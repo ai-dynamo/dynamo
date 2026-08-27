@@ -63,9 +63,22 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                    value,
+                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    %error,
+                    "Failed to parse tokenizer cache byte budget; using default"
+                );
+                DEFAULT_TOKENIZER_CACHE_BYTES
+            }
+        },
+        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+    }
 }
 
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
@@ -986,6 +999,28 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
+    /// Return this card's explicit worker role, with compatibility for legacy cards.
+    ///
+    /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
+    /// worker was a full-request worker.
+    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+        Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Resolve an explicit or legacy worker role without constructing a model card.
+    pub fn resolve_worker_type(
+        worker_type: Option<crate::worker_type::WorkerType>,
+        model_type: ModelType,
+    ) -> crate::worker_type::WorkerType {
+        worker_type.unwrap_or_else(|| {
+            if model_type.supports_prefill() {
+                crate::worker_type::WorkerType::Prefill
+            } else {
+                crate::worker_type::WorkerType::Aggregated
+            }
+        })
+    }
+
     /// Create a ModelDeploymentCard where only the name is filled in.
     ///
     /// Single-process setups don't need an MDC to communicate model details, but it
@@ -1178,7 +1213,16 @@ impl ModelDeploymentCard {
                     }
                 }
 
-                // TODO: Do we want any of user_data or runtime_config?
+                // Tower/connector LoRA changes vLLM's multimodal cache identity.
+                // Isolate such workers from the default/missing=false WorkerSet
+                // without changing checksums for existing deployments.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -3108,6 +3152,26 @@ mod ownership_tests {
         enabled.runtime_config.kv_event_publishing_enabled = Some(true);
 
         assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 

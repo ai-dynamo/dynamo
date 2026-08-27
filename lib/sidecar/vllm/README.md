@@ -26,6 +26,7 @@ It is a standalone Rust executable.
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
+- Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
 - Image URL and data-URI inputs, including media UUIDs
 
 The protocol does not support LoRA, encode workers, beam search, `n > 1`,
@@ -35,6 +36,10 @@ advertised to the Dynamo frontend because the current inference protocol does
 not preserve all parser-related request semantics.
 
 ## Run
+
+### Runtime compatibility
+
+The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
 
 Start vLLM with its gRPC listener:
 
@@ -50,13 +55,35 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
-Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates.
+### RL workflows
+
+Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery:
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 \
+  --grpc-port 50051 \
+  --enable-sleep-mode \
+  --weight-transfer-config '{"backend":"nccl"}'
+
+DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --enable-rl
+```
+
+`--enable-rl` (or `DYN_ENABLE_RL=true`) requires the Dynamo system server (`DYN_SYSTEM_PORT=0` or a positive port) and registers `dyn://<namespace>.<component>.rl`, which lets the Dynamo frontend discover this worker and its `/engine/control/*` and `/engine/update/*` routes through `/v1/rl/workers`. The sidecar advertises pause/resume, sleep-status, and weight-version controls when the vLLM server reports the RL gRPC API; mutating sleep/wake routes require `--enable-sleep-mode`, weight-transfer routes require `--weight-transfer-config`, and draft updates require speculative decoding support.
+
+The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_engine` requires `{"init_info": {...}}`, `update_weights` requires `{"update_info": {...}}`, `finish_weight_update` accepts `{"weight_version": "..."}`, and `update_weight_version` requires `{"new_version": "..."}`. Weight tensors remain on the configured NCCL, IPC, or sparse-NCCL transport; only backend metadata crosses gRPC.
+
+The RL endpoint and engine routes are unauthenticated administrative surfaces that can pause serving, release GPU memory, and replace model weights. Enable them only on trusted request and system networks.
+
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
@@ -85,8 +112,10 @@ cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --extra-engine-args '{"speedup_ratio":1000}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
+
+The mocker does not advertise RL capabilities; use a compatible vLLM server for RL route testing.
 
 See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
 for aggregated and prefill/decode examples, supported Mocker configuration,

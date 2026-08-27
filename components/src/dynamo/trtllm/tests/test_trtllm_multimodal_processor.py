@@ -43,7 +43,7 @@ pytestmark = [
         HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.png"),
     ],
 )
-async def test_client_errors_propagate(error) -> None:
+async def test_client_errors_propagate(error, monkeypatch) -> None:
     # Mock tokenizer skips tokenizer_factory; mock loader forces the failure.
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
@@ -53,13 +53,27 @@ async def test_client_errors_propagate(error) -> None:
     )
     processor.image_loader.load_image_batch = AsyncMock(side_effect=error)
 
+    # Images are processed before videos. A typed image error must stop the
+    # request before video validation or fetching begins.
+    video_validate = AsyncMock()
+    video_fetch = AsyncMock()
+    monkeypatch.setattr(mmp, "validate_media_url", video_validate)
+    monkeypatch.setattr(mmp, "fetch_bytes", video_fetch)
+
     request = {
-        "multi_modal_data": {"image_url": [{"Url": "https://example.com/x.png"}]}
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/x.png"}],
+            "video_url": [{"Url": "https://example.com/x.mp4"}],
+        }
     }
-    with pytest.raises(type(error)):
+    with pytest.raises(type(error)) as exc_info:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
+
+    assert exc_info.value is error
+    video_validate.assert_not_awaited()
+    video_fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

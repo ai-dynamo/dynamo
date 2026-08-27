@@ -12,14 +12,29 @@ use super::policy_config::{RouterPolicyConfigError, validate_identifier};
 /// Process-wide configuration for worker selection in a custom Dynamo image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerSelectionConfig {
-    default: Option<String>,
+    aggregated: Option<String>,
+    prefill: Option<String>,
+    decode: Option<String>,
+    encode: Option<String>,
     instances: HashMap<String, WorkerSelectionInstance>,
 }
 
 impl WorkerSelectionConfig {
-    /// The selected instance when no environment override is provided.
-    pub fn default_instance(&self) -> Option<&str> {
-        self.default.as_deref()
+    /// The selected instance for a full-request worker pool.
+    pub fn aggregated_instance(&self) -> Option<&str> {
+        self.aggregated.as_deref()
+    }
+
+    pub(crate) fn prefill_instance(&self) -> Option<&str> {
+        self.prefill.as_deref()
+    }
+
+    pub(crate) fn decode_instance(&self) -> Option<&str> {
+        self.decode.as_deref()
+    }
+
+    pub(crate) fn encode_instance(&self) -> Option<&str> {
+        self.encode.as_deref()
     }
 
     /// Look up one named instance.
@@ -58,16 +73,28 @@ impl WorkerSelectionInstance {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawWorkerSelectionConfig {
     #[serde(default)]
-    default: Option<String>,
+    aggregated: Option<String>,
+    #[serde(default)]
+    prefill: Option<String>,
+    #[serde(default)]
+    decode: Option<String>,
+    #[serde(default)]
+    encode: Option<String>,
     #[serde(default)]
     instances: Vec<RawWorkerSelectionInstance>,
 }
 
 impl RawWorkerSelectionConfig {
     pub(super) fn resolve(self) -> Result<WorkerSelectionConfig, RouterPolicyConfigError> {
-        if self.instances.is_empty() && self.default.is_none() {
+        if self.instances.is_empty()
+            && self.aggregated.is_none()
+            && self.prefill.is_none()
+            && self.decode.is_none()
+            && self.encode.is_none()
+        {
             return Err(RouterPolicyConfigError::Validation(
-                "worker_selection must define an instance or default: default".to_string(),
+                "worker_selection must define an instance or an aggregated, prefill, decode, or encode selection"
+                    .to_string(),
             ));
         }
 
@@ -98,18 +125,27 @@ impl RawWorkerSelectionConfig {
             }
         }
 
-        if let Some(default) = self.default.as_deref()
-            && default != "default"
-            && !instances.contains_key(default)
-        {
-            return Err(RouterPolicyConfigError::Validation(format!(
-                "worker_selection default {:?} does not name a configured instance",
-                default
-            )));
+        for (stage, selected) in [
+            ("aggregated", self.aggregated.as_deref()),
+            ("prefill", self.prefill.as_deref()),
+            ("decode", self.decode.as_deref()),
+            ("encode", self.encode.as_deref()),
+        ] {
+            if let Some(selected) = selected
+                && selected != "default"
+                && !instances.contains_key(selected)
+            {
+                return Err(RouterPolicyConfigError::Validation(format!(
+                    "worker_selection {stage} {selected:?} does not name a configured instance"
+                )));
+            }
         }
 
         Ok(WorkerSelectionConfig {
-            default: self.default,
+            aggregated: self.aggregated,
+            prefill: self.prefill,
+            decode: self.decode,
+            encode: self.encode,
             instances,
         })
     }

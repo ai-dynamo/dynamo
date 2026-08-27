@@ -22,9 +22,9 @@ use crate::indexer::{
     ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
 };
 use crate::protocols::{
-    LocalBlockHash, ResidencyProjection, RouterEvent, StorageTier, WorkerWithDpRank,
+    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
 };
-use crate::router_hint::RouterHintRootCandidates;
+use crate::router_hint::{RouterHintCandidateSource, RouterHintRootCandidates};
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
@@ -35,7 +35,7 @@ pub struct LowerTierIndexers {
     metrics: Option<Arc<KvIndexerMetrics>>,
     num_threads: usize,
     block_size: u32,
-    projection: Arc<ArcSwap<ResidencyProjection>>,
+    routing_snapshot: Arc<ArcSwap<ResidencyRoutingSnapshot>>,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
@@ -63,7 +63,7 @@ impl LowerTierIndexers {
             num_threads,
             block_size,
             metrics,
-            projection: Arc::new(ArcSwap::from_pointee(ResidencyProjection::default())),
+            routing_snapshot: Arc::new(ArcSwap::from_pointee(ResidencyRoutingSnapshot::default())),
             indexers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -72,7 +72,11 @@ impl LowerTierIndexers {
     /// lookups. Discovery and liveness reconciliation happen outside this
     /// crate; the indexer only consumes the already-resolved snapshot.
     pub fn set_residency_projection(&self, projection: ResidencyProjection) {
-        self.projection.store(Arc::new(projection));
+        self.set_residency_routing_snapshot(ResidencyRoutingSnapshot::from_projection(projection));
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        self.routing_snapshot.store(Arc::new(snapshot));
     }
 
     /// Return the per-tier indexer for `storage_tier`, lazily allocating it
@@ -223,11 +227,12 @@ pub fn query_lower_tiers(
 fn merge_router_hint_tier_candidates(
     device_candidates: Option<&RouterHintRootCandidates>,
     tier_matches: &LowerTierMatchDetails,
+    routing_snapshot: Arc<ResidencyRoutingSnapshot>,
 ) -> Option<RouterHintRootCandidates> {
     let mut block_hashes = device_candidates
         .map(|candidates| candidates.block_hashes.clone())
         .unwrap_or_default();
-    let mut owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize> = FxHashMap::default();
+    let mut owner_prefix_blocks: FxHashMap<RouterHintCandidateSource, usize> = FxHashMap::default();
 
     if let Some(candidates) = device_candidates {
         owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
@@ -277,6 +282,7 @@ fn merge_router_hint_tier_candidates(
     Some(RouterHintRootCandidates {
         block_hashes,
         owner_prefix_blocks,
+        routing_snapshot: Some(routing_snapshot),
     })
 }
 
@@ -289,13 +295,13 @@ pub fn query_lower_tiers_with_options(
     if indexers.is_empty() {
         return HashMap::new();
     }
-    let projection = indexers.projection.load();
-    query_lower_tiers_with_options_and_projection(
+    let snapshot = indexers.routing_snapshot.load_full();
+    query_lower_tiers_with_options_and_snapshot(
         indexers,
         sequence,
         device_matches,
         options,
-        &projection,
+        snapshot,
     )
 }
 
@@ -306,6 +312,25 @@ pub fn query_lower_tiers_with_options_and_projection(
     options: LowerTierQueryOptions,
     projection: &ResidencyProjection,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    query_lower_tiers_with_options_and_snapshot(
+        indexers,
+        sequence,
+        device_matches,
+        options,
+        Arc::new(ResidencyRoutingSnapshot::from_projection(
+            projection.clone(),
+        )),
+    )
+}
+
+pub fn query_lower_tiers_with_options_and_snapshot(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    let projection = snapshot.projection();
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
@@ -342,16 +367,17 @@ pub fn query_lower_tiers_with_options_and_projection(
             options.retain_router_hint_chain && storage_tier == StorageTier::HostPinned;
         let mut tier_matches = indexer
             .backend()
-            .query_match_details_with_options_and_projection(
+            .query_match_details_with_options_and_snapshot(
                 sequence,
                 &continuations,
                 retain_router_hint_chain,
-                projection,
+                &snapshot,
             );
         if retain_router_hint_chain {
             tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
                 device_matches.router_hint_root_candidates.as_ref(),
                 &tier_matches,
+                snapshot.clone(),
             );
         }
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
@@ -457,6 +483,9 @@ mod tests {
             .await
             .unwrap();
 
+        let dumped = lower.dump_events().await.unwrap();
+        assert!(dumped.iter().all(|event| event.state_source == Some(owner)));
+
         let replacement = WorkerWithDpRank::new(29, 3);
         let projection = ResidencyProjection::new([(owner, replacement)]).unwrap();
         assert_eq!(
@@ -528,7 +557,8 @@ mod tests {
             last_matched_hashes,
             router_hint_root_candidates: Some(RouterHintRootCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
-                owner_prefix_blocks: vec![(worker, 1)],
+                owner_prefix_blocks: vec![(worker.into(), 1)],
+                routing_snapshot: None,
             }),
         };
 
@@ -553,7 +583,7 @@ mod tests {
                 ExternalSequenceBlockHash(102),
             ]
         );
-        assert_eq!(candidates.owner_prefix_blocks, vec![(worker, 2)]);
+        assert_eq!(candidates.owner_prefix_blocks, vec![(worker.into(), 2)]);
     }
 
     #[tokio::test]
@@ -581,7 +611,8 @@ mod tests {
             last_matched_hashes,
             router_hint_root_candidates: Some(RouterHintRootCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
-                owner_prefix_blocks: vec![(worker_1, 1), (worker_2, 1)],
+                owner_prefix_blocks: vec![(worker_1.into(), 1), (worker_2.into(), 1)],
+                routing_snapshot: None,
             }),
         };
 
@@ -608,7 +639,7 @@ mod tests {
         );
         assert_eq!(
             candidates.owner_prefix_blocks,
-            vec![(worker_1, 2), (worker_2, 1)]
+            vec![(worker_1.into(), 2), (worker_2.into(), 1)]
         );
     }
 
@@ -644,7 +675,7 @@ mod tests {
         );
         assert_eq!(
             candidates.owner_prefix_blocks,
-            vec![(WorkerWithDpRank::new(7, 0), 2)]
+            vec![(WorkerWithDpRank::new(7, 0).into(), 2)]
         );
     }
 }

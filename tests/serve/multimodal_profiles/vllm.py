@@ -21,6 +21,8 @@ from tests.utils.multimodal import (
     make_image_payload_b64,
     make_image_payload_cached_tokens,
     make_image_payload_uuid_passthrough,
+    make_qwen35_custom_encoder_multi_image_payload,
+    make_qwen35_custom_encoder_payload,
     make_video_payload,
 )
 from tests.utils.payload_builder import (
@@ -78,10 +80,11 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # CustomEncoder: a custom in-process vision encoder beside the decoder
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
+    "agg_custom_qwen3_5": "agg_qwen3_5_native.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -139,8 +142,21 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    # Frontend decoding fetches the VP9 fixture from the local
+                    # image server and samples four frames in the Rust decoder.
+                    "DYN_MM_ALLOW_INTERNAL": "1",
+                    "DYN_MM_VIDEO_NUM_FRAMES": "4",
                 },
-                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
+                tests=[
+                    MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED)),
+                    MmCase(
+                        suffix="frontend_decoding",
+                        payload=make_video_payload(
+                            MULTIMODAL_VIDEO_EXPECTED, frontend_decoding=True
+                        ),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
             # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
@@ -381,6 +397,27 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     )
                 ],
             ),
+            "agg_custom_qwen3_5": TopologyConfig(
+                marks=[pytest.mark.nightly],
+                timeout_s=900,
+                profiled_vram_gib=4.7,
+                # Reuse the aggregate profile's 2x-safe KV cache cap.
+                requested_vllm_kv_cache_bytes=920_126_000,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(
+                        suffix="single_image",
+                        payload=make_qwen35_custom_encoder_payload(),
+                    ),
+                    MmCase(
+                        suffix="multi_image",
+                        payload=make_qwen35_custom_encoder_multi_image_payload(),
+                    ),
+                ],
+            ),
         },
     ),
     # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
@@ -493,7 +530,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
@@ -548,11 +587,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
-                # 2x RTX 6000 Ada (48 GB each). Encoder GPU peaked ~13.5 GB
-                # (static, full model fp16 load); PD GPU peaked ~19 GB
-                # (weights + KV @ 4 GB cap + activations). 2x safety on KV.
-                profiled_vram_gib=19.0,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially.
                 requested_vllm_kv_cache_bytes=4_308_848_000,
                 tests=[
                     MmCase(
@@ -619,7 +655,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).

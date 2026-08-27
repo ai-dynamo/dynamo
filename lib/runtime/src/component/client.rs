@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex as StdMutex},
@@ -10,137 +10,13 @@ use std::{
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use futures::StreamExt;
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
-use crate::routing_policy::{
-    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
-};
+use crate::routing_policy::{RoutingOccupancyState, get_or_create_routing_occupancy_state};
 use crate::traits::DistributedRuntimeProvider;
-
-/// Shared occupancy state for routing modes that track per-worker in-flight requests.
-#[derive(Debug, Default)]
-pub(crate) struct RoutingOccupancyState {
-    counts: DashMap<u64, Arc<AtomicU64>>,
-    exact_selection_lock: parking_lot::Mutex<()>,
-}
-
-impl RoutingOccupancyState {
-    pub(crate) fn increment(&self, instance_id: u64) -> Arc<AtomicU64> {
-        let count = self
-            .counts
-            .entry(instance_id)
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .clone();
-        count.fetch_add(1, Ordering::Relaxed);
-        count
-    }
-
-    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        RoutePicker::new(RoutePolicy::LeastLoaded)
-            .peek(
-                CandidateView::Workers(instance_ids),
-                RouteContext::default(),
-                |id| self.load(id),
-            )
-            .map(|decision| decision.target.worker_id)
-    }
-
-    pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
-        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
-        self.select_and_admit(
-            &picker,
-            CandidateView::Workers(instance_ids),
-            RouteContext::default(),
-        )
-        .map(|(decision, _)| decision.target.worker_id)
-    }
-
-    /// Least-loaded selection without the increment. Same tie-break policy as
-    /// [`Self::select_exact_min_and_increment`] so peek and select share a
-    /// distribution.
-    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        RoutePicker::new(RoutePolicy::LeastLoaded)
-            .peek(
-                CandidateView::Workers(instance_ids),
-                RouteContext::default(),
-                |id| self.load(id),
-            )
-            .map(|decision| decision.target.worker_id)
-    }
-
-    pub(crate) fn peek(
-        &self,
-        picker: &RoutePicker,
-        candidates: CandidateView<'_>,
-        context: RouteContext,
-    ) -> Option<RouteDecision> {
-        picker.peek(candidates, context, |id| self.load(id))
-    }
-
-    pub(crate) fn select_and_admit(
-        &self,
-        picker: &RoutePicker,
-        candidates: CandidateView<'_>,
-        context: RouteContext,
-    ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
-        let _guard = self.exact_selection_lock.lock();
-        let decision = picker.select(candidates, context, |id| self.load(id))?;
-        let counter = match decision.admission {
-            AdmissionKind::None => None,
-            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
-        };
-        Some((decision, counter))
-    }
-
-    pub(crate) fn decrement_counter(counter: &AtomicU64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(1))
-        });
-    }
-
-    pub(crate) fn decrement(&self, instance_id: u64) {
-        if let Some(count) = self.counts.get(&instance_id) {
-            Self::decrement_counter(count.as_ref());
-        }
-    }
-
-    pub(crate) fn load(&self, instance_id: u64) -> u64 {
-        self.counts
-            .get(&instance_id)
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn retain(&self, instance_ids: &[u64]) {
-        let live: HashSet<u64> = instance_ids.iter().copied().collect();
-        self.counts.retain(|id, _| live.contains(id));
-    }
-}
-
-/// Get or create the shared routing occupancy state for an endpoint.
-pub(crate) async fn get_or_create_routing_occupancy_state(
-    endpoint: &Endpoint,
-) -> Arc<RoutingOccupancyState> {
-    let drt = endpoint.drt();
-    let registry = drt.routing_occupancy_states();
-    let mut registry = registry.lock().await;
-
-    if let Some(weak) = registry.get(endpoint) {
-        if let Some(state) = weak.upgrade() {
-            return state;
-        } else {
-            registry.remove(endpoint);
-        }
-    }
-
-    let state = Arc::new(RoutingOccupancyState::default());
-    registry.insert(endpoint.clone(), Arc::downgrade(&state));
-    state
-}
 
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_INHIBITED_DURATION_SECS: u64 = 5;
@@ -562,12 +438,46 @@ impl Client {
         Self::with_reconcile_interval(endpoint, *INHIBITED_DURATION).await
     }
 
+    /// Like [`Self::new`], but the `monitor_instance_source` background task
+    /// is bound to `cancel_token` instead of the process-wide primary token.
+    /// See [`Self::with_reconcile_interval_and_cancellation`] for why a
+    /// caller whose own scope is narrower than the process needs this.
+    pub(crate) async fn with_cancellation(
+        endpoint: Endpoint,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        Self::with_reconcile_interval_and_cancellation(endpoint, *INHIBITED_DURATION, cancel_token)
+            .await
+    }
+
     /// Create a client with a custom reconcile interval.
     /// The reconcile interval controls how often `instance_avail` is reset to match
     /// `instance_source`, restoring any instances removed via `report_instance_down`.
     pub(crate) async fn with_reconcile_interval(
         endpoint: Endpoint,
         reconcile_interval: Duration,
+    ) -> Result<Self> {
+        let cancel_token = endpoint.drt().primary_token();
+        Self::with_reconcile_interval_and_cancellation(endpoint, reconcile_interval, cancel_token)
+            .await
+    }
+
+    /// Like [`Self::with_reconcile_interval`], but the `monitor_instance_source`
+    /// background task is bound to `cancel_token` rather than the process-wide
+    /// primary token.
+    ///
+    /// A caller that builds a `Client` scoped to something narrower than the
+    /// process — a monitor bound to one `WorkerSet`'s lifecycle, say — must use
+    /// this constructor. `Client` is `Clone`, and `monitor_instance_source`
+    /// captures its own clone before returning, so dropping every `Client`
+    /// handle the caller holds does not stop that task; only cancelling its
+    /// token does. Built through [`Self::new`] or [`Self::with_reconcile_interval`]
+    /// instead, that task runs until process shutdown regardless of how long
+    /// the caller actually keeps the `Client` around.
+    pub(crate) async fn with_reconcile_interval_and_cancellation(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
@@ -595,7 +505,7 @@ impl Client {
             instance_avail_owner: Arc::new(instance_avail_owner),
             reconcile_interval,
         };
-        client.monitor_instance_source();
+        client.monitor_instance_source_with_cancellation(cancel_token, true);
         Ok(client)
     }
 
@@ -821,11 +731,10 @@ impl Client {
     /// changed for `reconcile_interval`, we reset `instance_avail` to match
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
-    fn monitor_instance_source(&self) {
-        let cancel_token = self.endpoint.drt().primary_token();
-        self.monitor_instance_source_with_cancellation(cancel_token, true);
-    }
-
+    ///
+    /// The spawned task runs until `cancel_token` cancels. A caller that wants
+    /// this task to outlive nothing shorter than the process should pass
+    /// `self.endpoint.drt().primary_token()`, as [`Self::new`] does.
     fn monitor_instance_source_with_cancellation(
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -1508,6 +1417,56 @@ mod tests {
         rt.shutdown();
     }
 
+    /// Regression test: `monitor_instance_source_with_cancellation`'s task must
+    /// exit on its own `cancel_token`, not only at process shutdown.
+    ///
+    /// `Client::new` bound this task to the process-wide primary token
+    /// unconditionally. A caller building a `Client` scoped to something
+    /// narrower — a monitor bound to one `WorkerSet`'s lifecycle, say — had no
+    /// way to stop the task before then: dropping every `Client` handle does
+    /// not stop it, since it holds its own clone. Every WorkerSet rebuild
+    /// leaked one.
+    ///
+    /// The observable is the strong count of `routing_instances`: the spawned
+    /// task captures a clone of it, so the count returning to 1 proves the
+    /// task actually exited and dropped that capture.
+    #[tokio::test]
+    async fn monitor_instance_source_exits_on_its_own_cancellation_token() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_monitor_instance_source_cancellation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let client = Client::with_cancellation(endpoint.clone(), cancel_token.clone())
+            .await
+            .unwrap();
+
+        // Negative control, first: the task must still be alive, and still
+        // holding its capture, before cancellation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            Arc::strong_count(&client.routing_instances) > 1,
+            "monitor task must be running (and holding its capture) before cancellation"
+        );
+
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&client.routing_instances) > 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor_instance_source task must exit when its cancel_token cancels");
+
+        rt.shutdown();
+    }
+
     #[tokio::test]
     async fn admitted_client_never_routes_unadmitted_endpoint_instances() {
         let rt = Runtime::from_current().unwrap();
@@ -1630,7 +1589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_least_loaded_state_retain() {
+    async fn test_least_loaded_state_retain_preserves_live_counts() {
         let state = RoutingOccupancyState::default();
 
         // Add some connections
@@ -1642,16 +1601,16 @@ mod tests {
         assert_eq!(state.load(2), 1);
         assert_eq!(state.load(3), 1);
 
-        // Retain only instances 1 and 3 (instance 2 was removed)
+        // Discovery removal must not delete guard-owned accounting.
         state.retain(&[1, 3]);
 
         assert_eq!(state.load(1), 1);
-        assert_eq!(state.load(2), 0);
+        assert_eq!(state.load(2), 1);
         assert_eq!(state.load(3), 1);
     }
 
     #[tokio::test]
-    async fn test_monitor_instance_source_cleans_up_removed_worker_counts() {
+    async fn test_monitor_instance_source_defers_removed_worker_cleanup() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -1676,12 +1635,18 @@ mod tests {
         endpoint.unregister_endpoint_instance().await.unwrap();
 
         for _ in 0..10 {
-            if state.load(worker_id) == 0 {
+            if !client.instance_ids().contains(&worker_id) {
                 break;
             }
             tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
         }
 
+        assert_eq!(
+            state.load(worker_id),
+            1,
+            "discovery absence must retain live accounting"
+        );
+        state.decrement(worker_id);
         assert_eq!(state.load(worker_id), 0);
 
         rt.shutdown();

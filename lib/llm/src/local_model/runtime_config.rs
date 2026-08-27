@@ -19,6 +19,9 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
+use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
+
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
 pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
@@ -28,6 +31,14 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Runtime-data key indicating that a backend expects tool structural tags to
+/// exclude reasoning and manages grammar activation around reasoning itself.
+///
+/// Absence means `false` for compatibility with workers that expect the
+/// frontend's structural tag to model an already-opened reasoning block.
+pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_excludes_reasoning";
 
 /// Describes which request-token overflows the frontend may reject early.
 ///
@@ -79,6 +90,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// `ModelType::Chat` / `ModelType::Completions`: other backends expose those
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
+/// Worker-reported vLLM setting that makes multimodal cache identities depend
+/// on the active LoRA adapter. Missing and explicit `false` are equivalent.
+pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
@@ -177,6 +192,8 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
+    /// Physical KV-cache capacity for each router-visible data-parallel rank.
+    /// This is per rank, never the aggregate capacity of the worker process.
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -242,7 +259,7 @@ pub struct ModelRuntimeConfig {
 
     /// Immutable KV event source mode for this worker lifecycle.
     ///
-    /// Accepted values are `framework_v1` and `residency_v2`. Missing means the
+    /// Accepted values are `framework_v1` and `state_agent_v2`. Missing means the
     /// legacy Worker-only source. Unknown explicit values must disable KV-aware
     /// routing rather than falling back within the same worker lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,7 +345,7 @@ const fn default_local_indexer() -> bool {
     true
 }
 
-const fn default_exclude_tools_when_tool_choice_none() -> bool {
+pub(crate) const fn default_exclude_tools_when_tool_choice_none() -> bool {
     true
 }
 
@@ -373,14 +390,26 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    fn router_hints_enabled(&self) -> bool {
-        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
+    /// Check whether a runtime boolean is explicitly enabled.
+    ///
+    /// Rust callers commonly store booleans, while compatibility cards may
+    /// carry string-encoded flags. Both representations use Dynamo's canonical
+    /// truthy vocabulary.
+    pub(crate) fn runtime_flag_enabled(&self, key: &str) -> bool {
+        match self.runtime_data.get(key) {
             Some(serde_json::Value::Bool(true)) => true,
-            // Python ModelRuntimeConfig.set_engine_specific currently stores
-            // engine-specific values as strings.
             Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
         }
+    }
+
+    /// Check whether a runtime capability is explicitly enabled.
+    pub(crate) fn supports_runtime_capability(&self, capability: &str) -> bool {
+        self.runtime_flag_enabled(capability)
+    }
+
+    fn router_hints_enabled(&self) -> bool {
+        self.supports_runtime_capability(ROUTER_HINT_RUNTIME_CAPABILITY_KEY)
     }
 
     fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
@@ -519,6 +548,28 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if let Some(parser) = config
+        .tool_call_parser
+        .as_deref()
+        .filter(|parser| !parser.is_empty())
+    {
+        let mut supported = get_available_tool_parsers();
+        // Unified parser names live outside the v1 registry; normalize the union
+        // for a stable error message.
+        supported.extend_from_slice(unified_family_names());
+        supported.sort_unstable();
+        supported.dedup();
+        if !supported.contains(&parser) {
+            return Err(validation_error(
+                "unsupported_tool_call_parser",
+                format!(
+                    "tool_call_parser '{parser}' is not supported; available parsers: {}",
+                    supported.join(", ")
+                ),
+            ));
+        }
+    }
+
     if let Some(domain) = &config.kv_transfer_domain
         && !config.topology_domains.contains_key(domain)
     {
@@ -684,6 +735,8 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
@@ -1040,6 +1093,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capability_support_accepts_boolean_and_string_truthy_values() {
+        const CAPABILITY: &str = "test_capability";
+
+        let mut config = ModelRuntimeConfig::default();
+        assert!(!config.supports_runtime_capability(CAPABILITY));
+
+        for enabled in [serde_json::json!(true), serde_json::json!(" yes ")] {
+            config.runtime_data.insert(CAPABILITY.to_string(), enabled);
+            assert!(config.supports_runtime_capability(CAPABILITY));
+        }
+
+        for disabled in [
+            serde_json::json!(false),
+            serde_json::json!("false"),
+            serde_json::json!(1),
+        ] {
+            config.runtime_data.insert(CAPABILITY.to_string(), disabled);
+            assert!(!config.supports_runtime_capability(CAPABILITY));
+        }
+    }
+
+    #[test]
     fn test_serde_empty_topology_domains_omitted() {
         let config = ModelRuntimeConfig::default();
         let serialized = serde_json::to_string(&config).unwrap();
@@ -1186,5 +1261,26 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn test_validate_config_checks_tool_call_parser() {
+        let validate = |parser: &str| {
+            ModelRuntimeConfig {
+                tool_call_parser: Some(parser.to_string()),
+                ..Default::default()
+            }
+            .validate_config()
+        };
+
+        // Every v2 or unified parser must remain valid at registration.
+        for &parser in V2_FAMILIES.iter().chain(unified_family_names()) {
+            assert!(validate(parser).is_ok(), "{parser} must be supported");
+        }
+        assert!(validate("").is_ok());
+
+        let error = validate("not_registered").unwrap_err();
+        assert!(error.contains("not_registered"));
+        assert!(error.contains("muse_glimmer"));
     }
 }

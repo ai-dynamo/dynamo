@@ -10,6 +10,15 @@ model:
   hf_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 (B200) / -FP8 (H200)
   precision: NVFP4 (B200) / FP8 (H200), FP8 KV
 status: validated
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+    source_revision: 3424174cb83301418af5a000e9d09f2a4f93261c
+    source_kind: github-release
+    release_tag: v1.3.0-nemotron-super-dev.1
+    release_state: prerelease
 targets:
 - id: agg-b200-chat
   recommended: true

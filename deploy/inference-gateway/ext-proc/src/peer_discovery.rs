@@ -515,19 +515,26 @@ mod tests {
     /// wiring that consumes `peer_ips`, which the predicate tests above do not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_retains_draining_peer_until_it_stops_serving() {
+        use dynamo_kv_router::WorkerType;
         use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
-        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+        use dynamo_kv_router::services::selection::{
+            SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
+        };
 
         // A real replica-sync-enabled service. `register_replica_peer` is a lazy
         // ZMQ connect, so no live sibling is needed — we assert only the peer set
         // that reconcile maintains via `list_replica_peers`.
         let service = Arc::new(
-            SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
-                .indexer_threads(1)
-                .replica_sync(free_tcp_port(), Vec::new())
-                .build()
-                .await
-                .expect("build replica-sync selection service"),
+            SelectionServiceBuilder::new(
+                kv_router_config_from_dynamo_env(),
+                WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .indexer_threads(1)
+            .replica_sync(free_tcp_port(), Vec::new())
+            .build()
+            .await
+            .expect("build replica-sync selection service"),
         );
 
         let self_ip = "10.0.0.1";

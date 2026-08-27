@@ -208,9 +208,12 @@ python3 scripts/analyze_folded.py <out>/offcpu_bcc.folded --offcpu
   on glibc, so its alloc churn can show glibc-arena lock contention
   (`__lll_lock_wait` under `__libc_free`/`Vec::finish_grow`) in off-CPU. Preload
   jemalloc on the mocker too if that matters.
-- `DYN_RUNTIME_NUM_WORKER_THREADS` may be **ignored** (the runtime can be reused
-  via `runtime_from_existing`, bypassing `from_settings`). Verify thread counts
-  in `/proc/<pid>/task` rather than assuming the env var took effect.
+- `DYN_RUNTIME_NUM_WORKER_THREADS` and `DYN_RUNTIME_MAX_BLOCKING_THREADS` are
+  applied to every runtime the bindings build, including the one the pyo3 async
+  bridge builds for itself. Thread counts are still worth checking in
+  `/proc/<pid>/task`: if the bridge builds its runtime before a
+  `DistributedRuntime` is created, the process ends up with two runtimes and
+  twice the threads the configuration describes (a warning says so).
 
 **Known result (calibration)**: with mock workers, the Dynamo **frontend is
 rarely the bottleneck** — it's latency/IO-bound, sitting ~60–85% of its pinned

@@ -20,7 +20,7 @@ Only `model` is required; every other field has a default or is auto-detected.
 </ParamField>
 
 <ParamField path="image" type="string">
-  Container image for the profiling job (the planner image), for example `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1`. For Dynamo < 1.1.0, use `dynamo-frontend`.
+  Container image for the profiling job (the planner image), for example `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0`. For Dynamo < 1.1.0, use `dynamo-frontend`.
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -175,6 +175,15 @@ service.
 
     <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
+  <ParamField path="kvRouter" type="KVRouterSpec">
+    Configures KV-cache-aware routing for the generated deployment. When enabled, DGDR sets
+    `DYN_ROUTER_MODE=kv` on the generated Frontend.
+  </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean">
+      Enables KV-cache-aware routing.
+    </ParamField>
+  </Indent>
   <ParamField path="mocker" type="MockerSpec">
     Configures the simulated (mocker) backend for testing without GPUs.
   </ParamField>
@@ -186,7 +195,10 @@ service.
 </Indent>
 
 <Note>
-  DGDR does not currently expose a `features.kvRouter` field. To configure router mode or KV-aware routing, use a direct DGD, a tuned recipe, or `overrides.dgd` (see [Generated DGD overrides](#generated-dgd-overrides)).
+  `spec.overrides.dgd` takes precedence over `features.kvRouter`. A DGD override can replace
+  `DYN_ROUTER_MODE` on the Frontend container or provide an explicit `--router-mode` argument. The
+  command-line flag takes precedence over the environment variable when both are present. See
+  [Generated DGD overrides](#generated-dgd-overrides).
 </Note>
 
 ### Overrides
@@ -476,6 +488,10 @@ These fields default from environment variables and are excluded from serialized
   Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
 </ParamField>
 
+<ParamField path="metric_pulling_prometheus_request_timeout_seconds" type="number" default="10.0">
+  Connection and read inactivity timeout in seconds for each Prometheus API request. Defaults from `DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS` and must be greater than `0`. This is not a total wall-clock deadline: a response that continues delivering data can run longer. The Planner does not retry failed requests within the same collection cycle.
+</ParamField>
+
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
   Port on which the Planner exposes its own `dynamo_planner_*` metrics. Defaults from `PLANNER_PROMETHEUS_PORT`. `0` disables.
 </ParamField>
@@ -649,6 +665,36 @@ Overrides can modify only components present in the generated DGD; unknown names
 warning, and an override cannot add deployment topology. Labels and annotations merge,
 `metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
 values for typed fields, and field deletion are not supported.
+
+To add flags to a container already present in the generated DGD, set `$patch.args` to `append` on
+that named container:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: Frontend
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                $patch:
+                  args: append
+                args:
+                - --router-mode
+                - kv
+```
+
+The only supported modifier is `args: append`, and its `args` list must contain at least one
+non-empty string. The target container and its `args` list must already be present in the generated
+blueprint. The profiler blueprints define the complete default CLI for `Frontend/main`, so the
+example preserves `python3 -m dynamo.frontend` and appends the KV router flags. The override helper
+combines the argument lists and removes `$patch` before returning the final DGD. Without `$patch`,
+specifying `args` retains the standard replacement behavior and requires the complete desired list.
 
 <Note>
   Existing `nvidia.com/v1alpha1` overrides remain supported. They use the older `spec.services`

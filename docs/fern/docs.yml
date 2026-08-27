@@ -47,6 +47,10 @@ versions:
     path: ./index.yml
 
 redirects:
+  # Recipe slug renamed to include -fp8 suffix to match HF model ID.
+  - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
+    destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
+
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.
@@ -538,8 +542,10 @@ redirects:
     destination: "/dynamo/dev/kubernetes/operations/lo-ra-adapters"
   - source: "/dynamo/user-guides/multimodal"
     destination: "/dynamo/dev/multimodal/overview"
+  - source: "/dynamo/dev/advanced-customizations/custom-vision-encoders"
+    destination: "/dynamo/dev/multimodal/custom-vision-encoders"
   - source: "/dynamo/user-guides/multimodal/custom-vision-encoders"
-    destination: "/dynamo/dev/advanced-customizations/custom-vision-encoders"
+    destination: "/dynamo/dev/multimodal/custom-vision-encoders"
   - source: "/dynamo/user-guides/multimodal/embedding-cache"
     destination: "/dynamo/dev/multimodal/embedding-cache"
   - source: "/dynamo/user-guides/multimodal/encoder-disaggregation"

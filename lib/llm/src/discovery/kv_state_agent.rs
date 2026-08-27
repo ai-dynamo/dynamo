@@ -10,11 +10,13 @@
 use std::collections::HashSet;
 
 use dynamo_kv_router::{
-    identity::CacheOwnerId,
+    identity::{CacheOwnerId, IndexerDomainId},
     indexer::{
         KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
     },
-    protocols::{ResidencyProjection, ResidencyProjectionError, WorkerWithDpRank},
+    protocols::{
+        ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata, WorkerWithDpRank,
+    },
 };
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};
@@ -22,17 +24,119 @@ use serde::{Deserialize, Serialize};
 use super::PublisherId;
 use crate::kv_router::indexer::Indexer;
 
+pub const KV_STATE_HOST_TOPIC_V2: &str = "kv-state-hosts-v2";
+pub const KV_STATE_ATTACHMENT_INTENT_TOPIC_V2: &str = "kv-state-attachment-intents-v2";
 pub const KV_STATE_SOURCE_TOPIC_V2: &str = "kv-state-sources-v2";
 pub const KV_STATE_ATTACHMENT_TOPIC_V2: &str = "kv-state-attachments-v2";
 pub const KV_STATE_EVENT_TOPIC_V2: &str = "kv-state-events-v2";
 
+/// Deterministic identity of one immutable attachment advertisement.
+///
+/// The advertisement payload keeps `publisher_id` as the state-source
+/// publisher incarnation. The discovery record itself must be distinct for
+/// each attachment generation so stale removal cannot withdraw its successor.
+pub fn attachment_record_id(publisher_id: PublisherId, generation: u64) -> PublisherId {
+    const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dynamo/kv-state-attachment-record/v2");
+    hasher.update(&publisher_id.to_be_bytes());
+    hasher.update(&generation.to_be_bytes());
+    let digest = hasher.finalize();
+    let value = u64::from_be_bytes(
+        digest.as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 digest has eight prefix bytes"),
+    );
+    (value & JSON_SAFE_MASK).max(1)
+}
+
+/// Immutable raw ingress contract selected for one stable slot.
+///
+/// This is deliberately independent of [`KvStateProtocolVersion`], which
+/// versions the Dynamo discovery, recovery, and event protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvStateIngressProtocol {
+    FrameworkV1,
+    VllmResidencyV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvStateHostAdvertisement {
+    pub protocol_version: KvStateProtocolVersion,
+    pub host_instance: Instance,
+    pub control_target: Instance,
+    pub max_slots: usize,
+}
+
+/// Lease-owned request to attach one producer-owned raw stream to a host slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvStateAttachmentIntent {
+    pub target_host: Instance,
+    pub producer_instance: Instance,
+    pub intent_incarnation: u64,
+    pub cache_owner_id: CacheOwnerId,
+    pub worker: WorkerWithDpRank,
+    pub kv_state_endpoint: dynamo_runtime::protocols::EndpointId,
+    pub indexer_domain_id: IndexerDomainId,
+    pub kv_block_size: u32,
+    pub ingress_protocol: KvStateIngressProtocol,
+    pub raw_zmq_endpoint: String,
+    pub raw_topic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_token_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvStateHostControlRequest {
+    Status,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvStateHostStatus {
+    pub healthy: bool,
+    pub total_slots: usize,
+    pub active_slots: usize,
+    pub detached_slots: usize,
+    pub failed_slots: usize,
+    pub capacity_rejected_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl dynamo_runtime::protocols::maybe_error::MaybeError for KvStateHostStatus {
+    fn from_err(error: impl std::error::Error + 'static) -> Self {
+        Self {
+            healthy: false,
+            error: Some(error.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        self.error
+            .as_ref()
+            .map(|error| dynamo_runtime::error::DynamoError::msg(error.clone()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvStateSourceAdvertisement {
     pub cache_owner_id: CacheOwnerId,
+    pub global_dp_rank: u32,
+    pub kv_state_endpoint: dynamo_runtime::protocols::EndpointId,
+    pub indexer_domain_id: IndexerDomainId,
+    pub kv_block_size: u32,
+    pub ingress_protocol: KvStateIngressProtocol,
     pub publisher_id: PublisherId,
     pub protocol_version: KvStateProtocolVersion,
     pub event_topic: String,
     pub recovery_control_target: Instance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,9 +146,12 @@ pub struct KvStateAttachmentAdvertisement {
     pub protocol_version: KvStateProtocolVersion,
     pub recovery_control_target: Instance,
     pub attachment_generation: u64,
+    pub producer_instance: Instance,
+    pub intent_incarnation: u64,
     pub worker: WorkerWithDpRank,
-    pub vllm_zmq_endpoint: String,
-    pub cache_readable: bool,
+    pub ingress_protocol: KvStateIngressProtocol,
+    pub raw_zmq_endpoint: String,
+    pub raw_topic: String,
     pub ready_at_outbound_cursor: u64,
 }
 
@@ -156,7 +263,7 @@ pub fn resolve_kv_state_projection(
         };
     };
 
-    if !live_workers.contains(&attachment.worker) || !attachment.cache_readable {
+    if !live_workers.contains(&attachment.worker) {
         return KvStateProjectionResolution::Unavailable;
     }
 
@@ -170,13 +277,14 @@ pub fn resolve_kv_state_projection(
         || status.identity.publisher_id != source.publisher_id
         || status.identity.protocol_version != source.protocol_version
         || source.protocol_version != attachment.protocol_version
+        || source.ingress_protocol != attachment.ingress_protocol
+        || source.global_dp_rank != attachment.worker.dp_rank
         || source.event_topic != KV_STATE_EVENT_TOPIC_V2
         || source.recovery_control_target != attachment.recovery_control_target
         || status_attachment.is_none_or(|current| {
             current.generation != attachment.attachment_generation
                 || current.worker != attachment.worker
                 || !current.ready
-                || !current.cache_readable
                 || current.ready_at_outbound_cursor != attachment.ready_at_outbound_cursor
         })
     {
@@ -222,6 +330,15 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn attachment_record_identity_fences_generations_from_state_publisher() {
+        let first = attachment_record_id(41, 1);
+        let replacement = attachment_record_id(41, 2);
+        assert_ne!(first, 41);
+        assert_ne!(first, replacement);
+        assert_eq!(first, attachment_record_id(41, 1));
+    }
+
     fn owner() -> CacheOwnerId {
         CacheOwnerId::new(
             PoolId::new(
@@ -258,10 +375,16 @@ mod tests {
         };
         let source = KvStateSourceAdvertisement {
             cache_owner_id,
+            global_dp_rank: worker.dp_rank,
+            kv_state_endpoint: "ns.worker.generate".into(),
+            indexer_domain_id: cache_owner_id.pool().indexer_domain(),
+            kv_block_size: 4,
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: endpoint(),
+            router_hint_source: None,
         };
         let attachment = KvStateAttachmentAdvertisement {
             cache_owner_id,
@@ -269,9 +392,12 @@ mod tests {
             protocol_version: KvStateProtocolVersion::V2,
             recovery_control_target: endpoint(),
             attachment_generation: 7,
+            producer_instance: endpoint(),
+            intent_incarnation: 71,
             worker,
-            vllm_zmq_endpoint: "tcp://framework".to_string(),
-            cache_readable: true,
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            raw_zmq_endpoint: "tcp://framework".to_string(),
+            raw_topic: "kv-events-v2".to_string(),
             ready_at_outbound_cursor: 9,
         };
         let status = KvStateAgentStatus {
@@ -280,7 +406,6 @@ mod tests {
                 generation: 7,
                 worker,
                 ready: true,
-                cache_readable: true,
                 ready_at_outbound_cursor: 9,
             }),
             cache_owner_ready: true,
@@ -321,6 +446,21 @@ mod tests {
             ),
             KvStateProjectionResolution::Ready { worker: ready, .. } if ready == worker
         ));
+
+        let mut wrong_rank = attachment.clone();
+        wrong_rank.worker.dp_rank += 1;
+        assert_eq!(
+            resolve_kv_state_projection(
+                true,
+                cache_owner_id,
+                std::slice::from_ref(&source),
+                std::slice::from_ref(&wrong_rank),
+                &HashSet::from([wrong_rank.worker]),
+                Some(&status),
+                Some(&receipt),
+            ),
+            KvStateProjectionResolution::Unknown(KvStateUnknownReason::StatusMismatch)
+        );
 
         let wrong_publisher_receipt = KvStateRecoveryReceipt {
             identity: KvStateAgentIdentity {

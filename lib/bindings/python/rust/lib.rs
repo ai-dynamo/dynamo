@@ -38,7 +38,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(feature = "custom-policy")]
+#[cfg(any(feature = "custom-policy", feature = "select-service"))]
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
@@ -87,11 +87,23 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod push_egress;
 mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
+
+/// Ingress for the push egress path (handlers that declare `response_sender`).
+///
+/// Requests still decode into a Python object (the handler wants one), but
+/// responses are owned Rust values by the time they reach the channel, so the
+/// response encoder never needs the GIL. See `push_egress.rs`.
+type PythonPushEgressIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<push_egress::PushFrame>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -166,6 +178,25 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    // Size the runtime the bridge may build for itself.
+    //
+    // `DistributedRuntime::new` gives the bridge a configured runtime, but only when it gets
+    // there first, and often it does not — `dynamo.sglang` reaches the bridge earlier. Then
+    // `get_runtime()` builds a runtime from Tokio's own defaults: one worker per CPU and a
+    // 512-thread blocking ceiling, with DYN_RUNTIME_* ignored entirely.
+    //
+    // Setting the builder here means that runtime is sized correctly no matter who builds it.
+    // Module init is the earliest our code runs, so nothing can get in ahead of it.
+    match rs::RuntimeConfig::from_settings() {
+        Ok(config) => pyo3_async_runtimes::tokio::init(config.tokio_builder()),
+        // Not fatal: `Worker::ensure_process_runtime` reads the same settings and reports the
+        // error where there is context for it. Failing here would give a bare ImportError.
+        Err(e) => tracing::warn!(
+            "could not resolve the runtime configuration at import ({e}); if the async bridge \
+             has to build its own runtime it will fall back to Tokio's unbounded defaults"
+        ),
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     #[cfg(feature = "mm-routing")]
@@ -185,14 +216,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
-    m.add(
-        "MOCKER_KVBM_OFFLOAD_ENABLED",
-        cfg!(feature = "mocker-kvbm-offload"),
-    )?;
-
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<PyFirstTokenSource>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<Instance>()?;
@@ -240,6 +267,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
@@ -249,6 +278,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    push_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
@@ -278,6 +308,22 @@ pub(crate) fn worker_selection_policy_factory(
             );
         }
         Ok(None)
+    }
+}
+
+#[cfg(feature = "select-service")]
+pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
+    #[cfg(feature = "custom-policy")]
+    {
+        WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        WorkerSelectionPolicyRegistry::default()
     }
 }
 
@@ -366,10 +412,7 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || {
-        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
-            argv,
-            worker_selection_policy_factory,
-        )
+        llm::kv::run_select_service_cli(argv, linked_worker_selection_policy_registry())
     })
     .map_err(standalone_to_pyerr)
 }
@@ -398,21 +441,22 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 }
 
 /// Resolve the routing-side image-placeholder token id for a model using the
-/// same per-family logic the frontend's MM-aware KV routing uses (lightseek
-/// `resolve_routing_tokens`). Returns `chat_placeholder_token_id` — the exact
-/// id `OpenAIPreprocessor` substitutes `pad_value` over — so the vLLM worker's
-/// KV-event normalizer keys on the identical token (no cross-process drift).
+/// frontend's static per-family logic. Returns `chat_placeholder_token_id` —
+/// the exact id `OpenAIPreprocessor` substitutes `pad_value` over.
 ///
 /// `model_id` is the HF id (used for registry matching); `model_dir` is the
-/// local directory holding `config.json`/`tokenizer.json`. Returns `None` when
-/// the model isn't in the MM-routing registry or its config can't be read.
+/// local directory holding the model configs. Returns `None` when the
+/// placeholder, prompt layout, or image-token counter cannot be resolved, so
+/// the worker never enables image-key normalization while the frontend is
+/// limited to text-prefix routing. Request-time frontend gates are preserved
+/// because event normalization only recognizes frontend-issued canonical MM
+/// UUIDs.
 #[cfg(feature = "mm-routing")]
 #[pyfunction]
 #[pyo3(text_signature = "(model_id, model_dir)")]
 fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
     let dir = std::path::Path::new(model_dir);
-    llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir)
-        .chat_placeholder_token_id
+    llm_rs::preprocessor::lightseek_mm::resolve_exact_routing_image_token_id(model_id, dir)
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
@@ -823,6 +867,20 @@ struct Endpoint {
     event_loop: PyObject,
 }
 
+#[pyclass(name = "FirstTokenSource")]
+#[derive(Clone)]
+struct PyFirstTokenSource {
+    inner: llm_rs::first_token::FirstTokenSource,
+}
+
+#[pymethods]
+impl PyFirstTokenSource {
+    #[pyo3(signature = (context, dp_rank=None))]
+    fn bind(&self, mut context: PyRefMut<'_, context::Context>, dp_rank: Option<u32>) {
+        context.bind_first_token_source(&self.inner, dp_rank);
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct ModelCardInstanceId {
@@ -1119,25 +1177,31 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // Try to get existing runtime first, create new Worker only if needed
-        // This allows multiple DistributedRuntime instances to share the same tokio runtime
-        let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| -> anyhow::Result<rs::Runtime> {
-                // No existing Worker, create new one
-                let worker = rs::Worker::from_settings()?;
+        // Give the bridge our runtime before anything spawns on it. `run_input` wraps the whole
+        // frontend in `future_into_py`, which spawns through `get_runtime()`, so this is the
+        // call that decides which runtime serves traffic.
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        INIT.get_or_init(|| {
+            // An `Err` means the bridge already holds a runtime, and it never hands one back.
+            // That is a state to accept rather than a failure to report: `backend::Worker` may
+            // have registered this same `RT`, and `dynamo.sglang` reaches `get_runtime()`
+            // before we run. Refusing here broke every sglang test.
+            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
+                && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
+            {
+                // Both runtimes are sized from DYN_RUNTIME_*, since module init handed the
+                // bridge the same builder. The cost is that there are two of them, so the
+                // process carries twice the threads that configuration describes.
+                tracing::warn!(
+                    "the pyo3 async bridge built its own tokio runtime before this \
+                     DistributedRuntime was created, so the process now has two; both are sized \
+                     from DYN_RUNTIME_*, so the thread counts it describes are doubled"
+                );
+            }
+        });
 
-                // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| -> anyhow::Result<()> {
-                    let primary = worker.tokio_runtime()?;
-                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
-                    })?;
-                    Ok(())
-                })?;
-
-                Ok(worker.runtime().clone())
-            })
-            .map_err(to_pyerr)?;
+        // The bridge needed the tokio runtime; this wraps that same one in a dynamo `Runtime`.
+        let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
         let nats_enabled = request_plane.is_nats()
             || matches!(
@@ -1343,6 +1407,22 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
+    /// Create one fail-open completion source for this serving endpoint.
+    fn first_token_source<'p>(
+        &self,
+        py: Python<'p>,
+        worker_type: WorkerType,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(
+                llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
+                    .await
+                    .map(|inner| PyFirstTokenSource { inner }),
+            )
+        })
+    }
+
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
@@ -1352,16 +1432,70 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let engine = Arc::new(engine::PythonAsyncEngine::new(
-            generator,
-            self.event_loop.clone(),
-        )?);
-        let network_engine = Arc::new(engine.network_engine());
-        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
-            network_engine,
-            python_payload::PythonIngressPayloadAdapter,
-        )
-        .map_err(to_pyerr)?;
+        // Push egress: the handler pushes each response into a Rust channel via
+        // its `response_sender` argument, instead of Rust pulling `__anext__`
+        // off its generator on a tokio thread once per response. Selected per
+        // handler, purely by signature -- a handler must declare a
+        // `response_sender` parameter, which in practice means the TRT-LLM
+        // workers' `@push_egress_capable` decorator. NOT `context`, which every
+        // handler accepts and would therefore make this check always true,
+        // rendering the pull path unreachable. Anything else stays on pull.
+        let use_push_egress = push_egress::handler_supports_push(&generator);
+
+        // An endpoint has two doors, and this branch answers for both: the
+        // ingress that serves network requests, and the engine registered in
+        // the local (in-process) registry.
+        //
+        // Push endpoints need BOTH. The local registry — used by in-process
+        // callers and by the canary health check
+        // (`lib/runtime/src/health_check.rs`) — takes a `SingleIn`/`ManyOut`
+        // engine, which has nowhere to put a per-request sender. A pull engine
+        // over the SAME handler supplies one: called without a
+        // `response_sender`, `@push_egress_capable` hands back the handler's
+        // own async generator, so that door is ordinary pull egress.
+        // Registering it also keeps the endpoint in
+        // `SystemHealth::health_check_targets` — without which health status
+        // ignores endpoint readiness entirely and falls through to the
+        // process-wide `system_health`, a permanent 503 for a worker that never
+        // sets it (see `system_health.rs` tests).
+        //
+        // Both outcomes are logged: push mode is chosen by signature
+        // inspection, which can silently answer "no", and without the pull line
+        // the only symptom would be the absence of the push line.
+        let endpoint_name = self.inner.name().to_string();
+        let (ingress, local_engine): (
+            Arc<dyn rs::pipeline::network::PushWorkHandler>,
+            Option<Arc<engine::PythonAsyncEngine>>,
+        ) = if use_push_egress {
+            tracing::info!(endpoint = %endpoint_name, "serving endpoint with push egress");
+            // Same handler object, two engines: a refcount bump, not a copy.
+            let local = Arc::new(engine::PythonAsyncEngine::new(
+                generator.clone_ref(py),
+                self.event_loop.clone(),
+            )?);
+            let ingress = PythonPushEgressIngress::for_engine_with_adapter(
+                Arc::new(push_egress::PythonPushEngine::new(
+                    generator,
+                    self.event_loop.clone(),
+                )),
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(local))
+        } else {
+            tracing::debug!(endpoint = %endpoint_name, "serving endpoint with pull egress");
+            let engine = Arc::new(engine::PythonAsyncEngine::new(
+                generator,
+                self.event_loop.clone(),
+            )?);
+            let network_engine = Arc::new(engine.network_engine());
+            let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+                network_engine,
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(engine))
+        };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1389,12 +1523,17 @@ impl Endpoint {
             .metrics_labels(metrics_labels)
             .handler(ingress);
 
+        // Applies to both paths. `start_with_registration` bails if a payload is
+        // set while canary is enabled and no local engine is registered; the
+        // push branch above registers one precisely so this stays valid.
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
 
         // Register the engine in the local endpoint registry for in-process calls
-        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        if let Some(engine) = local_engine {
+            builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1607,9 +1746,12 @@ impl Client {
             let error_key = key.clone();
             let error_value = value.clone();
             let wait = async move {
-                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint)
-                    .await
-                    .map_err(to_pyerr)?;
+                let mut rx = llm_rs::discovery::runtime_config_watch(
+                    &endpoint,
+                    endpoint.drt().primary_token(),
+                )
+                .await
+                .map_err(to_pyerr)?;
 
                 loop {
                     let matches: Vec<u64> = rx

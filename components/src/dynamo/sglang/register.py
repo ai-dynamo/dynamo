@@ -12,8 +12,10 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
+from dynamo.common.utils.media_decoder import enable_frontend_video_decoding
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -97,6 +99,7 @@ def _build_media_decoder_and_fetcher():
     """
     media_decoder = MediaDecoder()
     media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()
     media_fetcher.timeout_ms(30000)
@@ -157,7 +160,7 @@ async def _register_model_with_runtime_config(
         )
         logging.info("Published SGLang engine-native generate capability")
     # Configure the Rust frontend's media decoder so it ships pre-decoded
-    # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None
     media_fetcher = None
     if getattr(dynamo_args, "frontend_decoding", False):
@@ -191,6 +194,12 @@ async def _register_model_with_runtime_config(
         )
 
     aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
+    # Built before the try: an invalid advertised configuration must fail
+    # startup, not be swallowed by the registration handler below and logged as
+    # a failed registration.
+    advertised_router_config = build_router_config(
+        getattr(dynamo_args, "router_advertisement", None)
+    )
     try:
         await register_model(
             input_type,
@@ -205,6 +214,11 @@ async def _register_model_with_runtime_config(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing when --router-mode is set;
+            # None inherits the frontend's global config. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=advertised_router_config,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,

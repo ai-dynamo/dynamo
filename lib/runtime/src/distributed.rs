@@ -3,7 +3,6 @@
 
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
-    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -20,6 +19,7 @@ use crate::{
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
+use crate::routing_policy::RoutingOccupancyState;
 use crate::runtime::Runtime;
 
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
@@ -461,7 +461,7 @@ impl DistributedRuntime {
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
     /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
+    /// Use this instead of `EventTransportKind::from_env_or_default` wherever you have
     /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
@@ -832,7 +832,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()

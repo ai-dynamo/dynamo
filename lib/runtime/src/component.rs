@@ -67,8 +67,6 @@ pub mod service;
 
 pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingInstances;
-pub(crate) use client::RoutingOccupancyState;
-pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use client::{Client, RoutingInstanceCounts};
 pub use endpoint::{StartedEndpoint, build_transport_type};
 
@@ -444,6 +442,20 @@ impl Endpoint {
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
+    }
+
+    /// Like [`Self::client`], but the returned `Client`'s background
+    /// instance-reconciliation task is bound to `cancel_token` rather than
+    /// the process-wide primary token. Use this when the `Client` itself is
+    /// scoped to something narrower than the process — a monitor bound to
+    /// one `WorkerSet`'s lifecycle, say — since dropping every handle to a
+    /// `Client` built through [`Self::client`] does not stop that task, and
+    /// it otherwise runs, and leaks, until process shutdown.
+    pub async fn client_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<client::Client> {
+        client::Client::with_cancellation(self.clone(), cancel_token).await
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {

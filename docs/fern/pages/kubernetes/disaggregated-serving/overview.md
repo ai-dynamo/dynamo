@@ -119,7 +119,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           imagePullPolicy: IfNotPresent
 ```
 
@@ -147,7 +147,7 @@ rather than a plain worker:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:
@@ -184,7 +184,7 @@ rather than prompt load.
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:
@@ -283,8 +283,6 @@ template and adapt it:
 Good recipe starting points:
 
 - [Qwen3-32B vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- [DeepSeek V3.2 TensorRT-LLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- [Llama 3 70B vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
 
 Backend deployment examples with concrete worker flags:
 

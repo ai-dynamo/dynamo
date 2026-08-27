@@ -32,7 +32,7 @@ from typing import (
 
 import torch
 from vllm import PoolingParams
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -78,7 +78,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -91,6 +91,7 @@ from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -106,6 +107,7 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
+from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -798,7 +800,14 @@ def build_sampling_params(
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {}) or {}
     logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
-    if logprobs is not None:
+    # Explicit `logprob_token_ids` replace vLLM's natural top-k selection, so the
+    # requested width no longer applies. vLLM's own OpenAI adapters null `logprobs`
+    # in this case and let `num_logprobs` derive the width from the id list; mirror
+    # that here, otherwise `SamplingParams.verify()` rejects the pair unless the
+    # caller happens to set `top_logprobs == len(logprob_token_ids)`.
+    if getattr(sampling_params, "logprob_token_ids", None):
+        sampling_params.logprobs = None
+    elif logprobs is not None:
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
@@ -1044,34 +1053,23 @@ def apply_data_parallel_runtime_config(
     runtime_config.data_parallel_size = dp_range[1]
 
 
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
-    """
-    Get the global DP rank range that this worker is responsible for based on vLLM config.
-    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
-    The return value is in the format of (start_dp_rank, managed_dp_size)."""
-    if vllm_config.parallel_config.data_parallel_external_lb:
-        # external load balancing, each worker is responsible for exactly 1 rank
-        return (vllm_config.parallel_config.data_parallel_rank, 1)
-    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
-        # hybrid load balancing, each worker is responsible for a subset of local ranks
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size_local,
-        )
-    else:
-        # internal load balancing, the worker is responsible for all DP ranks
-        logger.warning(
-            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
-            " hybrid or external load balancing is recommended."
-        )
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size,
-        )
-
-
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
+
+
+async def _translate_vllm_client_errors(
+    generator: AsyncIterator[ResponseT],
+) -> AsyncIterator[ResponseT]:
+    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    from vllm.exceptions import VLLMClientError
+
+    from .errors import vllm_client_error_to_http_error
+
+    try:
+        async for chunk in generator:
+            yield chunk
+    except VLLMClientError as exc:
+        raise vllm_client_error_to_http_error(exc) from exc
 
 
 def _as_exact_int(value: object) -> Optional[int]:
@@ -1982,9 +1980,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         it can be deferred until the first engine output (used in disagg decode
         mode to avoid aborting during an active NIXL KV transfer).
         """
+        wait_for = []
         try:
             # Build list of futures/tasks to wait for
-            wait_for = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             shutdown_task = None
 
             if self.shutdown_event:
@@ -2044,6 +2043,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
+        finally:
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            # Avoid suspending with EngineShutdown in flight. The owner can
+            # otherwise cancel this monitor and replace the pending exception.
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(
@@ -2224,6 +2233,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self.config.engine_args,
             lora_worker_type,
             self.dp_range,
+            publish_source_endpoints=state_agent_settings(self.config) is None,
         )
         runtime_config.context_length = self.model_max_len
         publish_vllm_token_budget(runtime_config, self.model_max_len)
@@ -2756,15 +2766,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
         if self.model_config is None:
-            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
+            raise RuntimeError(
+                "ModelConfig is unavailable for prompt_embeds validation."
+            )
 
         try:
             return safe_load_prompt_embeds(
                 self.model_config, prompt_embeds_base64.encode()
             )
+        except (MemoryError, torch.OutOfMemoryError):
+            # Resource failures are server-side faults. Preserve their type so
+            # the bindings return a retryable 5xx instead of a client 400.
+            raise
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+            raise ValueError(
+                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
+            ) from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -2801,7 +2819,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
-    ) -> tuple[TokensPrompt | EmbedsPrompt | None, Dict[str, Any] | None]:
+    ) -> TokensPrompt | EmbedsPrompt:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
 
@@ -2814,9 +2832,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
-            Tuple of (prompt, error_dict) where:
-            - On success: (prompt, None)
-            - On failure: (None, error_dict to yield)
+            The vLLM prompt built from prompt embeddings or token IDs.
+
+        Raises:
+            InvalidArgument: Prompt embeddings are disabled.
+            ValueError: Prompt embeddings cannot be decoded or validated.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -2824,16 +2844,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
                 )
                 logger.error(
-                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {msg}"
+                    "Rejected prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    msg,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
-                        "token_ids": [],
-                    },
-                )
+                raise InvalidArgument(f"Invalid prompt_embeds: {msg}")
             try:
                 prompt, tensor = self._create_prompt_from_embeddings(
                     request["prompt_embeds"]
@@ -2843,19 +2859,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"dtype={tensor.dtype}, sequence_length={tensor.shape[0]}, "
                     f"request_id={request_id}"
                 )
-                return prompt, None
-            except Exception as e:
+                return prompt
+            except Exception as exc:
                 logger.error(
-                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {e}"
+                    "Failed to process prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    exc,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                        "token_ids": [],
-                    },
-                )
+                raise
         # Text-only PD + encoder-worker path.
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the
@@ -2868,7 +2880,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             multi_modal_data,
             mm_processor_kwargs,
         )
-        return prompt, None
+        return prompt
 
     @staticmethod
     def _build_completion_usage(
@@ -3138,6 +3150,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        first_token_source: Any | None = None,
     ):
         super().__init__(
             runtime,
@@ -3153,13 +3166,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        self._first_token_source = first_token_source
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        routing = request.get("routing") or {}
+        if self._first_token_source is not None:
+            self._first_token_source.bind(context, routing.get("dp_rank"))
         self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
+        first_token_output_seen = False
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
@@ -3170,25 +3188,40 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in generator:
+            async for chunk in _translate_vllm_client_errors(generator):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
+                if not self.use_vllm_tokenizer and not first_token_output_seen:
+                    token_ids = chunk.get("token_ids") or []
+                    if token_ids:
+                        first_token_output_seen = True
+                        context.notify_first_token()
                 yield chunk
 
     async def _assemble_custom_encoder_prompt(
         self,
         request: Dict[str, Any],
         request_id: str,
-    ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
+    ) -> EmbedsPrompt | TokensPrompt | None:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
-        ``(prepared_prompt, error)``:
-        - images present: ``(prepared_prompt, None)``,
-        - no image content: ``(None, None)`` — text-only request, nothing
-          to assemble or extract (non-image modalities are rejected above),
-        - failure: ``(None, error_dict)`` for the caller to yield.
+        The CustomEncoder consumes image URLs directly and emits artifacts.
+        Returns the prepared prompt when images are present, or ``None`` for a
+        text-only request with nothing to assemble (non-image modalities are
+        rejected below).
+
+        Raises:
+            InvalidArgument: the request's multimodal payload is malformed in a
+                way checked for directly below. The frontend maps this to HTTP
+                400 and forwards the message verbatim, so both messages are
+                built here and never interpolate foreign text.
+            Exception: whatever the encoder or adapter raised, unchanged. The
+                bindings map the exception type to a ``BackendError``, so a
+                validation fault (``ValueError``/``TypeError``, which is what
+                the adapters raise) still reaches the caller as a 400, while a
+                timeout, CUDA fault, or cancellation keeps its own type and its
+                retry semantics.
         """
         # Internal invariant: callers guard on `self._custom_encoder is not None`
         # before reaching here. Use an explicit raise (not assert, which is
@@ -3211,7 +3244,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"unsupported multimodal data: {unsupported}"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         image_items = mm_map.get(IMAGE_URL_KEY) or []
         image_urls = [
@@ -3229,17 +3262,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "'Url'; each item must be a dict with a 'Url' key"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         if not image_urls:
             # No image items at all — and non-image modalities were already
             # rejected above — so there is nothing to assemble → text-only.
-            return None, None
+            return None
 
         token_ids: list[int] = request.get("token_ids") or []
-        # Both encode() and adapter preparation run user/model-specific code, so
-        # keep them inside one guard. A failure becomes a structured request error
-        # instead of escaping the coroutine and tearing down the stream.
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
@@ -3248,17 +3278,27 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 token_ids,
                 artifacts,
             )
-        except Exception as exc:
-            msg = f"CustomEncoder failed: {exc}"
-            logger.exception("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+        except Exception:
+            # Log with the traceback here — this is the last frame that knows
+            # which request and which encoder — then re-raise unchanged.
+            #
+            # Deliberately not converted to `InvalidArgument`. The adapters
+            # raise `ValueError`/`TypeError` for genuine input faults, which the
+            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
+            # the message, so the actionable case needs no help. Coercing the
+            # rest would relabel timeouts, CUDA faults, batcher shutdown and
+            # cancellations as client errors, suppressing retries — and since
+            # `encode()` is co-batched, it could blame a caller for a failure
+            # that originated in someone else's request.
+            logger.exception("Request %s: CustomEncoder failed", request_id)
+            raise
 
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
             len(artifacts),
         )
-        return prepared, None
+        return prepared
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -3296,13 +3336,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the
             # final engine prompt.
-            custom_prompt, assemble_error = await self._assemble_custom_encoder_prompt(
+            # Failures propagate as exceptions; the bindings map the type to a
+            # typed backend error, so an input fault answers 400 with its
+            # message and an engine fault stays a retryable 5xx.
+            custom_prompt = await self._assemble_custom_encoder_prompt(
                 request,
                 request_id,
             )
-            if assemble_error is not None:
-                yield assemble_error
-                return
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
@@ -3336,27 +3376,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
             if custom_prompt is not None:
                 prompt = custom_prompt
-                error = None
             elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
                 prompt = pre_rendered
-                error = None
                 logger.debug(
                     "[mm-routing] Request %s: using pre-rendered MultiModalInput",
                     request_id,
                 )
             else:
-                prompt, error = self._build_prompt_from_request(
+                prompt = self._build_prompt_from_request(
                     request,
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
-        if error is not None:
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3489,6 +3524,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
+        first_token_output_seen = False
 
         trace_headers = context.trace_headers()
 
@@ -3546,6 +3582,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     for output in res.outputs:
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
+                        if not first_token_output_seen and getattr(
+                            output, "token_ids", None
+                        ):
+                            first_token_output_seen = True
+                            context.notify_first_token()
                         output_idx = getattr(output, "index", 0) or 0
                         previous_text = previous_text_per_choice.get(output_idx, "")
                         # Calculate the delta text (new text since last chunk)
@@ -3635,7 +3676,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            generator = self._generate_token_mode(request, context, request_id)
+            async for chunk in _translate_vllm_client_errors(generator):
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
@@ -3651,18 +3693,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, error = self._build_prompt_from_request(
+        prompt = self._build_prompt_from_request(
             request,
             request_id,
             multi_modal_data,
             log_prefix="Prefill ",
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        if error is not None:
-            # Prefill errors need disaggregated_params field
-            error["disaggregated_params"] = None
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3833,11 +3870,12 @@ class EmbeddingWorkerHandler:
         embedding path (no ``is_prefill``, no ``abort_guard``).
         """
         shutdown_task: Optional[asyncio.Task] = None
+        wait_for: list[Any] = []
         try:
             # `list[Any]` mirrors BaseWorkerHandler._monitor_abort: the
             # iterable mixes the Future from async_killed_or_stopped() with
             # the Task from shutdown_event.wait().
-            wait_for: list[Any] = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             if self.shutdown_event is not None:
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
                 wait_for.append(shutdown_task)
@@ -3877,18 +3915,13 @@ class EmbeddingWorkerHandler:
             )
             raise
         finally:
-            # On the success path the wrapping ``_abort_monitor`` cancels
-            # this coroutine while it's blocked in ``asyncio.wait``, which
-            # short-circuits past the pending-task cleanup loop above and
-            # leaves ``shutdown_task`` (the ``shutdown_event.wait()`` task)
-            # pending forever — one leaked task per embedding request.
-            # Cancel it here on every exit path.
-            if shutdown_task is not None and not shutdown_task.done():
-                shutdown_task.cancel()
-                try:
-                    await shutdown_task
-                except asyncio.CancelledError:
-                    pass
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(self, context: Context, request_id: str):

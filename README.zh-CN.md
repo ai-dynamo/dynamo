@@ -113,7 +113,7 @@ limitations under the License.
 
 ```bash
 # 拉取预构建容器（SGLang 示例）
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
 
 # 在容器内启动 frontend 和 worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -127,7 +127,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-另有 [`tensorrtllm-runtime:1.3.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.3.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
+另有 [`tensorrtllm-runtime:1.4.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.4.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
 
 ### 选项 B：从 PyPI 安装
 
@@ -164,9 +164,9 @@ spec:
 
 | 模型 | 框架 | 模式 | 配方 |
 |------|------|------|------|
-| Llama-3-70B | vLLM | 聚合式 | [查看](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | 聚合式 | [查看](recipes/qwen3-32b-fp8/trtllm/) |
+| DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
+| Kimi-K3 | vLLM | 聚合式 | [查看](recipes/kimi-k3/vllm/) |
 
 完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 

@@ -356,8 +356,13 @@ type FeaturesSpec struct {
 	// +kubebuilder:validation:Type=object
 	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
-	// TODO: KVRouter support is not yet implemented in the operator.
-	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+	// KVRouter configures KV-cache-aware routing for the generated deployment.
+	// When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+	// Settings in spec.overrides.dgd take precedence: an override can replace
+	// DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+	// environment variable when both are present.
+	// +optional
+	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
@@ -459,7 +464,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
 	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`
