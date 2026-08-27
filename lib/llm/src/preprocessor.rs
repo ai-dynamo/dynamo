@@ -56,6 +56,8 @@ use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
+#[cfg(feature = "mm-routing")]
+use crate::preprocessor::media::MediaFetcher;
 use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
@@ -116,6 +118,32 @@ fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
         .message(message.into())
         .build()
         .into()
+}
+
+// Preserves terminal versus recoverable failures when moka shares a
+// dimension fetch among concurrent callers.
+#[cfg(feature = "mm-routing")]
+enum ImageDimFetchFailure {
+    InvalidArgument(String),
+    Recoverable(String),
+}
+
+#[cfg(feature = "mm-routing")]
+impl ImageDimFetchFailure {
+    fn from_error(error: anyhow::Error) -> Self {
+        if MediaFetcher::is_policy_rejection(&error) {
+            Self::InvalidArgument(error.to_string())
+        } else {
+            Self::Recoverable(error.to_string())
+        }
+    }
+
+    fn to_error(&self) -> anyhow::Error {
+        match self {
+            Self::InvalidArgument(message) => invalid_argument_error(message.clone()),
+            Self::Recoverable(message) => anyhow::anyhow!("fetch_image_dims failed: {message}"),
+        }
+    }
 }
 
 fn tool_content_part_as_user(
@@ -2573,12 +2601,11 @@ impl OpenAIPreprocessor {
         // smaller, we omit `mm_hashes` for the whole request rather than
         // ship a partial / misaligned UUID list to vLLM.
         //
-        // The mismatch is only reachable on the URL-passthrough path
-        // (no media_loader): each `fetch_image_dims_uncached` failure logs
-        // a warn and skips its `mm_image_entries.push`, but doesn't abort
-        // the request. The decoded path (`has_media_loader`) propagates
-        // any dim-fetch failure via `?`, so the request errors out before
-        // mm_hashes forwarding is even considered.
+        // The mismatch is only reachable on the URL-passthrough path when
+        // there is no media loader. Each recoverable `fetch_image_dims_uncached`
+        // failure logs a warning and skips its `mm_image_entries.push`.
+        // Security-policy failures remain terminal. The decoded path
+        // (`has_media_loader`) propagates any fetch failure via `?`.
         #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
@@ -2763,6 +2790,9 @@ impl OpenAIPreprocessor {
                         });
                     }
                     Err(e) => {
+                        if MediaFetcher::is_policy_rejection(&e) {
+                            return Err(e);
+                        }
                         // Redact `data:` URIs to just the media-type prefix —
                         // the comma-separated payload is the entire (base64)
                         // image body and ships in logs would be log bloat /
@@ -3054,8 +3084,8 @@ impl OpenAIPreprocessor {
     /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
     /// for the first 64 KB (covers PNG/WebP in <1 KB and JPEG SOF in worst
     /// case). For data: URIs we decode the base64 payload locally and parse
-    /// the header. Caller treats Err as "MM routing entry unavailable for
-    /// this image" — request still proceeds with text-prefix routing.
+    /// the header. Non-policy failures make the MM routing entry unavailable.
+    /// Policy rejections remain terminal for the request.
     ///
     /// Results are cached by `(mm_hash, dimension_policy)` so repeated
     /// requests for the same image (typical of multi-turn / session workloads)
@@ -3107,10 +3137,10 @@ impl OpenAIPreprocessor {
             .try_get_with(cache_key, async move {
                 Self::fetch_image_dims_uncached(&url_owned, dimension_policy)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(ImageDimFetchFailure::from_error)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("fetch_image_dims failed: {}", e))
+            .map_err(|error| error.to_error())
     }
 
     #[cfg(feature = "mm-routing")]
@@ -3170,7 +3200,10 @@ impl OpenAIPreprocessor {
                 .header("Range", format!("bytes=0-{}", range_end))
                 .timeout(DIM_FETCH_TIMEOUT)
                 .send()
-                .await?;
+                .await
+                .map_err(|error| {
+                    crate::preprocessor::media::MediaFetcher::map_fetch_error(error.into())
+                })?;
             let status = resp.status();
             // Require 206 Partial Content — if the origin ignored the
             // Range header and answered 200 OK, `.bytes()` would buffer
@@ -9564,6 +9597,86 @@ mod tests {
         let no_q = OpenAIPreprocessor::hash_image_url(base);
         assert_ne!(v1, v2, "different query values must hash differently");
         assert_ne!(v1, no_q, "presence of a query string must change the hash");
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn image_dim_cache_preserves_terminal_policy_classification() {
+        let terminal = ImageDimFetchFailure::from_error(invalid_argument_error(
+            "media destination rejected by SSRF policy",
+        ));
+        let terminal = terminal.to_error();
+        assert!(MediaFetcher::is_policy_rejection(&terminal));
+
+        let recoverable =
+            ImageDimFetchFailure::from_error(anyhow::anyhow!("image header was truncated"));
+        let recoverable = recoverable.to_error();
+        assert!(!MediaFetcher::is_policy_rejection(&recoverable));
+    }
+
+    /// A blocked destination on the URL-passthrough path must fail the whole
+    /// request. The IP literal is refused before DNS, so no socket is opened.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn url_passthrough_policy_rejection_is_terminal() {
+        // The probe's fetcher is built from the environment. The opt-in allows
+        // this destination, so there would be nothing to assert.
+        if std::env::var("DYN_MM_ALLOW_INTERNAL").as_deref() == Ok("1") {
+            return;
+        }
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert!(preprocessor.media_loader.is_none());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://169.254.169.254/latest/meta-data/private-image.png"
+                    }
+                }]
+            }]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+
+        let error = preprocessor
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
+            .await
+            .expect_err("URL-passthrough must stop at the policy rejection");
+
+        assert!(MediaFetcher::is_policy_rejection(&error));
+    }
+
+    /// Object-store and file URLs are backend-owned passthrough schemes, so a
+    /// failed dimension probe must remain recoverable rather than become 4xx.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn dim_fetch_declines_passthrough_schemes_without_rejecting_them() {
+        for url in [
+            "s3://bucket/private-image.png",
+            "gs://bucket/private-image.png",
+            "file:///tmp/private-image.png",
+        ] {
+            let error = OpenAIPreprocessor::fetch_image_dims_uncached(
+                url,
+                RoutingImageDimensionPolicy::Encoded,
+            )
+            .await
+            .expect_err("a non-fetchable scheme cannot yield dimensions");
+            assert!(
+                !MediaFetcher::is_policy_rejection(&error),
+                "{url} must be a skippable dim-fetch failure, not a terminal 4xx: {error:#}"
+            );
+        }
     }
 
     #[cfg(feature = "mm-routing")]

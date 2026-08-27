@@ -235,6 +235,7 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/common/
   - lib/bindings/

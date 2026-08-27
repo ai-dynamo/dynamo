@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -68,58 +68,19 @@ pub struct EppRouter {
 
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
-    pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
-    }
-
-    /// Assemble a custom EPP image around a prebuilt selection service.
-    pub async fn from_selection_service(
+    pub async fn from_selector(
         cfg: EppStandaloneConfig,
-        service: SelectionService,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let selector = Arc::new(Selector::from_service(&cfg, service).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
-    }
-
-    async fn dependencies(
-        cfg: &EppStandaloneConfig,
-    ) -> Result<(VllmRenderClient, Arc<PodDiscovery>, Arc<AtomicBool>)> {
+        let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let renderer = VllmRenderClient::new(
             &cfg.tokenizer_service_url,
             Duration::from_millis(cfg.tokenization_timeout_ms),
             cfg.tokenizer_max_response_bytes,
         )?;
-
-        let (reflector, reflector_ready) = PodDiscovery::spawn(cfg).await?;
+        let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
-
-        Ok((renderer, reflector, reflector_ready))
-    }
-
-    fn from_selector_parts(
-        cfg: EppStandaloneConfig,
-        renderer: VllmRenderClient,
-        reflector: Arc<PodDiscovery>,
-        reflector_ready: Arc<AtomicBool>,
-        selector: Arc<Selector>,
-    ) -> Self {
         let peer_ready = selector.peer_ready();
-
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
@@ -127,7 +88,7 @@ impl EppRouter {
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is
         // ready immediately and returns 503 per-request until capacity appears.
-        Self {
+        Ok(Self {
             renderer,
             reflector,
             selector,
@@ -136,7 +97,7 @@ impl EppRouter {
             peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        }
+        })
     }
 
     /// Overall EPP readiness for the gRPC health signal: the pod reflector is
