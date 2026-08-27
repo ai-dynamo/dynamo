@@ -2191,6 +2191,7 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
