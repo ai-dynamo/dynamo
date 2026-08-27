@@ -147,6 +147,8 @@ Convert the image to the format required by the Slurm site, then submit the pinn
 ```bash
 export CONTAINER=/shared/images/nemo-rl-dynamo-6ae03578.sqsh
 export MOUNTS="$PWD:$PWD"
+export SLURM_ACCOUNT=your-account
+export SLURM_PARTITION=your-partition
 # Use the partition's full physical GPU count per node. This example assumes
 # an eight-GPU node; use 2 only on a partition whose nodes have two GPUs.
 export GPUS_PER_NODE=8
@@ -160,12 +162,12 @@ sbatch \
   --nodes=1 \
   --gres="gpu:${GPUS_PER_NODE}" \
   --exclusive \
-  --account=<account> \
-  --partition=<partition> \
+  --account="$SLURM_ACCOUNT" \
+  --partition="$SLURM_PARTITION" \
   ray.sub
 ```
 
-The recipe assigns one GPU to training and one to a TP1 Dynamo vLLM engine; additional GPUs in a full-node allocation remain unused. The pinned `ray.sub` launches with `--exclusive` and rejects `GPUS_PER_NODE` when it differs from the partition's detected full-node GRES count. Therefore `GPUS_PER_NODE=2` and `--gres=gpu:2` are valid only on a two-GPU node, not as a partial request on a larger node. Two training steps are intended to cover pre-update generation, training, a policy refit, cache invalidation, and post-update generation. Preserve the Ray driver log, trainer metrics, Dynamo frontend log, every worker log, image digest, GPU inventory, model revision, and final process inventory.
+The recipe assigns one GPU to training and one to a TP1 Dynamo vLLM engine; additional GPUs in a full-node allocation remain unused. The pinned `ray.sub` launches with `--exclusive`, assumes a homogeneous partition, and rejects `GPUS_PER_NODE` when it differs from the partition's detected full-node GRES count. Therefore `GPUS_PER_NODE=2` and `--gres=gpu:2` are valid only on a two-GPU node, not as a partial request on a larger node. On a Slurm site without GRES, omit the `sbatch --gres` line but still set `GPUS_PER_NODE` to the physical count that Ray should advertise. Two training steps are intended to cover pre-update generation, training, a policy refit, cache invalidation, and post-update generation. Preserve the Ray driver log, trainer metrics, Dynamo frontend log, every worker log, image digest, GPU inventory, model revision, and final process inventory.
 
 The upstream functional check uses the same recipe with `Qwen/Qwen3-0.6B` model and tokenizer overrides. It is the authoritative assertion source for the current integration:
 
