@@ -11,6 +11,7 @@ on:
     # Documentation changes are validated before merge and do not affect images or GPU tests.
     paths-ignore:
       - 'docs/**'
+      - 'fern/**'
       - '**.md'
       - '**.rst'
   workflow_dispatch:
