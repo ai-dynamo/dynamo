@@ -346,11 +346,9 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
-  - lib/bindings/kvbm/pyproject.toml
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
-  - tests/wheels/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
   path_globs:
@@ -1101,63 +1099,7 @@ shared:
 - glob: tests/gpu_memory_service/
   owners:
   - gms
-- glob: tests/serve/test_vllm.py
-  owners:
-  - runtime
-  - backend-vllm
-- glob: tests/serve/test_vllm_omni.py
-  owners:
-  - runtime
-  - backend-vllm
-- glob: tests/serve/test_sglang.py
-  owners:
-  - runtime
-  - backend-sglang
-- glob: tests/serve/test_sglang_mm_hashes_protocol.py
-  owners:
-  - runtime
-  - backend-sglang
-- glob: tests/serve/test_trtllm.py
-  owners:
-  - runtime
-  - backend-trtllm
-- glob: tests/serve/test_trtllm_mm_hashes_protocol.py
-  owners:
-  - runtime
-  - backend-trtllm
-- glob: tests/serve/trtllm/
-  owners:
-  - runtime
-  - backend-trtllm
-- glob: tests/serve/test_sample_diffusion.py
-  owners:
-  - runtime
-  - diffusion
-- glob: tests/serve/multimodal_profiles/
-  owners:
-  - runtime
-  - multimodal
-# The xpu profile is declared in the xpu area, which emits in the earlier
-# override tier. Shared rules emit after overrides, so the directory glob above
-# would otherwise take this file back; the longer glob wins by last-match.
-- glob: tests/serve/multimodal_profiles/vllm_xpu.py
-  owners:
-  - xpu
-- glob: tests/test_kustomize_matrix.py
-  owners:
-  - runtime
-  - ops
-- glob: tests/test_generate_kustomize_openapi.py
-  owners:
-  - runtime
-  - ops
-- glob: tests/dependencies/test_kvbm_imports.py
-  owners:
-  - runtime
-  - kv-memory
 classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
-    coowner: ops
-  - pattern: pyproject.toml
     coowner: ops

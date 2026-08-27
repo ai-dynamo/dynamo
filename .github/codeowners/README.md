@@ -96,11 +96,6 @@ generated outputs together.
   base area rules, file-type defaults, nested path overrides, then explicit
   `shared` rules. Overlapping file-type rules retain their YAML declaration
   order, so later entries refine earlier ones.
-- A file-type default is a default, not an invariant. Because overrides and
-  `shared` rules emit after it, a `pyproject.toml` or `Dockerfile` added under a
-  path that carries its own override or `shared` declaration keeps that path's
-  owner. Confirm a new one with `who_owns.py` instead of assuming the file-type
-  rule caught it.
 - Legacy `classify.keyword_rules` are rejected because auto-classification and
   keyword co-ownership required a live tree. Declare ownership with explicit
   area `path_globs` or `shared` entries.
