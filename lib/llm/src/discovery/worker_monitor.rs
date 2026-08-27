@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -235,23 +236,8 @@ impl LoadThresholdConfig {
     }
 }
 
-/// Worker load monitoring state per dp_rank
-#[derive(Clone, Debug)]
-struct DecodeOverloadLatchState {
-    latched_overloaded: bool,
-    kv_used_blocks_cleared: bool,
-    active_decode_blocks_cleared: bool,
-}
-
-impl Default for DecodeOverloadLatchState {
-    fn default() -> Self {
-        Self {
-            latched_overloaded: false,
-            kv_used_blocks_cleared: true,
-            active_decode_blocks_cleared: true,
-        }
-    }
-}
+/// Default hysteresis window for the decode overload deadline mechanism.
+const DEFAULT_DECODE_OVERLOAD_HYSTERESIS_MS: u64 = 5000;
 
 #[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
@@ -261,10 +247,21 @@ pub struct WorkerLoadState {
     pub active_prefill_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
-    decode_overload_latches: HashMap<u32, DecodeOverloadLatchState>,
+    /// Per-dp_rank overload deadlines. A dp_rank is considered overloaded while
+    /// its deadline is in the future or a current signal exceeds the threshold.
+    decode_overload_deadlines: HashMap<u32, Instant>,
 }
 
 impl WorkerLoadState {
+    /// Returns a deadline without allowing an invalidly large duration to panic.
+    fn decode_overload_deadline(now: Instant, hysteresis_duration: Duration) -> Instant {
+        now.checked_add(hysteresis_duration)
+            .or_else(|| {
+                now.checked_add(Duration::from_millis(DEFAULT_DECODE_OVERLOAD_HYSTERESIS_MS))
+            })
+            .unwrap_or(now)
+    }
+
     fn is_decode_signal_overloaded(
         used_blocks: u64,
         total_blocks: u64,
@@ -300,50 +297,108 @@ impl WorkerLoadState {
                 })
     }
 
-    fn update_decode_overload_latch(
+    /// Refreshes or clears one rank's decode-overload deadline from an incoming load event.
+    fn update_decode_overload_deadline(
         &mut self,
         dp_rank: u32,
         active_decode_blocks: Option<u64>,
         kv_used_blocks: Option<u64>,
         active_decode_blocks_threshold: f64,
-    ) {
-        let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
-            return;
-        };
+        hysteresis_duration: Duration,
+        now: Instant,
+    ) -> Option<Instant> {
+        let &total_blocks = self.kv_total_blocks.get(&dp_rank)?;
         if total_blocks == 0 {
-            return;
+            return None;
         }
 
-        let active_decode_overloaded = active_decode_blocks.is_some_and(|value| {
+        let any_signal_overloaded = active_decode_blocks.is_some_and(|value| {
             Self::is_decode_signal_overloaded(value, total_blocks, active_decode_blocks_threshold)
-        });
-        let kv_used_overloaded = kv_used_blocks.is_some_and(|value| {
+        }) || kv_used_blocks.is_some_and(|value| {
             Self::is_decode_signal_overloaded(value, total_blocks, active_decode_blocks_threshold)
         });
 
-        let latch = self.decode_overload_latches.entry(dp_rank).or_default();
-        if active_decode_overloaded || kv_used_overloaded {
-            latch.latched_overloaded = true;
+        if any_signal_overloaded {
+            let deadline = Self::decode_overload_deadline(now, hysteresis_duration);
+            self.decode_overload_deadlines.insert(dp_rank, deadline);
+        } else {
+            let expired = self
+                .decode_overload_deadlines
+                .get(&dp_rank)
+                .is_none_or(|&deadline| now >= deadline);
+            if expired {
+                self.decode_overload_deadlines.remove(&dp_rank);
+                if active_decode_blocks.is_none() {
+                    self.active_decode_blocks.remove(&dp_rank);
+                }
+                if kv_used_blocks.is_none() {
+                    self.kv_used_blocks.remove(&dp_rank);
+                }
+            }
         }
-        if let Some(value) = active_decode_blocks {
-            latch.active_decode_blocks_cleared = !Self::is_decode_signal_overloaded(
-                value,
-                total_blocks,
-                active_decode_blocks_threshold,
-            );
+
+        self.decode_overload_deadlines.get(&dp_rank).copied()
+    }
+
+    /// Arms missing deadlines for cached signals that can now be evaluated.
+    fn arm_missing_decode_overload_deadlines_from_current_signals(
+        &mut self,
+        active_decode_blocks_threshold: f64,
+        hysteresis_duration: Duration,
+        now: Instant,
+    ) {
+        let dp_ranks: HashSet<u32> = self
+            .active_decode_blocks
+            .keys()
+            .chain(self.kv_used_blocks.keys())
+            .copied()
+            .collect();
+
+        for dp_rank in dp_ranks {
+            if !self.decode_overload_deadlines.contains_key(&dp_rank)
+                && self.current_decode_overloaded(dp_rank, active_decode_blocks_threshold)
+            {
+                let deadline = Self::decode_overload_deadline(now, hysteresis_duration);
+                self.decode_overload_deadlines.insert(dp_rank, deadline);
+            }
         }
-        if let Some(value) = kv_used_blocks {
-            latch.kv_used_blocks_cleared = !Self::is_decode_signal_overloaded(
-                value,
-                total_blocks,
-                active_decode_blocks_threshold,
-            );
-        }
-        if latch.latched_overloaded
-            && latch.kv_used_blocks_cleared
-            && latch.active_decode_blocks_cleared
-        {
-            latch.latched_overloaded = false;
+    }
+
+    /// Expires elapsed deadlines while retaining each rank as non-overloaded.
+    fn expire_decode_overload_deadlines(
+        &mut self,
+        now: Instant,
+        active_decode_blocks_threshold: f64,
+    ) {
+        let expired_dp_ranks: Vec<u32> = self
+            .decode_overload_deadlines
+            .iter()
+            .filter_map(|(&dp_rank, &deadline)| (now >= deadline).then_some(dp_rank))
+            .collect();
+
+        for dp_rank in expired_dp_ranks {
+            self.decode_overload_deadlines.remove(&dp_rank);
+            let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
+                continue;
+            };
+            if let Some(value) = self.active_decode_blocks.get_mut(&dp_rank)
+                && Self::is_decode_signal_overloaded(
+                    *value,
+                    total_blocks,
+                    active_decode_blocks_threshold,
+                )
+            {
+                *value = 0;
+            }
+            if let Some(value) = self.kv_used_blocks.get_mut(&dp_rank)
+                && Self::is_decode_signal_overloaded(
+                    *value,
+                    total_blocks,
+                    active_decode_blocks_threshold,
+                )
+            {
+                *value = 0;
+            }
         }
     }
 
@@ -351,7 +406,9 @@ impl WorkerLoadState {
         &mut self,
         active_load: &ActiveLoad,
         active_decode_blocks_threshold: Option<f64>,
-    ) {
+        hysteresis_duration: Duration,
+        now: Instant,
+    ) -> Option<Instant> {
         let dp_rank = active_load.dp_rank;
         if let Some(active_blocks) = active_load.active_decode_blocks {
             self.active_decode_blocks.insert(dp_rank, active_blocks);
@@ -363,13 +420,16 @@ impl WorkerLoadState {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
         }
         if let Some(threshold) = active_decode_blocks_threshold {
-            self.update_decode_overload_latch(
+            return self.update_decode_overload_deadline(
                 dp_rank,
                 active_load.active_decode_blocks,
                 active_load.kv_used_blocks,
                 threshold,
+                hysteresis_duration,
+                now,
             );
         }
+        None
     }
 
     /// Returns true if ALL dp_ranks are overloaded based on the threshold logic.
@@ -381,7 +441,7 @@ impl WorkerLoadState {
     /// For each dp_rank, a dp_rank is overloaded if ANY of these conditions is met (OR logic):
     /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute, if set)
     /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
-    /// 3. decode overload latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
+    /// 3. decode overload deadline or current `kv_used_blocks`/`active_decode_blocks` signal (if set)
     ///
     /// The worker is overloaded only if ALL dp_ranks are overloaded.
     pub fn is_overloaded(
@@ -403,7 +463,7 @@ impl WorkerLoadState {
             .active_decode_blocks
             .keys()
             .chain(self.kv_used_blocks.keys())
-            .chain(self.decode_overload_latches.keys())
+            .chain(self.decode_overload_deadlines.keys())
             .chain(self.active_prefill_tokens.keys())
             .copied()
             .collect();
@@ -437,13 +497,14 @@ impl WorkerLoadState {
                 }
             }
 
-            // Check 3: decode overload latch (OR-ed from kv_used_blocks and active_decode_blocks)
+            // Check 3: decode overload deadline and current decode signals.
             if let Some(decode_threshold) = active_decode_blocks_threshold {
-                let is_overloaded = self
-                    .decode_overload_latches
+                let deadline_active = self
+                    .decode_overload_deadlines
                     .get(&dp_rank)
-                    .map(|latch| latch.latched_overloaded)
-                    .unwrap_or_else(|| self.current_decode_overloaded(dp_rank, decode_threshold));
+                    .is_some_and(|&deadline| Instant::now() < deadline);
+                let is_overloaded =
+                    deadline_active || self.current_decode_overloaded(dp_rank, decode_threshold);
                 if is_overloaded {
                     return true;
                 }
@@ -518,6 +579,72 @@ fn collect_overloaded_workers(
         .collect()
 }
 
+/// Returns the earliest active decode-overload deadline across all workers.
+fn next_decode_overload_deadline(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+) -> Option<Instant> {
+    worker_load_states
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .value()
+                .decode_overload_deadlines
+                .values()
+                .copied()
+                .min()
+        })
+        .min()
+}
+
+/// Prunes workers absent from both endpoints and returns the next active deadline.
+fn prune_removed_worker_load_states(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    removed_workers: &[u64],
+    workers_on_other_endpoint: &HashSet<u64>,
+) -> Option<Instant> {
+    for worker_id in removed_workers {
+        if !workers_on_other_endpoint.contains(worker_id) {
+            worker_load_states.remove(worker_id);
+        }
+    }
+    next_decode_overload_deadline(worker_load_states)
+}
+
+/// Arms missing deadlines for cached signals that can now be evaluated.
+fn arm_missing_decode_overload_deadlines_from_current_signals(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    active_decode_blocks_threshold: f64,
+    hysteresis_duration: Duration,
+    now: Instant,
+) -> Option<Instant> {
+    for mut entry in worker_load_states.iter_mut() {
+        entry.arm_missing_decode_overload_deadlines_from_current_signals(
+            active_decode_blocks_threshold,
+            hysteresis_duration,
+            now,
+        );
+    }
+    next_decode_overload_deadline(worker_load_states)
+}
+
+/// Expires elapsed deadlines and returns the resulting overloaded workers and next deadline.
+fn reconcile_expired_decode_overloads(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    config: &LoadThresholdConfig,
+    now: Instant,
+) -> (HashSet<u64>, Option<Instant>) {
+    if let Some(threshold) = config.active_decode_blocks_threshold {
+        for mut entry in worker_load_states.iter_mut() {
+            entry.expire_decode_overload_deadlines(now, threshold);
+        }
+    }
+
+    (
+        collect_overloaded_workers(worker_load_states, config),
+        next_decode_overload_deadline(worker_load_states),
+    )
+}
+
 fn merge_endpoint_runtime_configs(
     decode_configs: &RuntimeConfigWatch,
     prefill_configs: Option<&RuntimeConfigWatch>,
@@ -568,6 +695,8 @@ pub struct KvWorkerMonitor {
     thresholds: Arc<RwLock<LoadThresholdConfig>>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
+    /// How long decode overload remains latched after a signal drops below threshold.
+    decode_overload_hysteresis: Duration,
     start_lock: Arc<tokio::sync::Mutex<()>>,
     lifecycle: Arc<MonitorLifecycle>,
 }
@@ -615,7 +744,13 @@ impl KvWorkerMonitor {
         config: LoadThresholdConfig,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Self {
+        use dynamo_runtime::config::environment_names::llm::DYN_DECODE_OVERLOAD_HYSTERESIS_MS;
+
         let cancellation_token = client.endpoint.drt().child_token();
+        let hysteresis_ms = std::env::var(DYN_DECODE_OVERLOAD_HYSTERESIS_MS)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_DECODE_OVERLOAD_HYSTERESIS_MS);
         Self {
             client,
             prefill_client: Arc::new(RwLock::new(None)),
@@ -623,6 +758,7 @@ impl KvWorkerMonitor {
             worker_load_states: Arc::new(DashMap::new()),
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
+            decode_overload_hysteresis: Duration::from_millis(hysteresis_ms),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
             lifecycle: Arc::new(MonitorLifecycle {
                 cancellation_token,
@@ -790,6 +926,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
         let thresholds = self.thresholds.clone();
+        let decode_overload_hysteresis = self.decode_overload_hysteresis;
         let started = self.started.clone();
         let task_guard = self.lifecycle.task_guard.clone();
 
@@ -824,6 +961,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 HashMap::new();
             let mut overloaded_tracker = OverloadedWorkerTracker::default();
             let mut last_thresholds = thresholds.read().unwrap().clone();
+            let mut next_overload_deadline: Option<Instant> = None;
 
             loop {
                 // Read from the exact decode endpoint and, when attached, the exact prefill
@@ -890,6 +1028,30 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
                         }
                         break;
+                    }
+
+                    _ = async {
+                        if let Some(deadline) = next_overload_deadline {
+                            tokio::time::sleep_until(deadline.into()).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        let cfg = thresholds.read().unwrap().clone();
+                        let (overloaded_workers, next_deadline) =
+                            reconcile_expired_decode_overloads(
+                                &worker_load_states,
+                                &cfg,
+                                Instant::now(),
+                            );
+                        next_overload_deadline = next_deadline;
+                        let overloaded_changed = overloaded_tracker.replace(overloaded_workers);
+                        publish_overloaded_instances_if_needed(
+                            &client,
+                            &prefill_client_holder,
+                            &overloaded_tracker,
+                            overloaded_changed,
+                        );
                     }
 
                     // Handle runtime config updates
@@ -972,6 +1134,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         let cfg = thresholds.read().unwrap().clone();
                         last_thresholds = cfg.clone();
+                        next_overload_deadline = cfg.active_decode_blocks_threshold.and_then(
+                            |threshold| {
+                                arm_missing_decode_overload_deadlines_from_current_signals(
+                                    &worker_load_states,
+                                    threshold,
+                                    decode_overload_hysteresis,
+                                    Instant::now(),
+                                )
+                            },
+                        );
                         let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
                         if overloaded_tracker.replace(overloaded_workers) {
                             let overloaded_instances = overloaded_tracker.ids();
@@ -1069,19 +1241,40 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // mean RwLock contention is effectively zero.
                         let cfg = thresholds.read().unwrap().clone();
                         let thresholds_changed = cfg != last_thresholds;
+                        let decode_threshold_changed = cfg.active_decode_blocks_threshold
+                            != last_thresholds.active_decode_blocks_threshold;
+                        let event_time = Instant::now();
 
                         // Update worker load state per dp_rank (for overload detection only).
                         // Note: Prometheus gauges are updated directly by sequence.rs
-                        let (total_blocks, worker_overloaded) = {
+                        let (total_blocks, worker_overloaded, overload_deadline) = {
                             let mut state = worker_load_states.entry(worker_id).or_default();
-                            state.update_from_active_load(
+                            let overload_deadline = state.update_from_active_load(
                                 &active_load,
                                 cfg.active_decode_blocks_threshold,
+                                decode_overload_hysteresis,
+                                event_time,
                             );
                             let total_blocks = state.kv_total_blocks.get(&dp_rank).copied();
                             let worker_overloaded = state.is_overloaded_for_config(&cfg);
-                            (total_blocks, worker_overloaded)
+                            (total_blocks, worker_overloaded, overload_deadline)
                         };
+                        if decode_threshold_changed {
+                            next_overload_deadline = cfg.active_decode_blocks_threshold.and_then(
+                                |threshold| {
+                                    arm_missing_decode_overload_deadlines_from_current_signals(
+                                        &worker_load_states,
+                                        threshold,
+                                        decode_overload_hysteresis,
+                                        event_time,
+                                    )
+                                },
+                            );
+                        } else if let Some(deadline) = overload_deadline
+                            && next_overload_deadline.is_none_or(|next| deadline < next)
+                        {
+                            next_overload_deadline = Some(deadline);
+                        }
 
                         if tracing::enabled!(tracing::Level::DEBUG) {
                             tracing::debug!(
@@ -1147,6 +1340,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
+                            next_overload_deadline = prune_removed_worker_load_states(
+                                &worker_load_states,
+                                &removed_workers,
+                                &known_prefill_workers,
+                            );
                         }
 
                         known_decode_workers = current_instances;
@@ -1198,6 +1396,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
+                            next_overload_deadline = prune_removed_worker_load_states(
+                                &worker_load_states,
+                                &removed_workers,
+                                &known_decode_workers,
+                            );
                         }
 
                         known_prefill_workers = current_instances;
@@ -1275,12 +1478,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
-        classify_load_membership, compute_overloaded_instances, overload_reconciliation_needed,
-        publish_overloaded_instances, publish_overloaded_instances_if_needed,
+        DEFAULT_DECODE_OVERLOAD_HYSTERESIS_MS, LoadMembership, LoadThresholdConfig,
+        OverloadedWorkerTracker, WorkerLoadState,
+        arm_missing_decode_overload_deadlines_from_current_signals, classify_load_membership,
+        collect_overloaded_workers, compute_overloaded_instances, overload_reconciliation_needed,
+        prune_removed_worker_load_states, publish_overloaded_instances,
+        publish_overloaded_instances_if_needed, reconcile_expired_decode_overloads,
     };
     use dynamo_kv_router::protocols::ActiveLoad;
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    const LONG_HYSTERESIS: Duration = Duration::from_secs(3600);
+    const ZERO_HYSTERESIS: Duration = Duration::ZERO;
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
@@ -1458,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_overload_latch_sets_overloaded_if_any_signal_is_overloaded() {
+    fn decode_overload_deadline_sets_overloaded_if_any_signal_is_overloaded() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
         state.update_from_active_load(
@@ -1470,13 +1680,25 @@ mod tests {
                 kv_used_blocks: Some(90),
             },
             Some(0.6),
+            LONG_HYSTERESIS,
+            Instant::now(),
         );
 
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
-    fn decode_overload_latch_only_clears_after_both_signals_report_not_overloaded() {
+    fn decode_overload_deadline_handles_unrepresentable_hysteresis() {
+        let now = Instant::now();
+        assert_eq!(
+            WorkerLoadState::decode_overload_deadline(now, Duration::MAX),
+            now.checked_add(Duration::from_millis(DEFAULT_DECODE_OVERLOAD_HYSTERESIS_MS))
+                .unwrap_or(now)
+        );
+    }
+
+    #[test]
+    fn decode_overload_deadline_holds_across_transient_below_threshold_signal() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -1489,6 +1711,272 @@ mod tests {
                 kv_used_blocks: Some(90),
             },
             Some(0.6),
+            LONG_HYSTERESIS,
+            Instant::now(),
+        );
+        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            Some(0.6),
+            LONG_HYSTERESIS,
+            Instant::now(),
+        );
+        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+    }
+
+    #[test]
+    fn expired_decode_deadline_reconciles_silent_signal_and_worker_set() {
+        let now = Instant::now();
+        let hysteresis = Duration::from_secs(1);
+        let states = dashmap::DashMap::new();
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+            hysteresis,
+            now,
+        );
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            Some(0.6),
+            hysteresis,
+            now + Duration::from_millis(100),
+        );
+        states.insert(1, state);
+
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.6),
+            ..Default::default()
+        };
+        let (overloaded, next_deadline) =
+            reconcile_expired_decode_overloads(&states, &config, now + hysteresis);
+
+        assert!(overloaded.is_empty());
+        assert_eq!(next_deadline, None);
+        let state = states.get(&1).unwrap();
+        assert_eq!(state.active_decode_blocks.get(&0), Some(&10));
+        assert_eq!(state.kv_used_blocks.get(&0), Some(&0));
+    }
+
+    #[test]
+    fn expired_silent_rank_remains_non_overloaded_in_multi_dp_worker() {
+        let now = Instant::now();
+        let hysteresis = Duration::from_secs(1);
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.extend([(0, 100), (1, 100)]);
+
+        for (dp_rank, event_time) in [(0, now + Duration::from_millis(500)), (1, now)] {
+            state.update_from_active_load(
+                &ActiveLoad {
+                    worker_id: 1,
+                    dp_rank,
+                    active_decode_blocks: None,
+                    active_prefill_tokens: None,
+                    kv_used_blocks: Some(90),
+                },
+                Some(0.6),
+                hysteresis,
+                event_time,
+            );
+        }
+        state.expire_decode_overload_deadlines(now + hysteresis, 0.6);
+
+        assert!(!state.is_overloaded(Some(0.6), None, None));
+        assert_eq!(
+            state.decode_overload_deadlines.get(&0),
+            Some(&(now + Duration::from_millis(1500)))
+        );
+        assert_eq!(state.kv_used_blocks.get(&1), Some(&0));
+    }
+
+    #[test]
+    fn enabling_decode_threshold_arms_deadline_for_cached_signal() {
+        let now = Instant::now();
+        let hysteresis = Duration::from_secs(1);
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        state.kv_used_blocks.insert(0, 90);
+        state.arm_missing_decode_overload_deadlines_from_current_signals(0.6, hysteresis, now);
+
+        assert_eq!(
+            state.decode_overload_deadlines.get(&0),
+            Some(&(now + hysteresis))
+        );
+    }
+
+    #[test]
+    fn runtime_config_arms_missing_deadline_without_extending_it() {
+        let load_time = Instant::now();
+        let config_time = load_time + Duration::from_millis(100);
+        let hysteresis = Duration::from_secs(1);
+        let states = dashmap::DashMap::new();
+        let mut state = WorkerLoadState::default();
+
+        let deadline = state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+            hysteresis,
+            load_time,
+        );
+        assert_eq!(deadline, None);
+
+        state.kv_total_blocks.insert(0, 100);
+        states.insert(1, state);
+        let expected_deadline = config_time + hysteresis;
+        assert_eq!(
+            arm_missing_decode_overload_deadlines_from_current_signals(
+                &states,
+                0.6,
+                hysteresis,
+                config_time,
+            ),
+            Some(expected_deadline)
+        );
+
+        assert_eq!(
+            arm_missing_decode_overload_deadlines_from_current_signals(
+                &states,
+                0.6,
+                hysteresis,
+                config_time + Duration::from_millis(100),
+            ),
+            Some(expected_deadline),
+            "a repeated runtime-config update must not extend the deadline"
+        );
+
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.6),
+            ..Default::default()
+        };
+        let (overloaded, next_deadline) =
+            reconcile_expired_decode_overloads(&states, &config, expected_deadline);
+        assert!(overloaded.is_empty());
+        assert_eq!(next_deadline, None);
+    }
+
+    #[test]
+    fn endpoint_removal_prunes_stale_state_and_deadline() {
+        let now = Instant::now();
+        let hysteresis = Duration::from_secs(1);
+        let states = dashmap::DashMap::new();
+
+        for (worker_id, event_time) in [(1, now), (2, now + Duration::from_millis(100))] {
+            let mut state = WorkerLoadState::default();
+            state.kv_total_blocks.insert(0, 100);
+            state.update_from_active_load(
+                &ActiveLoad {
+                    worker_id,
+                    dp_rank: 0,
+                    active_decode_blocks: None,
+                    active_prefill_tokens: None,
+                    kv_used_blocks: Some(90),
+                },
+                Some(0.6),
+                hysteresis,
+                event_time,
+            );
+            states.insert(worker_id, state);
+        }
+
+        let next_deadline = prune_removed_worker_load_states(&states, &[1, 2], &HashSet::from([2]));
+
+        assert!(!states.contains_key(&1));
+        assert!(states.contains_key(&2));
+        assert_eq!(next_deadline, Some(now + Duration::from_millis(1100)));
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.6),
+            ..Default::default()
+        };
+        assert_eq!(
+            collect_overloaded_workers(&states, &config),
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn stale_timer_does_not_expire_refreshed_decode_deadline() {
+        let now = Instant::now();
+        let hysteresis = Duration::from_secs(1);
+        let refreshed_at = now + Duration::from_millis(500);
+        let refreshed_deadline = refreshed_at + hysteresis;
+        let states = dashmap::DashMap::new();
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        for event_time in [now, refreshed_at] {
+            state.update_from_active_load(
+                &ActiveLoad {
+                    worker_id: 1,
+                    dp_rank: 0,
+                    active_decode_blocks: None,
+                    active_prefill_tokens: None,
+                    kv_used_blocks: Some(90),
+                },
+                Some(0.6),
+                hysteresis,
+                event_time,
+            );
+        }
+        states.insert(1, state);
+
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.6),
+            ..Default::default()
+        };
+        let (overloaded, next_deadline) =
+            reconcile_expired_decode_overloads(&states, &config, now + hysteresis);
+        assert_eq!(overloaded, HashSet::from([1]));
+        assert_eq!(next_deadline, Some(refreshed_deadline));
+
+        let (overloaded, next_deadline) =
+            reconcile_expired_decode_overloads(&states, &config, refreshed_deadline);
+        assert!(overloaded.is_empty());
+        assert_eq!(next_deadline, None);
+    }
+
+    #[test]
+    fn decode_overload_clears_when_overloading_signal_stops_after_deadline() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
 
@@ -1501,24 +1989,17 @@ mod tests {
                 kv_used_blocks: None,
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
-
-        state.update_from_active_load(
-            &ActiveLoad {
-                worker_id: 1,
-                dp_rank: 0,
-                active_decode_blocks: None,
-                active_prefill_tokens: None,
-                kv_used_blocks: Some(10),
-            },
-            Some(0.6),
+        assert!(
+            !state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)),
+            "worker must recover after the deadline when the overloading signal goes silent"
         );
-        assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
-    fn decode_overload_latch_clears_with_only_kv_used_blocks_signal() {
+    fn decode_overload_clears_with_only_kv_used_blocks_signal() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -1531,6 +2012,8 @@ mod tests {
                 kv_used_blocks: Some(90),
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
 
@@ -1543,12 +2026,14 @@ mod tests {
                 kv_used_blocks: Some(10),
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
-    fn decode_overload_latch_clears_with_only_active_decode_blocks_signal() {
+    fn decode_overload_clears_with_only_active_decode_blocks_signal() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -1561,6 +2046,8 @@ mod tests {
                 kv_used_blocks: None,
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
 
@@ -1573,12 +2060,14 @@ mod tests {
                 kv_used_blocks: None,
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
-    fn decode_overload_latch_clears_when_both_signals_are_not_overloaded_in_same_event() {
+    fn decode_overload_clears_when_both_signals_are_not_overloaded_in_same_event() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -1591,6 +2080,8 @@ mod tests {
                 kv_used_blocks: None,
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
 
@@ -1603,6 +2094,8 @@ mod tests {
                 kv_used_blocks: Some(10),
             },
             Some(0.6),
+            ZERO_HYSTERESIS,
+            Instant::now(),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
@@ -1641,6 +2134,8 @@ mod tests {
                 kv_used_blocks: Some(90),
             },
             Some(0.6),
+            LONG_HYSTERESIS,
+            Instant::now(),
         );
 
         assert!(!state.is_overloaded(None, Some(u64::MAX), None));
@@ -1659,6 +2154,8 @@ mod tests {
                 kv_used_blocks: Some(90),
             },
             Some(0.6),
+            LONG_HYSTERESIS,
+            Instant::now(),
         );
 
         assert!(!state.is_overloaded(None, None, Some(2.0)));
