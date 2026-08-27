@@ -36,11 +36,6 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     ))
 }
 
-pub(crate) fn parse_http_endpoint_arg(value: &str) -> Result<RlAdminBaseUrl, DynamoError> {
-    RlAdminBaseUrl::parse(value)
-        .map_err(|error| client::invalid_argument(format!("invalid --vllm-http-endpoint: {error}")))
-}
-
 impl VllmSidecarEngine {
     pub(crate) fn new(
         endpoint: GrpcEndpoint,
@@ -102,8 +97,13 @@ impl VllmSidecarEngine {
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_http_url = args
             .vllm_http_endpoint
-            .as_deref()
-            .map(parse_http_endpoint_arg)
+            .map(|endpoint| {
+                RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
+                    client::invalid_argument(format!(
+                        "invalid RL admin endpoint derived from --vllm-http-endpoint: {error}"
+                    ))
+                })
+            })
             .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
