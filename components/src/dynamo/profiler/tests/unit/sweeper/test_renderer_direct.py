@@ -182,3 +182,129 @@ def test_missing_required_field_raises_materialization_error() -> None:
     del candidate["agg_block_size"]
     with pytest.raises(MaterializationError, match="missing required field"):
         materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+def test_total_gpu_footprint_matches_the_evaluated_candidate_not_just_tp() -> None:
+    """Regression test for a review-reported gap: a real 4-GPU candidate
+    (Llama-3.3-70B FP8 / vLLM / 4xH200, tp=2 x replicas=2) materialized as a
+    2-GPU DGD, because replicas was never propagated from candidate_config
+    into component.replicas -- it silently stayed at the base template's
+    hardcoded `replicas: 1` regardless of the candidate's real replica
+    count. gpus-per-worker (via tp/tep/dep) was already correct; only the
+    replica multiplier was missing, so total footprint (replicas x
+    gpus-per-worker) could be silently wrong even when the per-worker
+    GPU count looked right on its own.
+    """
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend="vllm",
+        strategy="tp",
+        tp=2,
+        replicas=2,
+        used_gpus=4,
+        model_name="meta-llama/Llama-3.3-70B-Instruct-FP8",
+    )
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+    worker = next(
+        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+    )
+    replicas = worker["replicas"]
+    gpus_per_worker = int(
+        worker["podTemplate"]["spec"]["containers"][0]["resources"]["limits"][
+            "nvidia.com/gpu"
+        ]
+    )
+
+    assert replicas == 2, f"replicas not propagated from candidate: got {replicas}"
+    assert gpus_per_worker == 2
+    assert replicas * gpus_per_worker == candidate["used_gpus"], (
+        f"materialized total GPU footprint ({replicas} x {gpus_per_worker}) "
+        f"does not match the evaluated candidate's used_gpus "
+        f"({candidate['used_gpus']})"
+    )
+
+def test_scheduler_limits_materialize_the_evaluated_candidates_values() -> None:
+    """Regression test for the most significant gap found in this pass:
+    materialize_dgd_from_candidate never called set_prefill_config on any
+    backend, so agg_max_num_seqs/agg_max_num_batched_tokens -- real search
+    dimensions Sweeper evaluates and scores candidates by -- were never
+    materialized at all. Every DGD silently kept the base template's fixed
+    scheduler defaults regardless of what was actually searched, on every
+    backend, since this materializer's very first version.
+    """
+    for backend in ("vllm", "sglang", "trtllm"):
+        candidate = dict(
+            REAL_CANDIDATE_TEP_TRTLLM,
+            backend=backend,
+            strategy="tp",
+            agg_max_num_seqs=999,
+            agg_max_num_batched_tokens=12345,
+        )
+        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+        worker = next(
+            c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+        )
+        args_text = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
+        assert "999" in args_text, f"{backend}: agg_max_num_seqs missing: {args_text}"
+        assert "12345" in args_text, (
+            f"{backend}: agg_max_num_batched_tokens missing: {args_text}"
+        )
+
+
+def test_attention_dp_enabled_when_candidate_selected_it_trtllm_only() -> None:
+    """Regression test: examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+    (the extra-engine-args file every TRT-LLM agg deployment references)
+    hardcodes enable_attention_dp: false. Nothing overrode it before this
+    fix -- a candidate genuinely evaluated with attention_dp > 1 would
+    silently materialize with attention-DP off. TRT-LLM-only: vLLM/SGLang
+    don't reference this file, so their modifiers correctly have no
+    set_config_attention_dp at all (checked via hasattr, matching how
+    materializer.py gates the call).
+    """
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM, backend="trtllm", strategy="tp", attention_dp=4
+    )
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+    worker = next(
+        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+    )
+    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
+    assert "enable_attention_dp" in args and "true" in args.lower(), args
+
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+
+    assert not hasattr(CONFIG_MODIFIERS["vllm"], "set_config_attention_dp")
+    assert not hasattr(CONFIG_MODIFIERS["sglang"], "set_config_attention_dp")
+
+
+def test_attention_dp_left_disabled_when_candidate_did_not_select_it() -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM, backend="trtllm", strategy="tp", attention_dp=1
+    )
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+    worker = next(
+        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+    )
+    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
+    assert "enable_attention_dp" in args and "false" in args.lower(), args
+
+
+def test_cuda_graph_batch_size_mirrors_engine_max_batch_size_trtllm() -> None:
+    """cuda_graph_config.max_batch_size is a separate key from top-level
+    max_batch_size in the base template; confirmed it was never otherwise
+    overridden and stayed fixed at the template's default (16) regardless
+    of the real candidate."""
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend="trtllm",
+        strategy="tp",
+        agg_max_num_seqs=777,
+    )
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+    worker = next(
+        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+    )
+    args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+    args_text = " ".join(args)
+    assert "cuda_graph_config.max_batch_size" in args_text
+    assert "777" in args_text

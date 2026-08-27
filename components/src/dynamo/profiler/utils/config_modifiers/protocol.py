@@ -822,3 +822,40 @@ class BaseConfigModifier:
             agg_gpus,
             num_gpus_per_node=num_gpus_per_node,
         )
+
+    @classmethod
+    def set_config_replicas(
+        cls,
+        config: dict,
+        replicas: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's replica count to the worker component.
+
+        Backend-agnostic (component.replicas is a plain Kubernetes field, no
+        CLI flag involved), unlike set_config_model/set_config_kv_cache, so
+        this lives once here rather than duplicated per backend. Mirrors the
+        one relevant line of _apply_worker_config (component.replicas =
+        replicas) without touching CLI args or GPU resources, since those
+        are already set by set_config_tp_size/tep/dep separately.
+
+        Without this call, a candidate's total materialized GPU footprint
+        (replicas x gpus-per-worker) silently diverges from what was
+        actually evaluated: setup_worker_component_resources correctly sets
+        gpus-per-worker via the tp/tep/dep setters, but replicas is left at
+        whatever the base template hardcodes (confirmed: replicas: 1 in
+        every agg.yaml template), regardless of the candidate's real
+        replicas value. Confirmed in review: a real 4-GPU candidate
+        (tp=2, replicas=2) materialized as a 2-GPU DGD (tp=2, replicas=1).
+        """
+        cfg = Config.model_validate(config)
+        component_name = cls._resolve_component_name(cfg, component_type)
+        component = (
+            get_component_by_name(cfg, component_name) if component_name else None
+        )
+        if component is None:
+            raise ValueError(
+                f"could not find worker component for {component_type} to set replicas"
+            )
+        component.replicas = replicas
+        return cfg.model_dump()

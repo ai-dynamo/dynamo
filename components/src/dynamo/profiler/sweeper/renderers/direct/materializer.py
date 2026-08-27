@@ -125,11 +125,29 @@ def materialize_dgd_from_candidate(
             prefix_caching=candidate_config["agg_enable_prefix_caching"],
             component_type=component_type,
         )
+        config = modifier.set_prefill_config(
+            config,
+            max_batch_size=candidate_config["agg_max_num_seqs"],
+            max_num_tokens=candidate_config["agg_max_num_batched_tokens"],
+            component_type=component_type,
+        )
         config = modifier.set_config_model(               # <-- add these 4 lines
             config,
             model_name=candidate_config["model_name"],
             component_type=component_type,
         )
+        config = modifier.set_config_replicas(
+            config,
+            replicas=candidate_config["replicas"],
+            component_type=component_type,
+        )
+        if hasattr(modifier, "set_config_attention_dp"):
+            config = modifier.set_config_attention_dp(
+                config,
+                attention_dp=candidate_config.get("attention_dp", 1),
+                component_type=component_type,
+            )
+        
     except NotImplementedError as exc:
         # e.g. TRT-LLM's set_config_tep_size: confirmed real and reachable --
         # a real Sweeper-produced Candidate (strategy="tep", backend="trtllm")

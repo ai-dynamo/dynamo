@@ -550,6 +550,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
             {
                 "max_batch_size": int(max_batch_size),
                 "max_num_tokens": int(max_num_tokens),
+                # Mirror engine max_batch_size onto CUDA graph capture size.
+                # cuda_graph_config.max_batch_size is a *separate* key from
+                # top-level max_batch_size in the base template; confirmed
+                # it was never otherwise overridden and stayed fixed at the
+                # template's default (16) regardless of the real candidate.
+                "cuda_graph_config.max_batch_size": int(max_batch_size),
             },
         )
 
@@ -595,6 +601,48 @@ class TrtllmConfigModifier(BaseConfigModifier):
         get_main_container(worker_service).args = args
         return cfg.model_dump()
 
+    @classmethod
+    def set_config_attention_dp(
+        cls,
+        config: dict,
+        attention_dp: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's attention-DP mode.
+
+        TRT-LLM-only: neither vLLM nor SGLang's base templates reference
+        the extra-engine-args file this derives from, so this method is not
+        part of the shared ConfigModifierProtocol.
+
+        Confirmed against a real production config (deepseek-v32-fp4/trtllm
+        /agg-round-robin/deploy.yaml): enable_attention_dp needs no separate
+        DP-degree field -- TRT-LLM implicitly uses tensor_parallel_size as
+        the DP degree once this flag is set. So the only thing to derive is
+        the boolean itself: attention_dp > 1 means the candidate's search
+        selected data-parallel attention over the same tp_size.
+
+        Without this call, the base template's `enable_attention_dp: false`
+        default (from examples/backends/trtllm/engine_configs/qwen3/agg.yaml)
+        is never overridden -- a winning candidate evaluated with
+        attention_dp > 1 would silently materialize with attention-DP
+        disabled, deploying a structurally different configuration than the
+        one actually searched and scored.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        args = _merge_overrides_into_args(
+            args,
+            {"enable_attention_dp": bool(attention_dp and attention_dp > 1)},
+        )
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+        
     @classmethod
     def set_config_model(
         cls,
