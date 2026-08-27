@@ -308,10 +308,7 @@ impl ModelRuntimeConfig {
     }
 
     #[pyo3(signature = (structural_tag=None))]
-    fn set_structural_tag(
-        &mut self,
-        structural_tag: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<()> {
+    fn set_structural_tag(&mut self, structural_tag: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let structural_tag = structural_tag
             .map(|config| pythonize::depythonize::<RsStructuralTagConfig>(config))
             .transpose()
