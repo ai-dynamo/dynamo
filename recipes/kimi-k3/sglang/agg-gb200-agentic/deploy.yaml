@@ -60,7 +60,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:1.4.0-sglang-runtime-pr12513-26ea9a09-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -104,7 +104,7 @@ spec:
 
     - name: SglangWorker
       type: worker
-      replicas: 1
+      replicas: 2
       multinode:
         nodeCount: 4
       sharedMemorySize: 128Gi
@@ -144,7 +144,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:1.4.0-sglang-runtime-pr12513-26ea9a09-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.sglang]
               args:
@@ -216,7 +216,7 @@ spec:
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
                 - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
-                  value: "1024"
+                  value: "512"
                 # For perf benchmarking only
                 # - name: SGLANG_RAGGED_VERIFY_MODE
                 #   value: static
