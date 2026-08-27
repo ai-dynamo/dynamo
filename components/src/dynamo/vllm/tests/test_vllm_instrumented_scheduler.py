@@ -13,6 +13,7 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import uuid
 from collections import deque
@@ -3807,3 +3808,71 @@ def test_kvwarm_chain_tokens_are_deterministic_and_extend_monotonically():
     # Distinct chains draw distinct conversation orders.
     other = InstrumentedScheduler._kvwarm_chain_token_ids(_kvwarm_text_stub(), 3, 6)
     assert other != first
+
+
+def test_synthetic_content_unset_env_keeps_random_path_byte_identical(monkeypatch):
+    monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 1_000
+    stub._fpm_dp_rank = 0
+    got = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 32)
+    expected = random.Random("dp0:salt").choices(range(1, 1_000), k=32)
+    assert got == expected
+
+
+def test_synthetic_content_pool_windows_share_prefix_across_lengths(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 1_000
+    stub._fpm_dp_rank = 0
+    stub._bench_prefill_pool = list(range(1, 1_001))
+    short = InstrumentedScheduler._bench_synthetic_token_ids(stub, "s", 48)
+    long = InstrumentedScheduler._bench_synthetic_token_ids(stub, "s", 320)
+    # Window start depends only on the seed: any two lengths are strict
+    # prefixes -- the invariant the fake prefix-cache pairing relies on.
+    assert long[:48] == short
+    # Wrap-around past the pool end preserves both length and the invariant.
+    wrapped = InstrumentedScheduler._bench_synthetic_token_ids(stub, "s", 1_500)
+    assert len(wrapped) == 1_500 and wrapped[:320] == long
+
+
+def test_synthetic_content_chain_mode_routes_through_kvwarm_chains(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt_chain")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 1_000
+    stub._fpm_dp_rank = 0
+    seen = []
+    stub._kvwarm_chain_token_ids = lambda idx, depth: seen.append((idx, depth)) or [7] * depth
+    out = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 9)
+    assert out == [7] * 9
+    (idx, depth), = seen
+    # Derived chain indices stay clear of the grid's own chain range and are
+    # deterministic per seed.
+    assert depth == 9 and 20_000_000 <= idx < 21_000_000
+    InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 9)
+    assert seen[1] == (idx, 9)
+
+
+def test_content_pool_is_built_once_and_guards_small_datasets(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 1_000
+    stub._fpm_dp_rank = 0
+    calls = []
+    stub._kvwarm_load_texts = lambda: calls.append(1) or ["x" * 5_000]
+    stub._kvwarm_tokenizer = lambda: SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: [1] * len(text)
+    )
+    InstrumentedScheduler._bench_synthetic_token_ids(stub, "a", 16)
+    InstrumentedScheduler._bench_synthetic_token_ids(stub, "b", 16)
+    assert calls == [1]  # pool built once, then cached
+    tiny = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    tiny._bench_vocab_size = 1_000
+    tiny._fpm_dp_rank = 0
+    tiny._kvwarm_load_texts = lambda: ["too small"]
+    tiny._kvwarm_tokenizer = lambda: SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: [1] * len(text)
+    )
+    with pytest.raises(RuntimeError, match="pool too small"):
+        InstrumentedScheduler._bench_synthetic_token_ids(tiny, "a", 16)

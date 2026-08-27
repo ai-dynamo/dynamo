@@ -3297,8 +3297,71 @@ class InstrumentedScheduler(AsyncScheduler):
         # and expert routing would be correlated across the whole DP group --
         # a milder cousin of the constant-input collapse this method removes.
         dp_rank = getattr(self, "_fpm_dp_rank", 0)
-        rng = random.Random(f"dp{dp_rank}:{salt}")
+        seed = f"dp{dp_rank}:{salt}"
+        mode = os.environ.get("DYN_BENCH_PREFILL_CONTENT", "")
+        if mode == "sharegpt":
+            return self._bench_content_pool_ids(seed, length)
+        if mode == "sharegpt_chain":
+            # Route through the KV-warmup chain tokenizer so benchmark
+            # prompts are built exactly like ground-truth serving prompts
+            # (same dataset, same concatenation). The offset keeps these
+            # derived chain indices clear of the grid's own chain range.
+            idx = 20_000_000 + (
+                int.from_bytes(hashlib.sha256(seed.encode()).digest()[:4], "big")
+                % 1_000_000
+            )
+            return self._kvwarm_chain_token_ids(idx, length)
+        rng = random.Random(seed)
         return rng.choices(range(1, vocab_size), k=length)
+
+    def _bench_content_pool_ids(self, seed: str, length: int) -> list[int]:
+        """Deterministic window over a flat pool of real-text token ids.
+
+        Fully random token ids fix the constant-input collapse (see
+        ``_bench_synthetic_token_ids``) but still route MoE experts unlike
+        real text: uniform ids draw an unnaturally flat expert distribution,
+        which measured -5..-9% fast on deep-KV decode against real-traffic
+        ground truth. ``DYN_BENCH_PREFILL_CONTENT=sharegpt`` feeds prompts
+        from real conversations instead.
+
+        Invariants mirrored from the random path:
+        - the window START depends only on ``seed`` (never on ``length``),
+          wrapping around the pool end, so for one seed any two lengths are
+          strict prefixes of each other -- the property the fake prefix-cache
+          pairing depends on;
+        - the pool order is seeded once per process, so the mapping is
+          deterministic across ranks and boots.
+
+        ``DYN_BENCH_POOL_TAG`` re-draws every window (same invariants) so
+        repeated boots can vote over content draws as well as boot state.
+        """
+        pool = getattr(self, "_bench_prefill_pool", None)
+        if pool is None:
+            texts = self._kvwarm_load_texts()
+            tokenizer = self._kvwarm_tokenizer()
+            need = 2_400_000
+            order = list(range(len(texts)))
+            random.Random("bench-prefill-pool").shuffle(order)
+            pool = []
+            for i in order:
+                pool.extend(tokenizer.encode(texts[i], add_special_tokens=False))
+                if len(pool) >= need:
+                    break
+            if len(pool) < 4096:
+                raise RuntimeError(
+                    "DYN_BENCH_PREFILL_CONTENT=sharegpt: dataset pool too small "
+                    f"({len(pool)} tokens; need >= 4096)"
+                )
+            self._bench_prefill_pool = pool
+        n = len(pool)
+        tag = os.environ.get("DYN_BENCH_POOL_TAG", "")
+        start = random.Random(f"{tag}:{seed}").randrange(0, n)
+        if start + length <= n:
+            return pool[start : start + length]
+        out = pool[start:]
+        while len(out) < length:
+            out = out + pool
+        return out[:length]
 
     def _bench_cache_fake_prefixes(
         self,
