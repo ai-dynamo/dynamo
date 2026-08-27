@@ -34,24 +34,122 @@ if [[ "$actual_input_sha256" != "$EXPECTED_INPUT_SHA256" ]]; then
     exit 1
 fi
 
-python -m examples.custom_encoder.benchmark.fixed_text_image_workload validate \
-    "$WORKLOAD_ROOT" \
-    --image-size-count 300x300:500 \
-    --image-size-count 500x500:500 \
-    > "$OUTPUT_ROOT/workload_audit.txt"
+python - "$MEASURED_INPUT" "$WARMUP_INPUT" "$MANIFEST" \
+    > "$OUTPUT_ROOT/workload_audit.txt" <<'PY'
+import hashlib
+import json
+import sys
+from collections import Counter
+from pathlib import Path
 
-jq -e '
-    (.decoder_model == "Qwen/Qwen2.5-1.5B-Instruct")
-    and (.encoder_model == "Qwen/Qwen2.5-VL-3B-Instruct")
-    and (.concurrency == 64)
-    and (.requests_per_concurrency == 1000)
-    and (.warmup_requests == 20)
-    and (.text_isl == 644)
-    and (.target_osl == 7)
-    and (.observed_decoder_isl_by_image_size == {"300x300":773,"500x500":976})
-    and ([.image_size_counts[] | [.width, .height, .unique_images, .requests]]
-         == [[300,300,500,500],[500,500,500,500]])
-' "$MANIFEST" >/dev/null
+from PIL import Image
+
+measured_path = Path(sys.argv[1])
+warmup_path = Path(sys.argv[2])
+manifest = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+
+expected_manifest = {
+    "schema": "aiperf-benchmark-jsonl",
+    "prompt_policy": "one identical prompt for all measured and warmup requests",
+    "text_token_definition": "tokenizer(prompt, add_special_tokens=False)",
+    "text_tokens": 644,
+    "target_osl": 7,
+    "decoder_isls_by_image_size": {"300x300": 773, "500x500": 976},
+    "decoder_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "encoder_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+}
+for key, expected in expected_manifest.items():
+    if manifest.get(key) != expected:
+        raise SystemExit(
+            f"manifest field {key!r} is {manifest.get(key)!r}, expected {expected!r}"
+        )
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def audit_split(
+    name: str,
+    path: Path,
+    expected_rows: int,
+    expected_sizes: dict[str, int],
+) -> tuple[set[str], set[str], str, dict[str, object]]:
+    payload = path.read_bytes()
+    rows = [json.loads(line) for line in payload.splitlines()]
+    split_manifest = manifest[name]
+    if len(rows) != expected_rows or split_manifest.get("rows") != expected_rows:
+        raise SystemExit(f"{name} row count mismatch")
+    if sha256_bytes(payload) != split_manifest.get("sha256"):
+        raise SystemExit(f"{name} JSONL hash mismatch")
+    if len({row["session_id"] for row in rows}) != expected_rows:
+        raise SystemExit(f"{name} session IDs are not unique")
+
+    prompts = {str(row["text"]) for row in rows}
+    if len(prompts) != 1:
+        raise SystemExit(f"{name} does not use one shared prompt")
+    prompt = next(iter(prompts))
+    if sha256_bytes(prompt.encode("utf-8")) != manifest.get("prompt_sha256"):
+        raise SystemExit(f"{name} prompt hash mismatch")
+
+    image_paths = [Path(row["image"]) for row in rows]
+    if len(set(image_paths)) != expected_rows:
+        raise SystemExit(f"{name} image paths are not unique")
+    size_counts: Counter[str] = Counter()
+    encoded_hashes: set[str] = set()
+    decoded_hashes: set[str] = set()
+    for image_path in image_paths:
+        encoded = image_path.read_bytes()
+        encoded_hashes.add(sha256_bytes(encoded))
+        with Image.open(image_path) as image:
+            if image.format != "JPEG":
+                raise SystemExit(f"{name} image is not JPEG: {image_path}")
+            size_counts[f"{image.width}x{image.height}"] += 1
+            decoded_hashes.add(sha256_bytes(image.convert("RGB").tobytes()))
+    if dict(size_counts) != expected_sizes:
+        raise SystemExit(f"{name} image-size counts are {dict(size_counts)!r}")
+    if split_manifest.get("image_size_counts") != expected_sizes:
+        raise SystemExit(f"{name} manifest image-size counts mismatch")
+    if len(encoded_hashes) != expected_rows or len(decoded_hashes) != expected_rows:
+        raise SystemExit(f"{name} images are not unique by encoded and decoded hash")
+    return (
+        {str(path) for path in image_paths},
+        prompts,
+        sha256_bytes(payload),
+        {
+            "rows": len(rows),
+            "image_size_counts": dict(size_counts),
+            "unique_encoded_images": len(encoded_hashes),
+            "unique_decoded_images": len(decoded_hashes),
+        },
+    )
+
+
+measured_images, measured_prompts, measured_sha, measured_audit = audit_split(
+    "measured", measured_path, 1000, {"300x300": 500, "500x500": 500}
+)
+warmup_images, warmup_prompts, warmup_sha, warmup_audit = audit_split(
+    "warmup", warmup_path, 20, {"300x300": 10, "500x500": 10}
+)
+if measured_images & warmup_images:
+    raise SystemExit("measured and warmup image pools overlap")
+if measured_prompts != warmup_prompts:
+    raise SystemExit("measured and warmup prompts differ")
+
+print("WORKLOAD_AUDIT=PASS")
+print(
+    json.dumps(
+        {
+            "measured_sha256": measured_sha,
+            "warmup_sha256": warmup_sha,
+            "prompt_sha256": manifest["prompt_sha256"],
+            "measured": measured_audit,
+            "warmup": warmup_audit,
+        },
+        indent=2,
+    )
+)
+PY
 
 cp "$MANIFEST" "$OUTPUT_ROOT/workload_manifest.json"
 printf '%s\n' "$SOURCE_COMMIT" > "$OUTPUT_ROOT/source_commit.txt"
@@ -60,7 +158,6 @@ sha256sum "$MEASURED_INPUT" "$WARMUP_INPUT" > "$OUTPUT_ROOT/workload_sha256.txt"
 sha256sum \
     components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py \
     examples/custom_encoder/benchmark/batched_control_worker.py \
-    examples/custom_encoder/benchmark/fixed_text_image_workload.py \
     examples/custom_encoder/benchmark/run_qwen2_5_vl_comparison.sh \
     examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh \
     examples/custom_encoder/launch/agg_qwen2_5_vl_control.sh \

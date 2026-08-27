@@ -3,9 +3,9 @@
 
 """Unit tests for the custom encoder backend contract.
 
-Pin the author-facing contract surface: the ``Preprocessed`` carrier (item +
-scalar cost, no bucket_key), generic forward artifacts, the no-device ``build``
-signature, and that the ABC cannot be instantiated without the required methods.
+Pin the author-facing contract surface: the ``Preprocessed`` carrier (item,
+scalar cost, and compatibility key), generic forward artifacts, the no-device
+``build`` signature, and the required abstract methods.
 """
 
 import pytest
@@ -65,7 +65,7 @@ def test_preprocessed_cost_defaults_to_1():
     assert Preprocessed(item="x").cost == 1
 
 
-def test_preprocessed_has_no_bucket_key():
+def test_preprocessed_bucket_key_defaults_to_none():
     assert Preprocessed(item="x").bucket_key is None
 
 
@@ -95,5 +95,6 @@ def test_default_attrs_and_close_noop():
     assert e.buckets is None
     assert e.max_batch_cost is None
     assert e.max_batch_items is None
+    assert e.max_queue_delay_us == 0
     assert e.preprocess_concurrency == 0
     assert e.close() is None
