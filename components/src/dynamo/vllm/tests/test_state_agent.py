@@ -191,6 +191,7 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         endpoint,
         _vllm_config(4, 4),
         image_token_id=99,
+        video_token_id=100,
     )
 
     assert owner is not None
@@ -202,6 +203,8 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         "tcp://worker-a.example:5563",
         "tcp://worker-a.example:5564",
     ]
+    assert [item["image_token_id"] for item in captured["descriptors"]] == [99] * 4
+    assert [item["video_token_id"] for item in captured["descriptors"]] == [100] * 4
     assert [item["router_hint_source"] for item in captured["descriptors"]] == [
         {
             "source_control_endpoint": "tcp://cache-owner.example:23284",
