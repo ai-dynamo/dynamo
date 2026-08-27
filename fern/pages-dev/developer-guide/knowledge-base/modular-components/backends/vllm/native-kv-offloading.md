@@ -170,6 +170,6 @@ Queried lower-tier indexer storage_tier=HostPinned queried_workers=2 matched_wor
 - [Offloading Support Matrix](../../router/offloading-support-matrix.md) — cross-framework support matrix for KV routing with offloading
 - [vLLM KV offloading guide](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/) — connector configuration reference
 - [Configuration and Tuning](../../router/configuration-and-tuning.md) — full router flag reference, including lower-tier cache-hit weights
-- [Router Guide](../../router/router-guide.md) — routing modes and deployment matrix
+- [Router Guide](../../router/router-guide.md) — routing modes and deployment topologies
 - [KV Cache Offloading](kv-cache-offloading.md) — LMCache and FlexKV offloading backends for vLLM
 - [Using HiCache](../sglang/hicache.md) — the SGLang counterpart: tier-aware routing with HiCache

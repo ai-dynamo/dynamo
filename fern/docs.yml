@@ -234,6 +234,9 @@ redirects:
     destination: "/dynamo/dev/backends/writing-custom-backends/overview"
   - source: "/dynamo/dev/advanced-customizations/writing-custom-backends/:slug*"
     destination: "/dynamo/dev/backends/writing-custom-backends/:slug*"
+  # Custom routing strategies now live with the Router developer documentation.
+  - source: "/dynamo/dev/advanced-customizations/write-custom-routing-strategies"
+    destination: "/dynamo/dev/knowledge-base/modular-components/router/write-custom-routing-strategies"
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.
