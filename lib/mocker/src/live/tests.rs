@@ -689,7 +689,9 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
         args(EngineType::Vllm),
         0,
         LiveEngineOptions {
-            request_output_capacity: Some(NonZeroUsize::MIN),
+            request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                capacity: NonZeroUsize::MIN,
+            },
             fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
             ..LiveEngineOptions::default()
         },
@@ -1000,12 +1002,12 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
 }
 
 #[tokio::test]
-async fn replay_options_allow_zero_output_and_full_response_buffering() {
+async fn replay_options_allow_zero_output() {
     let zero_engine = LiveEngine::start_with_options(
         args(EngineType::Sglang),
         0,
         LiveEngineOptions {
-            request_output_capacity: None,
+            request_output_buffering: RequestOutputBuffering::FullResponse,
             allow_zero_output: true,
             ..LiveEngineOptions::default()
         },
@@ -1024,45 +1026,56 @@ async fn replay_options_allow_zero_output_and_full_response_buffering() {
     assert!(terminal.completed);
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
+}
 
-    let buffered_engine = LiveEngine::start_with_options(
+#[tokio::test]
+async fn full_response_buffering_preserves_concurrent_unread_requests() {
+    let buffered_engine = LiveEngine::start_with_config_and_request_output_buffering(
         args(EngineType::Vllm),
         0,
-        LiveEngineOptions {
-            request_output_capacity: None,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
-        },
+        LiveEngineConfig::default(),
+        RequestOutputBuffering::FullResponse,
     )
     .unwrap();
-    let mut buffered = buffered_engine
-        .submit(DirectRequest {
-            tokens: vec![4, 5, 6],
-            max_output_tokens: 32,
-            output_token_ids: Some(vec![7; 32]),
-            uuid: Some(Uuid::from_u128(22)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let mut requests = Vec::new();
+    for ordinal in 0..4_u128 {
+        let token_id = 7 + ordinal as u32;
+        requests.push(
+            buffered_engine
+                .submit(DirectRequest {
+                    tokens: vec![4, 5, 6],
+                    max_output_tokens: 32,
+                    output_token_ids: Some(vec![token_id; 32]),
+                    uuid: Some(Uuid::from_u128(22 + ordinal)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap(),
+        );
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while buffered_engine.active_request_count() != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the full response should buffer without a receiver draining it");
-    let mut output_count = 0;
-    let mut saw_terminal = false;
-    while let Some(output) = buffered.recv().await {
-        output_count += usize::from(output.token_id.is_some());
-        if output.completed {
-            saw_terminal = true;
-            break;
+    .expect("full responses should buffer without any receiver draining them");
+    for (ordinal, mut request) in requests.into_iter().enumerate() {
+        let expected_token_id = 7 + ordinal as u32;
+        let mut output_count = 0;
+        let mut saw_terminal = false;
+        while let Some(output) = request.recv().await {
+            assert_eq!(output.token_id, Some(expected_token_id));
+            output_count += 1;
+            if output.completed {
+                saw_terminal = true;
+                break;
+            }
         }
+        assert_eq!(output_count, 32);
+        assert!(saw_terminal);
+        assert!(request.recv().await.is_none());
     }
-    assert_eq!(output_count, 32);
-    assert!(saw_terminal);
     assert_eq!(buffered_engine.active_request_count(), 0);
     buffered_engine.shutdown().await.unwrap();
 }

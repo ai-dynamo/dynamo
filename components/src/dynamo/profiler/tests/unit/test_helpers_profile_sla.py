@@ -46,6 +46,7 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
+        KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
         SLASpec,
@@ -581,6 +582,243 @@ class TestAssembleFinalConfig:
         )
 
         assert result is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_sets_router_mode_env(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+        # command/args are left untouched.
+        assert "args" not in container
+        assert "command" not in container
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_disabled_kv_router_preserves_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=False)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--custom-arg"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        assert result is dgd_config
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["args"] == ["--custom-arg"]
+        assert "env" not in container
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_preserves_existing_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--http-port", "9000"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        # Existing args are untouched; routing is expressed via env only.
+        assert container["args"] == ["--http-port", "9000"]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_handles_command_form_frontend(self, tmp_path):
+        """A frontend produced by ``_update_frontend_cli`` puts the module
+        entrypoint in ``command`` and model flags in ``args``. Setting the env
+        var must not corrupt either list (no duplicate ``-m dynamo.frontend``).
+        """
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "command": [
+                                            "python3",
+                                            "-m",
+                                            "dynamo.frontend",
+                                        ],
+                                        "args": [
+                                            "--model-name",
+                                            "m",
+                                            "--model-path",
+                                            "/models/m",
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["command"] == ["python3", "-m", "dynamo.frontend"]
+        assert container["args"] == [
+            "--model-name",
+            "m",
+            "--model-path",
+            "/models/m",
+        ]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_replaces_existing_router_mode_env(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "env": [
+                                            {"name": "FOO", "value": "bar"},
+                                            {
+                                                "name": "DYN_ROUTER_MODE",
+                                                "value": "round-robin",
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["env"] == [
+            {"name": "FOO", "value": "bar"},
+            {"name": "DYN_ROUTER_MODE", "value": "kv"},
+        ]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_missing_frontend(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {"spec": {"components": [{"name": "decode", "type": "worker"}]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert "has no frontend component" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_frontend_without_main_container(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontend = {
+            "name": "Frontend",
+            "type": "frontend",
+            "podTemplate": {"spec": {"containers": [{"name": "sidecar"}]}},
+        }
+        dgd_config = {"spec": {"components": [frontend]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert frontend["podTemplate"]["spec"]["containers"] == [{"name": "sidecar"}]
+        assert "has no main container" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_configures_every_frontend(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontends = [
+            {
+                "name": name,
+                "type": "frontend",
+                "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+            }
+            for name in ("FrontendA", "FrontendB")
+        ]
+        dgd_config = {"spec": {"components": frontends}}
+
+        assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        for frontend in frontends:
+            assert frontend["podTemplate"]["spec"]["containers"][0]["env"] == [
+                {"name": "DYN_ROUTER_MODE", "value": "kv"}
+            ]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

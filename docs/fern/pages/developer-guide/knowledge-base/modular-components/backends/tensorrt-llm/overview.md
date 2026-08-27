@@ -32,7 +32,6 @@ example.
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../planner/overview.md) | 🚧 | Planned |
-| [**KVBM**](../../kvbm/overview.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -44,7 +43,7 @@ example.
 
 ## Feature Interactions
 
-TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support. The matrix below shows which feature pairs are validated to work together.
+The matrix below shows which TensorRT-LLM feature pairs are validated to work together.
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
