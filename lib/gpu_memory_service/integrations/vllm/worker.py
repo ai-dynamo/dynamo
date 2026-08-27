@@ -50,6 +50,7 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 )
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
+    patch_dsv4_topk_clone_inputs,
     patch_memory_snapshot,
 )
 from gpu_memory_service.integrations.vllm.upstream_workarounds import (
@@ -71,6 +72,8 @@ patch_empty_cache()
 patch_memory_snapshot()
 # Constructor-time vLLM shims (DeepSeek V4 / MoE). No-op if the op is gone.
 patch_moe_wna16_marlin_gemm_fake_impl()
+# Triton dsv4_topk: clone VMM operands, keep the real kernel (not PyTorch).
+patch_dsv4_topk_clone_inputs()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
@@ -205,9 +208,6 @@ class GMSWorker(Worker):
         return available
 
     def _determine_available_memory_before_gms_publish(self) -> int:
-        if not is_scratch_kv_enabled():
-            return super().determine_available_memory()
-
         import vllm.envs as envs
         from vllm.config import CUDAGraphMode
         from vllm.platforms import current_platform
@@ -217,15 +217,61 @@ class GMSWorker(Worker):
         # import's GMS mappings are not, so only those imported bytes need
         # adding below.
         has_pending_write = has_pending_gms_write()
+        skip_profile = os.environ.get("DYN_GMS_SKIP_PROFILE_RUN", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # RO import: dummy profile_run IMA on GMS VMM (DSV4 TEP8 and GLM-5.2
+        # NVFP4 TEP8). First-boot RW still profiles when scratch-KV is off.
+        # With scratch-KV, dummy profile_run calls gms_use_mem_pool("kv_cache")
+        # before any kv_cache allocator exists (that is created later in
+        # initialize_from_config). Skip the dummy run; size KV from allocated
+        # bytes + headroom, same as DYN_GMS_SKIP_PROFILE_RUN=1 on DSV4.
+        if not has_pending_write and get_imported_weights_bytes() > 0:
+            skip_profile = True
+        if is_scratch_kv_enabled():
+            skip_profile = True
+
+        if not is_scratch_kv_enabled() and not skip_profile:
+            return super().determine_available_memory()
 
         torch_device().reset_peak_memory_stats()
-        self.model_runner.profile_run()
-        torch_device().synchronize()
-        torch_peak = torch_device().max_memory_allocated()
+        # Dummy profile_run() launches DSV4 TileLang/Triton kernels (MHC +
+        # dsv4_topk) against GMS VMM-backed weights and hits CUDA IMA on
+        # B200 TEP8. Skip it when requested and size KV from current
+        # allocation plus a conservative activation headroom instead.
+        if skip_profile:
+            torch_device().synchronize()
+            torch_peak = torch_device().max_memory_allocated()
+            # RO imports do not show GMS weights in torch's allocator; a large
+            # activation headroom would starve KV. DYN_GMS_PROFILE_HEADROOM_GIB
+            # is the RW value (env is 12 on this DGD); RO uses a smaller default.
+            if has_pending_write:
+                headroom_gib = float(
+                    os.environ.get("DYN_GMS_PROFILE_HEADROOM_GIB", "12")
+                )
+            else:
+                headroom_gib = float(
+                    os.environ.get("DYN_GMS_RO_PROFILE_HEADROOM_GIB", "3")
+                )
+            headroom = int(headroom_gib * (1 << 30))
+            logger.warning(
+                "[GMS] Skipping profile_run; using allocated=%.2f GiB + "
+                "headroom=%.2f GiB for KV sizing",
+                torch_peak / (1 << 30),
+                headroom_gib,
+            )
+            torch_peak = int(torch_peak + headroom)
+        else:
+            self.model_runner.profile_run()
+            torch_device().synchronize()
+            torch_peak = torch_device().max_memory_allocated()
 
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda()
+            not skip_profile
+            and current_platform.is_cuda()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
@@ -268,8 +314,9 @@ class GMSWorker(Worker):
         """Allocate KV cache backing.
 
         In scratch-KV mode the tensors are allocated over scratch-aliased
-        backing client-side; wake_up drops scratch backing and installs fresh
-        server backing via the standard reallocate+remap path. With
+        backing client-side. CUDA-graph capture runs against those VAs during
+        compile_or_warm_up_model. wake_up drops scratch backing and installs
+        fresh server backing via the standard reallocate+remap path. With
         enable_sleep_mode the manager connects RW at init and allocates real
         backing immediately.
         """
@@ -324,6 +371,43 @@ class GMSWorker(Worker):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+    def compile_or_warm_up_model(self):
+        """Warm up and capture CUDA graphs against the current KV VAs.
+
+        Scratch-KV aliases one physical granule under the full KV VA, so
+        dummy_run writes are mapped (they clobber the alias). CUDA graphs
+        capture VAs, not physical handles; wake_up later installs unique
+        backing at the same VAs and replay is unchanged. Capture here so
+        the shadow is graph-ready before sleep; do not recapture in wake_up.
+        """
+        skip_env = os.environ.get("DYN_GMS_SKIP_KERNEL_WARMUP", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if skip_env:
+            from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
+            from vllm.utils.gpu_sync_debug import enable_gpu_sync_check
+            from vllm.utils.jit_monitor import activate as activate_jit_monitor
+            from vllm.v1.worker.worker_base import CompilationTimes
+
+            logger.warning(
+                "[GMS] Skipping kernel_warmup / CUDA-graph capture "
+                "(DYN_GMS_SKIP_KERNEL_WARMUP)"
+            )
+            activate_jit_monitor(
+                mode=self.observability_config.jit_monitor_mode,
+                verbose=self.observability_config.jit_monitor_verbose,
+            )
+            freeze_gc_heap()
+            maybe_attach_gc_debug_callback()
+            enable_gpu_sync_check()
+            return CompilationTimes(
+                language_model=self.compilation_config.compilation_time,
+                encoder=self.compilation_config.encoder_compilation_time,
+            )
+        return super().compile_or_warm_up_model()
+
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
 
@@ -332,6 +416,11 @@ class GMSWorker(Worker):
         by vLLM's memory tracking).
         """
         super().load_model(*args, **kwargs)
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            logger.exception("[GMS] CUDA error immediately after load_model")
+            raise
 
         # Correct memory accounting for GMS-imported weights
         try:

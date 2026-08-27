@@ -21,11 +21,13 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
+    _resolve_module_attr,
+    copy_unmapped_tensors_into_gms,
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
 from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import get_socket_path, is_truthy_env
 from gpu_memory_service.integrations.common.utils import (
     GMSCommittedMemoryStats,
     get_gms_lock_mode,
@@ -270,6 +272,8 @@ def _load_read_mode(
 
         logger.info("[GMS] Read mode: materializing tensors")
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+        torch.cuda.synchronize()
+        logger.info("[GMS] Read mode: cuda sync ok after materialize")
 
         # Rebuild vLLM runtime helpers that the RO meta constructor skipped.
         # These are best-effort: vLLM internals move, and a missing helper
@@ -278,16 +282,52 @@ def _load_read_mode(
             _process_fused_moe_kernels_after_gms_materialization(
                 model, model_config, target_device
             )
+            torch.cuda.synchronize()
+            logger.info("[GMS] Read mode: cuda sync ok after FusedMoE rebuild")
         except Exception:
             logger.exception(
                 "[GMS] Read mode: FusedMoE kernel rebuild failed; continuing"
             )
-        try:
-            _process_mla_weights_after_gms_materialization(
-                model, model_config, target_device
+        # Re-deriving MLA W_UK_T/W_UV on the reader means running vLLM's
+        # NVFP4 dequant, which for this quant method is a full GEMM through
+        # `quant_method.apply(layer, eye)`. That kernel illegal-addresses
+        # against GMS VMM mappings and takes engine startup down with it, so
+        # it stays opt-in until the writer publishes the derived tensors.
+        if is_truthy_env("DYN_GMS_RO_MLA_POSTLOAD"):
+            try:
+                _process_mla_weights_after_gms_materialization(
+                    model, model_config, target_device
+                )
+                torch.cuda.synchronize()
+                logger.info("[GMS] Read mode: cuda sync ok after MLA post-load")
+            except Exception:
+                logger.exception(
+                    "[GMS] Read mode: MLA post-load failed; continuing with "
+                    "the published tensors (expect degraded output)"
+                )
+        else:
+            logger.warning(
+                "[GMS] Read mode: skipping MLA process_weights_after_loading "
+                "(GMS VMM IMA in NVFP4 dequant GEMM); set "
+                "DYN_GMS_RO_MLA_POSTLOAD=1 to attempt it"
             )
+        try:
+            _rebuild_fp8_linear_kernels_after_gms_materialization(
+                model, target_device
+            )
+            torch.cuda.synchronize()
+            logger.info("[GMS] Read mode: cuda sync ok after fp8_linear rebuild")
         except Exception:
-            logger.exception("[GMS] Read mode: MLA rebuild failed; continuing")
+            logger.exception(
+                "[GMS] Read mode: fp8_linear kernel rebuild failed; continuing"
+            )
+        # Not best-effort: the Triton `dsv4_topk` router loads
+        # `correction_bias` by pointer and illegal-addresses against a VMM
+        # mapping, so a failure here means the first request takes the
+        # engine down. Fail the load instead.
+        _clone_triton_incompatible_params_off_gms(model)
+        torch.cuda.synchronize()
+        logger.info("[GMS] Read mode: cuda sync ok after triton-param clone")
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -352,6 +392,10 @@ def _load_write_mode(
             else:
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)
+            # process_weights_after_loading allocates MLA q/k/v/prob scales
+            # outside the GMS pool. Copy them in before register/publish so
+            # RO import does not zero-fill 312 leftover Parameters.
+            copy_unmapped_tensors_into_gms(gms_client, model)
 
             torch.cuda.empty_cache()
 
@@ -483,12 +527,51 @@ def _process_fused_moe_kernels_after_gms_materialization(
         )
 
 
+def _clone_module_tensors_off_gms(module: torch.nn.Module | None) -> None:
+    """Move ``module``'s CUDA parameters/buffers off GMS VMM in place.
+
+    Must not run under ``gms_use_mem_pool`` or the clones stay on VMM.
+    """
+    if module is None:
+        return
+    for name, param in list(module.named_parameters(recurse=True)):
+        if param is None or param.is_meta or not param.is_cuda:
+            continue
+        mod, attr = _resolve_module_attr(module, name)
+        mod._parameters[attr] = torch.nn.Parameter(
+            param.detach().contiguous().clone(),
+            requires_grad=param.requires_grad,
+        )
+    for name, buf in list(module.named_buffers(recurse=True)):
+        if buf is None or buf.is_meta or not buf.is_cuda:
+            continue
+        mod, attr = _resolve_module_attr(module, name)
+        mod._buffers[attr] = buf.detach().contiguous().clone()
+
+
 def _process_mla_weights_after_gms_materialization(
     model: torch.nn.Module,
     model_config,
     target_device: torch.device,
 ) -> None:
-    """Rebuild derived MLA projection tensors skipped from GMS metadata."""
+    """Re-derive MLA projections (``W_UK_T``/``W_UV``) on the RO path.
+
+    vLLM computes these by dequantizing ``kv_b_proj``; they exist only after
+    ``process_weights_after_loading`` runs, so a reader that skips it serves
+    whatever the writer happened to publish.
+
+    Two GMS-specific hazards are handled here:
+
+    * The dequant kernels address ``kv_b_proj`` by pointer, and CUDA VMM
+      mappings illegal-address on B200 (same failure mode as Triton
+      ``dsv4_topk``; see ``_clone_triton_incompatible_params_off_gms``).
+      Its tensors are cloned into ordinary CUDA memory first.
+    * ``materialize_module_from_gms`` zero-fills the leftover ``q_scale`` /
+      ``k_scale`` / ``v_scale`` / ``prob_scale`` staging Parameters. Zero is
+      neither the ">0 loaded" nor the "<0 absent" sentinel, so the KV-cache
+      quant method asserts. Deleting them reproduces the reference path,
+      which for a checkpoint carrying no attention scales resolves to 1.0.
+    """
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     processed: list[str] = []
@@ -497,6 +580,12 @@ def _process_mla_weights_after_gms_materialization(
             for name, module in model.named_modules():
                 if not _is_mla_post_load_module(module):
                     continue
+                _clone_module_tensors_off_gms(getattr(module, "kv_b_proj", None))
+                for leaf in ("q_scale", "k_scale", "v_scale", "prob_scale"):
+                    if isinstance(
+                        getattr(module, leaf, None), torch.nn.Parameter
+                    ):
+                        delattr(module, leaf)
                 module.process_weights_after_loading(model_config.dtype)
                 processed.append(name)
 
@@ -505,6 +594,146 @@ def _process_mla_weights_after_gms_materialization(
             "[GMS] Read mode: rebuilt %d MLA post-load modules: %s",
             len(processed),
             processed[:8],
+        )
+
+
+def _rebuild_fp8_linear_kernels_after_gms_materialization(
+    model: torch.nn.Module,
+    target_device: torch.device,
+) -> None:
+    """Re-select FP8 GEMM kernels on CUDA after RO GMS materialize.
+
+    Meta-device construction can pick a non-DeepGEMM kernel (no compute
+    capability). Packed GMS weights then hit the wrong apply path and IMA.
+    Skip re-packing: GMS already holds the writer's processed tensors.
+    """
+    from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+
+    rebuilt: list[str] = []
+    with target_device:
+        for name, module in model.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if quant_method is None or not hasattr(quant_method, "fp8_linear"):
+                continue
+            weight = getattr(module, "weight", None)
+            if not torch.is_tensor(weight) or weight.is_meta:
+                continue
+            shape = tuple(weight.shape)
+            if len(shape) > 2:
+                # is_bmm packed layout (g, r, d) -> DeepGEMM config wants 2D
+                shape = (int(weight.numel() // shape[-1]), int(shape[-1]))
+            keys = (
+                "activation_quant_key",
+                "weight_quant_key",
+                "input_dtype",
+                "out_dtype",
+            )
+            if any(not hasattr(quant_method, k) for k in keys):
+                continue
+            try:
+                kernel = init_fp8_linear_kernel(
+                    activation_quant_key=quant_method.activation_quant_key,
+                    weight_quant_key=quant_method.weight_quant_key,
+                    input_dtype=quant_method.input_dtype,
+                    out_dtype=quant_method.out_dtype,
+                    weight_shape=shape,
+                    module_name=type(quant_method).__name__,
+                )
+            except Exception:
+                logger.debug(
+                    "[GMS] fp8_linear rebuild skipped for %s", name, exc_info=True
+                )
+                continue
+            quant_method.fp8_linear = kernel
+            rebuilt.append(f"{name}:{type(kernel).__name__}")
+    if rebuilt:
+        logger.info(
+            "[GMS] Read mode: rebuilt %d fp8_linear kernels: %s",
+            len(rebuilt),
+            rebuilt[:8],
+        )
+
+
+def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
+    """Copy tiny router/bias params off GMS VMM into ordinary CUDA memory.
+
+    Triton ``dsv4_topk`` loads ``correction_bias`` by pointer. CUDA VMM
+    mappings are not Triton-loadable and illegal-address on B200.
+    """
+    cloned: list[str] = []
+    # vLLM aliases some of these across modules -- `e_score_correction_bias`
+    # is one tensor referenced by both `mlp.gate` and
+    # `mlp.experts.routed_experts`. Cloning each name separately would hand
+    # the router and the experts different copies of the routing bias, so
+    # keep one clone per source storage and reuse it.
+    by_storage: dict[tuple[int, int], torch.Tensor] = {}
+
+    def _off_gms(tensor: torch.Tensor) -> torch.Tensor:
+        # Must not run under gms_use_mem_pool or the clone stays on VMM.
+        key = (tensor.untyped_storage().data_ptr(), tensor.storage_offset())
+        clone = by_storage.get(key)
+        if clone is None:
+            clone = tensor.detach().contiguous().clone()
+            by_storage[key] = clone
+        return clone
+
+    def _want(name: str, tensor: torch.Tensor) -> bool:
+        if tensor is None or not torch.is_tensor(tensor):
+            return False
+        if tensor.is_meta or not tensor.is_cuda:
+            return False
+        key = name.rsplit(".", 1)[-1].lower()
+        if "bias" not in key and "expert_map" not in key and "hash_indices" not in key:
+            return False
+        return tensor.numel() * tensor.element_size() <= 16 * (1 << 20)
+
+    for name, param in list(model.named_parameters()):
+        if not _want(name, param):
+            continue
+        try:
+            mod, attr = _resolve_module_attr(model, name)
+        except Exception:
+            continue
+        if hasattr(mod, "_parameters") and attr in mod._parameters:
+            mod._parameters[attr] = torch.nn.Parameter(
+                _off_gms(param),
+                requires_grad=param.requires_grad,
+            )
+            cloned.append(name)
+    for name, buf in list(model.named_buffers()):
+        if not _want(name, buf):
+            continue
+        try:
+            mod, attr = _resolve_module_attr(model, name)
+        except Exception:
+            continue
+        if hasattr(mod, "_buffers") and attr in mod._buffers:
+            mod._buffers[attr] = _off_gms(buf)
+            cloned.append(name)
+    # FusedTopkBiasRouter stores e_score_correction_bias as a plain tensor
+    # alias of Parameter.data. Replacing _parameters does not update it.
+    for mod_name, module in model.named_modules():
+        for attr in ("e_score_correction_bias", "_hash_indices_table"):
+            if not hasattr(module, attr):
+                continue
+            t = getattr(module, attr)
+            if not torch.is_tensor(t) or t.is_meta or not t.is_cuda:
+                continue
+            off = _off_gms(t)
+            if hasattr(module, "_parameters") and attr in module._parameters:
+                module._parameters[attr] = torch.nn.Parameter(
+                    off, requires_grad=False
+                )
+            elif hasattr(module, "_buffers") and attr in module._buffers:
+                module._buffers[attr] = off
+            else:
+                setattr(module, attr, off)
+            cloned.append(f"{mod_name}.{attr}" if mod_name else attr)
+    if cloned:
+        logger.info(
+            "[GMS] Read mode: cloned %d Triton-incompatible params off GMS: %s",
+            len(cloned),
+            cloned[:8],
         )
 
 
