@@ -206,7 +206,7 @@ async def worker(runtime: DistributedRuntime):
         "router_temperature=%s, use_kv_events=%s, router_replica_sync=%s, "
         "router_track_active_blocks=%s, router_track_output_blocks=%s, "
         "router_assume_kv_reuse=%s, router_track_prefill_tokens=%s, "
-        "router_ttl_secs=%s",
+        "router_ttl_secs=%s, router_approximate_cache_policy=%s",
         config.endpoint,
         config.router_block_size,
         config.overlap_score_credit,
@@ -221,6 +221,7 @@ async def worker(runtime: DistributedRuntime):
         config.router_assume_kv_reuse,
         config.router_track_prefill_tokens,
         config.router_ttl_secs,
+        config.router_approximate_cache_policy,
     )
 
     kv_router_config = build_kv_router_config(config)

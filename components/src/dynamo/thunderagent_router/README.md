@@ -75,6 +75,12 @@ Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
 
+Admission is a transaction. A request cancelled while it is queued for capacity
+— a client disconnect, for instance — leaves the program table as it found it:
+a program the admission attempt created is removed, and one that already existed
+keeps the session history of its previous turn. Cancelled requests therefore do
+not hold capacity, and do not queue other programs behind them.
+
 ### SGLang HiCache retention budget
 
 `dynamo.sglang` publishes the authoritative GPU KV and HiCache host capacities in each worker's model deployment card. The scheduler automatically uses their sum as its retention budget, so `--pause-threshold 0.95` means 95% of the combined GPU + host pool; there is no ThunderAgent HiCache flag to set. This lets SGLang spill from GPU to its native host tier before ThunderAgent starts holding programs at tool boundaries.
