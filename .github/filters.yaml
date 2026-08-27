@@ -15,8 +15,7 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
-#   examples -> recipe-check (Kustomize recipe generation and docs-artifact
-#               unit tests)
+#   examples -> recipe-check (Kustomize recipe generation and docs tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -92,8 +91,6 @@ examples:
   - 'scripts/kustomize-matrix.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
-  # Docs-artifact tests run in recipe-check rather than the runtime/backend
-  # matrices. See the matching negation under `core`.
   - 'tests/docs/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
@@ -188,9 +185,6 @@ core:
   - '!lib/sidecar/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
-  # tests/docs/ validates docs artifacts and imports nothing from the runtime,
-  # so it cannot observe a container or backend change. recipe-check runs the
-  # whole directory in seconds on ubuntu-latest instead.
   - '!tests/docs/**'
   - '!**/*.md'
   - '!**/*.rst'
