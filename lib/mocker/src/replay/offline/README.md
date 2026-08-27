@@ -25,14 +25,15 @@ multiple frontend/router replicas. Requests are assigned round-robin from the
 configured `router_replica_seed`; every replica owns independent cache and
 active-load state.
 
-When `KvRouterConfig.router_replica_sync` is enabled, active-sequence lifecycle
-events are copied to peer views. `router_replica_sync_delivery_rate` controls
+`KvRouterConfig.router_replica_sync` gates only active-sequence lifecycle copies
+to peer views. Independently, `router_replica_sync_delivery_rate` controls
 deterministic best-effort delivery to each peer and to each router's KV-event
-view. A value of `1.0` converges the views; lower values intentionally leave
-measurable stale state. Replay logs cumulative attempted, delivered, and
-dropped event counters at debug level. The delivery model does not infer an
-unobservable production transport delay; it is a sensitivity control for
-inconsistent router state.
+view, including a single replica. A value of `1.0` converges the views; lower
+values intentionally leave measurable stale state. A stored child is withheld
+when its parent was missed, so simulated loss cannot create an impossible cache
+chain. Replay logs cumulative attempted, delivered, and dropped event counters
+at debug level. The delivery model does not infer an unobservable production
+transport delay; it is a sensitivity control for inconsistent router state.
 
 See the [`aisimulate-core` crate](https://crates.io/crates/aisimulate-core) for the
 virtual-time runtime and its liveness contract.

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +12,9 @@ use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, ExternalSequenceBlockHash, OverlapScores, PrefillLoadHint, RouterEvent,
+    RoutingConstraints, StorageTier, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -346,6 +347,7 @@ pub(in crate::replay) struct KvRouterPlacement {
     delivery_sequence: u64,
     sync_enabled: bool,
     sync_stats: ReplayReplicaSyncStats,
+    visible_kv_blocks: Vec<HashSet<(WorkerId, u32, StorageTier, ExternalSequenceBlockHash)>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -387,6 +389,7 @@ impl KvRouterPlacement {
             delivery_sequence: 0,
             sync_enabled,
             sync_stats: ReplayReplicaSyncStats::default(),
+            visible_kv_blocks: vec![HashSet::new(); args.router_replicas],
         })
     }
 
@@ -458,6 +461,47 @@ impl KvRouterPlacement {
             dropped = self.sync_stats.dropped,
             "offline replay replica-sync progress"
         );
+    }
+
+    fn filter_kv_events(&mut self, replica: usize, events: &[RouterEvent]) -> Vec<RouterEvent> {
+        if self.delivery_rate >= 1.0 {
+            return events.to_vec();
+        }
+        let mut delivered = Vec::with_capacity(events.len());
+        for event in events {
+            if !self.should_deliver(replica) {
+                continue;
+            }
+
+            let owner = (event.worker_id, event.event.dp_rank, event.storage_tier);
+            match &event.event.data {
+                dynamo_kv_router::protocols::KvCacheEventData::Stored(store) => {
+                    if store.parent_hash.is_some_and(|parent| {
+                        !self.visible_kv_blocks[replica]
+                            .contains(&(owner.0, owner.1, owner.2, parent))
+                    }) {
+                        continue;
+                    }
+                    self.visible_kv_blocks[replica].extend(
+                        store
+                            .blocks
+                            .iter()
+                            .map(|block| (owner.0, owner.1, owner.2, block.block_hash)),
+                    );
+                }
+                dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => {
+                    for hash in &removed.block_hashes {
+                        self.visible_kv_blocks[replica].remove(&(owner.0, owner.1, owner.2, *hash));
+                    }
+                }
+                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
+                    self.visible_kv_blocks[replica]
+                        .retain(|known| (known.0, known.1, known.2) != owner);
+                }
+            }
+            delivered.push(event.clone());
+        }
+        delivered
     }
 
     #[cfg(test)]
@@ -562,12 +606,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
         for replica in 0..self.routers.len() {
-            let events = observation
-                .0
-                .iter()
-                .filter(|_| self.should_deliver(replica))
-                .cloned()
-                .collect::<Vec<_>>();
+            let events = self.filter_kv_events(replica, &observation.0);
             self.sync_stats.attempted += observation.0.len() as u64;
             self.sync_stats.delivered += events.len() as u64;
             self.sync_stats.dropped += (observation.0.len() - events.len()) as u64;
@@ -589,14 +628,18 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        let owner = self.request_owners.remove(&request_id).unwrap_or(0);
+        let owner = self.request_owners.remove(&request_id).ok_or_else(|| {
+            anyhow!("offline replay has no router owner for request {request_id}")
+        })?;
         let effects = self.routers[owner].on_request_completed(request_id, now_ms)?;
         self.synchronize_lifecycle(owner);
         Ok(self.placements(effects.admissions))
     }
 
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        let owner = *self.request_owners.get(&request_id).unwrap_or(&0);
+        let owner = *self.request_owners.get(&request_id).ok_or_else(|| {
+            anyhow!("offline replay has no router owner for request {request_id}")
+        })?;
         let effects = self.routers[owner].on_prefill_completed(request_id, now_ms)?;
         self.synchronize_lifecycle(owner);
         Ok(self.placements(effects.admissions))
@@ -1394,6 +1437,29 @@ mod tests {
                 dp_rank,
             },
             storage_tier,
+        )
+    }
+
+    fn chained_store_event(
+        event_id: u64,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            StorageTier::Device,
         )
     }
 
@@ -2200,5 +2266,53 @@ policy_classes:
                 == 0)
         );
         assert_eq!(stale.replica_sync_stats().dropped, 2);
+    }
+
+    #[test]
+    fn partial_kv_delivery_preserves_parent_child_consistency() {
+        for delivery_rate in [0.95, 0.9875] {
+            let mut placement = replica_placement(delivery_rate);
+            let mut event_id = 1;
+            for _ in 0..64 {
+                let mut parent = None;
+                for _ in 0..8 {
+                    let event = chained_store_event(event_id, parent);
+                    <KvRouterPlacement as PlacementPolicy<DirectRequest>>::observe(
+                        &mut placement,
+                        RouterEventBatch(vec![event]),
+                        0.0,
+                    )
+                    .unwrap();
+                    parent = Some(ExternalSequenceBlockHash(event_id));
+                    event_id += 1;
+                }
+            }
+            assert!(placement.replica_sync_stats().dropped > 0);
+            assert!(placement.replica_sync_stats().delivered > 0);
+        }
+    }
+
+    #[test]
+    fn lifecycle_events_reject_requests_without_a_router_owner() {
+        let mut placement = replica_placement(1.0);
+        let request_id = Uuid::from_u128(42);
+
+        let terminal_error =
+            <KvRouterPlacement as PlacementPolicy<DirectRequest>>::request_terminal(
+                &mut placement,
+                request_id,
+                0.0,
+            )
+            .unwrap_err();
+        assert!(terminal_error.to_string().contains("no router owner"));
+
+        let prefill_error =
+            <KvRouterPlacement as PlacementPolicy<DirectRequest>>::prefill_completed(
+                &mut placement,
+                request_id,
+                0.0,
+            )
+            .unwrap_err();
+        assert!(prefill_error.to_string().contains("no router owner"));
     }
 }
