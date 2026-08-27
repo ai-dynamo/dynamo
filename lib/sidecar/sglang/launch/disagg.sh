@@ -90,6 +90,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL_HTTP_PORT" \
     --grpc-port "$SGLANG_PREFILL_GRPC_PORT" \
+    --incremental-streaming-output \
     --disaggregation-mode prefill \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
@@ -105,6 +106,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE_HTTP_PORT" \
     --grpc-port "$SGLANG_DECODE_GRPC_PORT" \
+    --incremental-streaming-output \
     --disaggregation-mode decode \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
@@ -116,12 +118,12 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
 OTEL_SERVICE_NAME=dynamo-worker-prefill \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
     --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
 
 OTEL_SERVICE_NAME=dynamo-worker-decode \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" &
 
 wait_any_exit

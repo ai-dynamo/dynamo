@@ -79,6 +79,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
+    --incremental-streaming-output \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
@@ -86,6 +87,6 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit

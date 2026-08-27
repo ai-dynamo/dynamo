@@ -9,10 +9,12 @@ to chat completion requests correctly.
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
 import time
+from typing import Any
 
 import kr8s
 import pytest
@@ -36,9 +38,56 @@ from tests.utils.client import send_request, wait_for_model_availability
 logger = logging.getLogger(__name__)
 
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"
+
+
+def normalize_log_lines(log_lines: Any) -> list[str]:
+    """Return pod logs as a reusable list of lines."""
+    if isinstance(log_lines, str):
+        return log_lines.splitlines()
+    return list(log_lines)
+
+
+def find_structured_json_log(log_lines: list[str]) -> dict[str, Any] | None:
+    """Return the first Dynamo JSONL record with the documented core fields."""
+    for line in log_lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if isinstance(record, dict) and JSON_LOG_REQUIRED_FIELDS.issubset(record):
+            return record
+
+    return None
+
+
+def validate_agg_logging_configuration(deployment_spec: DeploymentSpec) -> None:
+    """Verify that the logging profile enables structured JSONL output."""
+    logging_config = deployment_spec.get_logging_config()
+    if not logging_config["jsonl_enabled"]:
+        pytest.fail("The agg_logging deployment profile must enable DYN_LOGGING_JSONL")
+
+
+def validate_agg_logging_output(frontend_pod: Any, baseline_line_count: int) -> None:
+    """Verify that inference emitted a new structured frontend log record."""
+    frontend_log_lines = normalize_log_lines(frontend_pod.logs(container="main"))
+    new_log_lines = frontend_log_lines[baseline_line_count:]
+    json_log_record = find_structured_json_log(new_log_lines)
+    if json_log_record is None:
+        pytest.fail(
+            "The agg_logging deployment served inference but the frontend "
+            "did not emit a new structured Dynamo JSONL record"
+        )
+
+    logger.info(
+        "Validated structured JSON logging: target=%s message=%s",
+        json_log_record["target"],
+        json_log_record["message"],
+    )
 
 
 @pytest.mark.framework_only
@@ -75,6 +124,7 @@ async def test_deployment(
     # Extract identifying information from the target
     framework = deployment_target.framework
     profile = deployment_target.profile
+    validate_agg_logging = profile == "agg_logging"
 
     # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
     # transfer.  Prefill workers crash in NixlWrapper.create_backend.
@@ -98,6 +148,9 @@ async def test_deployment(
             f"Could not determine model name from deployment spec for "
             f"{framework}/{profile}"
         )
+
+    if validate_agg_logging:
+        validate_agg_logging_configuration(deployment_spec)
 
     logger.info(
         f"Starting deployment test for {deployment_target.test_id} "
@@ -156,6 +209,11 @@ async def test_deployment(
             "temperature": DEFAULT_TEMPERATURE,
             "stream": False,
         }
+        frontend_log_baseline = (
+            len(normalize_log_lines(frontend_pod.logs(container="main")))
+            if validate_agg_logging
+            else 0
+        )
         response = send_request(
             url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
         )
@@ -166,6 +224,9 @@ async def test_deployment(
             expected_model=model,
             min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
         )
+
+        if validate_agg_logging:
+            validate_agg_logging_output(frontend_pod, frontend_log_baseline)
 
         logger.info(
             f"Deployment test PASSED for {deployment_target.test_id} "

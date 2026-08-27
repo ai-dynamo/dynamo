@@ -25,11 +25,7 @@ from transformers import AutoTokenizer
 
 from dynamo._core import Client, Context
 from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import (
-    UrlValidationError,
-    UrlValidationPolicy,
-    validate_media_url,
-)
+from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -576,8 +572,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         * an ``NvdecVideoDecoder`` for H.264/H.265 -- hardware decode;
         * the **fetched bytes** for any other codec, or if building the decoder
           fails -- SGLang decodes what we already have;
-        * ``None`` only when nothing was fetched (unsupported scheme, or the
-          fetch itself failed), leaving the caller to pass the URL through.
+        * ``None`` only for unsupported schemes that are not fetched, leaving
+          the caller responsible for the URL. A failed fetch never returns
+          ``None``.
 
         Returning the bytes rather than the URL matters for three reasons, all
         reported by Codex on #11836. SGLang would otherwise download the same
@@ -610,16 +607,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         schemes have no decoder at all, so excluding them here would drop local
         and inline video entirely rather than merely skipping acceleration.
         """
-        content: bytes | None = None
+        # Perform validation and byte acquisition before attempting decoder fallback
+        # Any failure at this stage is terminal. Passing the URL to SGLang would retry
+        # the fetch without Dynamo's policy. Only failures that occur after bytes have
+        # been successfully fetched will trigger a fallback to those bytes.
+        normalized = await validate_media_url(url, self._url_policy)
+        scheme = urlparse(normalized).scheme
+        if scheme in ("http", "https"):
+            content = await fetch_bytes(normalized, 30.0, policy=self._url_policy)
+        elif is_local_media_url(normalized):
+            content = await read_local_media_bytes(normalized, self._url_policy)
+        else:
+            # If nothing is fetched and no error occurs, the caller retains the URL.
+            return None
+
+        codec: str | None = None
         try:
-            normalized = await validate_media_url(url, self._url_policy)
-            scheme = urlparse(normalized).scheme
-            if scheme in ("http", "https"):
-                content = await fetch_bytes(normalized, 30.0, policy=self._url_policy)
-            elif is_local_media_url(normalized):
-                content = await read_local_media_bytes(normalized, self._url_policy)
-            else:
-                return None
             codec = probe_video_codec(content)
             if not should_use_nvdec(codec):
                 # Not going to hardware. SGLang's software path needs
@@ -644,45 +647,25 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # Constructing the decoder opens the container and reads its frame
             # index, so keep it off the event loop.
             return await asyncio.to_thread(NvdecVideoDecoder, content)
-        except UrlValidationError:
-            # A policy refusal is not a decode failure and must not degrade to
-            # the URL fallback. SGLang applies no policy of its own: it fetches
-            # http(s) through get_mm_http_session and resolves file:// to a bare
-            # path, so passing a rejected URL on turns "denied" into an
-            # unvalidated fetch or local read.
-            #
-            # Confirmed on GPU hardware before this guard existed: a loopback
-            # URL the policy refused was served to SGLang (38128 bytes fetched
-            # from a blocked address), and a refused file:// path resolved to a
-            # readable local file.
-            #
-            # UrlValidationError subclasses ValueError, which is how this
-            # handler already reports a bad request, so the caller surfaces it
-            # as one instead of silently widening what the deployment accepts.
-            raise
         except MissingMediaDecoderError:
             # The preflight above is the actionable error this path exists to
             # raise. Letting the broad handler below catch it would return the
             # bytes anyway and reproduce exactly the deep-SGLang failure it
             # replaces.
             raise
-        except Exception as exc:  # noqa: BLE001 - additive; never blocks the path
-            # If the fetch itself failed there are no bytes and the URL is all
-            # the caller has. If it succeeded and only the decoder construction
-            # failed, pass the validated bytes on rather than making SGLang
-            # fetch them again -- but only if SGLang can actually decode them:
-            # this fallback leg reaches SGLang's software path exactly like the
-            # non-hardware-codec leg above, so it needs the same preflight, or
-            # a host with broken NVDEC and no software decoder gets the deep
-            # payload-blob error back.
-            if content is not None and not _software_video_decoder_imports():
+        except Exception as exc:  # noqa: BLE001 - decoder fallback is intentional
+            # The decoder failed but the validated bytes are here, so hand
+            # those over instead of making SGLang fetch again. This leg reaches
+            # SGLang's software path like the non-hardware-codec leg above, so
+            # it needs the same preflight, or a host with broken NVDEC and no
+            # software decoder gets the deep payload-blob error back.
+            if not _software_video_decoder_imports():
                 raise video_decoder_missing(
-                    "sglang", "decord2", "decord", probe_video_codec(content)
+                    "sglang", "decord2", "decord", codec, str(exc)
                 ) from exc
             logger.warning(
-                "NVDEC decode failed for video URL (%s); falling back to %s",
+                "NVDEC decode failed for video URL (%s); falling back to the fetched bytes",
                 exc,
-                "the fetched bytes" if content is not None else "URL passthrough",
             )
             return content
 

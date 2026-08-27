@@ -388,6 +388,9 @@ navigation:
             path: pages/use-cases/multimodal-serving/overview.md
           - page: Parallel Media Decoding
             path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
+          - page: Custom Vision Encoders
+            slug: custom-vision-encoders
+            path: pages/use-cases/multimodal-serving/custom-vision-encoders.md
           - page: Embedding Cache
             path: pages/use-cases/multimodal-serving/embedding-cache.md
           - page: Multimodal KV Routing
@@ -487,9 +490,6 @@ navigation:
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
-          - page: DeepSeek V3.2 NVFP4
-            path: pages/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
-            slug: deepseek-v3-2-nvfp4
           - page: GPT-OSS-120B
             path: pages/recipes/model-recipes/gpt-oss-120b.mdx
             slug: gpt-oss-120b
@@ -505,9 +505,6 @@ navigation:
           - page: Qwen3-32B FP8
             path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
-          - page: Llama-3.3-70B FP8
-            path: pages/recipes/model-recipes/llama-3-3-70b-fp8.mdx
-            slug: llama-3-3-70b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -580,14 +577,6 @@ navigation:
           - page: Qwen3-VL Embedding Cache
             path: pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
             slug: qwen3-vl-embedding-cache
-            hidden: true
-          - page: DeepSeek V3.2 WideEP Routing
-            path: pages/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
-            slug: deepseek-v3-2-wideep-routing
-            hidden: true
-          - page: Llama-3.3-70B Topology
-            path: pages/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
-            slug: llama-3-70b-topology
             hidden: true
           - page: KV Router A/B Testing
             path: pages/recipes/feature-benchmarks/kv-router-a-b-testing.md
@@ -897,9 +886,6 @@ navigation:
             path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Conditional Disaggregation
             path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
-          - page: Custom Vision Encoders
-            slug: custom-vision-encoders
-            path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md
           - page: FastTokens Tokenizer
             slug: fastokens-tokenizer
             path: pages/use-cases/fastokens-tokenizer/overview.md
