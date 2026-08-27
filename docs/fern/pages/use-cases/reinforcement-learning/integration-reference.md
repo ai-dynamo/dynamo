@@ -62,6 +62,8 @@ Use SGLang `/generate` when the framework already speaks SGLang's token-native s
 
 The framework and serving stack must agree which token sequence is authoritative. Retokenizing generated text is not equivalent: normalization, special tokens, chat templates, and tokenizer versions can change the sequence used for training.
 
+Current Dynamo `main` also exposes `POST /v1/responses/input_tokens`, but it is an approximate preflight estimator, not a tokenizer oracle. At the [`d3e7ce20` handler](https://github.com/ai-dynamo/dynamo/blob/d3e7ce20a91632c9bce20762e507593e066075db/lib/llm/src/http/service/openai.rs), the endpoint uses the request type's length heuristic, performs no readiness or model-serving check, and never sends the request to a backend; its [HTTP tests](https://github.com/ai-dynamo/dynamo/blob/d3e7ce20a91632c9bce20762e507593e066075db/lib/llm/tests/responses_http_replay.rs) prove that a count can succeed for an absent or omitted model and can ignore an unmodeled tool shape. Do not use it as the prompt token sequence, a training-token count, a logprob/mask alignment check, model readiness, or proof that the selected worker uses the expected tokenizer. If a framework uses the estimate for admission or capacity preflight, pin its exact request shape and preserve the authoritative engine token IDs separately.
+
 For OpenAI-compatible completions, send an integer array in `prompt` and request generated token IDs:
 
 ```bash
