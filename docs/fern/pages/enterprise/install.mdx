@@ -14,11 +14,11 @@ For the full walkthrough of cluster prerequisites, accelerator support, optional
 The enterprise images are public. Anonymous `docker pull` works from any host with network access to `nvcr.io`. Environments that require authenticated pulls (a bastion registry, an air-gapped mirror, or a policy that blocks anonymous access to `nvcr.io`) can configure an NGC API key on the pulling host; see the [NGC User Guide](https://docs.nvidia.com/ngc/ngc-catalog-user-guide/index.html) for the API-key workflow.
 
 ```bash
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.1
-docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:1.4.2
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:1.4.2
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.2
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.2
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:1.4.2
 ```
 
 Kubernetes clusters that already pull from `nvcr.io` need no additional pull secret for the enterprise images. Air-gapped and internal-mirror installs should retag these into the internal registry using the same repository names and versions to keep the manifests portable.
@@ -29,7 +29,7 @@ The enterprise Helm chart installs the Dynamo Operator, using the enterprise Ope
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.4.1
+export RELEASE_VERSION=1.4.2
 
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-enterprise-$RELEASE_VERSION.tgz
 helm install dynamo-platform dynamo-platform-enterprise-$RELEASE_VERSION.tgz \
@@ -65,7 +65,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.2
     - name: VllmWorker
       type: worker
       replicas: 1
@@ -73,7 +73,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.2
               envFrom:
                 - secretRef:
                     name: hf-token-secret
