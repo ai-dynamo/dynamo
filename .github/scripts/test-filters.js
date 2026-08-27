@@ -12,7 +12,7 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
- * - Route recipe catalogs and docs tests to recipe-check without core E2E checks
+ * - Route docs-artifact tests to recipe-check without core E2E checks
  * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
@@ -108,16 +108,6 @@ const testCases = [
     file: 'tests/docs/nested/__ci_filter_probe__',
     expect: { core: false, examples: true },
     desc: 'any tests/docs descendant triggers recipe check without core'
-  },
-  {
-    file: 'docs/fern/pages/recipes/_catalog/nested/__ci_filter_probe__',
-    expect: { core: false, docs: true, examples: true },
-    desc: 'any recipe catalog descendant triggers docs and recipe checks without core'
-  },
-  {
-    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/nested/__ci_filter_probe__',
-    expect: { core: false, docs: true, examples: true },
-    desc: 'any feature benchmark catalog descendant triggers docs and recipe checks without core'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',

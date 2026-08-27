@@ -15,8 +15,8 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
-#   examples -> recipe-check (Kustomize recipe generation, recipe catalog
-#               artifacts, and the unit tests covering both)
+#   examples -> recipe-check (Kustomize recipe generation and docs-artifact
+#               unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -92,12 +92,8 @@ examples:
   - 'scripts/kustomize-matrix.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
-  # Recipe and feature-benchmark catalog sources, plus the tests/docs/ suite
-  # that validates them. Those tests read only the catalogs and their validator,
-  # so recipe-check is the job that can run them -- see the matching negation
-  # under `core`. Both catalogs are listed so data changes run their tests.
-  - 'docs/fern/pages/recipes/_catalog/**'
-  - 'docs/fern/pages/recipes/feature-benchmarks/_catalog/**'
+  # Docs-artifact tests run in recipe-check rather than the runtime/backend
+  # matrices. See the matching negation under `core`.
   - 'tests/docs/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
