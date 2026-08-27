@@ -219,7 +219,7 @@ Annotations are additional annotations to add to the DynamoGraphDeployment metad
 </ParamField>
 
 <ParamField path="workersImage" type="string">
-WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1"
+WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2"
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -1965,7 +1965,7 @@ See [ConfigMapKeySelector](#configmapkeyselector).
 </ParamField>
 
 <ParamField path="profilerImage" type="string" required={true}>
-ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.1"
+ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.2"
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
@@ -3197,7 +3197,7 @@ See [BackendType](#backendtype).
 </ParamField>
 
 <ParamField path="image" type="string">
-Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.1". For Dynamo &lt; 1.1.0, use dynamo-frontend.
+Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.2". For Dynamo &lt; 1.1.0, use dynamo-frontend.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

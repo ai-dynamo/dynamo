@@ -27,13 +27,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           command:
           - python3
           - -m
@@ -49,7 +49,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           command:
           - python3
           - -m
@@ -75,13 +75,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           command:
           - python3
           - -m
@@ -99,7 +99,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           command:
           - python3
           - -m
@@ -351,7 +351,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
 ```
 
 `Recreate` applies independently to each worker component. Other worker components without the

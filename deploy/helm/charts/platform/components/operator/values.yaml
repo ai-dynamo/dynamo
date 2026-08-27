@@ -84,7 +84,7 @@ controllerManager:
     image:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
-      tag: 1.4.1
+      tag: 1.4.2
     resources:
       limits:
         cpu: 1024m

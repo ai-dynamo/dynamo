@@ -1140,7 +1140,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2"
         },
         {
           "label": "1.4.0-efa",
@@ -1159,7 +1159,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.2"
         },
         {
           "label": "1.4.0-efa",
@@ -1178,7 +1178,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.2"
         },
         {
           "label": "1.4.0-efa",
@@ -1197,7 +1197,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2"
         }
       ]
     },
@@ -1211,7 +1211,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.2"
         }
       ]
     },
@@ -1225,7 +1225,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.4.2"
         }
       ]
     },
@@ -1240,7 +1240,7 @@
       "tags": [
         {
           "label": "1.4.0",
-          "clipboard": "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.4.1"
+          "clipboard": "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.4.2"
         }
       ]
     },

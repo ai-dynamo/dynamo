@@ -791,7 +791,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "anyhow",
 ]

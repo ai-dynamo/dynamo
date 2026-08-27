@@ -46,13 +46,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     Planner:
       componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.2
           command:
           - python3
           - -m
