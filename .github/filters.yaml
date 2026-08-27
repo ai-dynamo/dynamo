@@ -113,10 +113,6 @@ ignore:
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
   - '.github/labeler.yml'
-  # Sidecar documentation is not part of the Fern site and does not affect the
-  # sidecar image or tests.
-  - 'lib/sidecar/**/*.md'
-  - 'lib/sidecar/**/*.rst'
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
@@ -288,33 +284,7 @@ planner:
   - '!**/*.rst'
 
 sidecar:
-  # Match the complete build context consumed by lib/sidecar/Dockerfile. A
-  # shared Rust or workspace change can break the sidecar even when no file
-  # under lib/sidecar changed.
-  - 'Cargo.toml'
-  - 'Cargo.lock'
-  - 'rust-toolchain.toml'
-  - '.dockerignore'
-  - '.cargo/**'
-  - 'lib/**'
-  - 'examples/router/custom-policy-example/**'
-  - 'deploy/inference-gateway/ext-proc/**'
-  - '.github/workflows/shared-build-sidecar.yml'
-  - '.github/workflows/shared-copy.yml'
-  - '.github/actions/setup-protoc/action.yml'
-  - '.github/actions/docker-login/action.yml'
-  - '.github/actions/docker-remote-build/action.yml'
-  - '.github/actions/init-dynamo-builder/action.yml'
-  - '.github/actions/bootstrap-buildkit/**'
-  - '.github/scripts/route_buildkit.sh'
-  - '.github/actions/skopeo-copy/action.yml'
-  - '.github/actions/skopeo-login/action.yml'
-  - '!lib/**/*.md'
-  - '!lib/**/*.rst'
-  - '!examples/router/custom-policy-example/**/*.md'
-  - '!examples/router/custom-policy-example/**/*.rst'
-  - '!deploy/inference-gateway/ext-proc/**/*.md'
-  - '!deploy/inference-gateway/ext-proc/**/*.rst'
+  - 'lib/sidecar/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
