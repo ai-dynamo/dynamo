@@ -571,24 +571,14 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         }
     }
 
+    // Empty is rejected, not skipped: downstream tests `reasoning_parser.is_none()`,
+    // so Some("") resolves to Basic.
     if let Some(parser) = config.reasoning_parser.as_deref() {
-        // The two downstream lookups disagree about case, so accept a name only
-        // the way the path that will actually serve it resolves that name.
-        // `get_reasoning_parser_from_name` lowercases before its registry lookup,
-        // while `unified_family` matches UNIFIED_FAMILIES exactly, so a
-        // capitalized muse would pass a lenient check here and then miss the
-        // unified pass and land on the wrong reasoning path anyway.
-        let registry = get_available_reasoning_parsers();
-        let accepted = registry.contains(&parser.to_lowercase().as_str())
-            || unified_family_names().contains(&parser);
-        if !accepted {
-            // Empty is rejected rather than skipped: downstream tests
-            // `reasoning_parser.is_none()`, so Some("") reads as configured and
-            // resolves to Basic, which is the silent substitution this guards.
-            let mut supported = registry;
-            supported.extend_from_slice(unified_family_names());
-            supported.sort_unstable();
-            supported.dedup();
+        let mut supported = get_available_reasoning_parsers();
+        supported.extend_from_slice(unified_family_names());
+        supported.sort_unstable();
+        supported.dedup();
+        if !supported.contains(&parser) {
             return Err(validation_error(
                 "unsupported_reasoning_parser",
                 format!(
@@ -1302,29 +1292,15 @@ mod tests {
             .validate_config()
         };
 
-        // Every registry entry and every unified family must stay valid: muse has
-        // no v1 reasoning parser, yet vLLM ships `--reasoning-parser muse_glimmer`.
+        // muse has no v1 reasoning entry, but vLLM ships `--reasoning-parser muse_glimmer`.
         for parser in get_available_reasoning_parsers()
             .into_iter()
             .chain(unified_family_names().iter().copied())
         {
             assert!(validate(parser).is_ok(), "{parser} must be supported");
+            // Downstream policy checks match the canonical name, so casing is exact.
+            assert!(validate(&parser.to_uppercase()).is_err(), "{parser} casing");
         }
-        // The registry lookup lowercases, so a capitalized spelling it would
-        // accept must not be rejected here.
-        assert!(validate("Qwen3").is_ok());
-
-        // ...but `unified_family` matches exactly, so a capitalized muse would not
-        // reach the unified pass. Accepting it here would only defer the problem.
-        for parser in unified_family_names() {
-            assert!(
-                validate(&parser.to_uppercase()).is_err(),
-                "{parser} must not be accepted in a case the unified router misses"
-            );
-        }
-
-        // Some("") reads as configured downstream and resolves to Basic, so it is
-        // the same silent substitution rather than an absent setting.
         assert!(validate("").is_err());
 
         let error = validate("not_registered").unwrap_err();
