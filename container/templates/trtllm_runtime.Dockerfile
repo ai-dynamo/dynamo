@@ -54,6 +54,32 @@ ENV DYNAMO_HOME=/workspace \
 
 WORKDIR /workspace
 
+# Recipe-branch TRT-LLM fixes not yet in the pinned nightly
+# (runtime_image_tag 1.3.0rc25.dev2026082600, cut from TRT-LLM main at
+# 7e106301df). Both are upstream PRs; drop each patch once its fix lands in
+# the nightly this branch pins, and re-pin to a plain release tag once both
+# have shipped.
+#
+#   18162 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18162 (merged 2026-08-26,
+#            after this nightly's cut)
+#   18274 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18274 (open)
+#
+# The checked-in .patch files are the upstream PR diffs with the mail header
+# and the tests/ hunks stripped -- the release image installs only the
+# tensorrt_llm package, not the test tree. dist-packages is not a git repo,
+# but `git apply` operates on a plain working tree, so -p1 off dist-packages
+# lands a/tensorrt_llm/... on the installed package. --check first so a
+# nightly bump that already carries either fix fails the build loudly instead
+# of silently shipping an unpatched image.
+RUN --mount=type=bind,source=./container/patches/trtllm,target=/tmp/trtllm-patches \
+    cd /usr/local/lib/python3.12/dist-packages && \
+    for p in /tmp/trtllm-patches/*.patch; do \
+        echo "applying $p" && \
+        git apply --check "$p" && \
+        git apply "$p"; \
+    done && \
+    /usr/bin/python3 -c "import ast; [ast.parse(open(f).read()) for f in ('tensorrt_llm/_torch/models/modeling_multimodal_mixin.py', 'tensorrt_llm/_torch/models/modeling_gemma4mm.py')]"
+
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
