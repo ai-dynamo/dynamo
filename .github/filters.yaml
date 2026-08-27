@@ -134,6 +134,11 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Sidecar READMEs are excluded from `sidecar` (they must not trigger the
+  # image build) and from `docs` (not part of the Fern site), so claim
+  # them here to satisfy the coverage check.
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
 
 ci: &ci
   - '.github/workflows/**'
@@ -285,6 +290,11 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  # Docs must not trigger the multi-arch image build; they are
+  # claimed by `ignore` so the coverage check still passes.
+  - '!**/*.md'
+  - '!**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
