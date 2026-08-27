@@ -269,10 +269,12 @@ def determine_request_receiving_worker(
     found_event = threading.Event()
 
     # Engine logs are written asynchronously and can arrive noticeably later
-    # under loaded CI nodes. Keep this timeout comfortably below the request
-    # timeout while avoiding a sub-second race when identifying the worker to
-    # terminate. See the aggregate vLLM migration regression in #9465.
-    max_wait_s = 10.0
+    # under loaded CI nodes. The first request can also spend more than ten
+    # seconds in cold frontend preprocessing before it reaches a worker. Keep
+    # polling the receipt condition rather than tearing workers down while that
+    # request is still being prepared. See the aggregate vLLM migration
+    # regression in #9465.
+    max_wait_s = 30.0
     poll_interval_s = 0.1
 
     # Poll both workers in parallel
@@ -366,6 +368,56 @@ def wait_for_endpoint_instances(
     pytest.fail(
         "Frontend discovery did not reach the required endpoint counts "
         f"{expected_counts} within {max_wait_time}s; last counts={last_counts}, "
+        f"last error={last_error}"
+    )
+
+
+def wait_for_endpoint_instance_reduction(
+    frontend_port: int,
+    endpoint: tuple[str, str],
+    previous_count: int,
+    max_wait_time: float = 10.0,
+) -> None:
+    """Wait until graceful shutdown removes one endpoint from discovery."""
+    if previous_count < 1:
+        pytest.fail(
+            f"Cannot observe removal of {endpoint}: initial count was {previous_count}"
+        )
+
+    deadline = time.monotonic() + max_wait_time
+    last_count = previous_count
+    last_error: Exception | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(
+                f"http://localhost:{frontend_port}/health",
+                timeout=1,
+            )
+            response.raise_for_status()
+            instances = response.json().get("instances", [])
+            last_count = sum(
+                1
+                for instance in instances
+                if (instance.get("component"), instance.get("endpoint")) == endpoint
+            )
+            if last_count < previous_count:
+                logger.info(
+                    "Graceful shutdown reduced %s discovery instances: %s -> %s",
+                    endpoint,
+                    previous_count,
+                    last_count,
+                )
+                return
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        f"Graceful shutdown did not reduce {endpoint} discovery instances below "
+        f"{previous_count} within {max_wait_time}s; last count={last_count}, "
         f"last error={last_error}"
     )
 
@@ -490,6 +542,31 @@ def _parse_migration_max_seq_len_exceeded_metric(
     return int(match.group(1)) if match else 0
 
 
+def wait_for_http_server_shutdown(
+    url: str,
+    max_wait_time: float = 10.0,
+) -> None:
+    """Wait until a process has closed its HTTP listener."""
+    deadline = time.monotonic() + max_wait_time
+    last_status: int | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(url, timeout=0.5)
+            last_status = response.status_code
+        except requests.RequestException:
+            logger.info("HTTP server shut down: %s", url)
+            return
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        f"HTTP server remained reachable for {max_wait_time}s: "
+        f"{url} (last status={last_status})"
+    )
+
+
 def verify_migration_metrics(
     frontend_port: int,
     expected_ongoing_request_count: int = 0,
@@ -580,6 +657,8 @@ def run_migration_test(
     long_prompt_repetitions: int = 8_000,
     wait_for_new_response_before_stop: bool = False,
     expected_ongoing_request_count: int | None = None,
+    graceful_shutdown_endpoint: tuple[str, str] | None = None,
+    wait_for_worker_health_shutdown: bool = False,
 ) -> None:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -601,6 +680,11 @@ def run_migration_test(
         expected_ongoing_request_count: Exact expected count for callers that
             opt into strict metric validation. When omitted, preserve the
             shared helper's historical backend-agnostic lower-bound behavior.
+        graceful_shutdown_endpoint: Discovery endpoint whose removal proves a
+            SIGTERM was observed before severing the parent transport. When
+            omitted, preserve the historical fixed parent grace period.
+        wait_for_worker_health_shutdown: Also wait for the selected worker's
+            health listener to close, proving active handlers have unwound.
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -645,11 +729,51 @@ def run_migration_test(
             worker_name,
             worker.get_pid(),
         )
-        # Give the runtime time to withdraw the endpoint from discovery, then
-        # stop its engine child before this short request can finish. A long
-        # parent-first grace period lets vLLM exhaust the output budget and
-        # turns the intended disconnect into a zero-token migration retry.
-        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=2)
+        if graceful_shutdown_endpoint is None:
+            # Preserve the historical backend-agnostic behavior for callers
+            # that have not opted into structured discovery synchronization.
+            terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=2)
+        else:
+            response = requests.get(
+                f"http://localhost:{frontend.frontend_port}/health",
+                timeout=1,
+            )
+            response.raise_for_status()
+            instances = response.json().get("instances", [])
+            previous_count = sum(
+                1
+                for instance in instances
+                if (
+                    instance.get("component"),
+                    instance.get("endpoint"),
+                )
+                == graceful_shutdown_endpoint
+            )
+
+            def wait_for_graceful_shutdown_observation() -> None:
+                wait_for_endpoint_instance_reduction(
+                    frontend.frontend_port,
+                    graceful_shutdown_endpoint,
+                    previous_count,
+                )
+                if wait_for_worker_health_shutdown:
+                    worker_health_port = getattr(worker, "system_port", None)
+                    assert isinstance(worker_health_port, int), (
+                        "Worker health shutdown synchronization requires "
+                        "an integer system_port"
+                    )
+                    wait_for_http_server_shutdown(
+                        f"http://localhost:{worker_health_port}/health"
+                    )
+
+            terminate_process_tree(
+                worker.get_pid(),
+                immediate_kill=False,
+                timeout=2,
+                after_parent_signal=wait_for_graceful_shutdown_observation,
+                force_parent_after_callback=True,
+                children_immediate_kill=True,
+            )
 
     # Step 5: Validate the request outcome via its response (the user-facing
     # contract). Migration is expected to succeed only when it is enabled and the

@@ -1324,6 +1324,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         try:
             yield cancellation_task
         finally:
+            shutdown_triggered = bool(
+                self.shutdown_event and self.shutdown_event.is_set()
+            )
+
             # Clean up the background cancellation task
             request_id = "unknown"
             if request_id_future.done() and not request_id_future.cancelled():
@@ -1343,3 +1347,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     pass
             else:
                 cancellation_task.result()
+
+            # The engine stream can end immediately after abort_request while
+            # the monitor is still between observing shutdown and raising its
+            # typed error. Cleanup must not turn that race into a normal stream
+            # end, which prevents the frontend from migrating the request.
+            if shutdown_triggered:
+                raise EngineShutdown("Engine was shut down during token generation")

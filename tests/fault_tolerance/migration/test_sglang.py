@@ -11,19 +11,119 @@ Test Execution Times (Last Run: 2026-01-13):
 
 import logging
 import os
-import shutil
+from pathlib import Path
 
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
-from .utils import DynamoFrontendProcess, run_migration_test
+from .utils import (
+    DynamoFrontendProcess,
+    managed_processes_concurrently,
+    run_migration_test,
+    wait_for_endpoint_instances,
+)
 
 logger = logging.getLogger(__name__)
+
+AGGREGATED_MAX_MODEL_LEN = 1024
+AGGREGATED_MAX_TOKENS = 64
+
+# Cover each distinct migration policy with complementary lifecycle, API,
+# response, and transport values. Together these eight rows cover every pair
+# of those four binary dimensions without paying for their Cartesian product.
+MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="migration_enabled-no_seq_cap-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "completion",
+        False,
+        "tcp",
+        id="migration_enabled-no_seq_cap-graceful_shutdown-completion-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        True,
+        "chat",
+        False,
+        "tcp",
+        id="migration_disabled-worker_failure-chat-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        True,
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        True,
+        "tcp",
+        id="max_seq_len_exceeded-worker_failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1,
+        False,
+        "chat",
+        False,
+        "nats",
+        id="max_seq_len_exceeded-graceful_shutdown-chat-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        True,
+        "completion",
+        False,
+        "nats",
+        id="max_seq_len_not_exceeded-worker_failure-completion-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        True,
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful_shutdown-chat-stream-tcp",
+    ),
+]
+
+MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    MIGRATION_CASES,
+    indirect=["request_plane"],
+)
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -31,6 +131,11 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+]
+
+# The remaining migration targets retain their existing Cartesian collection
+# until their own stack layers classify and reduce them.
+LEGACY_MIGRATION_PARAMETERS = (
     pytest.mark.parametrize(
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
@@ -71,7 +176,13 @@ pytestmark = [
         ],
     ),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
-]
+)
+
+
+def legacy_migration_parameters(test):
+    for marker in LEGACY_MIGRATION_PARAMETERS:
+        test = marker(test)
+    return test
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -92,14 +203,38 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
+        log_root: Path,
         disagg_mode: str | None = None,
+        max_model_len: int = 8192,
     ):
         self.worker_id = worker_id
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda ports=allocated_ports: deallocate_ports(ports))
+
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+        allocated_ports.append(self.system_port)
+        self.nccl_port = allocate_port(DynamoPortRange.NCCL.value)
+        allocated_ports.append(self.nccl_port)
         self.bootstrap_port: int | None = None
         self.prefill_port: int | None = None
         self.disagg_mode = disagg_mode
+
+        env = os.environ.copy()
+        if "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS" not in env:
+            kv_mark = request.node.get_closest_marker("requested_sglang_kv_tokens")
+            if kv_mark:
+                env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(
+                    int(kv_mark.args[0])
+                )
+
+        gpu_mem_args = build_gpu_mem_args("build_sglang_gpu_mem_args", env=env)
+        if not gpu_mem_args:
+            gpu_mem_args = [
+                "--max-total-tokens",
+                "1024",
+                "--mem-fraction-static",
+                "0.9",
+            ]
 
         command = [
             "python3",
@@ -114,10 +249,15 @@ class DynamoWorkerProcess(ManagedProcess):
             "16",
             "--tp",
             "1",
-            "--mem-fraction-static",
-            "0.3",
+            "--nccl-port",
+            str(self.nccl_port),
+            "--disable-cuda-graph",
+            "--disable-piecewise-cuda-graph",
+            "--max-running-requests",
+            "1",
+            *gpu_mem_args,
             "--context-length",
-            "8192",
+            str(max_model_len),
         ]
         if disagg_mode is None:
             # Aggregated
@@ -125,7 +265,7 @@ class DynamoWorkerProcess(ManagedProcess):
         else:
             # Disaggregated
             self.bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
-            request.addfinalizer(lambda port=self.bootstrap_port: deallocate_port(port))
+            allocated_ports.append(self.bootstrap_port)
             command.extend(
                 [
                     "--disaggregation-mode",
@@ -140,13 +280,10 @@ class DynamoWorkerProcess(ManagedProcess):
             )
             if disagg_mode == "prefill":
                 self.prefill_port = allocate_port(DynamoPortRange.PREFILL.value)
-                request.addfinalizer(
-                    lambda port=self.prefill_port: deallocate_port(port)
-                )
+                allocated_ports.append(self.prefill_port)
                 command.extend(["--port", str(self.prefill_port)])
 
         # Set environment variables
-        env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         env["DYN_LOG"] = "debug"
@@ -171,41 +308,22 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        # TODO: Have the managed process take a command name explicitly to distinguish
-        #       between processes started with the same command.
-        log_dir = f"{request.node.name}_{worker_id}"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = log_root / worker_id
 
         super().__init__(
             command=command,
             env=env,
             health_check_urls=health_check_urls,
             timeout=300,
-            display_output=True,
+            # Every worker retains a complete per-test log. Avoid interleaving
+            # verbose engine output when several GPU tests run concurrently.
+            display_output=False,
             terminate_all_matching_process_names=False,
             stragglers=["SGLANG:EngineCore"],
             straggler_commands=["-m dynamo.sglang"],
-            log_dir=log_dir,
+            log_dir=str(log_dir),
+            display_name=worker_id,
         )
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated ports when worker exits."""
-        for port in (self.system_port, self.bootstrap_port, self.prefill_port):
-            if port is None:
-                continue
-            try:
-                deallocate_port(port)
-            except Exception as e:
-                logging.warning(f"Failed to release SGLang worker port {port}: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
@@ -222,12 +340,11 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(230)  # 3x average
-@pytest.mark.post_merge
-@pytest.mark.skip(
-    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
-    "skipped wholesale until the underlying migration fault is owned and fixed."
-)
+@pytest.mark.timeout(180)  # includes the measured 88s cold-start path
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(5.4)  # measured NVML peak with two workers
+@pytest.mark.requested_sglang_kv_tokens(1024)
+@MIGRATION_PARAMETERS
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -238,6 +355,7 @@ def test_request_migration_sglang_aggregated(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -250,33 +368,6 @@ def test_request_migration_sglang_aggregated(
         stream: True for streaming, False for non-streaming
     """
 
-    request_plane = request.getfixturevalue("request_plane")
-
-    # OPS-4472: graceful-shutdown migration with NATS is flaky for the
-    # chat streaming aggregated SGLang case.
-    if (
-        migration_limit == 3
-        and migration_max_seq_len is None
-        and immediate_kill is False
-        and request_api == "chat"
-        and stream is True
-        and request_plane == "nats"
-    ):
-        pytest.skip("Flaky: graceful-shutdown migration fails with NATS. OPS-4472")
-
-    # OPS-4446: first-token delay routinely exceeds the 6s threshold in
-    # utils.validate_response for this parameter combination. Originally only
-    # the NATS variant tripped; once the NATS skip landed, the TCP variant
-    # started failing the same way (now bears the cold-start cost first).
-    if (
-        migration_limit == 3
-        and migration_max_seq_len is None
-        and immediate_kill is True
-        and request_api == "chat"
-        and stream is True
-    ):
-        pytest.skip("Flaky: first-token delay > 6s threshold. OPS-4446")
-
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
         request,
@@ -285,35 +376,52 @@ def test_request_migration_sglang_aggregated(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start 2 workers
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-
-            with DynamoWorkerProcess(
-                request,
-                "worker2",
+        # Step 2: Start 2 independent workers concurrently
+        worker1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        )
+        worker2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(worker1, worker2):
+            logger.info("Worker 1 PID: %s", worker1.get_pid())
+            logger.info("Worker 2 PID: %s", worker2.get_pid())
+            wait_for_endpoint_instances(
                 frontend.frontend_port,
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
+                {("backend", "generate"): 2},
+            )
 
-                # Step 3: Run migration test
-                run_migration_test(
-                    frontend,
-                    worker1,
-                    worker2,
-                    receiving_pattern="New Request ID: ",
-                    migration_limit=migration_limit,
-                    migration_max_seq_len=migration_max_seq_len,
-                    immediate_kill=immediate_kill,
-                    use_chat_completion=(request_api == "chat"),
-                    stream=stream,
-                )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                worker1,
+                worker2,
+                receiving_pattern="New Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=AGGREGATED_MAX_TOKENS,
+                expected_ongoing_request_count=1,
+                graceful_shutdown_endpoint=("backend", "generate"),
+                wait_for_worker_health_shutdown=True,
+            )
 
 
 @pytest.mark.skip(reason="Cannot reliably migrate at Prefill that finish < 1 ms")
 @pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
 @pytest.mark.timeout(230)  # 3x average
 @pytest.mark.nightly
+@legacy_migration_parameters
 def test_request_migration_sglang_prefill(
     request,
     runtime_services_dynamic_ports,
@@ -324,6 +432,7 @@ def test_request_migration_sglang_prefill(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for prefill worker request migration in disaggregated mode.
@@ -350,6 +459,7 @@ def test_request_migration_sglang_prefill(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             disagg_mode="decode",
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
@@ -359,6 +469,7 @@ def test_request_migration_sglang_prefill(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 disagg_mode="prefill",
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
@@ -367,6 +478,7 @@ def test_request_migration_sglang_prefill(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     disagg_mode="prefill",
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
@@ -389,6 +501,7 @@ def test_request_migration_sglang_prefill(
 @pytest.mark.skip(reason="KV cache transfer may fail")
 @pytest.mark.timeout(230)  # 3x average
 @pytest.mark.nightly
+@legacy_migration_parameters
 def test_request_migration_sglang_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -399,6 +512,7 @@ def test_request_migration_sglang_kv_transfer(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for request migration during KV transfer in disaggregated mode.
@@ -425,6 +539,7 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -434,6 +549,7 @@ def test_request_migration_sglang_kv_transfer(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -442,6 +558,7 @@ def test_request_migration_sglang_kv_transfer(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -463,6 +580,7 @@ def test_request_migration_sglang_kv_transfer(
 
 @pytest.mark.timeout(230)  # 3x average
 @pytest.mark.nightly
+@legacy_migration_parameters
 def test_request_migration_sglang_decode(
     request,
     runtime_services_dynamic_ports,
@@ -473,6 +591,7 @@ def test_request_migration_sglang_decode(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -503,6 +622,7 @@ def test_request_migration_sglang_decode(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -512,6 +632,7 @@ def test_request_migration_sglang_decode(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -520,6 +641,7 @@ def test_request_migration_sglang_decode(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")

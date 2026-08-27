@@ -9,7 +9,7 @@ import signal
 import socket
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -56,11 +56,17 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
 
 
 def terminate_process_tree(
-    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
+    pid,
+    logger=logging.getLogger(),
+    immediate_kill=False,
+    timeout=10,
+    after_parent_signal: Callable[[], None] | None = None,
+    force_parent_after_callback: bool = False,
+    children_immediate_kill: bool | None = None,
 ):
     """Terminate a process and all its children.
 
-    Kill Sequence:
+    Default Kill Sequence:
     ==============
     1. Snapshot all children (recursive)
     2. Send SIGTERM to parent IMMEDIATELY (no delay)
@@ -75,6 +81,12 @@ def terminate_process_tree(
     - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
 
     Summary: SIGTERM (immediate) → wait → SIGKILL if still alive
+
+    When ``after_parent_signal`` is provided, it runs immediately after the
+    parent signal. ``force_parent_after_callback`` can then sever the parent
+    transport before terminating its children. This lets lifecycle tests
+    synchronize on an externally visible shutdown condition without adding a
+    fixed sleep or racing child teardown against the parent connection.
     """
     try:
         parent = psutil.Process(pid)
@@ -95,6 +107,16 @@ def terminate_process_tree(
     # 2. Terminate parent first (graceful)
     terminate_process(parent, logger, immediate_kill=immediate_kill)
 
+    callback_error: BaseException | None = None
+    if after_parent_signal is not None:
+        try:
+            after_parent_signal()
+        except BaseException as error:
+            callback_error = error
+
+        if force_parent_after_callback:
+            terminate_process(parent, logger, immediate_kill=True)
+
     # 3. Wait for parent to exit
     try:
         parent.wait(timeout=timeout)
@@ -102,9 +124,11 @@ def terminate_process_tree(
         logger.warning("Parent process did not exit within timeout")
         terminate_process(parent, logger, immediate_kill=True)
 
-    # 4. Terminate children if still alive
+    # 4. Terminate children after the parent connection has closed.
+    if children_immediate_kill is None:
+        children_immediate_kill = immediate_kill
     for child in children:
-        terminate_process(child, logger, immediate_kill=immediate_kill)
+        terminate_process(child, logger, immediate_kill=children_immediate_kill)
 
     # 5. Wait for all processes to exit
     all_procs = [parent] + children
@@ -114,6 +138,9 @@ def terminate_process_tree(
     for p in alive:
         terminate_process(p, logger, immediate_kill=True)
     psutil.wait_procs(alive, timeout=timeout)
+
+    if callback_error is not None:
+        raise callback_error
 
 
 class ManagedProcessStopError(RuntimeError):
