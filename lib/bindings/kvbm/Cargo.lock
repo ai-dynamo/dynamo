@@ -1684,6 +1684,7 @@ dependencies = [
  "dynamo-truthy",
  "fastrand",
  "flume",
+ "futures-util",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",

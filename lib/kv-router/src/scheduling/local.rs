@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant as StdInstant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
@@ -16,6 +16,9 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::request_classifier::{
+    ClassifyRequest, RequestClassifier, RequestClassifierRuntime, RequestLifecycle,
+};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
@@ -48,6 +51,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -303,15 +307,39 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier: OnceLock::new(),
             track_prefill_tokens_default,
             worker_type,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.request_classifier
+            .set(RequestClassifierRuntime::new(classifier, shutdown))
+            .is_ok()
     }
 
     pub async fn schedule_request(
         &self,
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_request_with_ingress_at(request, StdInstant::now())
+            .await
+    }
+
+    /// Schedule a request using the router's original ingress timestamp.
+    #[doc(hidden)]
+    pub async fn schedule_request_with_ingress_at(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: StdInstant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let classified_request = self.classify_request(&request).await?;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let lifecycle_lease = self
             .queue
@@ -320,7 +348,13 @@ where
 
         let mut lifecycle_lease = self
             .queue
-            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
+            .enqueue_classified_with_block_hashes_and_lease(
+                request,
+                block_hashes,
+                lifecycle_lease,
+                classified_request,
+                ingress_at,
+            )
             .await;
 
         let response = resp_rx
@@ -330,6 +364,41 @@ where
             lease.disarm();
         }
         response
+    }
+
+    async fn classify_request(
+        &self,
+        request: &ScheduleRequest,
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
+        if matches!(request.mode, ScheduleMode::QueryOnly { .. }) {
+            return Ok(None);
+        }
+        let Some(request_classifier) = self.request_classifier.get() else {
+            return Ok(None);
+        };
+        request_classifier
+            .classify_with(request.mode.request_id(), || {
+                self.queue.classify_request(request)
+            })
+            .await
+            .map(Some)
+    }
+
+    /// Begin response-path lifecycle tracking when a classifier is configured.
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .get()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
+    }
+
+    #[doc(hidden)]
+    pub fn has_request_classifier(&self) -> bool {
+        self.request_classifier.get().is_some()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
