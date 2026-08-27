@@ -31,6 +31,7 @@ import (
 func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a native v1beta1 request with metadata, spec, and status values.")
 	autoApply := false
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -53,6 +54,7 @@ func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
 		},
 	}
 
+	t.Log("Convert the native v1beta1 request to a v1beta2 envelope representation.")
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(src); err != nil {
 		t.Fatalf("ConvertFrom() error = %v", err)
@@ -64,12 +66,14 @@ func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
 		t.Fatal("converted object contains native v1beta2 fields alongside envelopes")
 	}
 
+	t.Log("Convert the envelope representation back to the native v1beta1 request.")
 	dst := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertTo(dst); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 	assertDGDRPayloadEqual(t, src, dst)
 
+	t.Log("Mutate converted metadata and verify it does not alias the source.")
 	dst.Labels["owner"] = "changed"
 	if src.Labels["owner"] != "test" {
 		t.Fatal("conversion aliased source metadata")
@@ -79,6 +83,7 @@ func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
 func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a native v1beta2 request with spec and status values.")
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "replay-search", Namespace: "default"},
 		Spec: DynamoGraphDeploymentRequestSpec{
@@ -96,6 +101,7 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 		},
 	}
 
+	t.Log("Convert the native v1beta2 request to a v1beta1 envelope representation.")
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := src.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
@@ -107,6 +113,7 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 		t.Fatal("converted object contains native v1beta1 fields alongside envelopes")
 	}
 
+	t.Log("Convert the envelope representation back and compare the native payload.")
 	dst := &DynamoGraphDeploymentRequest{}
 	if err := dst.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom() error = %v", err)
@@ -122,12 +129,14 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 func TestEnvelopeJSONShape(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a v1beta2 object containing nested unknown JSON in its v1beta1 envelope.")
 	spoke := &DynamoGraphDeploymentRequest{
 		Spec: DynamoGraphDeploymentRequestSpec{
 			V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy","future":{"nested":[1,true,"value"]}}`)},
 		},
 	}
 
+	t.Log("Marshal the public object and decode its wire representation.")
 	raw, err := json.Marshal(spoke)
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
@@ -136,6 +145,8 @@ func TestEnvelopeJSONShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &object); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
+
+	t.Log("Verify the envelope is a direct JSON object with nested values and no raw wrapper.")
 	spec := object["spec"].(map[string]any)
 	envelope := spec["v1beta1"].(map[string]any)
 	if envelope["model"] != "legacy" {
@@ -153,63 +164,76 @@ func TestEnvelopeJSONShape(t *testing.T) {
 func TestConversionRejectsMixedRepresentations(t *testing.T) {
 	t.Parallel()
 
-	t.Run("v1beta2 spec", func(t *testing.T) {
-		src := &DynamoGraphDeploymentRequest{
-			Spec: DynamoGraphDeploymentRequestSpec{
-				ModelRef: &ModelReference{Name: "Qwen/Qwen3-32B"},
-				V1Beta1:  &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
+	tests := []struct {
+		name  string
+		spoke *DynamoGraphDeploymentRequest
+		hub   *v1beta1.DynamoGraphDeploymentRequest
+	}{
+		{
+			name: "v1beta2 spec",
+			spoke: &DynamoGraphDeploymentRequest{
+				Spec: DynamoGraphDeploymentRequestSpec{
+					ModelRef: &ModelReference{Name: "Qwen/Qwen3-32B"},
+					V1Beta1:  &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
+				},
 			},
-		}
-		if err := src.ConvertTo(&v1beta1.DynamoGraphDeploymentRequest{}); err == nil {
-			t.Fatal("ConvertTo() accepted native spec fields alongside a v1beta1 envelope")
-		}
-	})
+		},
+		{
+			name: "v1beta2 status",
+			spoke: &DynamoGraphDeploymentRequest{
+				Status: DynamoGraphDeploymentRequestStatus{
+					ObservedGeneration: 1,
+					V1Beta1:            &apiextensionsv1.JSON{Raw: []byte(`{}`)},
+				},
+			},
+		},
+		{
+			name: "v1beta1 spec",
+			hub: &v1beta1.DynamoGraphDeploymentRequest{
+				Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "legacy",
+					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"modelRef":{"name":"Qwen/Qwen3-32B"}}`)},
+				},
+			},
+		},
+		{
+			name: "v1beta1 status",
+			hub: &v1beta1.DynamoGraphDeploymentRequest{
+				Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase:   v1beta1.DGDRPhasePending,
+					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{}`)},
+				},
+			},
+		},
+	}
 
-	t.Run("v1beta2 status", func(t *testing.T) {
-		src := &DynamoGraphDeploymentRequest{
-			Status: DynamoGraphDeploymentRequestStatus{
-				ObservedGeneration: 1,
-				V1Beta1:            &apiextensionsv1.JSON{Raw: []byte(`{}`)},
-			},
-		}
-		if err := src.ConvertTo(&v1beta1.DynamoGraphDeploymentRequest{}); err == nil {
-			t.Fatal("ConvertTo() accepted native status fields alongside a v1beta1 envelope")
-		}
-	})
-
-	t.Run("v1beta1 spec", func(t *testing.T) {
-		src := &v1beta1.DynamoGraphDeploymentRequest{
-			Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-				Model:   "legacy",
-				V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"modelRef":{"name":"Qwen/Qwen3-32B"}}`)},
-			},
-		}
-		if err := (&DynamoGraphDeploymentRequest{}).ConvertFrom(src); err == nil {
-			t.Fatal("ConvertFrom() accepted native spec fields alongside a v1beta2 envelope")
-		}
-	})
-
-	t.Run("v1beta1 status", func(t *testing.T) {
-		src := &v1beta1.DynamoGraphDeploymentRequest{
-			Status: v1beta1.DynamoGraphDeploymentRequestStatus{
-				Phase:   v1beta1.DGDRPhasePending,
-				V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{}`)},
-			},
-		}
-		if err := (&DynamoGraphDeploymentRequest{}).ConvertFrom(src); err == nil {
-			t.Fatal("ConvertFrom() accepted native status fields alongside a v1beta2 envelope")
-		}
-	})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Convert an object containing both native fields and a foreign-version envelope.")
+			var err error
+			if test.spoke != nil {
+				err = test.spoke.ConvertTo(&v1beta1.DynamoGraphDeploymentRequest{})
+			} else {
+				err = (&DynamoGraphDeploymentRequest{}).ConvertFrom(test.hub)
+			}
+			if err == nil {
+				t.Fatal("conversion accepted mixed native and envelope representations")
+			}
+		})
+	}
 }
 
 func TestConversionRejectsEmptyEnvelope(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a v1beta1 hub object containing an empty v1beta2 envelope.")
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
 			V1Beta2: &apiextensionsv1.JSON{},
 		},
 	}
+
+	t.Log("Convert the object and require the empty envelope to be rejected.")
 	if err := (&DynamoGraphDeploymentRequest{}).ConvertFrom(src); err == nil {
 		t.Fatal("ConvertFrom() accepted an empty v1beta2 envelope")
 	}
@@ -218,11 +242,14 @@ func TestConversionRejectsEmptyEnvelope(t *testing.T) {
 func TestConversionRejectsMalformedEnvelope(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a v1beta1 hub object containing malformed JSON in its v1beta2 envelope.")
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
 			V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"modelRef":`)},
 		},
 	}
+
+	t.Log("Convert the object and require the malformed envelope to be rejected.")
 	if err := (&DynamoGraphDeploymentRequest{}).ConvertFrom(src); err == nil {
 		t.Fatal("ConvertFrom() accepted malformed JSON in a v1beta2 envelope")
 	}
