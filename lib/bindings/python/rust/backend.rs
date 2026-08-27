@@ -34,6 +34,7 @@ use dynamo_llm::local_model::runtime_config::{
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -46,6 +47,18 @@ use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
+
+fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
+    match error {
+        SidecarStartupError::Cli(error) => {
+            let _ = error.print();
+            pyo3::exceptions::PySystemExit::new_err(error.exit_code())
+        }
+        SidecarStartupError::Dynamo(error) => {
+            pyo3::exceptions::PyValueError::new_err(error.to_string())
+        }
+    }
+}
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -88,10 +101,8 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || {
-            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
-        })
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
@@ -116,8 +127,8 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::from_args(Some(cli_argv)))
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))

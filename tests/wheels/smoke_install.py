@@ -382,6 +382,28 @@ assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
     run([str(venv_python), "-c", code])
 
 
+def run_sidecar_help_smoke(venv_python: Path) -> None:
+    modules = (
+        ("dynamo.sglang.sidecar", "dynamo-sglang-sidecar"),
+        ("dynamo.vllm.sidecar", "dynamo-vllm-sidecar"),
+    )
+    for module, program in modules:
+        command = [str(venv_python), "-m", module, "--help"]
+        print("+", " ".join(command), flush=True)
+        proc = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print(proc.stdout)
+        if proc.returncode != 0:
+            raise AssertionError(f"{module} --help exited {proc.returncode}")
+        if f"Usage: {program}" not in proc.stdout:
+            raise AssertionError(f"{module} --help did not print its Clap usage")
+
+
 def run_aic_core_import_smoke(venv_python: Path) -> None:
     code = r"""
 import os
@@ -485,6 +507,7 @@ def install_core(
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
         run_core_import_smoke(venv_python)
+        run_sidecar_help_smoke(venv_python)
 
         for dist, wheel in also_wheels.items():
             assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
