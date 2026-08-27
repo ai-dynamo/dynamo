@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -41,6 +42,25 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+class _CancelableContext:
+    def __init__(self, request_id: str, *, trace_id: str | None = None):
+        self._request_id = request_id
+        self.trace_id = trace_id
+        self._cancelled = asyncio.Event()
+
+    def id(self) -> str:
+        return self._request_id
+
+    def trace_headers(self) -> dict[str, str]:
+        return {}
+
+    def async_killed_or_stopped(self) -> asyncio.Task[bool]:
+        return asyncio.create_task(self._cancelled.wait())
+
+    def cancel(self) -> None:
+        self._cancelled.set()
 
 
 def _read_zstd_payload(path):
@@ -119,6 +139,125 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
             pass
 
     assert not build_media_kwargs_called
+
+
+@pytest.mark.asyncio
+async def test_prefill_uses_context_id_as_sglang_rid_before_first_result(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_kwargs = {}
+
+    async def empty_results():
+        if False:
+            yield {}
+
+    class _Engine:
+        async def async_generate(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return empty_results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = _Engine()
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler._consume_tasks = set()
+    handler._generate_bootstrap_room = lambda: 17
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
+        lambda engine, request: {},
+    )
+
+    stream = handler.generate(
+        {
+            "request": {"token_ids": [1, 2, 3], "routing": {}},
+            "sampling_params": {},
+        },
+        _CancelableContext("request-id"),
+    )
+    await anext(stream)
+
+    assert captured_kwargs["rid"] == "request-id"
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_prefill_cancellation_waits_for_registration_before_abort():
+    rid = "request-id"
+    abort_calls = []
+    iteration_started = asyncio.Event()
+    allow_registration = asyncio.Event()
+    aborted = asyncio.Event()
+    result_stopped = asyncio.Event()
+
+    class _TokenizerManager:
+        def __init__(self):
+            self.rid_to_state = {}
+
+        def abort_request(self, *, rid, abort_all):
+            abort_calls.append((rid, abort_all))
+            aborted.set()
+
+    tokenizer_manager = _TokenizerManager()
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    handler.shutdown_event = None
+    handler._REQUEST_REGISTRATION_TIMEOUT_SECONDS = 1.0
+    context = _CancelableContext(rid)
+
+    async def results():
+        try:
+            iteration_started.set()
+            await allow_registration.wait()
+            tokenizer_manager.rid_to_state[rid] = object()
+            await aborted.wait()
+            return
+            yield {}
+        finally:
+            result_stopped.set()
+
+    consumer = asyncio.create_task(handler._consume_results(results(), rid, context))
+    await asyncio.wait_for(iteration_started.wait(), timeout=1)
+
+    context.cancel()
+    await asyncio.sleep(0)
+    assert abort_calls == []
+
+    allow_registration.set()
+    await asyncio.wait_for(consumer, timeout=1)
+
+    assert abort_calls == [(rid, False)]
+    assert result_stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_prefill_cleanup_awaits_consumers_before_engine_shutdown():
+    events = []
+
+    async def consume_forever():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            events.append("consumer-stopped")
+
+    consume_task = asyncio.create_task(consume_forever())
+    await asyncio.sleep(0)
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler._consume_tasks = {consume_task}
+    handler.publisher = SimpleNamespace(
+        cleanup=lambda: events.append("publisher-cleaned")
+    )
+    handler.engine = SimpleNamespace(shutdown=lambda: events.append("engine-shutdown"))
+
+    await handler.cleanup_async()
+
+    assert events == ["consumer-stopped", "publisher-cleaned", "engine-shutdown"]
+    assert not handler._consume_tasks
 
 
 def test_extract_media_urls_returns_none_for_missing_modality():

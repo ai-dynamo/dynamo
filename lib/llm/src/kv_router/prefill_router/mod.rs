@@ -406,6 +406,7 @@ where
                  Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
             ));
         }
+        link_prefill_cancellation(&engine_ctx, prefill_context.context());
 
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
@@ -635,6 +636,22 @@ where
 
         self.model_manager
             .get_kv_transfer_routing_constraints(endpoint_id, worker_id)
+    }
+}
+
+fn link_prefill_cancellation(
+    parent: &Arc<dyn dynamo_runtime::engine::AsyncEngineContext>,
+    child: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>,
+) {
+    parent.link_child(child.clone());
+
+    // Cancellation is sticky, but linking a child is not atomic with a parent
+    // cancellation. Mirror an already-observed parent state so a disconnect in
+    // the small construction window cannot leave remote prefill running.
+    if parent.is_killed() {
+        child.kill();
+    } else if parent.is_stopped() {
+        child.stop();
     }
 }
 
@@ -889,6 +906,26 @@ mod tests {
         })
         .await
         .expect("pending activation tasks retained their PrefillRouter");
+    }
+
+    #[tokio::test]
+    async fn prefill_cancellation_tracks_parent_before_and_after_linking() {
+        let parent = Context::new(()).context();
+        let child = Context::new(()).context();
+        link_prefill_cancellation(&parent, child.clone());
+
+        parent.kill();
+        tokio::time::timeout(std::time::Duration::from_secs(1), child.killed())
+            .await
+            .expect("linked prefill context did not receive parent cancellation");
+        assert!(child.is_killed());
+
+        let already_killed_parent = Context::new(()).context();
+        already_killed_parent.kill();
+        let late_child = Context::new(()).context();
+        link_prefill_cancellation(&already_killed_parent, late_child.clone());
+
+        assert!(late_child.is_killed());
     }
 
     #[test]

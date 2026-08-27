@@ -336,7 +336,7 @@ async def init_prefill(
         except asyncio.CancelledError:
             logging.info("Metrics task successfully cancelled")
             pass
-        handler.cleanup()
+        await handler.cleanup_async()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()
