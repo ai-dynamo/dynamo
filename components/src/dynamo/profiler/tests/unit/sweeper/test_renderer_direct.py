@@ -63,6 +63,51 @@ REAL_CANDIDATE_TEP_TRTLLM = {
 
 _IMAGE = "my-registry/tensorrtllm-runtime:1.3.0rc10"
 
+# Built directly from the confirmed field-naming rules in
+# aisimulate.sweeper.sample.py's unroll_sample/_unroll_parallel: disagg mode
+# has NO bare tp/strategy/replicas/agg_* keys at all -- every shape/kv-cache
+# /scheduler/replica/attention-dp field is uniformly "{role}_"-prefixed
+# ("prefill_"/"decode_"), unlike agg's bare-vs-"agg_"-prefixed mix.
+# model_name/backend/deployment_mode/hardware_sku/gpu_budget are shared,
+# not role-prefixed, matching _DEPLOYMENT_PINNED.
+REAL_SHAPED_DISAGG_CANDIDATE = {
+    "deployment_mode": "disagg",
+    "backend": "vllm",
+    "model_name": "deepseek-ai/DeepSeek-V3",
+    "hardware_sku": "gb200",
+    "gpu_budget": 32,
+    "min_gpu_budget": None,
+    "context_length": None,
+    "startup_time": None,
+    "aic_nextn": None,
+    "prefill_tp": 2,
+    "prefill_pp": 1,
+    "prefill_attention_dp": 1,
+    "prefill_moe_tp": 1,
+    "prefill_moe_ep": 1,
+    "prefill_strategy": "tp",
+    "prefill_replicas": 2,
+    "prefill_max_num_batched_tokens": 16384,
+    "prefill_max_num_seqs": 4,
+    "prefill_block_size": 64,
+    "prefill_gpu_memory_utilization": 0.9,
+    "prefill_enable_prefix_caching": True,
+    "decode_tp": 4,
+    "decode_pp": 1,
+    "decode_attention_dp": 1,
+    "decode_moe_tp": 1,
+    "decode_moe_ep": 4,
+    "decode_strategy": "tep",
+    "decode_replicas": 1,
+    "decode_max_num_batched_tokens": 8192,
+    "decode_max_num_seqs": 512,
+    "decode_block_size": 64,
+    "decode_gpu_memory_utilization": 0.85,
+    "decode_enable_prefix_caching": False,
+    "used_gpus": 8,
+    "backend_version": "0.24.0",
+    "concurrency": 128,
+}
 
 def test_real_candidate_strategy_tep_on_trtllm_raises_materialization_error() -> None:
     """Confirms a real gap, not a hypothetical one.
@@ -308,3 +353,69 @@ def test_cuda_graph_batch_size_mirrors_engine_max_batch_size_trtllm() -> None:
     args_text = " ".join(args)
     assert "cuda_graph_config.max_batch_size" in args_text
     assert "777" in args_text
+
+def test_disagg_materializes_both_prefill_and_decode_with_their_own_shapes() -> None:
+    """The core disagg test: prefill and decode must each get their own
+    tp/kv-cache/scheduler/replicas from their own {role}_-prefixed fields --
+    not share one shape, and not silently fall back to agg's bare/agg_*
+    keys (which don't exist on a real disagg Candidate.config at all)."""
+    result = materialize_dgd_from_candidate(
+        REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
+    )
+    components = {
+        c["type"]: c
+        for c in result.dgd["spec"]["components"]
+        if c.get("type") in ("prefill", "decode")
+    }
+    assert set(components) == {"prefill", "decode"}
+
+    prefill_args = " ".join(
+        components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
+    )
+    decode_args = " ".join(
+        components["decode"]["podTemplate"]["spec"]["containers"][0]["args"]
+    )
+
+    # Prefill: tp=2, replicas=2, max_num_seqs=4, deepseek-ai/DeepSeek-V3
+    assert "--tensor-parallel-size 2" in prefill_args
+    assert components["prefill"]["replicas"] == 2
+    assert "deepseek-ai/DeepSeek-V3" in prefill_args
+
+    # Decode: tep strategy (moe_tp=1), replicas=1, distinct from prefill
+    assert components["decode"]["replicas"] == 1
+    assert "deepseek-ai/DeepSeek-V3" in decode_args
+
+    # The two roles must not have collapsed onto identical materialized args
+    # -- this is the actual failure mode a broken/incomplete disagg
+    # implementation could produce (e.g. accidentally reusing agg's single-
+    # pass logic for both roles).
+    assert prefill_args != decode_args
+
+
+def test_disagg_prefix_caching_differs_correctly_by_role() -> None:
+    """prefill_enable_prefix_caching=True, decode_enable_prefix_caching=False
+    on the fixture -- must materialize differently per role, not share one
+    value (a plausible copy-paste bug: reading only one role's field for
+    both)."""
+    result = materialize_dgd_from_candidate(
+        REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
+    )
+    components = {
+        c["type"]: c
+        for c in result.dgd["spec"]["components"]
+        if c.get("type") in ("prefill", "decode")
+    }
+    prefill_args = components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
+    decode_args = components["decode"]["podTemplate"]["spec"]["containers"][0]["args"]
+
+    assert "--enable-prefix-caching" in prefill_args
+    assert "--no-enable-prefix-caching" in decode_args
+
+
+def test_disagg_missing_role_field_raises_materialization_error() -> None:
+    """Confirms disagg reads {role}_-prefixed keys for real -- deleting one
+    must fail, not silently fall back to agg's differently-named field."""
+    candidate = dict(REAL_SHAPED_DISAGG_CANDIDATE)
+    del candidate["decode_max_num_seqs"]
+    with pytest.raises(MaterializationError, match="decode_max_num_seqs"):
+        materialize_dgd_from_candidate(candidate, image=_IMAGE)
