@@ -13,7 +13,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 ## How the config is loaded
 
-Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
+Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
 
 <Card>
 <Tabs>
@@ -166,26 +166,10 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
 </ParamField>
 
-<ParamField path="--dyn-enable-structural-tag" type="boolean" default="false">
-  Enable structural tag guided decoding for tool calls. When enabled, configure activation scope and parameter schema strictness with `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema`.
+<ParamField path="--dyn-structural-tag" type="JSON object" default="unset">
+  Enable structural tag guided decoding for tool calls. Pass the flag without a value to use the default policy, or provide a JSON object for advanced options. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for the complete configuration.
 
-  Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-scope" type="string" default="auto">
-  Controls when structural tags are activated. `auto` activates them for required or named `tool_choice`, or when any tool has `strict=true` or `parallel_tool_calls` is false. `always` additionally activates them for `tool_choice=auto` without those conditions. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCOPE`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCHEMA`
+  Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
 
 <ParamField path="--custom-jinja-template" type="string" default="null">

@@ -341,8 +341,7 @@ impl WorkerSet {
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
-            structural_tag_mode: self.card.runtime_config.structural_tag_mode,
-            structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
                 .card
                 .runtime_config

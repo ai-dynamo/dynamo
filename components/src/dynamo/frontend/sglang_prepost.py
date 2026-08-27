@@ -583,14 +583,10 @@ def build_tool_call_guided_decoding(
             ),
         )
     # TODO: this applies a structural-tag constraint for tool_choice="auto"
-    # whenever a tool-call parser is configured, and reads NONE of
-    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
-    # knobs are accepted on the CLI and published into the model card by
-    # sglang/register.py, so an operator setting the mode to "off" still gets a
-    # constraint on this path. prepost.py requires structural_tag_mode == "on"
-    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
-    # requires StructuralTagMode != Off, so at the default mode ("off") the same
-    # request is unconstrained on both of those paths and constrained here.
+    # whenever a tool-call parser is configured, without consulting the
+    # worker's structural-tag policy. An operator who leaves the policy disabled
+    # still gets a constraint on this path, while prepost.py and the Rust
+    # preprocessor leave the same request unconstrained.
     # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
     # scope="always" with no way to narrow it.
     elif tool_call_parser_name:

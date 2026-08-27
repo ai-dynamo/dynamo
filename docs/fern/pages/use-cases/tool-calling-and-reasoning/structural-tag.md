@@ -19,9 +19,9 @@ Benefits:
   JSON schema.
 - **Single-call enforcement** — `parallel_tool_calls=false` is enforced via
   `stop_after_first` in the grammar, not just by convention.
-- **Tool call ban** — when `tool_choice="none"`, specific tokenizer tokens can be
-  banned so the model cannot start native tool-call syntax (see
-  [trade-offs](#tool_choicenone-and-token-banning)).
+- **Tool call ban** — when `tool_choice="none"`, parser-specific strings can be
+  excluded so the model cannot complete native tool-call syntax (see
+  [trade-offs](#tool_choicenone-and-marker-exclusion)).
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ Benefits:
 
 ## Quick Start
 
-Enable structural tags on the **worker** with `--dyn-enable-structural-tag`, alongside the tool-call parser. The Frontend needs no extra flags:
+Enable structural tags on the **worker** with `--dyn-structural-tag`, alongside the tool-call parser. The Frontend needs no extra flags:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -70,7 +70,7 @@ spec:
           - Qwen/Qwen3.5-4B
           - --dyn-tool-call-parser
           - qwen3_coder
-          - --dyn-enable-structural-tag
+          - --dyn-structural-tag
 ```
 
 Eligible tool-calling requests will now use xgrammar structural tags for guided
@@ -80,9 +80,32 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--dyn-enable-structural-tag` | bool | `false` | Master switch. When disabled, tool calling works the same as without structural tags. |
-| `--dyn-structural-tag-scope` | `auto`, `always` | `auto` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
-| `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
+| `--dyn-structural-tag` | optional JSON object | unset | Enable structural tags, optionally with advanced configuration. |
+
+The flag without a value uses the defaults below. Every field is optional:
+
+```json
+{
+  "scope": "always",
+  "schema": "strict",
+  "allow_tool_calls_with_structured_output": true,
+  "exclude_special_tokens": false,
+  "reasoning_boundary": "backend",
+  "tool_arguments_any_order": true
+}
+```
+
+| Field | Values | Default | Description |
+|---|---|---|---|
+| `scope` | `auto`, `always` | `auto` | Selects eligible tool-calling requests. |
+| `schema` | `auto`, `strict` | `auto` | Selects which tool argument schemas are enforced. |
+| `allow_tool_calls_with_structured_output` | boolean | `false` | Lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Requires parsers v2. |
+| `exclude_special_tokens` | boolean, `null` | `null` | Controls reasoning and tool-call marker exclusions. `null` preserves the model-family default. Requires parsers v2. |
+| `reasoning_boundary` | `structural_tag`, `backend` | `structural_tag` | Selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `backend` requires parsers v2 and backend support. |
+| `tool_arguments_any_order` | boolean | `false` | Allows tool argument properties in any order. This weakens required-property and duplicate-key validation and requires parsers v2. Structured-output schemas are unaffected. |
+
+`DYN_STRUCTURAL_TAG` accepts `true`, `false`, or the same JSON object. Unknown
+fields and invalid values are rejected during worker startup.
 
 ## Supported Parsers
 
@@ -95,12 +118,16 @@ Currently tested and supported:
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`
 - `deepseek_v3_2`, `deepseek_v4`
+- `glm47` with parsers v2
+
+The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
+`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2=1` in the worker and frontend processes.
 
 Contributions adding structural tag support for new parsers are welcome.
 
 ## Activation Scope
 
-The `--dyn-structural-tag-scope` flag controls when structural tags are used
+The `scope` field controls when structural tags are used
 based on the request's `tool_choice`:
 
 ### `auto` (default)
@@ -109,7 +136,7 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag only (bans tool call tokens, see [below](#tool_choicenone-and-token-banning)) |
+| `none` | Exclusion tag only (excludes tool-call markers, see [below](#tool_choicenone-and-marker-exclusion)) |
 
 ### `always`
 
@@ -122,7 +149,7 @@ based on the request's `tool_choice`:
 
 ## Schema Modes
 
-The `--dyn-structural-tag-schema` flag controls what JSON schema is used for
+The `schema` field controls what JSON schema is used for
 tool arguments inside the structural tag:
 
 ### `auto` (default)
@@ -136,11 +163,11 @@ tool arguments inside the structural tag:
 - All tools use their actual parameter schema regardless of the `strict`
   flag.
 
-## `tool_choice="none"` and Token Banning
+## `tool_choice="none"` and Marker Exclusion
 
 When `tool_choice="none"` and structural tags are enabled, Dynamo injects an
-exclusion structural tag that bans parser-specific tool-call start tokens (for
-example `<tool_call>`) so the model cannot start native tool-call syntax.
+exclusion structural tag that excludes parser-specific tool-call markers (for
+example `<tool_call>`) so the model cannot complete native tool-call syntax.
 
 **Quality trade-off**. If tools remain in the prompt on `none` (often via
 `--no-exclude-tools-when-tool-choice-none` to keep the chat prefix stable for KV
@@ -158,18 +185,18 @@ This interacts with the `--exclude-tools-when-tool-choice-none` flag (default:
 | `exclude-tools-when-tool-choice-none` | Structural tag | Effect |
 |---|---|---|
 | `true` (default) | off | Tools removed from prompt. Model doesn't know about tools. Prompt changes break KV cache prefix sharing. |
-| `true` | on | Tools removed from prompt; tokens also banned. Prompt changes break KV cache prefix sharing. |
-| `false` | on | Tools stay in prompt; guided decoding bans tokens. Model sees tools but cannot emit banned openings. Stable KV cache prefix across different `tool_choice` values. |
+| `true` | on | Tools removed from prompt; tool-call markers are also excluded. Prompt changes break KV cache prefix sharing. |
+| `false` | on | Tools stay in prompt; guided decoding excludes tool-call markers. Model sees tools but cannot complete a native tool-call opening. Stable KV cache prefix across different `tool_choice` values. |
 | `false` | off | Tools stay in prompt; no token ban. Same response shaping as above: no structured `tool_calls` for explicit `none`. Tool-like text may still appear in `content`. |
 
 For multi-turn conversations where `tool_choice` changes between turns,
 consider `--no-exclude-tools-when-tool-choice-none` combined with
-`--dyn-enable-structural-tag` to keep the prompt stable and benefit from
+`--dyn-structural-tag` to keep the prompt stable and benefit from
 KV cache reuse.
 
 ## Example
 
-To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema` to the worker `args:` alongside the parser and master switch:
+To pin the scope and schema, pass a JSON value to `--dyn-structural-tag`:
 
 ```yaml
   - name: SGLangWorker
@@ -194,11 +221,8 @@ To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structu
           - Qwen/Qwen3.5-4B
           - --dyn-tool-call-parser
           - qwen3_coder
-          - --dyn-enable-structural-tag
-          - --dyn-structural-tag-scope
-          - always
-          - --dyn-structural-tag-schema
-          - strict
+          - --dyn-structural-tag
+          - '{"scope":"always","schema":"strict","allow_tool_calls_with_structured_output":true}'
 ```
 
 ## See Also

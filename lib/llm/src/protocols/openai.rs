@@ -403,16 +403,11 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
 
-    /// The worker's operator-configured structural-tag policy. Carried through so
-    /// the HTTP-layer tool-call-gate reconstruction
-    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
-    /// same structural-tag contract the real preprocessing path uses, instead of
-    /// only recognizing intrinsically-forced model families.
-    #[serde(default)]
-    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
-
-    #[serde(default)]
-    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+    /// The worker's structural-tag policy. Carried through so the HTTP-layer
+    /// tool-call-gate reconstruction consults the same configuration as the
+    /// request preprocessor. Presence enables operator-controlled tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
@@ -446,8 +441,7 @@ impl ParsingOptions {
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
-            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag: None,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),

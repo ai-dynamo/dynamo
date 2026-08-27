@@ -62,15 +62,6 @@ pub fn topology_taint(domain: &str, value: &str) -> String {
     format!("{TOPOLOGY_TAINT_PREFIX}{domain}={value}")
 }
 
-/// Master switch for structural tag guided decoding.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum StructuralTagMode {
-    #[default]
-    Off,
-    On,
-}
-
 /// Controls when structural tags are activated based on `tool_choice`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +69,32 @@ pub enum StructuralTagScope {
     #[default]
     Auto,
     Always,
+}
+
+/// Controls which layer owns a reasoning boundary before structural-tag output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralTagReasoningBoundary {
+    /// Include reasoning and its closing marker in the structural tag.
+    #[default]
+    StructuralTag,
+    /// Let the inference backend activate a suffix-only structural tag after reasoning.
+    Backend,
+}
+
+/// Structural-tag guided-decoding policy for tool-calling requests.
+///
+/// Presence enables structural tags; absence disables operator-controlled tags.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct StructuralTagConfig {
+    pub scope: StructuralTagScope,
+    pub schema: StructuralTagSchemaMode,
+    pub allow_tool_calls_with_structured_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_special_tokens: Option<bool>,
+    pub reasoning_boundary: StructuralTagReasoningBoundary,
+    pub tool_arguments_any_order: bool,
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
@@ -223,17 +240,10 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_fallback_enabled: Option<bool>,
 
-    /// Whether structural tag guided decoding is enabled for tool calls.
-    #[serde(default)]
-    pub structural_tag_mode: StructuralTagMode,
-
-    /// Controls when structural tags are activated based on tool_choice.
-    #[serde(default)]
-    pub structural_tag_scope: StructuralTagScope,
-
-    /// Controls whether tools get real or generic schemas in structural tags.
-    #[serde(default)]
-    pub structural_tag_schema: StructuralTagSchemaMode,
+    /// Structural-tag policy used by the preprocessor. Presence enables
+    /// operator-controlled structural tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<StructuralTagConfig>,
 
     /// When true, strip tool definitions from the chat template when tool_choice is "none".
     #[serde(default = "default_exclude_tools_when_tool_choice_none")]
@@ -365,9 +375,7 @@ impl Default for ModelRuntimeConfig {
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
-            structural_tag_mode: StructuralTagMode::Off,
-            structural_tag_scope: StructuralTagScope::Auto,
-            structural_tag_schema: StructuralTagSchemaMode::Auto,
+            structural_tag: None,
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
@@ -737,6 +745,27 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+
+    #[test]
+    fn structural_tag_config_round_trips_and_rejects_unknown_fields() {
+        let config = StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            allow_tool_calls_with_structured_output: true,
+            exclude_special_tokens: Some(false),
+            reasoning_boundary: StructuralTagReasoningBoundary::Backend,
+            tool_arguments_any_order: true,
+        };
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(value).unwrap(),
+            config
+        );
+        assert!(
+            serde_json::from_value::<StructuralTagConfig>(serde_json::json!({"unexpected": true}))
+                .is_err()
+        );
+    }
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the

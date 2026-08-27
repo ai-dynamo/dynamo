@@ -2453,20 +2453,31 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
 
 
-def test_runtime_config_structural_tag_options(vllm_processor_module):
-    mdc = SimpleNamespace(
-        runtime_config=lambda: {
-            "structural_tag_mode": "on",
-            "structural_tag_scope": "always",
-            "structural_tag_schema": "strict",
-        }
-    )
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        (
+            {"structural_tag": {"scope": "always", "schema": "strict"}},
+            ("on", "always", "strict"),
+        ),
+        (
+            {
+                "structural_tag_mode": "on",
+                "structural_tag_scope": "always",
+                "structural_tag_schema": "strict",
+            },
+            ("off", "auto", "auto"),
+        ),
+        ({}, ("off", "auto", "auto")),
+        (None, ("off", "auto", "auto")),
+    ],
+)
+def test_runtime_config_structural_tag_options(
+    vllm_processor_module, runtime_config, expected
+):
+    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
-    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == (
-        "on",
-        "always",
-        "strict",
-    )
+    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == expected
 
 
 # Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
