@@ -276,6 +276,24 @@ impl Selector {
     /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let reservation_id = req.reservation_id;
+        // The scheduler requires a positive `isl_tokens` value even when no
+        // token sequence is available. EPP's load-only fallback intentionally
+        // passes an empty token vector; represent that as an empty hash prompt
+        // with one minimal accounting token so it cannot trigger the scheduler
+        // invariant or manufacture a KV prefix match.
+        let prompt = if req.token_ids.is_empty() {
+            PromptRequest {
+                block_hashes: Some(Vec::new()),
+                sequence_hashes: Some(Vec::new()),
+                isl_tokens: Some(1),
+                ..Default::default()
+            }
+        } else {
+            PromptRequest {
+                token_ids: Some(req.token_ids),
+                ..Default::default()
+            }
+        };
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
@@ -283,10 +301,7 @@ impl Selector {
             // this id; feed it the EPP-minted reservation id so the booking stays
             // EPP-known (releasable even if this response is lost).
             selection_id: Some(reservation_id.clone()),
-            prompt: PromptRequest {
-                token_ids: Some(req.token_ids),
-                ..Default::default()
-            },
+            prompt,
             router_config_override: None,
             expected_output_tokens: None,
             session_id: None,
@@ -481,6 +496,12 @@ models:
         }
     }
 
+    fn load_only_select_request(reservation_id: &str) -> SelectRequest {
+        let mut request = select_request(reservation_id);
+        request.token_ids.clear();
+        request
+    }
+
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
     /// core admitted it (so the reserve paths below actually book).
     async fn selector_with_schedulable_worker() -> Selector {
@@ -609,6 +630,24 @@ worker_selection:
             .free_reservation("res-1")
             .await
             .expect("freeing an already-freed booking is an idempotent no-op");
+    }
+
+    #[tokio::test]
+    async fn load_only_empty_tokens_can_be_reserved() {
+        let selector = selector_with_schedulable_worker().await;
+
+        let response = selector
+            .select_and_reserve(load_only_select_request("load-only"))
+            .await
+            .expect("load-only fallback should still reserve a worker");
+        assert_eq!(response.worker_id, 1);
+        assert_eq!(response.overlap.longest_matched, 0);
+        assert_eq!(response.effective_prefill_tokens, 1);
+
+        selector
+            .free_reservation("load-only")
+            .await
+            .expect("load-only reservation should be releasable");
     }
 
     /// Item 5: prefill completion releases prompt load exactly once and is
