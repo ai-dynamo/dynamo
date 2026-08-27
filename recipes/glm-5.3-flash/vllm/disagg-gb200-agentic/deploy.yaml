@@ -1,17 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# GLM-5.3-Flash (GLA/KDA hybrid attention) — disaggregated 1P1D, 4x GB200 per worker (2 nodes
-# total = 8 GPUs). Agentic coding workload: 90% KV reuse, 64K ISL (SSP=57600 / ISL=6400 / OSL=400).
-# Measured on dynamo-gcp-dev-02: peak 206 tok/s aggregate (25.8 tok/s/GPU ÷ 8).
-#
-# Image: vllm/vllm-openai:glm53-flash — GLM-specific vLLM build with GLA/KDA kernels and
-# cudnn workaround (sitecustomize.py). ai-dynamo is pip-installed at pod startup.
-# See README.md for image build details and MNNVL transport upgrade path.
-#
-# KV transport: cuda_copy+tcp (^cuda_ipc excludes same-node IPC cross-node crash).
-# To use MNNVL NVLink IPC for ~10x lower TTFT, rebuild on nvcr.io/nvidia/ai-dynamo/vllm-runtime
-# base and set UCX_TLS: cuda_copy,cuda_ipc,tcp + UCX_CUDA_IPC_ENABLE_MNNVL: "y".
+# GLM-5.3-Flash — disaggregated 1P1D, 4x GB200 per worker (8 GPUs total), agentic workload (64K ISL / 400 OSL).
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:

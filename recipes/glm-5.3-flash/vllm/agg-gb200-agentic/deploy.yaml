@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# GLM-5.3-Flash (GLA/KDA hybrid attention) — aggregated, 4x GB200 (1 node), agentic workload.
-# Benchmark target: 64K context (SSP=57600 / ISL=6400 / OSL=400), 90% KV reuse.
-# Measured on dynamo-gcp-dev-02: 64 tok/s/GPU at C=4; TTFT 2.9 s at C=4.
-#
-# Image: vllm/vllm-openai:glm53-flash — GLM-specific vLLM build with GLA/KDA kernels.
-# ai-dynamo is pip-installed at pod startup. See README.md for details.
+# GLM-5.3-Flash — aggregated, 4x GB200 (TP=4), agentic workload (64K ISL / 400 OSL).
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
