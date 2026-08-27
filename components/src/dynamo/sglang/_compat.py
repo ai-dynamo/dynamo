@@ -34,12 +34,17 @@ logger = logging.getLogger(__name__)
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY = "kv_transfer_params"
 _ROUTER_HINT_EXTRA_ARGS_KEY = "router_hint"
 
+# The async_generate kwarg SGLang reads the hint from. Named for the KV-hint
+# envelope (protocol 0.1) rather than for one hint shape, since SGLang parses
+# the field as a list of independently versioned actions.
+_SGLANG_HINT_KWARG = "kv_hints"
+
 
 @lru_cache(maxsize=1)
 def _warn_router_hint_unsupported() -> None:
     logger.warning(
         "Dropping the router KV-reuse hint because SGLang Engine.async_generate "
-        "does not accept kv_router_hint; requests will recompute prefixes a peer "
+        f"does not accept {_SGLANG_HINT_KWARG}; requests will recompute prefixes a peer "
         "already holds. Upgrade SGLang to enable hint-driven KV reuse."
     )
 
@@ -192,10 +197,14 @@ def router_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any
     """Build the optional SGLang per-request router KV-reuse hint argument.
 
     The KV router attaches its hint under ``extra_args.kv_transfer_params``;
-    SGLang consumes it as the ``kv_router_hint`` async_generate kwarg, which is
-    threaded down to the KVCR HiCache storage backend so it can pull the prefix
-    from the named peer. An engine without that kwarg just recomputes the
+    SGLang consumes it as the ``kv_hints`` async_generate kwarg, which is
+    threaded down to the HiCache storage backends so one of them can pull the
+    prefix from the named peer. An engine without that kwarg just recomputes the
     prefix, so a missing hint degrades rather than failing the request.
+
+    The value is forwarded untouched: SGLang reads the KV-hint envelope and
+    picks out the actions it implements, so this adapter needs no change when
+    the router starts wrapping its hint in one.
     """
     extra_args = request.get("extra_args")
     if not isinstance(extra_args, Mapping):
@@ -209,9 +218,9 @@ def router_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any
 
     kwargs = filter_supported_async_generate_kwargs(
         engine,
-        {"kv_router_hint": dict(router_hint)},
+        {_SGLANG_HINT_KWARG: dict(router_hint)},
     )
-    if "kv_router_hint" not in kwargs:
+    if _SGLANG_HINT_KWARG not in kwargs:
         _warn_router_hint_unsupported()
     return kwargs
 

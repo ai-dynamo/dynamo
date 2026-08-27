@@ -319,14 +319,14 @@ def test_raises_when_endpoint_is_not_advertisable(overrides):
 
 
 class _Engine:
-    """Stand-in whose async_generate accepts kv_router_hint."""
+    """Stand-in whose async_generate accepts kv_hints."""
 
-    async def async_generate(self, *, kv_router_hint=None, **kwargs):
+    async def async_generate(self, *, kv_hints=None, **kwargs):
         return None
 
 
 class _LegacyEngine:
-    """An older SGLang install with no kv_router_hint kwarg."""
+    """An older SGLang install with no kv_hints kwarg."""
 
     async def async_generate(self, *, sampling_params=None):
         return None
@@ -338,7 +338,7 @@ _HINT = {"source_control_endpoint": "tcp://peer:25000", "block_hashes": [1, 2]}
 def test_router_hint_kwargs_extracts_hint_from_kv_transfer_params():
     request = {"extra_args": {"kv_transfer_params": {"router_hint": _HINT}}}
 
-    assert router_hint_kwargs(_Engine(), request) == {"kv_router_hint": _HINT}
+    assert router_hint_kwargs(_Engine(), request) == {"kv_hints": _HINT}
 
 
 @pytest.mark.parametrize(
