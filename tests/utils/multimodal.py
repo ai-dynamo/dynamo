@@ -289,7 +289,9 @@ class Base64LazyChatPayload(ChatPayload):
         temperature: float = 0.0,
         repeat_count: int = 1,
         timeout: int = 60,
-    ):
+        expected_log: Optional[list[str]] = None,
+        image_colors: tuple[str, ...] = ("green",),
+    ) -> None:
         """Stash payload params for lazy body construction, then run parent init."""
         # Initialize lazy state and the init flag BEFORE super().__init__ —
         # the parent dataclass __init__ assigns self.body = ..., which routes
@@ -298,12 +300,13 @@ class Base64LazyChatPayload(ChatPayload):
         object.__setattr__(self, "_b64_prompt", prompt)
         object.__setattr__(self, "_b64_max_tokens", max_tokens)
         object.__setattr__(self, "_b64_temperature", temperature)
+        object.__setattr__(self, "_b64_image_colors", image_colors)
         object.__setattr__(self, "_b64_storage", None)
         object.__setattr__(self, "_b64_materialized", False)
         super().__init__(
             body=None,  # placeholder; replaced when .body is first read
             expected_response=expected_response,
-            expected_log=[],
+            expected_log=list(expected_log or []),
             repeat_count=repeat_count,
             timeout=timeout,
         )
@@ -311,15 +314,22 @@ class Base64LazyChatPayload(ChatPayload):
 
     def _materialize_body(self) -> dict:
         """Read the LFS image, base64-encode it, and build the chat body dict."""
-        b64 = base64.b64encode(get_multimodal_test_image_bytes()).decode()
-        ref = chat_payload(
-            [
-                {"type": "text", "text": self._b64_prompt},
+        encoded_images = [
+            base64.b64encode(get_multimodal_test_image_bytes(color)).decode()
+            for color in self._b64_image_colors
+        ]
+        content = [
+            {"type": "text", "text": self._b64_prompt},
+            *[
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
-                },
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+                for encoded in encoded_images
             ],
+        ]
+        ref = chat_payload(
+            content,
             repeat_count=1,
             expected_response=list(self.expected_response),
             max_tokens=self._b64_max_tokens,
@@ -444,6 +454,32 @@ def make_custom_encoder_payload() -> ChatPayload:
         expected_log=["Loaded CustomEncoder", "LinearEmbedsAdapter"],
         max_tokens=32,
         temperature=0.0,
+    )
+
+
+def make_qwen35_custom_encoder_payload() -> ChatPayload:
+    """Single-image semantic check for the native Qwen3.5 custom encoder."""
+    return Base64LazyChatPayload(
+        prompt="What color is the large square? Answer with one color.",
+        expected_response=["green"],
+        expected_log=["Qwen35VisionEncoder", "Qwen3VLNativeAdapter"],
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+
+def make_qwen35_custom_encoder_multi_image_payload() -> ChatPayload:
+    """Order-sensitive two-image check for multiple placeholder expansion."""
+    return Base64LazyChatPayload(
+        prompt=(
+            "Name the square color in the first image and then the second image. "
+            "Answer exactly as: COLOR then COLOR."
+        ),
+        expected_response=["green then red"],
+        expected_log=["Qwen35VisionEncoder", "Qwen3VLNativeAdapter"],
+        max_tokens=16,
+        temperature=0.0,
+        image_colors=("green", "red"),
     )
 
 
