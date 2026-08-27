@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
+
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
 except (ImportError, OSError, NotImplementedError):
