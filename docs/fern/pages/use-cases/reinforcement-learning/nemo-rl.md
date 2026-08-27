@@ -2,100 +2,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Integrate with NeMo RL
-subtitle: Run NeMo RL's managed Dynamo vLLM backend on Slurm and verify its rollout, refit, and telemetry contracts
+subtitle: Run NeMo RL's managed Dynamo vLLM backend on Slurm
 ---
 
-**Experimental.** NeMo RL includes a merged, runnable Dynamo generation backend with a pinned dependency environment and dedicated GPU functional test. The integration is deliberately narrow: NeMo RL launches and owns a fixed Dynamo vLLM fleet inside its Ray allocation on Slurm. It does not connect to an existing Dynamo deployment, deploy Kubernetes resources, or establish compatibility with current Dynamo `main`.
+**Experimental.** NeMo RL includes a managed Dynamo generation backend with a pinned runtime and dedicated GPU functional test. NeMo RL launches and owns a fixed Dynamo vLLM fleet inside its Slurm/Ray allocation; it does not connect to an existing Dynamo deployment or require Kubernetes.
 
-Treat the pinned NeMo RL snapshot as the implementation and launch source of truth. This page explains the Dynamo boundary, preserves the exact evidence, and identifies what still prevents a Supported label.
+## Integration Shape
 
-## Reviewed Artifact and Current Gate
-
-| Item | Pin or status |
+| Dimension | Current path |
 |---|---|
-| NeMo RL snapshot reviewed | [`6ae035784fe40fd9c9e31d27fffa4a403243a0bd`](https://github.com/NVIDIA-NeMo/RL/tree/6ae035784fe40fd9c9e31d27fffa4a403243a0bd) |
-| Managed Dynamo integration merge | [PR #3391](https://github.com/NVIDIA-NeMo/RL/pull/3391), merged as [`85e02cca39968ec5997cc0833bef419895f566f7`](https://github.com/NVIDIA-NeMo/RL/commit/85e02cca39968ec5997cc0833bef419895f566f7) |
-| Dynamo runtime | `ai-dynamo[vllm]==1.3.0.post1`, corresponding to Dynamo source commit [`d14d9290c7a616db2225f459f8a66d8c1bc63fda`](https://github.com/ai-dynamo/dynamo/commit/d14d9290c7a616db2225f459f8a66d8c1bc63fda) |
-| Coupled runtime dependencies | vLLM `0.23.0`, `nvidia-nccl-cu13==2.30.7`, etcd `3.5.21`, and NATS Server `2.11.6` |
-| Required vLLM correction | Backport of vLLM PR #44814 at merge commit [`c9e5bf813530fb9ce06024e075da0f520b0718c8`](https://github.com/vllm-project/vllm/commit/c9e5bf813530fb9ce06024e075da0f520b0718c8); the NeMo RL installer applies it only after an applicability check |
-| Upstream functional evidence | `L1_Functional_Tests_Dynamo` passed on the integration PR; its two-step GRPO test checks a refit, one cache invalidation per refit, `max(train/token_mult_prob_error) < 1.05`, generation metrics, and process cleanup |
-| Larger upstream evidence | The integration PR records a four-step, three-node/eight-GPU-per-node Nemotron Nano SWE run with four refits and four cache invalidations |
-| Independent Dynamo-docs reproduction | Not recorded; required before Supported status |
+| Runtime | NeMo RL-managed Slurm allocation and Ray virtual cluster |
+| Backend | `dynamo.vllm` with BF16 generation |
+| Placement | Training and generation are not colocated |
+| Routing | Managed Dynamo frontend; the example uses KV-aware routing |
+| Policy update | NeMo RL NCCL sender to a fixed vLLM fleet |
+| Supported engine layout | Each tensor-parallel × pipeline-parallel engine group fits on one node |
 
-The NeMo RL pin matters independently of this Dynamo documentation branch. Do not replace `1.3.0.post1` with current Dynamo `main` or a newer wheel without revalidating the response fields, CLI arguments, vLLM backport, packed-transfer constants, and complete training iteration.
+The reviewed NeMo RL integration pins `ai-dynamo[vllm]==1.3.0.post1` and its compatible vLLM environment. Do not replace that runtime with current Dynamo `main` or a newer wheel without rerunning the functional and training checks.
 
-Two upstream changes can alter this page's ownership and correlation contract, but neither belongs to the reviewed snapshot:
+## Prerequisites
 
-| Tracked proposal | Current evidence and revalidation trigger |
-|---|---|
-| [NeMo RL session-ID PR #3856 at `2af6e1b`](https://github.com/NVIDIA-NeMo/RL/pull/3856) | Open draft. It proposes one stable session UUID per direct trajectory attempt, preserves NeMo Gym's session UUID, and forwards `X-Dynamo-Session-ID` only to Dynamo. Its PR record reports focused CPU tests but no functional or GPU test. If it merges, revalidate direct retries, sibling and full-trajectory retries, Gym forwarding, trace capture, and the distinction between correlation and opt-in session affinity before closing the identity gap. |
-| [NeMo RL token-ownership PR #3763 at `d3a007e`](https://github.com/NVIDIA-NeMo/RL/pull/3763) plus [NeMo Gym PR #1784 at `acc3c35c`](https://github.com/NVIDIA-NeMo/Gym/pull/1784) | Both remain open. The paired change proposes moving native Dynamo response-token validation and training-bundle construction from NeMo RL's wrapper into NeMo Gym while preserving the wire fields. If it merges, advance both coupled pins together and revalidate direct GRPO and Gym token IDs, logprobs, masks, metadata stripping, and the functional test before changing the ownership table. |
+- A Slurm site supported by NeMo RL's Ray launcher
+- A full-node allocation with at least two GPUs available to the recipe
+- A container registry and image-conversion path readable by the Slurm site
+- Model, data, results, and container paths shared where required by the allocation
 
-Do not apply either proposal to the commands below or cite it as current capability. Recheck its final merge commit, coupled dependency pin, tests, and user-visible configuration at every release audit.
+## Build the Runtime
 
-## Implemented Shape in This Integration
-
-| Dimension | Validated boundary |
-|---|---|
-| Scheduler and deployment | Slurm allocation with a Ray virtual cluster; the NeMo RL driver owns the Dynamo processes |
-| Generation backend | Managed `dynamo.vllm` only |
-| Algorithms | Direct synchronous or asynchronous GRPO, plus NeMo Gym rollouts through a token wrapper |
-| Placement | Non-colocated training and generation resources |
-| Engine parallelism | Each TP × PP engine group fits completely on one node; EP is `1` or equals TP |
-| Precision | BF16 generation and `kv_cache_dtype: auto` |
-| Routing | Managed Dynamo frontend with a configured router mode; the example selects `kv` |
-| Live update | NeMo RL collective sender to every fixed vLLM engine through NCCL |
-
-The current adapter rejects or excludes external Dynamo deployments, Kubernetes, DGD, SGLang, TensorRT-LLM, speculative decoding, quantized generation, colocated generation, custom refit transports, and engine groups that span nodes. These are unimplemented combinations, not undocumented setup choices.
-
-## Architecture and Ownership
-
-```mermaid
-flowchart LR
-    T["NeMo RL trainer and GRPO driver"] -->|"token-ID completions or Gym chat"| F["managed Dynamo frontend"]
-    F --> R["Dynamo router"]
-    R --> V1["Ray-managed dynamo.vllm engine 1"]
-    R --> V2["Ray-managed dynamo.vllm engine 2"]
-    T -->|"NCCL collective weights"| V1
-    T -->|"NCCL collective weights"| V2
-    T -->|"pause, cache clear, resume"| A["immutable worker system URLs"]
-    A --> V1
-    A --> V2
-    V1 -->|"Prometheus metrics"| M["NeMo RL metrics sampler"]
-    V2 -->|"Prometheus metrics"| M
-    E["driver-owned etcd and NATS"] --> F
-    E --> V1
-    E --> V2
-```
-
-| Concern | Owner in this integration |
-|---|---|
-| Training algorithm, prompts, rewards, advantages, optimizer steps, checkpoints, and sample acceptance | NeMo RL |
-| Service ports, namespace, etcd, NATS, frontend, and worker subprocess lifecycle | NeMo RL's `ManagedDynamoRuntime` |
-| GPU reservation and fixed worker placement | NeMo RL's Ray worker pool |
-| Request routing and cache-aware scheduling | Managed Dynamo frontend and router |
-| Token IDs, processed rollout log probabilities, and backend engine metadata | Dynamo vLLM, validated by the NeMo RL response adapters |
-| Target policy state, collective sender, update timing, and training barrier | NeMo RL |
-| Per-engine update RPCs and cache-control execution | Dynamo vLLM system servers, called through NeMo RL's immutable endpoint list |
-| Framework retry, duplicate-sample handling, and policy-lag acceptance | NeMo RL; Dynamo does not infer these semantics |
-
-Constructing the runtime is inert. NeMo RL's explicit start sequence allocates ports, starts etcd and NATS, reserves generation GPUs, launches one `dynamo.vllm` process per model-parallel group, and starts the frontend. Readiness requires the same expected instance IDs at Dynamo's generation and RL endpoints and the configured model in `/v1/models`. A listening frontend alone is not considered ready.
-
-Managed does not mean authenticated. The runtime owns these ranges inside the allocation: `1313-1399` for etcd and NATS, `3000-3999` for the frontend and token wrapper, `4000-4099` for node-local worker system servers, and `7000 + slot × 100` for node-local vLLM rendezvous. Keep the control and system ports on a trusted job network, do not expose them to rollout clients, and do not start a second etcd, NATS, frontend, or worker fleet for this mode.
-
-## Build the Pinned Runtime
-
-Clone and check out the reviewed NeMo RL snapshot:
+Clone the reviewed NeMo RL source and build its opt-in Dynamo layer:
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/RL.git
 git -C RL checkout 6ae035784fe40fd9c9e31d27fffa4a403243a0bd
 cd RL
-```
 
-Build the opt-in Dynamo image layer from that checkout:
-
-```bash
 export IMAGE=registry.example.com/nemo-rl:dynamo-6ae03578
 docker buildx build \
   --build-context nemo-rl=. \
@@ -105,24 +45,13 @@ docker buildx build \
   --tag "$IMAGE" \
   --push \
   .
-docker buildx imagetools inspect "$IMAGE"
 ```
 
-Replace `registry.example.com` with a writable registry that the Slurm site's image-conversion path can read. [`--push`](https://docs.docker.com/reference/cli/docker/buildx/build/#push) is part of the reproducible build boundary: a non-Docker Buildx driver can otherwise finish without exporting an image that the conversion step can consume. If the site explicitly converts from a local Docker daemon, use [`--load`](https://docs.docker.com/reference/cli/docker/buildx/build/#load) instead of `--push`. Record the resolved image digest either way; a mutable tag alone is not a run pin.
+Replace the registry with one available to your site and record the resolved image digest. Convert the image to the format expected by the Slurm environment using the site's normal NeMo RL workflow.
 
-The standard image remains unchanged when `BUILD_DYNAMO` is not set. The opt-in layer creates an isolated Python 3.12 environment at `/opt/dynamo_venv`; it does not replace NeMo RL's normal actor environments. The normal NeMo RL vLLM environment and the managed Dynamo vLLM environment intentionally use different vLLM releases while sharing the exact NCCL release.
+## Configure the Backend
 
-For a local source environment instead of the image layer:
-
-```bash
-bash docker/dynamo/install.sh
-```
-
-Set `NEMO_RL_DYNAMO_VENV_DIR` before running the installer to choose a location other than `venvs/dynamo`. Do not manually omit the vLLM patch step: the installer fails if the patch neither applies cleanly nor is already recorded in `VLLM_BACKPORTS`.
-
-## Configure the Managed Backend
-
-Start from the pinned [`grpo_math_1B_dynamo.yaml`](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/examples/configs/grpo_math_1B_dynamo.yaml). Its essential boundary is:
+Start from the pinned `examples/configs/grpo_math_1B_dynamo.yaml`. Its essential generation settings are:
 
 ```yaml
 policy:
@@ -145,21 +74,17 @@ policy:
         num_nodes: 1
 ```
 
-NeMo RL divides vLLM settings into translated, moved, unsupported, managed, and inapplicable classes. A setting inherited from another backend can therefore warn, fail with the Dynamo replacement, or be intentionally ignored. Treat those messages as configuration evidence; do not assume every `vllm_cfg` field reaches `dynamo.vllm`.
+NeMo RL validates which vLLM options are translated, managed, unsupported, or ignored by the Dynamo backend. Treat configuration warnings and errors as contract checks rather than assuming every normal vLLM field reaches `dynamo.vllm`.
 
-The managed frontend supports `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, and `device-aware-weighted` values through `dynamo_cfg.frontend_args.router_mode`. Start with a round-robin control before claiming a benefit from `kv`. The current merged adapter does not forward a NeMo RL rollout session ID to Dynamo, so do not claim session-affinity behavior or a framework-to-request identity join from this configuration. The tracked session-ID proposal above does not change this boundary until its final coupled implementation merges and passes the required validation.
+## Run the Training Smoke
 
-## Run the Two-GPU Training Smoke
-
-Convert the image to the format required by the Slurm site, then submit the pinned two-step recipe from the NeMo RL repository root:
+Set the site-specific allocation values and submit the pinned two-step recipe from the NeMo RL repository root:
 
 ```bash
 export CONTAINER=/shared/images/nemo-rl-dynamo-6ae03578.sqsh
 export MOUNTS="$PWD:$PWD"
 export SLURM_ACCOUNT=your-account
 export SLURM_PARTITION=your-partition
-# Use the partition's full physical GPU count per node. This example assumes
-# an eight-GPU node; use 2 only on a partition whose nodes have two GPUs.
 export GPUS_PER_NODE=8
 export BASE_LOG_DIR="$PWD/results/dynamo-smoke/logs"
 printf -v COMMAND '%q ' \
@@ -176,92 +101,53 @@ sbatch \
   ray.sub
 ```
 
-The recipe assigns one GPU to training and one to a TP1 Dynamo vLLM engine; additional GPUs in a full-node allocation remain unused. The pinned `ray.sub` launches with `--exclusive`, assumes a homogeneous partition, and rejects `GPUS_PER_NODE` when it differs from the partition's detected full-node GRES count. Therefore `GPUS_PER_NODE=2` and `--gres=gpu:2` are valid only on a two-GPU node, not as a partial request on a larger node. On a Slurm site without GRES, omit the `sbatch --gres` line but still set `GPUS_PER_NODE` to the physical count that Ray should advertise. Two training steps are intended to cover pre-update generation, training, a policy refit, cache invalidation, and post-update generation. Preserve the Ray driver log, trainer metrics, Dynamo frontend log, every worker log, image digest, GPU inventory, model revision, and final process inventory.
+Set `GPUS_PER_NODE` to the physical GPU count expected by the partition. The launcher requests an exclusive full node even though the small recipe uses one training GPU and one generation GPU.
 
-The upstream functional check uses the same recipe with `Qwen/Qwen3-0.6B` model and tokenizer overrides. It is the authoritative assertion source for the current integration:
+The upstream functional entry point is:
 
 ```bash
 uv run --no-sync bash tests/functional/grpo_dynamo.sh
 ```
 
-Run that command only inside the purpose-built Dynamo image on an allocation that exposes at least the two GPUs requested by the pinned configuration and satisfies the full-node `ray.sub` rule above. A successful command proves the assertions in the pinned script; it does not prove a different model, topology, Dynamo release, or Slurm environment.
+Run it only in the purpose-built Dynamo image on a compatible allocation. A passing result covers the pinned configuration, not other models, topologies, Dynamo versions, or Slurm environments.
 
-## Verify the Token Contract
+## Verify the Run
 
-Direct GRPO generation sends one token-ID prompt at a time to `/v1/completions`, asks for `nvext.completion_token_ids`, and consumes `choice.logprobs.token_logprobs`. The adapter rejects a response when the token IDs are missing, the logprob vector is missing, lengths differ, or a log probability is not numeric.
+### Token Correctness
 
-NeMo Gym takes a different path. Its local wrapper renders the policy tokenizer's chat template, sends the exact result in `nvext.token_data`, requests `nvext.engine_data`, and maps these engine fields back to Gym message metadata:
+Direct GRPO sends token-ID prompts to `/v1/completions` and consumes returned completion token IDs and log probabilities. NeMo Gym uses a local chat wrapper with `nvext.token_data`. Validate both paths separately when your workload uses both; missing token IDs, missing log probabilities, or mismatched lengths must fail the sample.
 
-- `prompt_token_ids`
-- `completion_token_ids`
-- `completion_logprobs`
+### Policy Refit
 
-The merged wrapper supports `n=1` and rejects streaming. It preserves caller `nvext.extra_fields`, strips Gym-only message token metadata before forwarding, and can replace a rendered assistant prefix with caller-provided token IDs. Validate direct GRPO and Gym as different request contracts.
+NeMo RL fixes worker membership, creates a trainer-plus-inference NCCL world, drains generation, applies the target checkpoint to each worker, clears stale cache state, and resumes the fleet. Verify that every worker completes the refit and cache barrier before post-update generation begins. A per-worker success is not a fleet transaction, and this path does not replace failed workers in place.
 
-The direct completion client retries transport failures, JSON-decode failures, HTTP `408`, `429`, and `5xx` responses up to three attempts. That retry does not create a framework-wide idempotency or deduplication guarantee. Record attempt counts and decide how NeMo RL should treat a completion that may have executed before its response was lost.
+### Routing and Telemetry
 
-## Verify the Policy Refit
+Compare the example's `kv` router with `round-robin` while holding prompts, concurrency, engine count, update cadence, and cache-reset behavior fixed. NeMo RL can poll per-worker Dynamo and vLLM metrics, but the current integration does not provide a lossless rollout-to-Dynamo request identity. Keep trainer step, rollout, attempt, target policy, and accepted sample identity in NeMo RL records.
 
-The merged update path is NeMo RL collective transfer, not ModelExpress and not the generic shared-disk route:
+## Troubleshoot
 
-1. NeMo RL fixes worker membership and records each engine's immutable `system_url` before collective setup.
-2. The trainer and inference ranks join one NCCL world. For engine world size `E`, worker `i` begins at `training_world_size + i × E`.
-3. The sender and vLLM receivers use the same peer protocol and fixed packing geometry: two 1-GiB buffers.
-4. Generation is drained before refit.
-5. Each worker executes vLLM's `start_weight_update`, `update_weights`, and `finish_weight_update` transaction through its direct system server.
-6. The framework invalidates caches separately by sending `pause_generation` with `mode: wait` and `clear_cache: true`, then resumes every worker that paused successfully.
-7. New generation is allowed only after the framework's update and cache barriers complete.
+| Symptom | Check first |
+|---|---|
+| Frontend never becomes ready | etcd/NATS health, worker exits, expected registration count, and `/v1/models` |
+| Training cannot score a completion | Returned token IDs, logprob lengths, tokenizer identity, and response adapter |
+| Refit hangs or fails | Fixed worker list, NCCL world geometry, vLLM patch, and first failed worker result |
+| Post-update output is inconsistent | Refit count, cache invalidation, pause/resume failures, and post-update sample |
+| Worker exits | Ray actor, GPU reservation, process group, and frontend registration |
+| Shutdown leaves processes | Managed teardown, ports, temporary directories, and next-job startup |
 
-Before every update, the channel revalidates process liveness, GPU reservations, instance identity, and endpoint membership. A dead, replaced, or reordered worker fails the update instead of silently joining with initial weights. This protects the fixed-fleet assumption; it is not elastic recovery.
+Keep new rollout admission gated after any refit or cache-control failure. See [Update Rollout Weights](weight-updates.md#nemo-rl-managed-update) and [Observe and Simulate RL Rollouts](operations-and-simulation.md) for the shared lifecycle and telemetry boundaries.
 
-The transaction returns per-worker futures, and cache invalidation aggregates pause and resume failures. The integration does not expose a fleet-wide policy-version transaction or automatic rollback. Your validation record must show that every intended worker reached the target state, that a failed update keeps new rollout admission gated, and that a post-update request used the refreshed fleet.
+## Current Limitations
 
-See [Update rollout weights](weight-updates.md#nemo-rl-managed-nccl-refit) for the cross-framework lifecycle and failure requirements.
+- Managed Slurm/Ray and vLLM only; no external Dynamo fleet, Kubernetes deployment, SGLang, or TensorRT-LLM path
+- Fixed, non-colocated fleet; no elastic worker replacement during the update lifecycle
+- No general policy-version transaction or automatic rollback
+- No current lossless framework rollout-to-Dynamo request join
+- Supported status requires an independent reproduction with token correctness, refit, post-update generation, and failure recovery
 
-## Route and Observe the Run
-
-The example enables `router_mode: kv` and `router_reset_states: true`. For a routing experiment, compare it with `round-robin` while holding model, prompts, sample grouping, seed, concurrency, output limits, engine count, parallelism, update cadence, and cache reset behavior fixed. Use [Route RL rollouts](routing.md) for the required workload, topology, metric, and causal-evidence record.
-
-When `enable_vllm_metrics_logger` is true, NeMo RL polls each worker's direct `/metrics` endpoint and records per-worker timelines under `generation_metrics/*`. Curated defaults include Dynamo inflight requests, queue depth, request counts, time to first response, GPU cache usage, and corresponding vLLM running, waiting, token, cache, and inter-token-latency metrics. The sampler also creates NeMo RL aliases such as `inflight_batch_sizes`, `num_pending_samples`, `kv_cache_usage_perc`, and `generation_tokens` when the source metric exists.
-
-These metrics establish serving behavior and worker ordinal, not rollout identity or policy version. The current merged adapter does not forward a stable rollout/session ID into Dynamo request records. Preserve a NeMo RL-side ledger for trainer step, rollout identity, request attempt, target policy, and accepted sample, and treat the live framework-to-Dynamo trace join as an open graduation gate. See [Observe, debug, replay, and simulate RL rollouts](operations-and-simulation.md).
-
-## Recover from Common Failures
-
-| Symptom | Likely boundary | Check first | Required recovery proof |
-|---|---|---|---|
-| Frontend never becomes ready | Managed service startup or registration | etcd and NATS health, worker process exit, generation/RL registration counts, `/v1/models` | A clean relaunch reaches the exact fixed membership and expected model. |
-| Completion returns text but training cannot score it | Token response adaptation | named completion token IDs, token/logprob vector lengths, parser-v2 environment, tokenizer identity | One deterministic sample reaches the trainer with exact aligned engine tokens and log probabilities. |
-| Refit hangs or fails | NCCL geometry, worker liveness, or per-engine update RPC | training and inference world sizes, fixed endpoint list, vLLM patch marker, first failed future | New rollouts stay gated until every intended engine reaches one verified target or the run is terminated. |
-| Post-update outputs are inconsistent | Partial update or stale cache | refit count, one cache invalidation per refit, pause/resume errors, post-update sample | A fresh run or controlled recovery excludes stale workers and passes post-update generation. |
-| A worker exits | Fixed-fleet lifecycle | Ray actor, reservation actor, process group, frontend registration | The job fails the affected operation; current integration does not replace the worker in place. |
-| Shutdown leaves ports or GPU processes | Managed teardown | frontend, worker process groups, NATS, etcd, temporary directories | The next clean job starts without stale processes or port conflicts. |
-
-The current design explicitly leaves fault tolerance and multi-controller ownership as follow-up work. A retrying generation client and idempotent shutdown do not turn this fixed fleet into an elastic service.
-
-## Graduation Checklist
-
-This page can move from Experimental to Supported only after a maintained release and an independently reviewed run preserve:
-
-- exact NeMo RL, Dynamo, vLLM, NCCL, etcd, NATS, patch, image, CUDA/driver, model, dataset, hardware, and topology pins
-- successful pinned functional test and one complete training iteration with pre-update and post-update generation
-- exact token-ID and logprob alignment for every published direct-GRPO or NeMo-Gym request path
-- successful all-worker refit, cache invalidation, and post-update verification
-- a forced request failure, worker failure, refit failure, and cache-control failure with documented admission and recovery behavior
-- a stable framework rollout/session identity forwarded into Dynamo or another measured, lossless framework-to-request join
-- matched routing evidence for every routing recommendation
-- named NeMo RL, Dynamo RL, and independent reproduction owners
-
-Until those gates pass, the merged adapter and upstream GPU evidence justify a runnable Experimental guide, not a general compatibility promise.
-
-## Upstream References
+## Upstream Resources
 
 - [Managed Dynamo generation guide](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/docs/guides/dynamo-generation.md)
-- [Managed Dynamo design](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/docs/design-docs/dynamo-integration.md)
 - [Two-GPU configuration](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/examples/configs/grpo_math_1B_dynamo.yaml)
 - [Dedicated functional test](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/tests/functional/grpo_dynamo.sh)
-- [Validated configuration boundary](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/config.py)
-- [Managed runtime lifecycle](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/managed_runtime.py)
-- [Token wrapper contract](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/token_wrapper.py)
-- [NCCL refit and cache-control path](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/refit.py)
-- [Worker telemetry sampler](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/metrics.py)

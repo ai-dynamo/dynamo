@@ -716,21 +716,17 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/reinforcement-learning/overview.md
-          - page: RL Integration and Compatibility Reference
-            path: pages/use-cases/reinforcement-learning/integration-reference.md
           - page: Integrate with verl
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: Integrate with NeMo RL
             path: pages/use-cases/reinforcement-learning/nemo-rl.md
-          - page: SLIME Integration Status
-            path: pages/use-cases/reinforcement-learning/slime.md
-          - page: Prime-RL Integration Status
-            path: pages/use-cases/reinforcement-learning/prime-rl.md
+          - page: RL Integration Reference
+            path: pages/use-cases/reinforcement-learning/integration-reference.md
           - page: Route RL Rollouts
             path: pages/use-cases/reinforcement-learning/routing.md
           - page: Update Rollout Weights
             path: pages/use-cases/reinforcement-learning/weight-updates.md
-          - page: Observe, Debug, Replay, and Simulate RL Rollouts
+          - page: Observe and Simulate RL Rollouts
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: RL Implementation Guide
             path: pages/use-cases/reinforcement-learning/implementation-guide.md

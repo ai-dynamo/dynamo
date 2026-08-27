@@ -2,84 +2,46 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Route RL Rollouts
-subtitle: Match routing, cache reuse, and queueing to rollout workload shape
+subtitle: Match routing and cache reuse to the shape of the rollout workload
 ---
 
-**Experimental.** RL rollout routing uses the same Dynamo router as other inference workloads, but the optimization objective and failure boundary are different. Measure serving efficiency together with framework-owned sample freshness and acceptance. Dynamo routes requests; it does not decide whether a trajectory is on-policy, accepted, or fresh enough for training.
+Dynamo uses the same router for RL and other inference workloads. What changes is the objective: measure serving efficiency together with framework-owned sample freshness and acceptance. Dynamo routes requests; it does not decide whether a trajectory is on-policy or useful for training.
 
-This guide explains how to choose and validate an RL routing strategy. Use the [router configuration and tuning reference](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md) for every flag, default, and cost-model detail.
+Use the [router configuration reference](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md) for complete flag definitions and defaults.
 
-## Start with the Workload, Not the Policy Name
+## Choose a Starting Strategy
 
-Record the following before selecting a router mode:
+| Rollout shape | Start with | Watch for |
+|---|---|---|
+| Mostly independent prompts | Round-robin, then load-aware routing | Mixed output lengths can still create queue imbalance. |
+| Many samples share a prompt or rubric | KV-aware routing | A cache-rich worker can become overloaded. |
+| Sibling samples arrive before KV events | KV-aware routing with a short predicted-placement window | A long prediction window can preserve stale placement. |
+| Multi-turn trajectories | KV-aware routing; add session affinity only when strict stickiness is required | Affinity can pin work to an overloaded or replaced worker. |
+| Bursty mixed-length prompts | KV-aware or load-aware routing with queueing | Queueing can increase rollout tails or trigger framework timeouts. |
 
-- prompt and generated token length distributions, including tails
-- samples per prompt and how quickly sibling requests arrive
-- repeated system, rubric, few-shot, environment, and conversation prefixes
-- single-turn versus multi-turn sessions and child-agent fan-out
-- rollout-phase concurrency and its burst/idle schedule around trainer updates
-- worker count, tensor/data parallel layout, aggregated versus P/D topology, and cache capacity
-- whether requests can be delayed, rejected, retried, or canceled without violating framework semantics
-- policy update frequency and how the framework gates requests around updates
-- the serving metric and the framework goodput metric used to judge success
+Start with one baseline and one mechanism justified by the workload. Do not enable KV routing, queueing, affinity, priority, offload, and custom policies in the same first experiment.
 
-A router cannot recover prefix reuse that the request representation hides. Confirm that equivalent prefixes produce compatible token IDs, cache salts, model identity, LoRA identity, and block boundaries before tuning overlap credit.
+## Establish the Baseline
 
-## Choose an Initial Strategy
-
-| Rollout shape | Start with | Why | Main risk to watch |
-|---|---|---|---|
-| Independent prompts with little prefix reuse | Round-robin baseline, then `--load-aware` | Establishes distribution cost before adding cache signals; load-aware mode uses active load without assuming reuse | Queue imbalance from mixed output lengths |
-| Many samples per prompt or shared rubric/system prefix | `--router-mode kv` | Credits workers that already hold the prompt prefix | One cache-rich busy worker can win too often |
-| Sibling samples arrive in one burst before KV events are published | KV routing plus a short `--router-predicted-ttl-secs` | Records recent routing decisions in a short-lived side index so siblings can reuse the first placement | Too-long prediction TTL can preserve stale assumptions |
-| Multi-turn agent trajectory | KV routing first; add session affinity only when strict worker stickiness is required | KV routing naturally follows cache state, while affinity pins a session independent of the full cost comparison | Affinity can overload one worker or outlive useful cache state |
-| Mixed short and long prompts with queue pressure | KV or load-aware routing plus a queue threshold; compare `fcfs` and `wspt` | Defers dispatch until capacity is available and chooses tail- versus mean-oriented ordering | Queueing can increase end-to-end rollout latency or trigger framework timeouts |
-| P/D serving across topology domains | KV routing with validated topology-aware transfer | Avoids slow cross-domain KV movement after prefill selection | Backend metadata and topology constraints must be present and current |
-| Different service classes or rollout phases share a frontend | Policy-class queues only after a simple baseline | Isolates queue limits, ordering, and service shares | Misclassification, high-cardinality classes, or starvation from an unvalidated policy file |
-
-The first comparison should normally be a simple distribution baseline versus one mechanism justified by the workload. Adding KV routing, queueing, priority, affinity, offload, custom policies, and autoscaling at the same time makes a causal result impossible.
-
-## Establish a Round-Robin Baseline
-
-Run the frontend with the same model, workers, and request schedule that the variant will use:
+Use round-robin to measure the cost of simple distribution:
 
 ```bash
 python -m dynamo.frontend --router-mode round-robin
 ```
 
-Record at least completed requests, generated tokens, request errors, time to first token, inter-token latency, end-to-end request duration, worker utilization, queue depth, and framework accepted/fresh sample counts. Clear or warm caches consistently between repetitions and state which condition you used.
+Record the effective worker set, request errors, generated tokens, time to first token, inter-token latency, end-to-end latency, queue depth, and framework accepted or fresh sample counts. Use the same cold- or warm-cache procedure for every comparison.
 
-Round-robin is a comparison baseline, not a recommendation for every RL workload. It can duplicate a shared prefix across workers, but it also reveals whether a more complex strategy is paying for itself.
+Round-robin is a control, not a universal recommendation. Verify that every intended worker is eligible and receives traffic before trusting the baseline.
 
-Current `main` includes the shared routing-policy refactor from [Dynamo PR #12880](https://github.com/ai-dynamo/dynamo/pull/12880), whose focused checks distributed 1,024 round-robin selections exactly across both four- and 256-worker sets. [Open issue #8551](https://github.com/ai-dynamo/dynamo/issues/8551) nevertheless records real SGLang deployments on older Dynamo `0.9.1` and `1.0.0` packages concentrating traffic on only a subset of registered backends; maintainers noted #12880 as the likely fix, but the field issue remains open pending validation. Before accepting a round-robin baseline on the pinned stack, compare discovered versus eligible worker identity, prove every intended worker receives traffic, and invalidate the run if the effective set is narrower.
+## Evaluate Prefix Reuse
 
-## Map the Router Setting to the Framework
-
-The framework must configure the same frontend that actually receives rollout traffic. Do not launch a second frontend only to copy a generic CLI example.
-
-When evaluating against current Dynamo `main`, also verify the effective worker-set configuration rather than trusting the frontend command alone. A worker set that advertises router settings replaces the frontend defaults instead of merging with them, and every replica in that set must advertise the same values or Dynamo admits none of them. Restate every required nondefault worker setting and confirm the resolved `Activating prefill router` log for each routing hop. See [configuration scope and precedence](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configuration-scope-and-precedence). Framework snapshots pinned to an older Dynamo release must follow and verify that release's precedence rules separately.
-
-| Framework path | Router setting | Important boundary |
-|---|---|---|
-| verl native Dynamo variant | `actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode` with `thunderagent.enabled=false` | The recipe-owned frontend translates this value into Dynamo routing. When ThunderAgent is enabled, it owns the internal scheduling decision and the same comparison no longer isolates native Dynamo routing. |
-| NeMo RL managed backend | `policy.generation.dynamo_cfg.frontend_args.router_mode` | NeMo RL launches its own frontend and forwards the validated value. The pinned smoke uses `kv`; create a `round-robin` control by changing this field, not by starting an external frontend. |
-| SLIME and Prime-RL status paths | Integration-specific prototype configuration | Their accepted upstream routing contracts are unresolved. Do not publish a launch or performance recommendation from the status pages. |
-
-NeMo RL also exposes `router_reset_states` under the same `frontend_args` object. Treat it as startup state handling, not policy-update cache invalidation: NeMo RL separately pauses and clears every worker after a refit. The current merged NeMo RL adapter does not forward rollout session IDs, so session-affinity experiments require adapter work and fresh validation rather than only setting a frontend TTL.
-
-## Route for Prefix Reuse
-
-Enable KV-aware routing on the frontend:
+Enable KV-aware routing when prompts share token prefixes:
 
 ```bash
 python -m dynamo.frontend --router-mode kv
 ```
 
-KV routing combines prompt-side load with cache-overlap credit. The selected backend and deployment must publish the KV events or other cache state required by the chosen configuration; otherwise the router can only use the signals it actually observes.
-
-### Parallel samples and best-of-N groups
-
-RL workloads often issue several samples with the same prompt almost simultaneously. The first routing decision can occur before the engine publishes a “block stored” event, causing every sibling to appear to have zero overlap. A short prediction window closes that race:
+For parallel samples that arrive before the first worker publishes KV events, add a short predicted-placement window:
 
 ```bash
 python -m dynamo.frontend \
@@ -87,36 +49,28 @@ python -m dynamo.frontend \
   --router-predicted-ttl-secs 5
 ```
 
-Validate the value against the observed gap between routing and usable KV events. Compare per-worker prefix placement, cache hits/queries, request queueing, and generated response lengths. Do not keep the example value solely because it is documented; it is a starting point for bursty sibling arrivals.
+Treat `5` seconds as a starting value. Tune it against the observed gap between routing and usable KV events. Confirm that equivalent prompts use the same model, tokenizer, cache salt, LoRA identity, and token sequence; the router cannot recover reuse hidden by the request representation.
 
-### Balance cache reuse against current load
-
-`--router-kv-overlap-score-credit` controls how much device-local prefix overlap reduces prompt-side cost. Higher credit favors reuse; lower credit distributes work more evenly. `--router-kv-overlap-score-credit-decay` reduces the device credit when a cache-rich worker has more active prefill work than the least-loaded candidate.
-
-Change one knob at a time. A useful test sequence is:
-
-1. Default KV configuration.
-2. Default overlap credit with nonzero load decay.
-3. A lower overlap credit when inter-token latency or worker imbalance remains high.
-4. `--load-aware` to measure the value of load modeling without cache reuse.
-
-Keep host, disk, and shared-cache credit separate from device-local credit. A hit in a lower tier still has transfer/materialization cost and should not automatically receive full device-cache credit.
-
-## Use Load-Aware Routing Without Prefix Reuse
-
-When prompts are mostly unique but worker backlog differs, use the load-aware preset:
+If one cache-rich worker receives too much work, compare overlap-credit decay or a lower overlap credit while holding the request schedule fixed. Use `--load-aware` as the control that accounts for active load without crediting prefix reuse:
 
 ```bash
 python -m dynamo.frontend --load-aware
 ```
 
-This selects the KV scheduler's active load model while setting prefix-overlap credit to zero and disabling KV reuse assumptions. It is a cleaner comparison than enabling KV mode and leaving stale or incomplete cache signals in the cost model.
+## Map the Setting to the Framework
 
-Measure prompt-side active load and decode work separately. A worker can look inexpensive at dispatch while carrying long decode requests that later dominate inter-token latency; use the router's active-request and load metrics to explain the result rather than relying on aggregate utilization.
+Configure the frontend that actually receives rollout traffic; do not launch a second frontend just to copy a generic command.
 
-## Decide Whether to Use Session Affinity
+| Framework | Setting | Boundary |
+|---|---|---|
+| verl native-router path | `actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode` | Set `thunderagent.enabled=false`; ThunderAgent owns a different scheduling path. |
+| NeMo RL managed backend | `policy.generation.dynamo_cfg.frontend_args.router_mode` | NeMo RL launches and owns the frontend. Change this field for the baseline. |
 
-Sending `X-Dynamo-Session-ID` identifies a session but does not enable affinity. Enable affinity explicitly with a bounded TTL:
+When workers advertise router configuration, verify the effective worker-set values in the frontend logs. Worker settings can replace frontend defaults rather than merge with them.
+
+## Use Affinity and Queueing Deliberately
+
+`X-Dynamo-Session-ID` identifies a session but does not enable affinity. Enable affinity only when related turns must remain on one worker:
 
 ```bash
 python -m dynamo.frontend \
@@ -124,99 +78,36 @@ python -m dynamo.frontend \
   --router-session-affinity-ttl-secs 300
 ```
 
-Use affinity when the application requires related turns to return to one worker even when another candidate has a lower current cost. Prefer ordinary KV routing when cache state itself is enough: it can follow reused prefixes without pinning a long-running session to an overloaded or replaced worker.
+Prefer ordinary KV-aware routing when cache state is enough. Affinity does not create a backend conversation, enforce a policy version, or update workers when a session ends.
 
-For strict affinity across multiple frontends, ensure ingress consistently routes a session to one frontend or validate replicated affinity behavior. Session affinity does not create a backend conversation, enforce a policy version, or issue lifecycle RPCs when the session ends.
+Add router queueing only after measuring dispatch and engine queue pressure. Compare first-come, first-served (`fcfs`) for tail behavior with weighted shortest processing time (`wspt`) for mixed prompt lengths. Use bounded service classes; never encode rollout IDs, users, or policy versions as queue classes or Prometheus labels.
 
-## Add Queueing and Priority Carefully
+## Measure Useful Work
 
-`--router-queue-threshold` makes the router defer dispatch while every eligible worker exceeds the configured fraction of prefill-token capacity. Queueing is disabled when no threshold is set.
+Keep model, hardware, prompts, arrival schedule, concurrency, output limits, worker count, parallelism, cache state, and update cadence fixed. Run at least three measured repetitions after warm-up.
 
-```bash
-python -m dynamo.frontend \
-  --router-mode kv \
-  --router-queue-threshold 0.8 \
-  --router-queue-policy fcfs
-```
+Report:
 
-Use `fcfs` when tail time to first token is the primary concern. Compare `wspt` when minimizing average time to first token for mixed prompt lengths matters more. SGLang deployments require special care because the capacity value used by the threshold can differ from the intended prefill window unless `--max-prefill-tokens` is set; follow the backend caveat in the router tuning reference.
+- request success, generated tokens, queue time, latency, and per-worker load
+- KV-cache hits and queries when cache reuse is the mechanism
+- completed and accepted trajectory groups, not only individual requests
+- stale or rejected samples and rollout-phase time
+- the causal explanation for the result
 
-`nvext.agent_hints.strict_priority` selects an absolute router queue tier and `nvext.agent_hints.priority` adjusts ordering within the active policy. These hints affect requests only when they enter the router queue. They do not set backend engine priority, change trainer importance, or guarantee admission.
+Many RL workloads wait for every required sample in a group. Measure the time from first dispatch to the final accepted attempt and identify the slowest request's queue, prefill, and decode contribution. A faster mean request that does not improve group completion or useful training output is not a win.
 
-Do not encode rollout IDs, users, or policy versions as queue classes or Prometheus labels. Keep classes bounded to a small operational taxonomy such as validation, rollout, and evaluation only when the policy is explicitly designed and measured.
+The router does not filter workers by RL policy version. Gate synchronous updates in the framework, or enforce bounded staleness and sample acceptance there.
 
-## Keep Routing Separate from Policy Freshness
+## Diagnose Common Problems
 
-The current typed Dynamo request extension does not contain a stable RL policy version, target trainer step, or maximum lag field. The router therefore cannot guarantee that a request is served by the newest acceptable policy.
-
-Use one of these framework-owned patterns:
-
-| Training/update model | Required framework behavior |
+| Symptom | Inspect first |
 |---|---|
-| Synchronous stop-the-world | Gate all new rollout requests, update and verify the entire target worker set, then reopen generation. |
-| Rolling replacement | Route new requests only after the deployment mechanism exposes a fully initialized target pool; keep old and new pools distinguishable outside the current router contract. |
-| Bounded-staleness asynchronous RL | Maintain policy identity and sample acceptance in the framework, prove which worker version served each sample, and reject or down-weight samples beyond the configured lag. Do not claim Dynamo enforces the bound. |
+| Low cache reuse for repeated prompts | Tokenized prefix identity, block size, cache events, model/LoRA identity, and worker placement |
+| One worker is cache-rich but overloaded | Overlap credit, active prefill/decode load, decay, and affinity |
+| Sibling requests scatter | Request burst timing versus KV-event publication; predicted-placement TTL |
+| Queue grows while workers appear idle | Eligible worker set, queue threshold, capacity input, and backend prefill limits |
+| Priority has no effect | Whether requests enter the router queue under controlled pressure |
+| Throughput rises but accepted sample rate falls | Framework update barrier, served policy identity, and acceptance logic |
+| Cache reuse drops after policy update | Required cache invalidation and the post-update warm-up window |
 
-Routing measurements should report fresh completed trajectories or accepted samples in addition to raw tokens/second. A policy that raises serving throughput while increasing stale or rejected samples can reduce useful training goodput.
-
-## Measure the Group Tail, Not Only the Average Request
-
-Many RL workloads admit or score a group only after all required samples reach an acceptable terminal state. One long decode, overloaded worker, failed stream, or resampled attempt can therefore gate the entire group even when mean request latency improves. Dynamo does not know which requests form a training group, which attempts replace failures, or when the framework considers the group complete.
-
-Keep group identity and attempt disposition in the framework ledger, then report at least:
-
-- time from first group dispatch to the final accepted terminal attempt
-- completed and accepted groups per unit time, together with individual request throughput
-- within-group latency spread and the slowest request's queue, prefill, and decode contribution
-- groups delayed or invalidated by cancellation, retry, worker loss, or a policy-update barrier
-- whether a routing change improved the group tail by reducing repeated prefill, queue imbalance, or another observed mechanism
-
-For matched routing runs, preserve the same group composition, arrival pattern, retry policy, output limits, and acceptance rule. Do not replace a failed attempt in only one variant or compare mean request latency when the framework waits on group completion.
-
-## Design a Credible Routing Experiment
-
-Use a matched experiment record:
-
-| Dimension | Record |
-|---|---|
-| Software | Dynamo commit/release, framework commit, backend version, image digest, CUDA/driver |
-| Model | model/tokenizer revision, precision, dense/MoE, parallel layout |
-| Hardware | GPU type/count, node topology, network, CPU/memory constraints |
-| Workload | prompt/output distributions, samples per prompt, concurrency, schedule, sessions, cache-sharing structure |
-| Baseline | router mode and every nondefault routing/queue/cache option |
-| Variant | exactly one intended mechanism change where possible |
-| Cache state | cold/warm procedure, update/reset schedule, offload tiers |
-| Repetitions | warm-up, measured runs, variance or spread |
-| Serving outcomes | request success, tokens, TTFT, ITL, end-to-end latency, queue time, KV hits/queries, per-worker load |
-| RL outcomes | completed fresh trajectories, accepted samples, policy lag/rejections, rollout phase time, full-step time |
-
-When publishing a result, state the causal mechanism. For example: “the variant reduced repeated prefill work because sibling requests reused a predicted prefix placement,” not “KV routing was X% faster” without cache and workload evidence.
-
-## Record Evidence for a Routing Claim
-
-Before the experiment, record immutable pins, named owners, the headline metric's numerator, denominator, and freshness rule, complete workload shape, fixed controls, and the full router configuration for the baseline and variant. Preserve at least three measured repetitions per variant plus immutable links for the raw requests, configuration, and computed metrics. Label a routing claim as a live measurement only after those artifacts demonstrate the declared mechanism.
-
-Do not publish a recommendation based on a single configuration, fewer than three repetitions, a missing or nonnumeric headline metric, multiple or absent baselines, unmatched controls, missing mechanism evidence, or simulation alone. When a routing result supports a broader RL deployment recommendation, review it together with the claimed weight paths and the [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report) so the conclusion refers to one pinned program rather than unrelated demonstrations.
-
-## Diagnose Common Routing Failures
-
-| Symptom | Inspect | Likely experiment |
-|---|---|---|
-| Low cache hit rate despite repeated prompts | tokenized prefix identity, cache salt, block size, KV events, model/LoRA identity | Compare trace hashes and per-worker cache events for two supposedly identical prompts. |
-| One worker is cache-rich but overloaded | overlap credit, active prefill/decode load, decay, affinity | Add overlap-credit decay or lower credit in a matched run. |
-| Sibling requests scatter before cache events | request arrival burst versus event delay | Add a short predicted TTL and verify placement. |
-| Queue grows while workers appear idle | capacity denominator, worker eligibility, SGLang max prefill tokens, policy class | Remove queueing for a control run, then validate capacity inputs. |
-| Priority has no effect | whether requests enter the router queue | Force controlled queue pressure and inspect per-tier queue metrics. |
-| Multi-turn sessions overload one worker | affinity TTL and session distribution | Compare affinity with ordinary KV routing and shorten/disable affinity. |
-| Throughput rises but accepted sample rate falls | policy-update barrier and framework freshness ledger | Correlate request time with target/served policy identity outside the current typed router schema. |
-| Cache hit rate collapses after update | cache invalidation and warm-up | Verify the expected reset, then separate warm-up from steady-state measurements. |
-
-## Observe the Router
-
-The frontend exposes router Prometheus metrics on `/metrics`, including request metrics, routing overhead, and per-worker gauges. Use the [metrics catalog](../../reference/observability/metrics-catalog.mdx#router-metrics) for exact names and the [operations guide](operations-and-simulation.md#diagnose-the-live-run) for an RL correlation workflow.
-
-Use traces for high-cardinality request/session/rollout joins and metrics for bounded aggregate dimensions. A routing dashboard should show request rate, queue depth/time, cache hits and queries, active prompt/decode work, routing overhead, per-worker balance, errors/cancellations, and the framework's accepted/fresh goodput on the same time axis.
-
-## Validation Gate
-
-A routing recommendation is publication-ready only when the workload, topology, baseline, variant, repetitions, serving metrics, RL goodput metric, and causal mechanism are recorded and independently reviewed. Simulated results must be labeled directional and calibrated against a live run before they become performance claims. See [Replay and simulate the request plane](operations-and-simulation.md#replay-and-simulate-the-request-plane) for the fidelity boundary.
+Use the [metrics catalog](../../reference/observability/metrics-catalog.mdx#router-metrics) for exact metric names and [Observe and Simulate RL Rollouts](operations-and-simulation.md) to correlate framework, router, and worker behavior.
