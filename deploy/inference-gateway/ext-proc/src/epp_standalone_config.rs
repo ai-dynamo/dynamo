@@ -83,23 +83,31 @@ impl std::str::FromStr for TokenizerProtocol {
     }
 }
 
+/// Complete replica synchronization configuration. Its presence enables
+/// replica-sync; its fields are validated together when parsing the environment.
+#[derive(Debug, Clone, Validate)]
+pub struct PeerReplicationConfig {
+    /// EPP Service used for peer discovery and state synchronization.
+    pub service_name: String,
+    /// Local EPP Pod IP from `POD_IP` (downward API), used to exclude self.
+    pub pod_ip: String,
+    /// ZMQ listener and peer dial port. Every EPP selected by `service_name`
+    /// must use the same port.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
+    ))]
+    pub sync_port: u16,
+}
+
 #[derive(Debug, Clone, Validate)]
 pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization.
-    pub peer_service: Option<String>,
-    /// Local EPP Pod IP (from `POD_IP`, downward API). Required when peer
-    /// discovery is enabled so this replica can exclude itself from peers.
-    pub pod_ip: Option<String>,
-    /// ZMQ listener and peer dial port for replica synchronization. Every EPP
-    /// selected by `peer_service` must use the same port.
-    #[validate(range(
-        min = 1,
-        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
-    ))]
-    pub replica_sync_port: u16,
+    /// Enables replica synchronization when set.
+    #[validate(nested)]
+    pub peer_replication: Option<PeerReplicationConfig>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
@@ -161,14 +169,30 @@ impl EppStandaloneConfig {
         let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
+        let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
+        let pod_ip = trimmed(get("POD_IP"));
+        let sync_port = opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
+            .unwrap_or(DEFAULT_REPLICA_SYNC_PORT);
+        let peer_replication = peer_service
+            .map(|service_name| -> anyhow::Result<_> {
+                let pod_ip = pod_ip.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                         inject POD_IP via the downward API (fieldRef status.podIP)"
+                    )
+                })?;
+                Ok(PeerReplicationConfig {
+                    service_name,
+                    pod_ip,
+                    sync_port,
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
-            peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
-            pod_ip: trimmed(get("POD_IP")),
-            replica_sync_port: opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
-                .unwrap_or(DEFAULT_REPLICA_SYNC_PORT),
+            peer_replication,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
@@ -197,12 +221,6 @@ impl EppStandaloneConfig {
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
-        if self.peer_service.is_some() && self.pod_ip.is_none() {
-            anyhow::bail!(
-                "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
-                 inject POD_IP via the downward API (fieldRef status.podIP)"
-            );
-        }
         Ok(())
     }
 }
@@ -310,9 +328,7 @@ mod tests {
         .expect("config should parse");
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
-        assert!(cfg.peer_service.is_none());
-        assert!(cfg.pod_ip.is_none());
-        assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
+        assert!(cfg.peer_replication.is_none());
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
@@ -415,9 +431,13 @@ mod tests {
             match expected {
                 Ok((port, selector_threads)) => {
                     let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
-                    assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"), "{name}");
-                    assert_eq!(cfg.pod_ip.as_deref(), Some("10.0.0.10"), "{name}");
-                    assert_eq!(cfg.replica_sync_port, port, "{name}");
+                    let replication = cfg
+                        .peer_replication
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{name}: replication should be enabled"));
+                    assert_eq!(replication.service_name, "dynamo-epp", "{name}");
+                    assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
+                    assert_eq!(replication.sync_port, port, "{name}");
                     assert_eq!(cfg.selector_threads, selector_threads, "{name}");
                 }
                 Err(expected_error) => {

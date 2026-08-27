@@ -30,7 +30,9 @@ pub mod vllm_render_client;
 
 pub use epp::Router;
 pub use epp_router::EppRouter;
-pub use epp_standalone_config::{EppMode, EppStandaloneConfig, TokenizerProtocol};
+pub use epp_standalone_config::{
+    EppMode, EppStandaloneConfig, PeerReplicationConfig, TokenizerProtocol,
+};
 pub use inference_pool::PoolState;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};
