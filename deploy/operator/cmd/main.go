@@ -156,9 +156,8 @@ func main() {
 	}
 }
 
-// run carries operator startup and reports failure by returning an error rather than by
-// calling os.Exit, so that deferred cleanup registered during startup — in particular
-// release of the namespace scope marker lease — runs on every controlled failure path.
+// run carries operator startup and returns errors instead of calling os.Exit, so deferred
+// cleanup — notably release of the namespace scope marker lease — runs on failure paths.
 //
 //nolint:gocyclo
 func run() error {

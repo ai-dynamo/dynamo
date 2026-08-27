@@ -39,9 +39,8 @@ var errStartupFailed = errors.New("startup failed")
 // immediately, so the value only has to be large enough not to fire spuriously.
 const guardCleanupTimeout = 2 * time.Second
 
-// newGuardTestLeaseManager builds a LeaseManager over a fake API server, which NewLeaseManager
-// cannot do because it dials a *rest.Config. The failure budget is fixed at two renewals so a
-// test that rejects renewals reaches the unrecoverable path within two renewal intervals.
+// newGuardTestLeaseManager builds a LeaseManager over a fake API server, which
+// NewLeaseManager cannot do because it dials a *rest.Config.
 func newGuardTestLeaseManager(client kubernetes.Interface, leaseDuration, renewInterval time.Duration) *LeaseManager {
 	return &LeaseManager{
 		client:          client,
@@ -79,10 +78,8 @@ func rejectLeaseUpdates(client *fake.Clientset) {
 	})
 }
 
-// TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns is the regression test for startup
-// failures downstream of lease acquisition. Before Guard, those paths called os.Exit(1), which
-// skips deferred lease release and leaves the namespace excluded from cluster-wide
-// reconciliation until the lease TTL expires.
+// TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns covers startup failures downstream of
+// lease acquisition: the lease must be gone before the failure reaches the exit boundary.
 func TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -129,9 +126,8 @@ func TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns(t *testing.T) {
 	}
 }
 
-// TestLeaseManager_Guard_ReleasesLeaseWhenRenewalIsUnrecoverable is the regression test for the
-// lease manager's own fatal path. The goroutine that watched Errors() used to call os.Exit(1),
-// stranding the very lease whose renewal had just failed.
+// TestLeaseManager_Guard_ReleasesLeaseWhenRenewalIsUnrecoverable covers the lease manager's
+// own fatal path, which stranded the very lease whose renewal had failed.
 func TestLeaseManager_Guard_ReleasesLeaseWhenRenewalIsUnrecoverable(t *testing.T) {
 	t.Log("Given a lease manager whose renewals always fail")
 	client := fake.NewSimpleClientset()
@@ -165,18 +161,12 @@ func TestLeaseManager_Guard_ReleasesLeaseWhenRenewalIsUnrecoverable(t *testing.T
 	}
 }
 
-// guardUnwindDeadline is the ceiling this test allows for Guard to return once the lease has
-// gone unrecoverable: the production unwind budget floor plus the cleanup timeout, plus slack
-// for a loaded machine. It is a literal rather than a call to unwindBudget so that the test
-// still compiles — and still fails — against a Guard that has no bound on the unwind at all.
+// guardUnwindDeadline is the ceiling for Guard to return once the lease is unrecoverable.
+// A literal, so the test still fails against a Guard that never bounds the unwind.
 const guardUnwindDeadline = 2*time.Second + guardCleanupTimeout
 
-// TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable pins the split-brain bound. The
-// renewal loop declares the lease unrecoverable one renewInterval before it can expire, and that
-// interval is all the operator has to shut down in. In production work ends in mgr.Start, whose
-// graceful shutdown drains for as long as controller-runtime lets it, so an unbounded wait here
-// lets the restricted operator keep acting on the namespace after the cluster-wide operator has
-// taken it back.
+// TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable pins the split-brain bound:
+// an unbounded wait lets the restricted operator outlive the lease it can no longer renew.
 func TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable(t *testing.T) {
 	t.Log("Given a lease manager whose renewals always fail")
 	client := fake.NewSimpleClientset()
@@ -218,9 +208,8 @@ func TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable(t *testing.T)
 	}
 }
 
-// TestLeaseManager_Guard_ReturnsWorkErrorWhenLeaseIsHealthy is a negative control for the error
-// assertion above: with renewals succeeding there is no lease failure to report, so the
-// "unrecoverable" wrapper must not appear.
+// TestLeaseManager_Guard_ReturnsWorkErrorWhenLeaseIsHealthy is a negative control: with
+// renewals succeeding, the "unrecoverable" wrapper must not appear.
 func TestLeaseManager_Guard_ReturnsWorkErrorWhenLeaseIsHealthy(t *testing.T) {
 	t.Log("Given a lease manager whose renewals succeed")
 	client := fake.NewSimpleClientset()
@@ -240,9 +229,8 @@ func TestLeaseManager_Guard_ReturnsWorkErrorWhenLeaseIsHealthy(t *testing.T) {
 	}
 }
 
-// TestLeaseManager_Guard_PrefersGenuineWorkErrorOverLeaseFailure is a negative control for the
-// preference rule: the lease failure wins only over the cancellation Guard itself caused, never
-// over a real diagnosis from work.
+// TestLeaseManager_Guard_PrefersGenuineWorkErrorOverLeaseFailure is a negative control: the
+// lease failure wins only over the cancellation Guard caused, never over work's diagnosis.
 func TestLeaseManager_Guard_PrefersGenuineWorkErrorOverLeaseFailure(t *testing.T) {
 	t.Log("Given a lease manager whose renewals always fail")
 	client := fake.NewSimpleClientset()
@@ -266,9 +254,8 @@ func TestLeaseManager_Guard_PrefersGenuineWorkErrorOverLeaseFailure(t *testing.T
 	}
 }
 
-// TestLeaseManager_Guard_DoesNotRunWorkWhenLeaseCannotStart is a negative control for the
-// deletion assertions: they mean something only because Guard reached the point of holding the
-// lease. When acquisition itself fails there is nothing to release and nothing to run.
+// TestLeaseManager_Guard_DoesNotRunWorkWhenLeaseCannotStart is a negative control: when
+// acquisition fails there is nothing to release and nothing to run.
 func TestLeaseManager_Guard_DoesNotRunWorkWhenLeaseCannotStart(t *testing.T) {
 	t.Log("Given an API server that refuses to create the marker lease")
 	client := fake.NewSimpleClientset()
