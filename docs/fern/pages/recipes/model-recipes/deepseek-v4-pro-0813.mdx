@@ -221,13 +221,17 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 
 <div data-sku="h200" data-variant="agg">
 
-Not yet validated on the shared trace. A synthetic 64K / 400 / 90%-reuse profile measures 25.0 system tok/s/GPU at user output 53.0 tok/s (concurrency 4, single run).
+| Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
+| --- | --- | --- | --- |
+| 6 | 25.24 | 43.5 | 330 ms |
+
+Partial run (93% of the trace) and **below the 50 tok/s/user gate**. The trace's unique KV working set is ~57.5M tokens against ~3.12M of H200 GPU KV — 18.4x oversubscribed — so measured prompt-cache read is 42.5% versus the ~94% the trace could offer. On a synthetic 64K / 400 profile whose working set fits in GPU KV, the same recipe reaches 25.0 tok/s/GPU at user output 53.0 (concurrency 4) and clears the gate.
 
 </div>
 
 <div data-sku="h200" data-variant="disagg">
 
-Not yet validated on the shared trace. A synthetic 64K / 400 / 90%-reuse profile puts the SLA crossing near concurrency 6, at 19.9 system tok/s/GPU (single run).
+Not yet run on the shared trace. On a synthetic 64K / 400 / 90%-reuse profile the SLA crossing sits near concurrency 6, at 18.3–19.9 system tok/s/GPU and user output ~50 tok/s. Expect the same KV-oversubscription penalty as the aggregated H200 target when run on the trace.
 
 </div>
 
@@ -237,7 +241,7 @@ Not yet validated on the shared trace. A synthetic 64K / 400 / 90%-reuse profile
 | --- | --- | --- | --- | --- |
 | `agg-gb200-agentic` | 8x GB200 | Aggregated | 1,048,576 | Trace-validated |
 | `disagg-gb200-agentic` | 16x GB200 | 1P1D | 1,048,576 | Trace-validated |
-| `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Synthetic only |
+| `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Trace (partial) + synthetic |
 | `disagg-h200-agentic` | 16x H200 | 1P1D | 1,048,576 | Synthetic only |
 
 ## Notes

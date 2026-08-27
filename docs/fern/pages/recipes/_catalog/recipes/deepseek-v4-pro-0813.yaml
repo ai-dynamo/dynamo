@@ -88,8 +88,8 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Not yet validated on the shared trace. Synthetic 64K/400/90%-reuse measurement gives c4 = 25.0 system tok/s/GPU @ user 53.0 tok/s (N=1).
+    available: true
+    summary: 'Trace replay c6 (93% partial) = 25.24 system tok/s/GPU @ user 43.5 tok/s -- below the 50 tok/s gate. Synthetic 64K/400/90%-reuse c4 = 25.0 @ user 53.0 clears it. The trace working set (~57.5M tokens) is 18.4x H200 GPU KV, so measured prompt-cache read is 42.5% vs the trace''s ~94% potential.'
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -115,12 +115,13 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Not yet validated on the shared trace. Synthetic measurement puts the SLA crossing near c6 (19.9 system tok/s/GPU @ user 50), N=1.
+    available: true
+    summary: 'Synthetic 64K/400/90%-reuse: SLA crossing near c6 = 18.25-19.9 system tok/s/GPU @ user ~50. Not yet run on the shared trace; expect the same KV-oversubscription penalty as the aggregated H200 target.'
 related_benchmarks: []
 maintainer: null
 gaps:
-- 'H200 targets are not yet validated on the shared Mooncake trace; the published H200 figures come from a synthetic 64K/400/90%-reuse profile and are N=1 against a measured 17% run-to-run variance.'
-- 'A partial H200 aggregated trace run (93% of the 15% subset, c6) measured user output 43.5 tok/s -- below the 50 tok/s SLA -- with prompt-cache read of only 42.5% against the trace''s ~94% shared-block potential. The reuse shortfall is not yet explained and should be understood before comparing H200 and GB200 trace numbers.'
+- 'The H200 trace figure is a 93% partial run (3,287 of 3,541 requests) and misses the 50 tok/s/user gate at c6. The cause is KV capacity, not configuration: the trace working set is ~57.5M tokens against ~3.12M of H200 GPU KV (18.4x oversubscribed), so measured prompt-cache read is 42.5% versus the ~94% shared-block potential in the trace. These recipes deliberately use no CPU KV offload tier.'
+- 'H200 disaggregated has synthetic numbers only; it has not been run on the shared trace.'
+- 'All H200 figures are N=1 against a measured 17% run-to-run variance.'
 - 'This is a different checkpoint from deepseek-ai/DeepSeek-V4-Pro (see the deepseek-v4-pro recipe); the two must not share a model cache.'
 - maintainer unknown

@@ -98,11 +98,38 @@ offloading, see [perf/README.md](perf/README.md) for details.
 
 ## Performance results
 
-| Workload | Recipe | SKU | User output tok/s (P50) | TTFT P50 (ms) |
-| -------- | ------ | --- | ----------------------- | ------------- |
-| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 55.906 | 383.3 |
-| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 50.042 | 2370.3 |
+Joint gate: user output >= 50 tok/s **and** TTFT p50 < 5 s.
 
-Both GB200 rows were measured on the same 3,541-row 15% agentic trace, each at its own
-iso-SLA operating point against the joint gate of >= 50 tok/s/user and TTFT p50 < 5 s.
+### Mooncake trace replay (3,541-row 15% agentic trace, `ignore_eos`)
+
+| Workload | Recipe | SKU | Concurrency | System tok/s/GPU | User output tok/s (P50) | TTFT P50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 64.88 | 55.9 | 383 ms |
+| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 12 | 50.31 | 50.0 | 2,370 ms |
+| Agentic 64K | `agg-h200-agentic` | 8x H200 | 6 | 25.24 | 43.5 | 330 ms |
+
+Each GB200 row was measured at its own iso-SLA operating point. The H200 row is a
+**partial run (93% of the trace, 3,287 valid requests)** and **does not meet the 50 tok/s/user
+gate** at concurrency 6.
+
+**Why H200 falls short on this trace.** The trace's unique KV working set is ~57.5M tokens
+(113,113 distinct blocks of ~509 tokens). H200 GPU KV holds ~3.12M tokens, so the working set is
+**18.4x oversubscribed** and only ~5% of shared blocks stay resident. Measured prompt-cache read
+is **42.5%**, against the ~94% shared-block potential in the trace file. Most of the reuse the
+trace is designed to exercise cannot be realised on this SKU without a CPU KV offload tier, which
+these recipes deliberately do not use.
+
+### Synthetic profile (fixed 64K ISL / 400 OSL, ~90% prefix reuse)
+
+| Recipe | SKU | Concurrency | System tok/s/GPU | User output tok/s (P50) | TTFT P50 | Gate |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agg-h200-agentic` | 8x H200 | 2 | 16.00 | 64.05 | 600 ms | pass |
+| `agg-h200-agentic` | 8x H200 | 4 | 25.00 | 52.98 | 650 ms | pass |
+| `disagg-h200-agentic` | 16x H200 | 4 | 14.00 | 57.53 | 910 ms | pass |
+| `disagg-h200-agentic` | 16x H200 | 6 | 18.25 | 50.59 | 940 ms | pass |
+
+The synthetic profile holds its whole working set in GPU KV, so it realises the intended ~90%
+reuse and clears the gate. It is not comparable to the trace rows above: fixed OSL 400 versus a
+trace mean of 2,442, and no eviction pressure. All figures are N=1 against a measured 17%
+run-to-run variance.
 
