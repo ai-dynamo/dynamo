@@ -191,12 +191,8 @@ where
             };
             let is_error = encoded.is_error();
             saw_error_response |= is_error;
-            // Counted here rather than at the engine adapter because this pump
-            // is below every backend — Rust engines, pull-mode and push-mode
-            // Python handlers all reach it — and it is where the counter this
-            // increments actually lives. `generate` covers the setup failure
-            // instead, and is emitted from a path that runs only when this one
-            // never does, so the two cannot double-count.
+            // Counted here rather than at the engine adapter because every
+            // backend reaches this pump; `generate` covers setup failure.
             if encoded.kind == ResponseFrameKind::EngineError && !counted_engine_stream_error {
                 counted_engine_stream_error = true;
                 if let Some(m) = self.metrics() {

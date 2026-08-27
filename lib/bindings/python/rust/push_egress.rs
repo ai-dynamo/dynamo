@@ -143,9 +143,8 @@ impl PushFrame {
         let codec = RequestPlanePayloadCodec::configured();
         // An error frame is a string and three `None`s; neither codec can fail
         // on it. Degrade to an empty frame rather than panic if one somehow does.
-        // The degraded frame is an engine error: the classification the real
-        // frame would have carried was lost with it, and silently excusing it
-        // would hide the encode failure from the error counter as well.
+        // The degraded frame counts as an engine error: the classification the
+        // real frame would have carried was lost with it.
         let (bytes, kind) = python_payload::encode_annotated_response(codec, annotated)
             .unwrap_or_else(|error| {
                 tracing::error!(%error, "push egress: failed to encode terminal error frame");
