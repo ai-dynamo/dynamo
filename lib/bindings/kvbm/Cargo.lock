@@ -1751,6 +1751,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "libc",
+ "libloading 0.8.9",
  "lru",
  "minijinja",
  "modelexpress-client",

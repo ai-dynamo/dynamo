@@ -8,13 +8,14 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, metrics::RouterRequestMetrics,
+        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
+        metrics::RouterRequestMetrics,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -164,6 +165,7 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    load_context: Arc<RoutingLoadContext>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -182,14 +184,22 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_coordinator(router, chooser, affinity))
+            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+                router,
+                chooser,
+                load_context,
+                affinity,
+            ))
         }
         _ => {
             let lora = model_manager
                 .lora_filter_for(endpoint_id)
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
             Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
-                router, affinity, lora,
+                router,
+                load_context,
+                affinity,
+                lora,
             )?)
         }
     };
@@ -202,7 +212,7 @@ pub async fn build_preprocessed_routing(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    load_context: Arc<RoutingLoadContext>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
@@ -213,7 +223,7 @@ pub async fn build_preprocessed_routing(
         client,
         model_manager,
         router_mode,
-        worker_monitor,
+        load_context,
         chooser,
         prefill_chooser,
         encoder_chooser,
@@ -228,7 +238,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    load_context: Arc<RoutingLoadContext>,
     chooser: Option<Arc<KvRouter<Sel>>>,
     prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
@@ -270,13 +280,10 @@ where
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
-
     let router = LlmPushRouter::from_client_with_state(
         router_client,
         router_mode,
-        monitor_arc,
+        None,
         embedding_cache_indexer,
         cache_key_extractor,
     )
@@ -306,6 +313,7 @@ where
         &model_manager,
         &endpoint_id,
         affinity,
+        load_context,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

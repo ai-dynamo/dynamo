@@ -9,8 +9,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC = 128 * 1024 * 1024
 DYN_MM_VIDEO_NUM_FRAMES = "DYN_MM_VIDEO_NUM_FRAMES"
 DEFAULT_FRONTEND_VIDEO_NUM_FRAMES = 32
+
+
+def build_frontend_image_decoder_options(
+    *,
+    max_alloc: int = DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC,
+) -> dict[str, Any]:
+    return {"limits": {"max_alloc": max_alloc}}
 
 
 def _video_num_frames() -> int:

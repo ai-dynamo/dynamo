@@ -66,6 +66,7 @@ pub mod prefill_router;
 pub mod publisher;
 mod route_lookup;
 mod routing_host;
+pub(crate) mod routing_load;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
@@ -77,6 +78,9 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_load::{
+    ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
+};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
@@ -616,6 +620,50 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let source = RouterLoadSource::from_worker_role_or_metric(worker_role, metric_worker_type);
+        let parent_token = endpoint.component().drt().child_token();
+        let scheduler_load = SchedulerLoadSender::disabled(source, parent_token.child_token());
+
+        Self::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            scheduler_load,
+            parent_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_with_worker_role_and_scheduler_load(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        scheduler_load: SchedulerLoadSender,
+        parent_token: CancellationToken,
+    ) -> Result<Self> {
         let required_worker_inputs = selector.required_worker_inputs();
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
@@ -639,8 +687,8 @@ where
                     | KvEventSourceRequirement::Unknown
             );
         let component = endpoint.component();
-        // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
-        let cancellation_token = component.drt().child_token();
+        // All chooser tasks are children of the routing load context owner.
+        let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
@@ -726,6 +774,7 @@ where
             Some(available_worker_provider),
             model_name.as_deref(),
             metric_worker_type,
+            scheduler_load,
             cancellation_token.child_token(),
         )
         .await?;

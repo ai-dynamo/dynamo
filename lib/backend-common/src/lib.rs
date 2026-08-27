@@ -43,6 +43,7 @@ pub use engine::{
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
+pub use rl::RlWorkerMetadata;
 pub use run::{run, run_raw};
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

@@ -191,23 +191,23 @@ vllm-rs serve "$MODEL" \
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_DECODE1_GRPC_PORT}" \
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE1_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_DECODE2_GRPC_PORT}" \
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE2_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_PREFILL1_GRPC_PORT}" \
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL1_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT4:-8084}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_PREFILL2_GRPC_PORT}" \
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL2_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 
