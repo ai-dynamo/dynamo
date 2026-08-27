@@ -2907,7 +2907,19 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
 
         // Register an instance so we can create the router (needs transport setup).
         endpoint.register_endpoint_instance().await.unwrap();
@@ -2949,7 +2961,19 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();
         let real_id = instances[0].id();
