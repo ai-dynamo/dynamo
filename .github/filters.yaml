@@ -92,11 +92,12 @@ examples:
   - 'scripts/kustomize-matrix.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
-  # Recipe catalog sources and the tests/docs/ suite that validates them. Those
-  # tests read only the catalog and its validator, so recipe-check is the job
-  # that can run them -- see the matching negation under `core`. The catalog is
-  # listed so a change to the data runs the tests that check it.
+  # Recipe and feature-benchmark catalog sources, plus the tests/docs/ suite
+  # that validates them. Those tests read only the catalogs and their validator,
+  # so recipe-check is the job that can run them -- see the matching negation
+  # under `core`. Both catalogs are listed so data changes run their tests.
   - 'docs/fern/pages/recipes/_catalog/**'
+  - 'docs/fern/pages/recipes/feature-benchmarks/_catalog/**'
   - 'tests/docs/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
