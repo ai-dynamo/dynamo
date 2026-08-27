@@ -73,6 +73,29 @@ spec:
               operator: Equal
               value: arm64
               effect: NoSchedule
+          # GB200 MNNVL: every rank of a TP group must land in ONE NVLink72
+          # clique. deep_gemm_mega_moe allocates a symmetric-memory buffer via
+          # torch.distributed._symmetric_memory.rendezvous, which cannot import
+          # memory across cliques -- it fails at engine init with
+          #   "CUDA driver error: invalid resource handle. Rank 0 failed to
+          #    import memory from rank 4, NCCL_MNNVL_CLIQUE_ID: unset"
+          # Without this the scheduler may split a TP group across cliques and
+          # startup fails non-deterministically.
+          # `required` (not `preferred`): cross-clique is a hard failure, so
+          # staying Pending under capacity pressure is the correct outcome.
+          # matchLabelKeys scopes the rule to THIS TP group's own scaling-group
+          # value, which is operator-generated and cannot be hardcoded.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: nvidia.com/gpu.clique
+                  labelSelector:
+                    matchExpressions:
+                      - key: app.kubernetes.io/managed-by
+                        operator: In
+                        values: [grove-operator]
+                  matchLabelKeys:
+                    - grove.io/podcliquescalinggroup
           resourceClaims:
             - name: compute-domain-channel
               resourceClaimTemplateName: dsv4-pro-0813-agg-gb200-agentic-compute-domain-channel
