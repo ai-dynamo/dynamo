@@ -842,13 +842,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return ctrl.Result{}, err
 	}
 
-	// Validate the identity of a same-name DGD before this request adopts it.
-	//
-	// The generated-spec annotation is both the gate and the evidence: while it is
-	// non-empty this request has not yet confirmed a DGD of its own, and it still
-	// records what it meant to create. Once clearGeneratedSpecAnnotation empties it
-	// the DGD is confirmed ours and later spec drift is the DGD controller's business,
-	// not a collision.
+	// A non-empty generated-spec annotation means this request has not yet confirmed
+	// a DGD of its own, so the same-name DGD must pass the identity check first.
 	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
 		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
 		if err != nil {
@@ -1091,20 +1086,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// dgdCollisionRequeueDelay paces the retry used when the API server rejects a DGD
-// create as already existing but the cached read cannot see that object yet. The
-// foreign object carries no DGDR labels, so the DGD watch will never deliver it and
-// an explicit requeue is the only way back into the identity check.
+// dgdCollisionRequeueDelay retries the identity check after an AlreadyExists create
+// the cache cannot yet see. A foreign DGD carries no labels, so no watch delivers it.
 const dgdCollisionRequeueDelay = 5 * time.Second
 
-// generatedDGDFromAnnotation returns the DynamoGraphDeployment this request intends
-// to create, decoded from the generated-spec annotation and carrying the request's
-// runtime version override. The caller must establish that the annotation is present
-// and non-empty; an absent or unparseable annotation is returned as an error rather
-// than an empty deployment, because the two are not interchangeable here.
-//
-// The returned deployment is freshly allocated, so applying the runtime version
-// override mutates only that copy. dgdr is read but never modified.
+// generatedDGDFromAnnotation decodes the deployment this request intends to create
+// from the generated-spec annotation, applying the runtime version override to a fresh copy.
 func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
@@ -1122,24 +1109,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
 	return generatedDGD, nil
 }
 
-// resolveGeneratedDGDIdentity reports whether liveDGD is the deployment dgdr created
-// from generatedDGD, and when it is not, a short phrase naming the half of the
-// identity contract that failed. All three arguments must be non-nil. The function is
-// read-only: it deep-copies before normalizing and never touches the live object.
-//
-// The contract has two halves and both are required.
-//
-// The tracking labels answer "who created this": they are written only by createDGD
-// and they name the exact request. Alone they are not enough, because a DGD left
-// behind by a deleted-and-recreated DGDR of the same name in the same namespace
-// carries labels that still match while its spec describes an unrelated deployment.
-//
-// The generated spec answers "is this the deployment we asked for": it distinguishes
-// a genuine crash-loop recovery, where the live spec is what this request generated,
-// from an unrelated workload that merely happens to occupy the name. Alone it is not
-// enough either, because two requests can legitimately generate identical specs, and
-// adopting on spec equality alone would let one request take over another's
-// deployment.
+// resolveGeneratedDGDIdentity reports whether liveDGD is the deployment dgdr created,
+// and names the failing half of the contract when it is not. Both halves are required.
 func resolveGeneratedDGDIdentity(
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1164,37 +1135,8 @@ func resolveGeneratedDGDIdentity(
 	return true, "", nil
 }
 
-// generatedSpecDivergence returns the first field path at which liveDGD fails to
-// carry what generatedDGD asks for, or the empty string when the live spec
-// satisfies the generated one. Both arguments must be non-nil and neither is
-// modified. An error means the comparison could not be made at all and the caller
-// must retry rather than conclude anything about identity.
-//
-// This is deliberately a subset test and not an equality test. Equality is wrong
-// here because the two sides have been through different numbers of defaulting
-// layers, and there is no way to run the missing ones in process:
-//
-//   - liveDGD was persisted through the API server, so it carries the DGD CRD's
-//     structural defaults — a container port's protocol, multinode.nodeCount,
-//     restart.strategy.type, and every non-zero default under experimental.
-//   - liveDGD also passed the DGD mutating webhook, so it carries defaulted
-//     replicas, Grove minimum-available replicas, and provider-override targets.
-//   - generatedDGD was decoded from an annotation this controller wrote from
-//     profiler output. It has been through neither layer.
-//
-// An earlier revision normalized both sides through the mutating webhook's own
-// defaulting. That closed the webhook gap and left the structural one wide open:
-// any request whose generated spec touched a defaulted subtree — reachable today
-// through spec.overrides.dgd — was failed terminally for colliding with the
-// deployment it had just created itself.
-//
-// Subset comparison closes both gaps at once and stays closed as either layer
-// grows, because defaulting only ever fills a field that was left unset. A live
-// value that contradicts a generated one, or a generated field the live object
-// does not have at all, is still a divergence and still rejected. What it
-// deliberately does not detect is a live object that is a strict superset of the
-// generated spec; the tracking-label half of the contract is what establishes
-// ownership, and this half only has to confirm the deployment we asked for.
+// generatedSpecDivergence returns the first field path where liveDGD fails to carry what
+// generatedDGD asks for. Subset, not equality: only liveDGD has been through defaulting.
 func generatedSpecDivergence(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) (string, error) {
 	liveSpec, err := specAsJSONValue(liveDGD)
 	if err != nil {
@@ -1208,12 +1150,8 @@ func generatedSpecDivergence(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraph
 	return jsonSubsetDivergence(generatedSpec, liveSpec, "spec"), nil
 }
 
-// specAsJSONValue renders dgd's spec as the generic JSON value the API server
-// would have seen, so that a field the Go type serializes with omitempty is
-// absent here exactly when it was absent on the wire. That correspondence is what
-// makes the subset test line up with structural defaulting, which fills a field
-// only when the submitted document omits it. dgd must not be nil and is not
-// modified.
+// specAsJSONValue renders dgd's spec as the generic JSON value the API server saw,
+// so an omitempty field is absent here exactly when it was absent on the wire.
 func specAsJSONValue(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (any, error) {
 	encoded, err := json.Marshal(dgd.Spec)
 	if err != nil {
@@ -1226,15 +1164,8 @@ func specAsJSONValue(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (any, error) {
 	return decoded, nil
 }
 
-// jsonSubsetDivergence returns the path of the first place where have does not
-// carry what want specifies, or the empty string when it does. Both arguments are
-// generic JSON values as produced by specAsJSONValue. path names the position
-// being compared and appears in the operator-facing collision message, so keys are
-// walked in sorted order to keep the reported path stable across runs.
-//
-// Lists compare element-wise and require equal length. Structural defaulting can
-// fill fields inside an existing element but cannot add or drop elements, so a
-// length difference is a real divergence rather than a defaulting artifact.
+// jsonSubsetDivergence returns the path of the first place where have does not carry
+// what want specifies. Keys walk in sorted order so the reported path is stable.
 func jsonSubsetDivergence(want, have any, path string) string {
 	switch wantValue := want.(type) {
 	case map[string]any:
@@ -1276,10 +1207,8 @@ func jsonSubsetDivergence(want, have any, path string) string {
 	}
 }
 
-// failDeploymentNameCollision drives the request terminal because the DGD name it
-// generated is held by a deployment it does not own. The status-only write preserves
-// the generated-spec annotation, so the evidence of what this request intended to
-// create survives for an operator to inspect.
+// failDeploymentNameCollision drives the request terminal. The status-only write preserves
+// the generated-spec annotation, so what this request meant to create stays inspectable.
 func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,

@@ -1529,13 +1529,8 @@ spec:
 
 			t.Log("Given a generated spec that declares a container port and omits its protocol")
 
-			// A container port without an explicit protocol is the cheapest reachable
-			// instance of a whole class: the DGD CRD carries structural defaults that
-			// the API server applies on write, and the generated-spec annotation never
-			// passes through an API server. `protocol: TCP` stands in here for
-			// multinode.nodeCount, restart.strategy.type, and the experimental
-			// subtrees, all of which default the same way. spec.overrides.dgd lets a
-			// user put any of them into a generated spec.
+			// A port protocol is the cheapest reachable instance of the whole class: the
+			// CRD's structural defaults apply on write, and the annotation bypasses them.
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdrName,
