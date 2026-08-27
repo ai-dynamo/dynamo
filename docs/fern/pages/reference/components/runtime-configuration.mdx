@@ -104,10 +104,11 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
-  Maximum number of seconds that an `etcd` discovery client spends establishing its initial
+  Maximum number of seconds that an etcd discovery client spends establishing its initial
   connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a
   larger value when etcd can take longer to become available during deployment startup or recovery;
-  set a smaller value when the process should fail fast. Values must be greater than `0`.
+  set a smaller value when the process should fail fast. Values must be greater than `0`. Zero or
+  invalid values log a warning and fall back to `120`.
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
