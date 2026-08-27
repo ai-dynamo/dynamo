@@ -28,20 +28,29 @@ If the endpoint requires bearer authentication, export `DYNAMO_API_KEY` and add 
 <Tabs>
   <Tab title="Codex">
 
-    Codex uses the Responses API. Add a provider in `~/.codex/config.toml` and replace the example URL with `${DYNAMO_BASE_URL%/}/v1`:
+    Codex uses the Responses API and needs no Dynamo-specific skill or ACP adapter. Add the served model and a Dynamo provider to your user-level `~/.codex/config.toml`:
 
     ```toml
+    model = "your-recipe-served-model"
+    model_provider = "dynamo"
+
     [model_providers.dynamo]
-    name = "dynamo"
+    name = "Dynamo"
     base_url = "https://your-dynamo-endpoint.example.com/v1"
     wire_api = "responses"
+    # Uncomment only when the endpoint requires bearer authentication.
+    # env_key = "DYNAMO_API_KEY"
     ```
+
+    Replace the model and base URL with the values from step 1. If you enable `env_key`, export `DYNAMO_API_KEY` before starting Codex; strict configuration fails closed when the variable is missing.
 
     ```bash
-    codex -m "$DYNAMO_MODEL" -c model_provider=dynamo
+    codex --strict-config -C /absolute/worktree
     ```
 
-    Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
+    Codex owns the conversation and tool loop. To continue it in a later process, run `codex resume --last` for the interactive UI or `codex exec resume --last '<next prompt>'` for a headless task. Dynamo maps Codex's `thread-id` header to `session_id`; spawned child threads also send `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
+
+    Start with a read-only smoke test and verify the requested fact independently. A successful HTTP response proves connectivity, not that the deployed model is strong enough for coding or tool use.
 
   </Tab>
   <Tab title="Pi">
