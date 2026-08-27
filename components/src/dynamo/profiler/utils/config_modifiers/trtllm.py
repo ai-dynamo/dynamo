@@ -19,6 +19,7 @@ from dynamo.profiler.utils.config import (
     get_worker_component_from_config,
     parse_override_engine_args,
     remove_valued_arguments,
+    set_argument_value,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -590,6 +591,35 @@ class TrtllmConfigModifier(BaseConfigModifier):
                 "kv_cache_config.enable_block_reuse": bool(prefix_caching),
             },
         )
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        --model-path / --served-model-name are plain CLI flags in TRT-LLM's
+        base template (confirmed: unlike kv_cache_config.*, they are not
+        routed through _merge_overrides_into_args' dotted-key/engine-args
+        mechanism), so set_argument_value applies directly here, same as
+        vLLM/SGLang. See VllmV1ConfigModifier.set_config_model for why this
+        call exists at all.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()

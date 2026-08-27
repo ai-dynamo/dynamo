@@ -695,3 +695,34 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        Uses cls.WORKER_MODEL_PATH_ARG / cls.WORKER_SERVED_MODEL_NAME_ARG so
+        the correct per-backend flag name is picked automatically (vLLM
+        overrides WORKER_MODEL_PATH_ARG to "--model"; other backends use
+        "--model-path"). Without this call, the base template's placeholder
+        model name survives untouched into the materialized DGD -- confirmed
+        via a real end-to-end sweep where the evaluated/scored model
+        (Qwen/Qwen3-8B) did not match the model written into the output DGD
+        (the template's example placeholder, Qwen/Qwen3-0.6B).
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()

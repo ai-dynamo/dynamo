@@ -91,6 +91,39 @@ def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
         assert args, f"no args materialized for {backend}"
 
 
+def test_evaluated_model_is_written_into_the_dgd_not_the_template_placeholder() -> None:
+    """Regression test for a real bug found running a live end-to-end sweep:
+    the sweep evaluated and scored Qwen/Qwen3-8B, but the materialized DGD
+    contained Qwen/Qwen3-0.6B -- the base template's example placeholder --
+    because materialize_dgd_from_candidate never read candidate_config
+    ["model_name"] at all. Checks all three backends, since each uses a
+    different flag name (vLLM: --model; SGLang/TRT-LLM: --model-path) via
+    cls.WORKER_MODEL_PATH_ARG, and the bug could plausibly be fixed for one
+    backend while remaining broken for the others.
+    """
+    for backend in ("vllm", "sglang", "trtllm"):
+        candidate = dict(
+            REAL_CANDIDATE_TEP_TRTLLM,
+            backend=backend,
+            strategy="tp",
+            model_name="Qwen/Qwen3-8B",
+        )
+        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+        worker = next(
+            c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
+        )
+        args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+        args_text = " ".join(args)
+
+        assert "Qwen/Qwen3-8B" in args_text, (
+            f"{backend}: evaluated model_name missing from materialized args: {args}"
+        )
+        assert "Qwen3-0.6B" not in args_text, (
+            f"{backend}: template placeholder model leaked into materialized "
+            f"args (the real bug this test guards against): {args}"
+        )
+
 def test_evaluation_context_fields_never_appear_in_the_dgd_spec() -> None:
     """The identity-collision-relevant fields (concurrency, kv_load_ratio,
     ...) must land in `.experimental`, never as a CLI flag in the DGD spec
