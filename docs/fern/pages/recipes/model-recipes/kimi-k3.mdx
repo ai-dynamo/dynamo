@@ -262,7 +262,7 @@ The benchmark replays the Mooncake-format agentic trace described in [perf/READM
 
 | Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Agentic (15% subset) | SGLang | Aggregated (&lt;N&gt; workers) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Aggregated (2 workers) | GB200 | 28 | 32.910 | 56.067 | 827.773 |
 | Agentic (15% subset) | SGLang | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB200 | | | | |
 | Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 84.397 | 51.276 | 572.670 |
 | Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | | 61.032 | 75.929 | 4,809 |
