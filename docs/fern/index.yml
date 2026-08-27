@@ -361,12 +361,12 @@ navigation:
             contents:
               - page: Architecture
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md
-              - page: Sidecar Backends (Experimental)
-                slug: system-architecture/sidecar-backends
-                path: pages/developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md
               - page: Disaggregated Serving
                 slug: system-architecture/disaggregated-serving
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md
+              - page: KV-Aware Routing
+                slug: system-architecture/kv-aware-routing
+                path: pages/developer-guide/knowledge-base/concepts/system-architecture/kv-aware-routing.md
               - section: Simulation
                 collapsed: true
                 contents:
@@ -440,6 +440,9 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
                   - page: Fault Tolerance Testing
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md
+              - page: Sidecar Backends (Experimental)
+                slug: system-architecture/sidecar-backends
+                path: pages/developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md
           - section: Modular Components
             collapsed: open-by-default
             contents:
@@ -518,16 +521,16 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md
                   - page: Profiler Examples
                     path: pages/developer-guide/knowledge-base/modular-components/profiler/profiler-examples.md
-      - section: Advanced Customizations
+      - section: Developing and Extending Dynamo
         slug: advanced-customizations
         icon: sliders
         contents:
-          - page: Building from Source
-            path: pages/developer-guide/advanced-customizations/building-from-source.md
           - page: Write Custom Routing Strategies
             path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Conditional Disaggregation
             path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
+          - page: Building from Source
+            path: pages/developer-guide/advanced-customizations/building-from-source.md
           - page: Metrics Developer Guide
             path: pages/developer-guide/advanced-customizations/metrics-developer-guide.md
           - page: Developing with Tilt

@@ -57,6 +57,7 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 ## Next Steps
 
+- **[KV-Aware Routing](../../concepts/system-architecture/kv-aware-routing.md)**: Architecture, state flow, and request-path hosts
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](routing-concepts.md)**: Cost model and worker-selection behavior
 - **[Router Filtering](worker-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
