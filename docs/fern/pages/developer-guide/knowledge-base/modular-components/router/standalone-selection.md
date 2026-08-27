@@ -54,7 +54,7 @@ invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
-To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
+To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 The C and Go bindings do not currently expose `SelectionService`. An EPP
 integration requires separate FFI lifecycle, error-mapping, worker, and peer
@@ -218,7 +218,7 @@ implement session affinity by preferring the worker a session used previously.
 > `session_id` is an input to policy, not an affinity mechanism in itself. The
 > built-in selector ignores it, so it changes the chosen worker only when you
 > supply a custom picker or scorer that reads it. See
-> [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
+> [Write Custom Routing Strategies](custom-worker-selection.mdx).
 > It is also distinct from the frontend's own session affinity, which binds
 > sessions from request headers rather than from this API; see
 > [Configuration and Tuning](configuration-and-tuning.md).
