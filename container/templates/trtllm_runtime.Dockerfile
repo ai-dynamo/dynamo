@@ -59,7 +59,10 @@ WORKDIR /workspace
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
 # tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
 # carries a single copy of each tool, drop the unused wandb developer tooling
-# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
+# the DLFW base carries (upstream removes it on main, Dockerfile.multi), drop
+# the Nsight efa_metrics plugin (a Go NIC sampler nothing in the serving path
+# loads; the CUDA and Nsight versions in its path move with every base bump, so
+# the paths are globbed and the removal is asserted rather than pinned), and
 # symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
@@ -86,6 +89,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
         /usr/local/bin/etcdutl && \
+    rm -rf \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
+    [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ] && \
     /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
@@ -431,6 +439,9 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
+    /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+    /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+    /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics \
     /usr/local/bin/wandb \
     /usr/local/lib/python3.12/dist-packages/wandb \
     /usr/local/lib/python3.12/dist-packages/wandb-* \
@@ -491,6 +502,13 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done
+
+# Post-overlay guard for the efa_metrics whiteout above, for the same reason the
+# DALI one exists: the in-stage assertion runs inside runtime_full, before
+# `COPY --from=runtime_full / /`, so by construction it cannot observe a whiteout
+# mistake. Both stages start FROM the same upstream image, so a deletion in only
+# one of them ships the plugin anyway.
+RUN [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
 
 # Post-overlay guard for the system-site floor whiteouts above, for the same
 # reason DALI has one: the in-stage assertion runs inside runtime_full, before

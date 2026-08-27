@@ -198,6 +198,17 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
     fi
 
+# Drop the Nsight efa_metrics plugin AGENT_BASE_IMAGE carries: a Go NIC sampler
+# nothing in the agent path loads. The CUDA and Nsight versions in its path move
+# with every base bump, so the paths are globbed and the removal is asserted
+# rather than pinned. `agent` is FROM agent_pre with no overlay rebase, so one
+# deletion here ships.
+RUN rm -rf \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
+    [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
+
 # Install CRIU runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libbsd0 \
