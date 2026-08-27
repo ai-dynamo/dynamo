@@ -419,7 +419,7 @@ impl AddressedPushRouter {
         Self::new(req_client, resp_transport)
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// Cancel pending response-stream handshakes for an instance.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         self.resp_transport
             .cancel_instance_streams(instance_id)
@@ -576,12 +576,11 @@ impl AddressedPushRouter {
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
-        // Disarms the recv-side cleanup; see the holding rationale above.
-        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
-
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        // `wait()` keeps the registration cleanup armed so cancellation of
+        // this request before worker call-home cannot leak the subject.
+        let response_stream = match recv_registered.wait().await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 // generate() failed before any response bytes; migrate via
@@ -810,7 +809,8 @@ where
     ) -> Result<ManyOut<U>, Error>;
 
     /// Discovery-driven cleanup when an instance leaves — the request plane
-    /// cancels its call-home streams; another transport frees per-instance state.
+    /// cancels pending call-home handshakes; another transport frees
+    /// per-instance state.
     async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
 
     /// Discovery-driven notification when an instance (re)appears — the request
@@ -851,7 +851,7 @@ where
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 cancelled = n,
-                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+                "Cancelled pending stream handshakes for removed instance (discovery-driven cleanup)"
             );
         }
     }
