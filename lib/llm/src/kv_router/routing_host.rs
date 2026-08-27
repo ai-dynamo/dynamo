@@ -102,6 +102,7 @@ where
                         .message(format!("Request {} was cancelled", context.id()))
                         .build();
                     guard.abort_with_error(Some(&error)).await;
+                    terminal_handled = true;
                     break false;
                 }
 

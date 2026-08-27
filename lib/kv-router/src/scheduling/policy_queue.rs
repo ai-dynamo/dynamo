@@ -438,6 +438,7 @@ pub struct PolicyQueue<T> {
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
+    due_time_count: usize,
     candidates: Vec<Option<DispatchCandidate>>,
 }
 
@@ -464,6 +465,7 @@ impl<T> PolicyQueue<T> {
             carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
+            due_time_count: 0,
             candidates: vec![None; class_count],
         }
     }
@@ -494,6 +496,9 @@ impl<T> PolicyQueue<T> {
     }
 
     pub(crate) fn next_due_at(&self) -> Option<Instant> {
+        if self.due_time_count == 0 {
+            return None;
+        }
         self.classes
             .iter()
             .flat_map(|class| {
@@ -608,6 +613,7 @@ impl<T> PolicyQueue<T> {
         add_stats(&mut class.stats, snapshot);
         class.push_ready(placement, entry);
         self.pending_count += 1;
+        self.due_time_count += usize::from(due_at.is_some());
         Ok(())
     }
 
@@ -664,6 +670,7 @@ impl<T> PolicyQueue<T> {
         for entry in &removed {
             subtract_stats(&mut class.stats, entry.snapshot);
             self.pending_count -= 1;
+            self.due_time_count -= usize::from(entry.due_at().is_some());
         }
         if class.ready_is_empty() {
             class.deficit = 0;
@@ -793,6 +800,7 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
+        self.due_time_count -= usize::from(entry.due_at().is_some());
         if class.ready_is_empty() {
             class.deficit = 0;
         } else {
@@ -1067,6 +1075,50 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "earlier-due"
         );
+        assert_eq!(queue.due_time_count, 1);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "later-due"
+        );
+        assert_eq!(queue.due_time_count, 0);
+        assert_eq!(queue.next_due_at(), None);
+    }
+
+    #[test]
+    fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let due_at = Instant::now() + std::time::Duration::from_secs(10);
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "no-deadline",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(due_at),
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "deadline",
+            )
+            .unwrap();
+
+        assert_eq!(queue.next_due_at(), Some(due_at));
+        queue.retain(|payload| *payload != "deadline");
+        assert_eq!(queue.due_time_count, 0);
+        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(queue.pending_count(), 1);
     }
 
     #[test]
