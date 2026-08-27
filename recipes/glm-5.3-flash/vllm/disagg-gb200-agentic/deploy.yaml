@@ -1,0 +1,370 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GLM-5.3-Flash (GLA/KDA hybrid attention) — disaggregated 1P1D, 4x GB200 per worker (2 nodes
+# total = 8 GPUs). Agentic coding workload: 90% KV reuse, 64K ISL (SSP=57600 / ISL=6400 / OSL=400).
+# Measured on dynamo-gcp-dev-02: peak 206 tok/s aggregate (25.8 tok/s/GPU ÷ 8).
+#
+# Image: vllm/vllm-openai:glm53-flash — GLM-specific vLLM build with GLA/KDA kernels and
+# cudnn workaround (sitecustomize.py). ai-dynamo is pip-installed at pod startup.
+# See README.md for image build details and MNNVL transport upgrade path.
+#
+# KV transport: cuda_copy+tcp (^cuda_ipc excludes same-node IPC cross-node crash).
+# To use MNNVL NVLink IPC for ~10x lower TTFT, rebuild on nvcr.io/nvidia/ai-dynamo/vllm-runtime
+# base and set UCX_TLS: cuda_copy,cuda_ipc,tcp + UCX_CUDA_IPC_ENABLE_MNNVL: "y".
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: glm53-flash-disagg-gb200-agentic-compute-domain
+spec:
+  # 0 = on-demand; must span the full NVL72 rack so MNNVL fabric handles are valid
+  # for both prefill and decode nodes. numNodes: N > 0 creates a partial domain
+  # that causes IPC handle crashes when P and D land on different nodes.
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm53-flash-disagg-gb200-agentic
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: vllm/vllm-openai:glm53-flash
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 15
+                failureThreshold: 200
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  pip install --no-cache-dir ai-dynamo==1.4.1
+                  exec python3 -m dynamo.frontend \
+                    --router-mode kv \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000 \
+                    --router-kv-events \
+                    --kv-cache-block-size 16
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  add: [IPC_LOCK]
+
+    - name: VllmPrefill
+      type: prefill
+      replicas: 1
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/vllm-distributed-executor-backend: mp
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB200
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 200Gi
+          containers:
+            - name: main
+              image: vllm/vllm-openai:glm53-flash
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+              env:
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "14400"
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "1"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: FLASHINFER_DISABLE_VERSION_CHECK
+                  value: "1"
+                - name: PYTORCH_ALLOC_CONF
+                  value: "expandable_segments:True"
+                - name: VLLM_ALLREDUCE_USE_FLASHINFER
+                  value: "1"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: mnnvl
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: MC_FORCE_MNNVL
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_DEBUG
+                  value: WARN
+                # ^cuda_ipc excludes single-node IPC so UCX falls back to tcp cross-node.
+                # Required when using glm53-flash image (UCX lacks MNNVL IPC support).
+                # To enable MNNVL IPC: switch to vllm-runtime base image and use
+                # UCX_TLS: cuda_copy,cuda_ipc,tcp + UCX_CUDA_IPC_ENABLE_MNNVL: "y".
+                - name: UCX_TLS
+                  value: "cuda_copy,^cuda_ipc,tcp"
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+                  value: "86400"
+                - name: DYN_REQUEST_PLANE
+                  value: tcp
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                # GLM-5.3-Flash SSM/KDA KV layout — must match on prefill and decode.
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: VLLM_KV_CACHE_LAYOUT
+                  value: HND
+                - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                  value: "5560"
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 15
+                failureThreshold: 200
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  pip install --no-cache-dir ai-dynamo==1.4.1
+                  pip install --no-cache-dir sentencepiece tiktoken
+
+                  # WAR: disable cudnn globally to prevent segfault in GLM _kpool_* kernels.
+                  mkdir -p /opt/glm53-workarounds
+                  printf 'import torch\ntorch.backends.cudnn.enabled = False\n' \
+                    > /opt/glm53-workarounds/sitecustomize.py
+                  export PYTHONPATH="/opt/glm53-workarounds${PYTHONPATH:+:$PYTHONPATH}"
+
+                  exec python3 -m dynamo.vllm \
+                    --model zai-org/GLM-5.3-Flash \
+                    --served-model-name zai-org/GLM-5.3-Flash \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --max-num-seqs 32 \
+                    --max-num-batched-tokens 16384 \
+                    --gpu-memory-utilization 0.92 \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45 \
+                    --enable-multimodal \
+                    --limit-mm-per-prompt '{"image":0,"video":0}' \
+                    --mm-encoder-tp-mode data \
+                    --skip-mm-profiling \
+                    --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq"}' \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --compilation-config '{"cudagraph_mm_encoder":true}' \
+                    --disaggregation-mode prefill \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                limits:
+                  nvidia.com/gpu: "4"
+                requests:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  add: [IPC_LOCK, SYS_RESOURCE]
+
+    - name: VllmDecode
+      type: decode
+      replicas: 1
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/vllm-distributed-executor-backend: mp
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB200
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 200Gi
+          containers:
+            - name: main
+              image: vllm/vllm-openai:glm53-flash
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+              env:
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "14400"
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "1"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: FLASHINFER_DISABLE_VERSION_CHECK
+                  value: "1"
+                - name: PYTORCH_ALLOC_CONF
+                  value: "expandable_segments:True"
+                - name: VLLM_ALLREDUCE_USE_FLASHINFER
+                  value: "1"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: mnnvl
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: MC_FORCE_MNNVL
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_DEBUG
+                  value: WARN
+                - name: UCX_TLS
+                  value: "cuda_copy,^cuda_ipc,tcp"
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+                  value: "86400"
+                - name: DYN_REQUEST_PLANE
+                  value: tcp
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: VLLM_KV_CACHE_LAYOUT
+                  value: HND
+                - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                  value: "5558"
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 15
+                failureThreshold: 200
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  pip install --no-cache-dir ai-dynamo==1.4.1
+                  pip install --no-cache-dir sentencepiece tiktoken
+
+                  # WAR: disable cudnn globally to prevent segfault in GLM _kpool_* kernels.
+                  mkdir -p /opt/glm53-workarounds
+                  printf 'import torch\ntorch.backends.cudnn.enabled = False\n' \
+                    > /opt/glm53-workarounds/sitecustomize.py
+                  export PYTHONPATH="/opt/glm53-workarounds${PYTHONPATH:+:$PYTHONPATH}"
+
+                  exec python3 -m dynamo.vllm \
+                    --model zai-org/GLM-5.3-Flash \
+                    --served-model-name zai-org/GLM-5.3-Flash \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --max-num-seqs 256 \
+                    --max-num-batched-tokens 4096 \
+                    --gpu-memory-utilization 0.92 \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45 \
+                    --enable-multimodal \
+                    --limit-mm-per-prompt '{"image":0,"video":0}' \
+                    --mm-encoder-tp-mode data \
+                    --skip-mm-profiling \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --disaggregation-mode decode \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                limits:
+                  nvidia.com/gpu: "4"
+                requests:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  add: [IPC_LOCK, SYS_RESOURCE]
