@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Test Execution Times (Last Run: 2026-01-13):
-- test_request_migration_sglang_aggregated: ~75s
-- test_request_migration_sglang_prefill: N/A
-- test_request_migration_sglang_kv_transfer: N/A
-- test_request_migration_sglang_decode: ~75s
-"""
-
 import logging
 import os
 import signal
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +19,7 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
+from tests.utils.prometheus import sum_metric_samples
 
 # Customized utils for migration tests
 from .utils import (
@@ -94,6 +89,53 @@ def _sglang_graceful_shutdown(
                 os.killpg(process_group, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def get_sglang_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
+    """Return the completed SGLang KV-transfer count and total size."""
+    response = requests.get(f"http://localhost:{worker_system_port}/metrics", timeout=1)
+    response.raise_for_status()
+    return (
+        sum_metric_samples(response.text, "sglang:kv_transfer_total_mb_count"),
+        sum_metric_samples(response.text, "sglang:kv_transfer_total_mb_sum"),
+    )
+
+
+def wait_for_sglang_kv_transfer(
+    worker_system_port: int,
+    baseline_count: float,
+    baseline_total_mb: float,
+    max_wait_time: float = 10.0,
+) -> None:
+    """Wait for a completed, non-empty SGLang KV transfer after the baseline."""
+    deadline = time.monotonic() + max_wait_time
+    transfer_count = baseline_count
+    total_mb = baseline_total_mb
+    last_error: Exception | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            transfer_count, total_mb = get_sglang_kv_transfer_metrics(
+                worker_system_port
+            )
+            if transfer_count > baseline_count and total_mb > baseline_total_mb:
+                logger.info(
+                    "Observed %s completed SGLang KV transfer(s) totaling %.3f MB",
+                    transfer_count - baseline_count,
+                    total_mb - baseline_total_mb,
+                )
+                return
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        "SGLang did not report a completed, non-empty KV transfer after the "
+        f"request started; count_delta={transfer_count - baseline_count}, "
+        f"total_mb_delta={total_mb - baseline_total_mb}, last_error={last_error}"
+    )
 
 
 # Cover each distinct migration policy with complementary lifecycle, API,
@@ -294,6 +336,7 @@ class DynamoWorkerProcess(ManagedProcess):
         worker_id: Unique identifier for the worker (e.g., "worker1", "worker2")
         frontend_port: Port where the frontend is running
         disagg_mode: None for aggregated, "prefill" or "decode" for disaggregated
+        enable_metrics: Expose SGLang engine metrics through the worker system port
     """
 
     def __init__(
@@ -304,6 +347,7 @@ class DynamoWorkerProcess(ManagedProcess):
         log_root: Path,
         disagg_mode: str | None = None,
         max_model_len: int = 8192,
+        enable_metrics: bool = False,
     ):
         self.worker_id = worker_id
         allocated_ports: list[int] = []
@@ -380,6 +424,9 @@ class DynamoWorkerProcess(ManagedProcess):
                 self.prefill_port = allocate_port(DynamoPortRange.PREFILL.value)
                 allocated_ports.append(self.prefill_port)
                 command.extend(["--port", str(self.prefill_port)])
+
+        if enable_metrics:
+            command.append("--enable-metrics")
 
         # Set environment variables
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
@@ -535,9 +582,13 @@ def test_request_migration_sglang_kv_transfer(
     tmp_path,
 ):
     """
-    End-to-end test for request migration during KV transfer in disaggregated mode.
+    End-to-end test for request migration with KV re-transfer in disaggregated mode.
 
-    Setup: 1 prefill worker + 2 decode workers
+    Setup: 1 prefill worker + 2 decode workers. The test faults the decode
+    worker before any response token, proves that the replacement handles the
+    same request, and requires SGLang to report a completed non-empty KV
+    transfer. It intentionally makes no timing assertion about the signal
+    landing inside the underlying transfer operation.
 
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
@@ -562,6 +613,7 @@ def test_request_migration_sglang_kv_transfer(
             tmp_path,
             disagg_mode="prefill",
             max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+            enable_metrics=True,
         )
         decode1 = DynamoWorkerProcess(
             request,
@@ -587,8 +639,12 @@ def test_request_migration_sglang_kv_transfer(
                 frontend.frontend_port,
                 {("prefill", "generate"): 1, ("backend", "generate"): 2},
             )
+            baseline_transfer_count, baseline_total_mb = get_sglang_kv_transfer_metrics(
+                prefill_worker.system_port
+            )
 
-            # Step 3: Inject the fault after decode accepts the long-prefill request.
+            # Step 3: Fault the first decode before any response token, then
+            # prove the replacement drains the request and KV is transferred.
             run_migration_test(
                 frontend,
                 decode1,
@@ -605,6 +661,12 @@ def test_request_migration_sglang_kv_transfer(
                 expected_ongoing_request_count=1,
                 graceful_shutdown_endpoint=("backend", "generate"),
                 wait_for_worker_health_shutdown=True,
+                verify_replacement_worker=True,
+            )
+            wait_for_sglang_kv_transfer(
+                prefill_worker.system_port,
+                baseline_transfer_count,
+                baseline_total_mb,
             )
 
 
