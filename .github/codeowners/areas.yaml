@@ -1155,11 +1155,6 @@ shared:
   - runtime
   - kv-memory
 classify:
-  # File-type defaults sit above the area tier but below explicit path overrides
-  # and shared rules, which emit later and win by last-match. A pyproject.toml or
-  # Dockerfile added under a path carrying its own override or shared declaration
-  # keeps that path's owner instead. Every pyproject.toml in the tree resolves to
-  # ops today; check a new one with who_owns.py rather than assuming this caught it.
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
