@@ -32,7 +32,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::RoutingLoadContext,
+    kv_router::{RoutingLoadContext, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
@@ -737,15 +737,21 @@ async fn prefill_start_recording_is_phase_aware() {
     let (router, runtime) = router(None).await;
 
     // KV and hosted-policy dispatch share this RequestGuard transition.
-    for (phase, expected) in [
-        (RequestPhase::Prefill, true),
-        (RequestPhase::Aggregated, true),
-        (RequestPhase::Decode, false),
+    for (phase, is_remote_prefill_bypassed, expected) in [
+        (RequestPhase::Prefill, false, true),
+        (RequestPhase::Aggregated, false, true),
+        (RequestPhase::Decode, false, false),
+        (RequestPhase::Decode, true, true),
     ] {
         let tracker = Arc::new(RequestTracker::new());
         let _phase_permit = tracker.set_phase(phase).await;
         let mut tracked_request = request();
         tracked_request.tracker = Some(Arc::clone(&tracker));
+        if is_remote_prefill_bypassed {
+            tracked_request
+                .annotations
+                .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+        }
         let mut guard = RequestGuard::new_kv(
             Arc::clone(router.kv_router()),
             Arc::clone(&router.request_metrics),
@@ -755,11 +761,11 @@ async fn prefill_start_recording_is_phase_aware() {
             false,
         );
 
-        guard.record_prefill_start(tracker.phase());
+        guard.record_prefill_start(&tracked_request, tracker.phase());
         assert_eq!(
             tracker.prefill_wait_time_ms().is_some(),
             expected,
-            "unexpected prefill-start state for {phase}"
+            "unexpected prefill-start state for {phase}, bypass={is_remote_prefill_bypassed}"
         );
         guard.abort().await;
     }
@@ -777,14 +783,14 @@ async fn prefill_start_recording_is_phase_aware() {
     );
 
     let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
-    guard.record_prefill_start(tracker.phase());
+    guard.record_prefill_start(&tracked_request, tracker.phase());
     let prefill_start = tracker
         .prefill_wait_time_ms()
         .expect("prefill phase should record prefill start");
     drop(prefill_permit);
 
     let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-    guard.record_prefill_start(tracker.phase());
+    guard.record_prefill_start(&tracked_request, tracker.phase());
     assert_eq!(tracker.prefill_wait_time_ms(), Some(prefill_start));
     guard.abort().await;
 

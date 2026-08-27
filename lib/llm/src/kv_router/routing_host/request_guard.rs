@@ -4,7 +4,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        scheduler::DefaultWorkerSelector,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -275,14 +278,9 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
-    fn record_prefill_start(&self, phase: RequestPhase) {
-        match phase {
-            RequestPhase::Prefill | RequestPhase::Aggregated => {
-                if let Some(tracker) = &self.tracker {
-                    tracker.record_prefill_start();
-                }
-            }
-            RequestPhase::Decode => {}
+    fn record_prefill_start(&self) {
+        if let Some(tracker) = &self.tracker {
+            tracker.record_prefill_start();
         }
     }
 
@@ -691,8 +689,15 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self, phase: RequestPhase) {
-        self.observability.record_prefill_start(phase);
+    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest, phase: RequestPhase) {
+        if phase != RequestPhase::Decode
+            || request
+                .annotations
+                .iter()
+                .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION)
+        {
+            self.observability.record_prefill_start();
+        }
     }
 
     pub(super) fn mark_dispatched(&mut self) {

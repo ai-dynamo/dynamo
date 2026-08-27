@@ -191,8 +191,8 @@ where
                 "Failed to attach router_hint to backend request"
             );
         }
+        guard.record_prefill_start(&backend_input, phase);
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start(phase);
 
         let dispatch = self
             .inner
