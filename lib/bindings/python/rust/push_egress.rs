@@ -123,8 +123,8 @@ impl PushFrame {
                 ))
             })?;
         let codec = RequestPlanePayloadCodec::configured();
-        let (bytes, kind) = python_payload::encode_annotated_response(codec, annotated)
-            .map_err(|error| {
+        let (bytes, kind) =
+            python_payload::encode_annotated_response(codec, annotated).map_err(|error| {
                 PyValueError::new_err(format!(
                     "critical error: failed serializing python response as {}: {error}",
                     codec.name()
