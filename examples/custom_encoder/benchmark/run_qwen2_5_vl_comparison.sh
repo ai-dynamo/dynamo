@@ -233,7 +233,6 @@ output_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 PY
 
 COMMON_AIPERF_ARGS=(
-    --model Qwen/Qwen2.5-1.5B-Instruct
     --url http://127.0.0.1:8000
     --endpoint-type chat
     --endpoint /v1/chat/completions
@@ -307,6 +306,7 @@ run_arm() {
     local kv_events_config
     local benchmark_log_first_line
     local result
+    local served_model
     local zmq_prefix
 
     case "$arm" in
@@ -360,10 +360,16 @@ run_arm() {
     wait_for_server "$arm_dir/server.log" "$arm_dir/models.json"
     printf 'SERVER_READY=%s\n' "$(date -u +%FT%TZ)" \
         | tee -a "$arm_dir/timestamps.txt"
+    served_model="$(jq -er \
+        '.data[0].id | select(type == "string" and length > 0)' \
+        "$arm_dir/models.json")"
+    jq --arg model "$served_model" '.model = $model' \
+        "$OUTPUT_ROOT/smoke_request.json" \
+        > "$arm_dir/smoke_request.json"
 
     curl -fsS http://127.0.0.1:8000/v1/chat/completions \
         -H 'Content-Type: application/json' \
-        --data-binary "@$OUTPUT_ROOT/smoke_request.json" \
+        --data-binary "@$arm_dir/smoke_request.json" \
         > "$arm_dir/smoke_response.json"
     jq -e '.nvext.completion_token_ids | length == 7' \
         "$arm_dir/smoke_response.json" >/dev/null
@@ -375,6 +381,7 @@ run_arm() {
     rm -f "${zmq_prefix}-warmup"* "${zmq_prefix}-measured"* || true
 
     aiperf profile "${COMMON_AIPERF_ARGS[@]}" \
+        --model "$served_model" \
         --input-file "$WARMUP_INPUT" \
         --concurrency 20 \
         --conversation-num 20 \
@@ -386,6 +393,7 @@ run_arm() {
         | tee -a "$arm_dir/timestamps.txt"
     TIMEFORMAT='%R'
     { time aiperf profile "${COMMON_AIPERF_ARGS[@]}" \
+        --model "$served_model" \
         --input-file "$MEASURED_INPUT" \
         --concurrency "$CONCURRENCY" \
         --conversation-num 1000 \
