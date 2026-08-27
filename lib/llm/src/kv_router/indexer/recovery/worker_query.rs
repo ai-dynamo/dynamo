@@ -1102,7 +1102,7 @@ mod tests {
             CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
             RoutingScopeId, StableDpSlotId,
         },
-        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, WorkerKvQueryRequest},
+        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
         protocols::{
             DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
             KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier, WorkerId,
@@ -1117,13 +1117,8 @@ mod tests {
             SharedMockRegistry,
         },
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        pipeline::{
-            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-            network::Ingress,
-        },
         protocols::EndpointId,
         storage::kv::Selector,
-        stream,
         transports::event_plane::{EventPublisher, EventScope},
     };
     use std::{
@@ -1131,8 +1126,9 @@ mod tests {
         path::Path,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
-    use tokio::sync::{Notify, watch};
+    use tokio::sync::{Notify, oneshot, watch};
 
+    use super::super::{direct_zmq::run_direct_zmq_supervisor, subscriber::MismatchMetricScope};
     use crate::{
         discovery::{
             KvSourceAmbiguity, KvSourceMembershipCoordinator, KvSourceMembershipView,
@@ -2641,7 +2637,7 @@ mod tests {
         assert!(contains_rank_block(&events, rank_5, 1));
     }
 
-    struct ControlledRecoveryEngine {
+    struct ControlledRecoveryTransport {
         worker: WorkerWithDpRank,
         calls: AtomicUsize,
         delayed_started: Notify,
@@ -2658,16 +2654,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
-        for ControlledRecoveryEngine
-    {
-        async fn generate(
+    impl WorkerQueryTransport for ControlledRecoveryTransport {
+        async fn query_worker(
             &self,
-            request: SingleIn<WorkerKvQueryRequest>,
-        ) -> Result<ManyOut<WorkerKvQueryResponse>> {
-            let (request, context) = request.into_parts();
-            assert_eq!(request.worker_id, self.worker.worker_id);
-            assert_eq!(request.dp_rank, self.worker.dp_rank);
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            _target: Instance,
+            _start_event_id: Option<u64>,
+            _end_event_id: Option<u64>,
+        ) -> Result<WorkerKvQueryResponse> {
+            assert_eq!(worker_id, self.worker.worker_id);
+            assert_eq!(dp_rank, self.worker.dp_rank);
             let response = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 WorkerKvQueryResponse::TreeDump {
                     events: Vec::new(),
@@ -2683,10 +2680,7 @@ mod tests {
                     last_event_id: 2,
                 }
             };
-            Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                context.context(),
-            ))
+            Ok(response)
         }
     }
 
@@ -2873,7 +2867,6 @@ mod tests {
             let old_node_1_drt = shared_drt(store.path()).await;
             let namespace = "test-direct-zmq-multi-node";
             let frontend = shared_component(&frontend_drt, namespace);
-            let old_node_1 = shared_component(&old_node_1_drt, namespace);
             let serving = frontend.endpoint("generate");
             let serving_id = serving.id();
             let kv_endpoint = EndpointId {
@@ -2938,20 +2931,22 @@ mod tests {
                 .unwrap();
 
             let delayed_rank = WorkerWithDpRank::new(logical_worker_id, 4);
-            let recovery_engine = Arc::new(ControlledRecoveryEngine {
+            let recovery_transport = Arc::new(ControlledRecoveryTransport {
                 worker: delayed_rank,
                 calls: AtomicUsize::new(0),
                 delayed_started: Notify::new(),
                 delayed_release: Notify::new(),
                 delayed_finished: Notify::new(),
             });
-            let recovery_endpoint = old_node_1
-                .endpoint("controlled-kv-recovery")
-                .endpoint_builder()
-                .handler(Ingress::for_engine(recovery_engine.clone()).unwrap())
-                .start_with_registration()
-                .await
-                .unwrap();
+            let recovery_target = Instance {
+                namespace: namespace.to_string(),
+                component: "router".to_string(),
+                endpoint: "controlled-kv-recovery".to_string(),
+                instance_id: old_node_1_drt.connection_id(),
+                transport: TransportType::Nats(String::new()),
+                device_type: None,
+                request_plane_codec: None,
+            };
 
             let mut node_0_sources = Vec::new();
             for dp_rank in 0..4 {
@@ -2969,8 +2964,7 @@ mod tests {
             let mut old_node_1_sources = Vec::new();
             for dp_rank in 4..8 {
                 let worker = WorkerWithDpRank::new(logical_worker_id, dp_rank);
-                let recovery_target =
-                    (worker == delayed_rank).then(|| recovery_endpoint.instance().clone());
+                let recovery_target = (worker == delayed_rank).then(|| recovery_target.clone());
                 old_node_1_sources.push(
                     register_test_source(
                         &old_node_1_drt,
@@ -3015,19 +3009,24 @@ mod tests {
             );
             let membership_watch = membership_coordinator.subscribe();
             let mut membership_observer = membership_watch.clone();
-            let subscription = crate::kv_router::indexer::recovery::subscriber::start_subscriber(
-                serving.clone(),
+            let client = WorkerQueryClient::new_for_test(
                 indexer,
+                watch::Receiver::clone(&membership_watch),
+                recovery_transport.clone(),
+            );
+            let (startup_tx, startup_rx) = oneshot::channel();
+            let subscription = tokio::spawn(run_direct_zmq_supervisor(
+                frontend.clone(),
+                serving_id.clone(),
+                client,
                 membership_watch,
-                4,
                 "test-model".to_string(),
-                None,
-                crate::kv_router::KvEventSourceRequirement::Unknown,
                 "decode",
+                MismatchMetricScope::Router(crate::kv_router::KvEventSourceRequirement::Unknown),
                 cancel.child_token(),
-            )
-            .await
-            .unwrap();
+                Some(startup_tx),
+            ));
+            startup_rx.await.unwrap().unwrap();
 
             tokio::time::timeout(
                 Duration::from_secs(5),
@@ -3115,7 +3114,7 @@ mod tests {
                         .publish(&vec![store_block_for(delayed_rank, 5, 903)])
                         .await
                         .unwrap();
-                    if recovery_engine.calls.load(Ordering::SeqCst) >= 2 {
+                    if recovery_transport.calls.load(Ordering::SeqCst) >= 2 {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -3247,10 +3246,10 @@ mod tests {
             .await
             .expect("replacement node-1 state was not activated after the cold reset");
 
-            recovery_engine.delayed_release.notify_waiters();
+            recovery_transport.delayed_release.notify_waiters();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                recovery_engine.delayed_finished.notified(),
+                recovery_transport.delayed_finished.notified(),
             )
             .await
             .expect("old node-1 recovery did not finish or cancel after release");
@@ -3321,7 +3320,7 @@ mod tests {
                 .with_label_values(&mismatch_labels)
                 .set(4);
             cancel.cancel();
-            subscription.shutdown().await;
+            subscription.await.unwrap();
             assert_eq!(
                 status_metrics
                     .kv_event_source_mismatch_workers
@@ -3343,7 +3342,6 @@ mod tests {
             }
             discovery.unregister(model_instance).await.unwrap();
             discovery.unregister(serving_instance).await.unwrap();
-            recovery_endpoint.shutdown().await.unwrap();
         })
         .await
         .expect("direct ZMQ multi-node KV source lifecycle test timed out");
