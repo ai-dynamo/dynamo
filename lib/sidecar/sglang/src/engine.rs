@@ -53,15 +53,13 @@ struct DiscoveredKvEventSource {
 }
 
 impl SglangSidecarEngine {
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        match argv {
-            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
-            None => Self::from_parsed(<Args as clap::Parser>::parse()),
-        }
-    }
-
-    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+    pub fn from_args(
+        argv: Option<Vec<String>>,
+    ) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = match argv {
+            Some(argv) => <Args as clap::Parser>::try_parse_from(argv)?,
+            None => <Args as clap::Parser>::parse(),
+        };
         Self::from_parsed(args).map_err(Into::into)
     }
 
