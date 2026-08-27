@@ -243,10 +243,11 @@ class HardwareSpec(BaseModel):
 
 
 class DynamoGraphDeploymentRequestSpec(BaseModel):
-    """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
+    """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive."""
 
-    model: str = Field(
-        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
+    model: Optional[str] = Field(
+        default=None,
+        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.',
     )
     backend: BackendType = Field(
         default="auto",
@@ -291,6 +292,10 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     autoApply: Optional[bool] = Field(
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
+    )
+    v1beta2: Optional[Any] = Field(
+        default=None,
+        description="V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1beta1. It is mutually exclusive with native fields.",
     )
 
 
@@ -357,6 +362,10 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
     observedGeneration: Optional[int] = Field(
         default=None,
         description="ObservedGeneration is the most recent generation observed by the controller.",
+    )
+    v1beta2: Optional[Any] = Field(
+        default=None,
+        description="V1Beta2 losslessly preserves a native v1beta2 status while this object is represented through v1beta1.",
     )
 
 

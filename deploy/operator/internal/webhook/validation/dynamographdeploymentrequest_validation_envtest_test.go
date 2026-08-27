@@ -79,12 +79,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name: "v1beta1 empty model is rejected by source schema",
+			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
 			}),
-			gpuDiscovery:  true,
-			wantSchemaErr: `spec.model: Invalid value: "": spec.model in body should be at least 1 chars long`,
+			gpuDiscovery: true,
+			wantCELErr:   `spec: Invalid value: exactly one of native v1beta1 fields or v1beta2 must be specified`,
 		},
 		{
 			name: "v1beta1 SLA optimization enum is rejected by source schema",
