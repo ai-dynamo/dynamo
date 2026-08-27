@@ -16,7 +16,6 @@ use tokio::net::TcpListener;
 use crate::protocols::WorkerId;
 use crate::services::common::replica_sync::ReplicaPeerError;
 
-use super::core::SelectionServiceConfig;
 use super::service::SelectionService;
 use super::types::{
     OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, REQUEST_BODY_LIMIT_BYTES,
@@ -343,13 +342,8 @@ pub(crate) fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
-    let service = config.service_builder().build().await?;
-    run_server_with_service(config.port, service).await
-}
-
 /// Serve a caller-built selection service until shutdown.
-pub async fn run_server_with_service(port: u16, service: SelectionService) -> anyhow::Result<()> {
+pub async fn run_server(port: u16, service: SelectionService) -> anyhow::Result<()> {
     tracing::info!(port, "Starting Dynamo selection service");
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     let service = Arc::new(service);

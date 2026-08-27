@@ -13,14 +13,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::WorkerSelectionPolicyFactory;
-use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::services::selection::{SelectionService, WorkerSelectionPolicyRegistry};
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, Selector, metrics};
+use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
@@ -46,15 +45,6 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 struct Config {
     namespace: String,
     component: String,
-}
-
-enum StandaloneSelectionService {
-    Default,
-    Existing(SelectionService),
-    LinkedWorkerSelectionPolicy {
-        kv_router_config: Box<KvRouterConfig>,
-        factory: WorkerSelectionPolicyFactory,
-    },
 }
 
 impl Config {
@@ -134,87 +124,18 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(tls_config)))
 }
 
-/// Run the stock EPP until it exits.
-pub async fn run() -> Result<()> {
+/// Run EPP until it exits.
+pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
-    if matches!(mode, EppMode::Standalone) {
-        let kv_router_config =
-            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        reject_unlinked_worker_selection_policy(&kv_router_config)?;
-    }
-    run_inner(mode, StandaloneSelectionService::Default).await
-}
-
-fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
-    if let Some(instance) = config
-        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+    if !matches!(mode, EppMode::Standalone)
+        && policy_registry
+            .as_ref()
+            .is_some_and(|registry| !registry.is_empty())
     {
-        anyhow::bail!(
-            "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
-        );
+        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
     }
-    warn_if_epp_ignores_stage_policies(config)?;
-    Ok(())
-}
-
-fn warn_if_epp_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
-    if config.has_explicit_stage_worker_selection_policy()? {
-        tracing::warn!(
-            "worker_selection.prefill, worker_selection.decode, worker_selection.encode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
-        );
-    }
-    Ok(())
-}
-
-/// Run the standalone EPP around a caller-built selection service.
-pub async fn run_with_selection_service(service: SelectionService) -> Result<()> {
-    init_tracing();
-    run_inner(
-        EppMode::Standalone,
-        StandaloneSelectionService::Existing(service),
-    )
-    .await
-}
-
-/// Run EPP with linked policy types and the aggregated instance selected from YAML.
-///
-/// Standalone EPP ignores and does not resolve prefill, decode, or encode selections.
-pub async fn run_with_worker_selection_policy_registry(
-    registry: WorkerSelectionPolicyRegistry,
-) -> Result<()> {
-    init_tracing();
-    let mode = EppMode::from_env()?;
-    let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-    warn_if_epp_ignores_stage_policies(&kv_router_config)?;
-    if kv_router_config
-        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
-        .is_none()
-    {
-        return run_inner(mode, StandaloneSelectionService::Default).await;
-    }
-    // TODO: Resolve the stage-specific roles when EPP supports disaggregated worker pools.
-    let Some(factory) = registry
-        .resolve_for_worker_type(&kv_router_config, dynamo_kv_router::WorkerType::Aggregated)?
-    else {
-        return run_inner(mode, StandaloneSelectionService::Default).await;
-    };
-    require_standalone_mode_for_linked_worker_selection_policy(mode)?;
-    run_inner(
-        mode,
-        StandaloneSelectionService::LinkedWorkerSelectionPolicy {
-            kv_router_config: Box::new(kv_router_config),
-            factory,
-        },
-    )
-    .await
-}
-
-fn require_standalone_mode_for_linked_worker_selection_policy(mode: EppMode) -> Result<()> {
-    if matches!(mode, EppMode::Standalone) {
-        return Ok(());
-    }
-    anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+    run_inner(mode, policy_registry.unwrap_or_default()).await
 }
 
 fn init_tracing() {
@@ -243,10 +164,36 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-async fn run_inner(
-    mode: EppMode,
-    standalone_selection_service: StandaloneSelectionService,
-) -> Result<()> {
+/// Tasks started before router initialization that must not outlive a failed run.
+struct BackgroundTasks {
+    health_task: JoinHandle<()>,
+    metrics_task: Option<JoinHandle<()>>,
+    shutdown_task: JoinHandle<()>,
+}
+
+impl BackgroundTasks {
+    async fn shutdown(self) {
+        let Self {
+            health_task,
+            metrics_task,
+            shutdown_task,
+        } = self;
+
+        health_task.abort();
+        if let Some(task) = &metrics_task {
+            task.abort();
+        }
+        shutdown_task.abort();
+
+        let _ = health_task.await;
+        if let Some(task) = metrics_task {
+            let _ = task.await;
+        }
+        let _ = shutdown_task.await;
+    }
+}
+
+async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();
@@ -268,24 +215,29 @@ async fn run_inner(
 
     let health_addr = format!("0.0.0.0:{HEALTH_PORT}").parse()?;
     tracing::info!(%health_addr, "Starting gRPC health server (plaintext)");
-    tokio::spawn(
-        tonic::transport::Server::builder()
+    let health_task = tokio::spawn(async move {
+        if let Err(error) = tonic::transport::Server::builder()
             .add_service(health_service)
-            .serve(health_addr),
-    );
+            .serve(health_addr)
+            .await
+        {
+            tracing::error!(%error, "Health server exited");
+        }
+    });
 
     // Start before router init so scrapes during a slow discovery bootstrap
     // return an empty exposition rather than a connection refusal.
     let metrics_port = parse_env(metrics::METRICS_PORT_ENV, metrics::DEFAULT_METRICS_PORT);
-    if metrics_port == 0 {
+    let metrics_task = if metrics_port == 0 {
         tracing::info!("Metrics server disabled");
+        None
     } else {
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = metrics::serve(metrics_port).await {
                 tracing::error!(error = %e, port = metrics_port, "Metrics server exited");
             }
-        });
-    }
+        }))
+    };
 
     // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
     // (the gateway stops routing new requests to this EPP), allow the endpoint
@@ -294,7 +246,7 @@ async fn run_inner(
     // connections are handled by the follow-up connection-lifecycle work.
     let draining = CancellationToken::new();
     let shutdown = CancellationToken::new();
-    {
+    let shutdown_task = {
         let draining = draining.clone();
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
@@ -316,84 +268,72 @@ async fn run_inner(
             tokio::time::sleep(std::time::Duration::from_secs(propagation_secs)).await;
             shutdown.cancel();
             tracing::info!("EPP endpoint propagation complete; stopping accepts");
-        });
-    }
+        })
+    };
+    let background_tasks = BackgroundTasks {
+        health_task,
+        metrics_task,
+        shutdown_task,
+    };
 
-    if standalone {
-        let selector_cfg = EppStandaloneConfig::from_env()?;
-        tracing::info!(
-            inference_pool_name = %selector_cfg.inference_pool_name,
-            model_name = %selector_cfg.model_name,
-            block_size = selector_cfg.block_size,
-            "Initializing standalone selector mode (no Dynamo runtime)..."
-        );
-        metrics::set_served_model(&selector_cfg.model_name);
-        let router = tokio::select! {
-            _ = draining.cancelled() => {
-                tracing::info!("Shutdown received during standalone EPP initialization");
+    let result = async {
+        if standalone {
+            let selector_cfg = EppStandaloneConfig::from_env()?;
+            tracing::info!(
+                inference_pool_name = %selector_cfg.inference_pool_name,
+                model_name = %selector_cfg.model_name,
+                block_size = selector_cfg.block_size,
+                "Initializing standalone selector mode (no Dynamo runtime)..."
+            );
+            metrics::set_served_model(&selector_cfg.model_name);
+            let router = tokio::select! {
+                _ = draining.cancelled() => {
+                    tracing::info!("Shutdown received during standalone EPP initialization");
+                    return Ok(());
+                }
+                router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
+            };
+            if draining.is_cancelled() {
+                tracing::info!("Shutdown received before standalone EPP serving started");
                 return Ok(());
             }
-            router = async {
-                Ok::<_, anyhow::Error>(Arc::new(match standalone_selection_service {
-                    StandaloneSelectionService::Default => {
-                        crate::EppRouter::from_selector(selector_cfg).await?
-                    }
-                    StandaloneSelectionService::Existing(service) => {
-                        crate::EppRouter::from_selection_service(selector_cfg, service).await?
-                    }
-                    StandaloneSelectionService::LinkedWorkerSelectionPolicy {
-                        kv_router_config,
-                        factory,
-                    } => {
-                        let service =
-                            Selector::build_selection_service_with_worker_selection_policy_factory(
-                                &selector_cfg,
-                                *kv_router_config,
-                                factory,
-                            )
-                            .await?;
-                        crate::EppRouter::from_selection_service(selector_cfg, service).await?
-                    }
-                }))
-            } => router?,
-        };
-        if draining.is_cancelled() {
-            tracing::info!("Shutdown received before standalone EPP serving started");
-            return Ok(());
-        }
-        let ready_router = router.clone();
-        serve(
-            router,
-            move || ready_router.is_ready(),
-            health_reporter,
-            draining,
-            shutdown,
-        )
-        .await
-    } else {
-        tracing::info!("Initializing KV-aware router from discovery...");
-        let router = tokio::select! {
-            _ = draining.cancelled() => {
-                tracing::info!("Shutdown received during Dynamo discovery initialization");
+            let ready_router = router.clone();
+            serve(
+                router,
+                move || ready_router.is_ready(),
+                health_reporter,
+                draining,
+                shutdown,
+            )
+            .await
+        } else {
+            tracing::info!("Initializing KV-aware router from discovery...");
+            let router = tokio::select! {
+                _ = draining.cancelled() => {
+                    tracing::info!("Shutdown received during Dynamo discovery initialization");
+                    return Ok(());
+                }
+                router = Router::from_discovery(&config.namespace, &config.component) => router?,
+            };
+            if draining.is_cancelled() {
+                tracing::info!("Shutdown received before Dynamo discovery serving started");
                 return Ok(());
             }
-            router = Router::from_discovery(&config.namespace, &config.component) => router?,
-        };
-        if draining.is_cancelled() {
-            tracing::info!("Shutdown received before Dynamo discovery serving started");
-            return Ok(());
+            metrics::set_served_model(router.served_model());
+            let ready = router.pod_store_ready();
+            serve(
+                Arc::new(router),
+                move || ready.load(std::sync::atomic::Ordering::Acquire),
+                health_reporter,
+                draining,
+                shutdown,
+            )
+            .await
         }
-        metrics::set_served_model(router.served_model());
-        let ready = router.pod_store_ready();
-        serve(
-            Arc::new(router),
-            move || ready.load(std::sync::atomic::Ordering::Acquire),
-            health_reporter,
-            draining,
-            shutdown,
-        )
-        .await
     }
+    .await;
+    background_tasks.shutdown().await;
+    result
 }
 
 /// Mirror the picker's live readiness onto the gRPC health status, then serve
@@ -554,49 +494,46 @@ async fn serve<P: crate::EndpointPicker>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use dynamo_kv_router::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
+    use tokio::sync::Mutex;
+
     use super::*;
+    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
 
-    #[test]
-    fn linked_policy_requires_standalone_epp() {
-        assert!(
-            require_standalone_mode_for_linked_worker_selection_policy(EppMode::Standalone).is_ok()
+    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn linked_policy_registry_requires_standalone_mode() {
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "test",
+                Arc::new(
+                    |_| -> std::result::Result<
+                        WorkerSelectionPolicyFactory,
+                        WorkerSelectionPolicyProviderError,
+                    > {
+                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
+                    },
+                ),
+            )
+            .unwrap();
+
+        let _lock = EPP_MODE_ENV_LOCK.lock().await;
+        let previous = std::env::var_os(DYN_EPP_MODE);
+        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
+        let result = run(Some(registry)).await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
+            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
+        }
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "linked worker-selection policies require DYN_EPP_MODE=standalone"
         );
-        assert!(
-            require_standalone_mode_for_linked_worker_selection_policy(EppMode::DynamoRuntime)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn stock_epp_rejects_custom_worker_selection_policy() {
-        let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
-            r#"
-worker_selection:
-  aggregated: custom
-  instances:
-    - name: custom
-      type: acme
-      parameters: {}
-"#,
-        )
-        .unwrap();
-        let config = KvRouterConfig {
-            router_policy_config: Some(policy_file.path().display().to_string()),
-            ..Default::default()
-        };
-
-        assert!(reject_unlinked_worker_selection_policy(&config).is_err());
-    }
-
-    #[test]
-    fn stock_epp_ignores_embedded_stage_policy() {
-        let config = KvRouterConfig {
-            router_prefill_policy: Some("embedded-only".to_string()),
-            ..Default::default()
-        };
-
-        assert!(reject_unlinked_worker_selection_policy(&config).is_ok());
     }
 }

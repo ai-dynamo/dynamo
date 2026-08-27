@@ -100,7 +100,7 @@ impl VllmSidecarEngine {
             ));
         }
 
-        let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
+        let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(
