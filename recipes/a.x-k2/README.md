@@ -80,10 +80,12 @@ Start with aggregated serving to validate the custom vLLM image and model
 implementation:
 
 ```bash
+export DEPLOYMENT=axk2-vllm-agg-b200   # axk2-vllm-disagg-b200 for disaggregated serving
+
 kubectl apply -f "${RECIPE}/deploy.yaml" -n "${NAMESPACE}"
 
 kubectl get pods \
-  -l nvidia.com/dynamo-graph-deployment-name=axk2-vllm-agg-b200 \
+  -l nvidia.com/dynamo-graph-deployment-name="${DEPLOYMENT}" \
   -n "${NAMESPACE}" \
   --watch
 ```
@@ -97,7 +99,7 @@ artifacts.
 
 ```bash
 kubectl port-forward \
-  svc/axk2-vllm-agg-b200-frontend \
+  "svc/${DEPLOYMENT}-frontend" \
   8000:8000 \
   -n "${NAMESPACE}"
 ```

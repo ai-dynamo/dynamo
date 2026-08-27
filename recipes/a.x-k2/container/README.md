@@ -51,5 +51,7 @@ docker run --rm --gpus all --entrypoint python3 "${AXK2_IMAGE}" -c \
   "import dynamo.vllm; from vllm.transformers_utils.configs.axk2 import AXK2Config; print(AXK2Config.model_type)"
 ```
 
-The command must print `axk2`. A complete verification still requires starting
+The command must print `axk2`, confirming the Dynamo import and the A.X K2
+config registration. It does not check NIXL or parser registration. A complete
+verification, including NIXL and parser registration, still requires starting
 the aggregated recipe on a 4-GPU B200 node.

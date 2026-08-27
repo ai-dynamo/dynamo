@@ -10,3 +10,5 @@ spec:
   resources:
     requests:
       storage: 750Gi
+  # Edit this
+  storageClassName: "your-storage-class-name"
