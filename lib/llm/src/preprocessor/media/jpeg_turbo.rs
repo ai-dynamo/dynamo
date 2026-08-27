@@ -4,9 +4,9 @@
 //! Runtime bindings for libjpeg-turbo's TurboJPEG decode API.
 //!
 //! The shared library is loaded with `dlopen` instead of linked at build time so
-//! Dynamo keeps working in images that do not install libturbojpeg. Callers can
-//! use this as an opt-in fast path and fall back to the pure-Rust `image`
-//! decoder when the library is unavailable.
+//! Dynamo keeps working in images that do not install libturbojpeg. JPEG inputs
+//! use this fast path by default and fall back to the pure-Rust `image` decoder
+//! when the library is unavailable.
 
 #![allow(unsafe_code)]
 

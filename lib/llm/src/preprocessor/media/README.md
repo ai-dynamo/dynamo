@@ -25,8 +25,6 @@ Set media decoding default options and limits:
 from dynamo.llm import MediaDecoder
 decoder = MediaDecoder()
 decoder.enable_image({"limits": {"max_image_width": 4096, "max_image_height": 4096, "max_alloc": 16*1024*1024}})
-# Optional: force the original image::ImageReader path for JPEG inputs.
-# decoder.enable_image({"enable_libjpeg": False, "limits": {"max_alloc": 16*1024*1024}})
 decoder.enable_video({"fps": 2.0, "max_frames": 128, "limits": {"max_alloc": 1024*1024*128*3}})
 ```
 
@@ -60,7 +58,7 @@ register_model(
 ## Image decoding options
 
 ### JPEG decoding
-- **enable_libjpeg** (bool): Defaults to `true`, enabling libjpeg-turbo's TurboJPEG API for JPEG inputs. Set to `false` to force the original Rust `image::ImageReader` path.
+- The frontend uses libjpeg-turbo's TurboJPEG API for JPEG inputs by default. Set `DYN_MM_ENABLE_LIBJPEG=0` on the frontend process to use `image::ImageReader` instead.
 - Dynamo backend runtime images include `libturbojpeg`; custom images must provide `libturbojpeg.so.0` or Dynamo logs a one-time warning and falls back to `image::ImageReader`. The standalone frontend image is excluded as described above. Non-JPEG inputs and JPEGs that TurboJPEG cannot decode also fall back to `image::ImageReader`.
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)

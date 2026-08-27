@@ -7,11 +7,8 @@ import logging
 import os
 from typing import Any
 
-from dynamo.common.utils.env import env_bool
-
 logger = logging.getLogger(__name__)
 
-DYN_MM_ENABLE_LIBJPEG = "DYN_MM_ENABLE_LIBJPEG"
 DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC = 128 * 1024 * 1024
 DYN_MM_VIDEO_NUM_FRAMES = "DYN_MM_VIDEO_NUM_FRAMES"
 DEFAULT_FRONTEND_VIDEO_NUM_FRAMES = 32
@@ -21,10 +18,7 @@ def build_frontend_image_decoder_options(
     *,
     max_alloc: int = DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC,
 ) -> dict[str, Any]:
-    return {
-        "enable_libjpeg": env_bool(DYN_MM_ENABLE_LIBJPEG, default=True),
-        "limits": {"max_alloc": max_alloc},
-    }
+    return {"limits": {"max_alloc": max_alloc}}
 
 
 def _video_num_frames() -> int:

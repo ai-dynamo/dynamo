@@ -70,11 +70,11 @@ registers the model.
 
 ### JPEG Decoder
 
-The Rust frontend uses libjpeg-turbo for JPEG inputs by default. Set
-`DYN_MM_ENABLE_LIBJPEG=0` to use `image::ImageReader` instead. Dynamo backend
-runtime images include `libturbojpeg`; custom images must provide
-`libturbojpeg.so.0`. If the library is unavailable, Dynamo logs a one-time
-warning and falls back to `image::ImageReader`.
+The Rust frontend uses libjpeg-turbo for JPEG inputs by default. To use
+`image::ImageReader` instead, set `DYN_MM_ENABLE_LIBJPEG=0` on the frontend
+process. Dynamo backend runtime images include `libturbojpeg`; custom images
+must provide `libturbojpeg.so.0`. If the library is unavailable, Dynamo logs a
+one-time warning and falls back to `image::ImageReader`.
 
 ## Requirements and Limitations
 

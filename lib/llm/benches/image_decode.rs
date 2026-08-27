@@ -119,17 +119,16 @@ fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
     out.into_inner()
 }
 
-fn image_decoder(config: serde_json::Value) -> ImageDecoder {
-    serde_json::from_value(config).unwrap()
-}
-
 fn image_decoders() -> [(&'static str, ImageDecoder); 2] {
     [
         (
             "image_reader",
-            image_decoder(serde_json::json!({"enable_libjpeg": false})),
+            ImageDecoder::default().with_libjpeg_for_benchmark(false),
         ),
-        ("libjpeg_turbo", image_decoder(serde_json::json!({}))),
+        (
+            "libjpeg_turbo",
+            ImageDecoder::default().with_libjpeg_for_benchmark(true),
+        ),
     ]
 }
 
