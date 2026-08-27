@@ -21,8 +21,7 @@ Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `v
 | Variant target | `ENDPOINT` | Validated `CONCURRENCY` | `TRACE_FILE` |
 | --- | --- | --- | --- |
 | H200 aggregated (agentic + 1M) | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | `2` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| H200 disaggregated agentic | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `7` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| H200 disaggregated 1M | `dsv4-pro-0813-disagg-h200-1m-frontend:8000` | `1` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated (agentic + 1M) | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `7` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | GB200 aggregated agentic | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` | `8` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | GB200 disaggregated agentic | `dsv4-pro-0813-disagg-gb200-agentic-frontend:8000` | `12` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 

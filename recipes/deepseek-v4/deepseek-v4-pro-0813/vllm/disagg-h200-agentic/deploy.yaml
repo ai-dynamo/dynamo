@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# DeepSeek-V4-Pro-0813 - disaggregated 1P1D, 16x H200, agentic workload (64K ISL / 400 OSL).
+# DeepSeek-V4-Pro-0813 - disaggregated 1P1D, 16x H200.
+# Agentic workload (64K ISL / 400 OSL) and 1M context from the same config.
+# Prefill needs mnbt 4096 + gpu-mu 0.97: at mnbt 16384 it cannot start at 1M
+# (24.06 GiB KV needed for one request vs 20.75 available). No CPU offload needed --
+# GPU KV holds ~3.1M tokens (prefill) / ~2.8M (decode).
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -64,10 +68,10 @@ spec:
               --moe-backend marlin \
               --enable-prefix-caching \
               --no-enable-flashinfer-autotune \
-              --max-model-len 86016 \
+              --max-model-len 1048576 \
               --max-num-seqs 16 \
-              --max-num-batched-tokens 16384 \
-              --gpu-memory-utilization 0.95 \
+              --max-num-batched-tokens 4096 \
+              --gpu-memory-utilization 0.97 \
               --disaggregation-mode prefill \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
@@ -133,7 +137,7 @@ spec:
               --moe-backend marlin \
               --enable-prefix-caching \
               --no-enable-flashinfer-autotune \
-              --max-model-len 86016 \
+              --max-model-len 1048576 \
               --max-num-seqs 128 \
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.95 \
