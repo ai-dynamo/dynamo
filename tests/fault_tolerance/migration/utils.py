@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 
 import pytest
 import requests
@@ -18,6 +18,7 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
+from tests.utils.prometheus import sum_metric_samples
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +43,24 @@ def managed_processes_concurrently(
                 if startup_error is None:
                     startup_error = error
 
-    with ExitStack() as stack:
-        for process in entered:
-            if process is not None:
-                stack.callback(process.__exit__, None, None, None)
-
+    active_processes = [process for process in entered if process is not None]
+    try:
         if startup_error is not None:
             raise startup_error
 
-        yield tuple(process for process in entered if process is not None)
+        yield tuple(active_processes)
+    finally:
+        # ManagedProcess teardown can spend several seconds waiting for each
+        # independent process tree. Stop sibling workers concurrently just as
+        # they are started concurrently, while still waiting for every cleanup
+        # before leaving the context.
+        with ThreadPoolExecutor(max_workers=len(active_processes) or 1) as executor:
+            cleanup_futures = [
+                executor.submit(process.__exit__, None, None, None)
+                for process in reversed(active_processes)
+            ]
+            for future in cleanup_futures:
+                future.result()
 
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
@@ -251,9 +261,9 @@ def start_chat_completion_request(
 
 def determine_request_receiving_worker(
     worker1: ManagedProcess, worker2: ManagedProcess, receiving_pattern: str
-) -> tuple:
+) -> tuple[ManagedProcess, str, str]:
     """
-    Determine which worker received the request using parallel polling.
+    Determine which worker received the request while inspecting both logs together.
 
     Args:
         worker1: First worker process
@@ -261,13 +271,8 @@ def determine_request_receiving_worker(
         receiving_pattern: Log pattern indicating request receipt
 
     Returns:
-        Tuple of (worker_with_request, name_of_worker_with_request)
+        Tuple of (worker_with_request, name_of_worker_with_request, request_id)
     """
-    worker1_results: list[bool] = []
-    worker2_results: list[bool] = []
-    # Event to signal all threads to exit when one finds the pattern
-    found_event = threading.Event()
-
     # Engine logs are written asynchronously and can arrive noticeably later
     # under loaded CI nodes. The first request can also spend more than ten
     # seconds in cold frontend preprocessing before it reaches a worker. Keep
@@ -276,58 +281,81 @@ def determine_request_receiving_worker(
     # regression in #9465.
     max_wait_s = 30.0
     poll_interval_s = 0.1
+    request_re = re.compile(re.escape(receiving_pattern) + r"(?P<request_id>\S+)")
+    poll_event = threading.Event()
 
-    # Poll both workers in parallel
-    def poll_worker(worker: ManagedProcess, result_list: list[bool]):
-        deadline = time.monotonic() + max_wait_s
-        while time.monotonic() < deadline and not found_event.is_set():
-            # Check if the worker logs contain the pattern
-            try:
-                with open(worker.log_path, "r") as f:
-                    log_content = f.read()
-                    if receiving_pattern in log_content:
-                        result_list.append(True)
-                        found_event.set()  # Signal other thread to exit
-                        return
-            except Exception as error:
-                logger.error(
-                    "Could not read log file %s: %s",
-                    worker.log_path,
-                    error,
-                )
-                return
+    def request_ids(worker: ManagedProcess) -> list[str]:
+        try:
+            with open(worker.log_path, "r") as log_file:
+                return request_re.findall(log_file.read())
+        except FileNotFoundError:
+            return []
+        except OSError as error:
+            logger.warning("Could not read log file %s: %s", worker.log_path, error)
+            return []
 
-            # This is condition-driven polling: wake immediately when the other
-            # worker finds the request instead of sleeping for a fixed duration.
-            found_event.wait(timeout=poll_interval_s)
+    deadline = time.monotonic() + max_wait_s
+    last_worker1_ids: list[str] = []
+    last_worker2_ids: list[str] = []
+    while time.monotonic() < deadline:
+        last_worker1_ids = request_ids(worker1)
+        last_worker2_ids = request_ids(worker2)
 
-    # Look for which worker received the request
-    thread1 = threading.Thread(
-        target=poll_worker, args=(worker1, worker1_results), daemon=True
+        if last_worker1_ids and last_worker2_ids:
+            pytest.fail(
+                "Both candidate workers received a request before fault injection: "
+                f"worker1={last_worker1_ids}, worker2={last_worker2_ids}"
+            )
+        if last_worker1_ids:
+            request_id = last_worker1_ids[-1]
+            logger.info("Request %s was received by Worker 1", request_id)
+            return worker1, "Worker 1", request_id
+        if last_worker2_ids:
+            request_id = last_worker2_ids[-1]
+            logger.info("Request %s was received by Worker 2", request_id)
+            return worker2, "Worker 2", request_id
+
+        poll_event.wait(timeout=poll_interval_s)
+
+    pytest.fail(
+        f"Neither worker logged {receiving_pattern!r} within {max_wait_s}s; "
+        f"worker1_ids={last_worker1_ids}, worker2_ids={last_worker2_ids}"
     )
-    thread2 = threading.Thread(
-        target=poll_worker, args=(worker2, worker2_results), daemon=True
+
+
+def wait_for_worker_request_id(
+    worker: ManagedProcess,
+    receiving_pattern: str,
+    request_id: str,
+    max_wait_time: float = 30.0,
+) -> None:
+    """Wait until the replacement worker accepts the exact migrated request."""
+    expected = f"{receiving_pattern}{request_id}"
+    deadline = time.monotonic() + max_wait_time
+    last_error: OSError | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            with open(worker.log_path, "r") as log_file:
+                if expected in log_file.read():
+                    logger.info(
+                        "Replacement worker %s accepted request %s",
+                        worker.log_path,
+                        request_id,
+                    )
+                    return
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            last_error = error
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        f"Replacement worker did not log {expected!r} within {max_wait_time}s; "
+        f"last_error={last_error}"
     )
-    thread1.start()
-    thread2.start()
-    join_timeout_s = max_wait_s + 1
-    thread1.join(timeout=join_timeout_s)
-    thread2.join(timeout=join_timeout_s)
-
-    # Get results from lists
-    worker1_received = worker1_results[0] if worker1_results else False
-    worker2_received = worker2_results[0] if worker2_results else False
-
-    if worker1_received and not worker2_received:
-        logger.info("Request was received by Worker 1")
-        return worker1, "Worker 1"
-    elif worker2_received and not worker1_received:
-        logger.info("Request was received by Worker 2")
-        return worker2, "Worker 2"
-    elif worker1_received and worker2_received:
-        pytest.fail("Both workers received the request")
-    else:
-        pytest.fail("Neither worker received the request")
 
 
 def wait_for_endpoint_instances(
@@ -428,26 +456,76 @@ def wait_for_response(
     max_wait_time: float = 10.0,
 ) -> None:
     """
-    Block until num_responses new responses are received or max_wait_time is reached.
+    Block until at least ``num_responses`` non-empty payload chunks exist.
 
     Args:
         response_list: List being populated by background thread
-        num_responses: Number of new responses to wait for (default 5)
+        num_responses: Absolute minimum number of non-empty payload chunks (default 5)
         max_wait_time: Maximum time to wait in seconds (default 10s)
     """
-    initial_len = len(response_list)
-    target_len = initial_len + num_responses
     poll_interval = 0.001  # 1ms
     deadline = time.monotonic() + max_wait_time
 
     while time.monotonic() < deadline:
-        if len(response_list) >= target_len:
+        content_count = sum(
+            1 for response, _ in response_list if isinstance(response, str) and response
+        )
+        if content_count >= num_responses:
             return
         time.sleep(poll_interval)
 
+    content_count = sum(
+        1 for response, _ in response_list if isinstance(response, str) and response
+    )
     pytest.fail(
-        f"Only received {len(response_list) - initial_len}/{num_responses} new "
-        f"responses within {max_wait_time}s"
+        f"Only observed {content_count}/{num_responses} non-empty response chunks "
+        f"within {max_wait_time}s"
+    )
+
+
+def wait_for_worker_generate_completion(
+    worker_system_port: int,
+    component: str = "backend",
+    max_wait_time: float = 10.0,
+) -> None:
+    """Prove the replacement worker drained one request and emitted response bytes."""
+    metrics_url = f"http://localhost:{worker_system_port}/metrics"
+    labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    deadline = time.monotonic() + max_wait_time
+    duration_count = 0.0
+    response_bytes = 0.0
+    last_error: Exception | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(metrics_url, timeout=1)
+            response.raise_for_status()
+            duration_count = sum_metric_samples(
+                response.text,
+                "dynamo_component_request_duration_seconds_count",
+                labels,
+            )
+            response_bytes = sum_metric_samples(
+                response.text,
+                "dynamo_component_response_bytes_total",
+                labels,
+            )
+            if duration_count == 1 and response_bytes > 0:
+                logger.info(
+                    "Replacement worker completed one request with %s response bytes",
+                    response_bytes,
+                )
+                return
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        "Replacement worker did not complete exactly one generate request with "
+        f"response bytes within {max_wait_time}s; duration_count={duration_count}, "
+        f"response_bytes={response_bytes}, last_error={last_error}"
     )
 
 
@@ -659,6 +737,7 @@ def run_migration_test(
     expected_ongoing_request_count: int | None = None,
     graceful_shutdown_endpoint: tuple[str, str] | None = None,
     wait_for_worker_health_shutdown: bool = False,
+    verify_replacement_worker: bool = False,
 ) -> None:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -685,6 +764,9 @@ def run_migration_test(
             omitted, preserve the historical fixed parent grace period.
         wait_for_worker_health_shutdown: Also wait for the selected worker's
             health listener to close, proving active handlers have unwound.
+        verify_replacement_worker: Require the surviving worker to accept the
+            exact request ID and expose one completed generate request with
+            nonzero response bytes. Intended for isolated per-test workers.
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -705,9 +787,10 @@ def run_migration_test(
         )
 
     # Step 2: Determine which worker received the request
-    worker, worker_name = determine_request_receiving_worker(
+    worker, worker_name, request_id = determine_request_receiving_worker(
         worker1, worker2, receiving_pattern=receiving_pattern
     )
+    replacement_worker = worker2 if worker is worker1 else worker1
     assert (
         request_thread.is_alive()
     ), "Request completed before the migration fault could be injected"
@@ -780,7 +863,19 @@ def run_migration_test(
     # request does not exceed the migration seq-len cap; otherwise the in-flight
     # request must fail.
     if migration_limit > 0 and migration_max_seq_len != 1:
+        if verify_replacement_worker:
+            wait_for_worker_request_id(
+                replacement_worker,
+                receiving_pattern,
+                request_id,
+            )
         validate_response(request_thread, response_list)
+        if verify_replacement_worker:
+            worker_system_port = getattr(replacement_worker, "system_port", None)
+            assert isinstance(
+                worker_system_port, int
+            ), "Replacement-worker verification requires an integer system_port"
+            wait_for_worker_generate_completion(worker_system_port)
     else:
         # openai.APIError covers both mid-stream structured error frames and
         # HTTP non-200 responses.

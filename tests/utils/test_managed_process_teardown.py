@@ -19,12 +19,14 @@ Always use unique markers scoped to the test invocation.
 import os
 import signal
 import subprocess
+import threading
 import time
 import uuid
 
 import psutil
 import pytest
 
+from tests.fault_tolerance.migration.utils import managed_processes_concurrently
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = [
@@ -33,6 +35,30 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
 ]
+
+
+class _ConcurrentExitProbe:
+    """Minimal context manager that proves its sibling entered teardown."""
+
+    def __init__(self, sibling_exiting: threading.Event):
+        self.exiting = threading.Event()
+        self.sibling_exiting = sibling_exiting
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.exiting.set()
+        assert self.sibling_exiting.wait(timeout=1), "sibling teardown was sequential"
+
+
+def test_managed_processes_teardown_concurrently():
+    first = _ConcurrentExitProbe(threading.Event())
+    second = _ConcurrentExitProbe(first.exiting)
+    first.sibling_exiting = second.exiting
+
+    with managed_processes_concurrently(first, second):
+        pass
 
 
 def _unique_marker() -> str:
