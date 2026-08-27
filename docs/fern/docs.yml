@@ -99,6 +99,9 @@ redirects:
   # Reference variant-to-section redirects.
   - source: "/dynamo/dev/reference/releases/release-history"
     destination: "/dynamo/dev/reference/releases"
+  # Dynamo Enterprise moved out of Reference into its own top-level tab.
+  - source: "/dynamo/dev/reference/dynamo-enterprise"
+    destination: "/dynamo/dev/enterprise/overview"
   - source: "/dynamo/dev/reference/kubernetes-api"
     destination: "/dynamo/dev/reference/api/kubernetes/dynamo-graph-deployment"
   - source: "/dynamo/dev/reference/kubernetes-api/dynamo-graph-deployment"
