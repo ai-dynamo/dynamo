@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
 # Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
 # External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: none; this is a DGD-only example.
@@ -23,6 +25,13 @@ spec:
               workingDir: /workspace
               command: [python3]
               args: [-m, dynamo.frontend, --trust-remote-code]
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
               env:
                 - name: DYN_ROUTER_MODE
                   value: kv
@@ -34,11 +43,11 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-                readOnly: true
 
     - name: Worker
       type: worker
       replicas: 1
+      sharedMemorySize: 64Gi
       podTemplate:
         spec:
           containers:
@@ -78,6 +87,13 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
               resources:
                 requests:
                   nvidia.com/gpu: "4"
@@ -91,4 +107,3 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-                readOnly: true

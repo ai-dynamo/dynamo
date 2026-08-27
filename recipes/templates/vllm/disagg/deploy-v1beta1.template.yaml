@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
 # Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
 # External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: none; this is a DGD-only example.
@@ -22,6 +24,13 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
               command: [python3]
               args: [-m, dynamo.frontend, --router-mode, kv, --router-kv-events, --kv-cache-block-size, "64", --trust-remote-code]
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
               resources:
                 requests:
                   cpu: "8"
@@ -30,6 +39,7 @@ spec:
     - name: PrefillWorker
       type: prefill
       replicas: 2
+      sharedMemorySize: 64Gi
       podTemplate:
         spec:
           containers:
@@ -56,11 +66,13 @@ spec:
                     --no-disable-hybrid-kv-cache-manager \
                     --enable-flashinfer-autotune \
                     --speculative-config='{"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}' \
-                    --kv-transfer-config='{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}' \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
                     --disaggregation-mode=prefill \
                     --dyn-reasoning-parser gpt_oss \
                     --dyn-tool-call-parser harmony
               env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
                 - name: MODEL_NAME
                   value: openai/gpt-oss-120b
                 - name: SERVED_MODEL_NAME
@@ -94,20 +106,16 @@ spec:
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
-                - name: dshm
-                  mountPath: /dev/shm
+                  readOnly: true
           volumes:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 64Gi
 
     - name: DecodeWorker
       type: decode
       replicas: 6
+      sharedMemorySize: 64Gi
       podTemplate:
         spec:
           containers:
@@ -134,11 +142,13 @@ spec:
                     --no-disable-hybrid-kv-cache-manager \
                     --enable-flashinfer-autotune \
                     --speculative-config='{"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}' \
-                    --kv-transfer-config='{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}' \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
                     --disaggregation-mode=decode \
                     --dyn-reasoning-parser gpt_oss \
                     --dyn-tool-call-parser harmony
               env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
                 - name: MODEL_NAME
                   value: openai/gpt-oss-120b
                 - name: SERVED_MODEL_NAME
@@ -172,13 +182,8 @@ spec:
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
-                - name: dshm
-                  mountPath: /dev/shm
+                  readOnly: true
           volumes:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 64Gi

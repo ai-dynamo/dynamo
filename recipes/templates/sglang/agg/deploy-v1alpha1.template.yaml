@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
 # Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
 # External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: none; this is a DGD-only example.
 # Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
-# Compatibility note: the evidence source requires Dynamo 1.0+ with SGLang 0.5.9 or newer.
+# Compatibility note: requires Dynamo 1.0+ with SGLang 0.5.9 or newer.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -30,6 +32,13 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
           command: [python3]
           args: [-m, dynamo.frontend, --router-mode, kv, --no-kv-events, --http-port, "8000"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
 
     Worker:
       componentType: worker
@@ -66,3 +75,10 @@ spec:
               value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
             - name: HF_HOME
               value: /opt/models
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 60

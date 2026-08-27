@@ -55,6 +55,14 @@ The current shared provider Components target alpha `spec.services` and offer li
 
 Recipe examples must omit cluster scheduling, physical artifact and Secret bindings, image-pull Secrets, provider-network bindings, host bindings, and `metadata.namespace`. They retain portable serving behavior, logical references, and the fields needed by framework runtime commands.
 
+## Shared memory behavior
+
+For `v1beta1` workers, the operator owns `/dev/shm` unless injection is explicitly disabled:
+
+- When `sharedMemorySize` is omitted, the operator injects an 8Gi `/dev/shm` volume.
+- A positive `sharedMemorySize` makes the operator inject a volume of that size and drop any manual mount at `/dev/shm`.
+- `sharedMemorySize: "0"` disables operator injection. This is the only mode in which a manual `/dev/shm` volume applies, and the catalog does not use it.
+
 ## Limits
 
 These examples are copy starts, not synchronized source mirrors or cluster-qualified deployments. The checks prove YAML syntax and catalog conformance; they do not prove admission, scheduling, networking, model access, readiness, or benchmark performance. Live-cluster qualification belongs to the Kustomize integration and cluster-policy workstream.

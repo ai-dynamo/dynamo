@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: offline. Runtime pods use the pre-populated model cache.
+# To enable online access, add hf-token-secret through envFrom.secretRef and
+# remove HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE.
+# IPC_LOCK is needed only when the selected image or transport locks memory;
+# remove it otherwise.
+# Worker sharedMemorySize is 200Gi for this example. Validate the value for the
+# selected model, parallelism, and hardware before deployment.
 # Edit guide: change all resource names, model variables, image, replicas, node count, GPU count, and runtime configuration.
 # External references: model-cache is a logical reference that must stay consistent.
 # Optional resources: ComputeDomain/DRA and ConfigMap documents require the paired removals described below.
@@ -84,6 +91,13 @@ spec:
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
                   value: "1"
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
@@ -98,6 +112,7 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 4
+      sharedMemorySize: 200Gi
       podTemplate:
         spec:
           resourceClaims:
@@ -107,9 +122,8 @@ spec:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1
               securityContext:
-                runAsUser: 0
                 capabilities:
-                  add: [IPC_LOCK, SYS_RESOURCE]
+                  add: [IPC_LOCK]
               resources:
                 requests:
                   nvidia.com/gpu: "4"
@@ -121,25 +135,23 @@ spec:
                 httpGet:
                   path: /live
                   port: 9090
-                periodSeconds: 10
-                timeoutSeconds: 5
-                failureThreshold: 720
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 120
               volumeMounts:
-                - name: engine-config
-                  mountPath: /etc/sglang
-                  readOnly: true
                 - name: model-cache
                   mountPath: /model-cache
                   readOnly: true
-                - name: dshm
-                  mountPath: /dev/shm
+                - name: engine-config
+                  mountPath: /etc/sglang
+                  readOnly: true
               env:
                 - name: MODEL_NAME
                   value: Qwen/Qwen3.8-2.4T-A95B-FP8
                 - name: SERVED_MODEL_NAME
                   value: Qwen/Qwen3.8-2.4T-A95B-FP8
                 - name: DYN_FORWARDPASS_METRIC_PORT
-                  value: ""
+                  value: ""  # Empty disables the forward-pass metric server.
                 - name: HF_HOME
                   value: /model-cache
                 - name: HF_HUB_OFFLINE
@@ -171,12 +183,9 @@ spec:
                     --cuda-graph-max-bs-prefill 8192 \
                     --mamba-radix-cache-strategy extra_buffer
           volumes:
-            - name: engine-config
-              configMap:
-                name: qwen38-sglang-engine-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
+            - name: engine-config
+              configMap:
+                name: qwen38-sglang-engine-config

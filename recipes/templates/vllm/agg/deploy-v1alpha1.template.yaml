@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
 # Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
 # External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: none; this is a DGD-only example.
@@ -30,6 +32,13 @@ spec:
           workingDir: /workspace/examples/backends/vllm
           command: [python3]
           args: [-m, dynamo.frontend]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
 
     Worker:
       componentType: worker
@@ -67,3 +76,10 @@ spec:
               value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
             - name: HF_HOME
               value: /opt/models
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 60

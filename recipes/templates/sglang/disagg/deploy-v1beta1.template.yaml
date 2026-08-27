@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
+# To change the transfer backend, set SGLANG_DISAGGREGATION_NIXL_BACKEND on
+# both workers.
 # Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
 # External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: remove the ConfigMap only with both workers' sglang-config volumes, mounts, and --config arguments.
@@ -105,7 +109,6 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
               command: [python3]
               args: [-m, dynamo.frontend, --trust-remote-code]
               env:
@@ -115,6 +118,13 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
 
     - name: PrefillWorker
       type: prefill
@@ -125,7 +135,6 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
               workingDir: /workspace/
               command: [/bin/bash, -lc]
               args:
@@ -138,6 +147,8 @@ spec:
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45
               env:
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
                 - name: MODEL_NAME
                   value: nvidia/GLM-5.2-NVFP4
                 - name: SERVED_MODEL_NAME
@@ -150,8 +161,6 @@ spec:
                   value: /model-cache
                 - name: DYN_SGL_ALLOW_TOP_LOGPROBS
                   value: "1"
-                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-                  value: UCX
                 - name: UCX_TLS
                   value: cuda_ipc,cuda_copy,rc
               envFrom:
@@ -172,18 +181,19 @@ spec:
                   nvidia.com/gpu: "4"
                   memory: 1Ti
               volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
                 - name: sglang-config
                   mountPath: /etc/sglang
                   readOnly: true
-                - name: model-cache
-                  mountPath: /model-cache
           volumes:
-            - name: sglang-config
-              configMap:
-                name: glm52-sglang-disaggregated-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm52-sglang-disaggregated-config
 
     - name: DecodeWorker
       type: decode
@@ -194,7 +204,6 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
               workingDir: /workspace/
               command: [/bin/bash, -lc]
               args:
@@ -207,6 +216,8 @@ spec:
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45
               env:
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
                 - name: MODEL_NAME
                   value: nvidia/GLM-5.2-NVFP4
                 - name: SERVED_MODEL_NAME
@@ -221,8 +232,6 @@ spec:
                   value: "1"
                 - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
                   value: "3600"
-                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-                  value: UCX
                 - name: UCX_TLS
                   value: cuda_ipc,cuda_copy,rc
               envFrom:
@@ -243,15 +252,16 @@ spec:
                   nvidia.com/gpu: "8"
                   memory: 200Gi
               volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
                 - name: sglang-config
                   mountPath: /etc/sglang
                   readOnly: true
-                - name: model-cache
-                  mountPath: /model-cache
           volumes:
-            - name: sglang-config
-              configMap:
-                name: glm52-sglang-disaggregated-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm52-sglang-disaggregated-config

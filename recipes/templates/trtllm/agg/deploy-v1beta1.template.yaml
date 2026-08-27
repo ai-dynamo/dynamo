@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
 # Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache is a logical reference that must stay consistent.
+# External references: model-cache and hf-token-secret are logical references that must stay consistent.
 # Optional resources: remove the ConfigMap only with the Worker's trtllm-config volume,
 # /config mount, configMap.name reference, and --extra-engine-args /config/agg.yaml flag.
 # Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
@@ -46,7 +48,6 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
-              imagePullPolicy: IfNotPresent
               command: [python3]
               args: [-m, dynamo.frontend, --router-mode, round-robin, --http-port, "8000"]
               env:
@@ -58,20 +59,19 @@ spec:
                   value: "200"
                 - name: HF_HOME
                   value: /model-cache
-                - name: HF_HUB_OFFLINE
-                  value: "1"
                 - name: HF_MODULES_CACHE
                   value: /tmp/hf_modules
-              startupProbe:
+              readinessProbe:
                 httpGet:
                   path: /health
                   port: 8000
                 periodSeconds: 10
-                timeoutSeconds: 60
-                failureThreshold: 60
+                timeoutSeconds: 3
+                failureThreshold: 3
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
+                  readOnly: true
           volumes:
             - name: model-cache
               persistentVolumeClaim:
@@ -86,7 +86,6 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
-              imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command: [/bin/bash, -lc]
               args:
@@ -112,8 +111,6 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
-                - name: HF_HUB_OFFLINE
-                  value: "1"
                 - name: HF_MODULES_CACHE
                   value: /tmp/hf_modules
                 - name: TRITON_CACHE_DIR
@@ -132,6 +129,9 @@ spec:
                   value: "1"
                 - name: TRTLLM_WORKER_DISABLE_GC
                   value: "1"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
               resources:
                 requests:
                   memory: 128Gi
@@ -142,14 +142,13 @@ spec:
                 httpGet:
                   path: /live
                   port: 9090
-                periodSeconds: 30
+                periodSeconds: 60
                 timeoutSeconds: 20
-                failureThreshold: 120
+                failureThreshold: 60
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
-                - name: dshm
-                  mountPath: /dev/shm
+                  readOnly: true
                 - name: trtllm-config
                   mountPath: /config
                   readOnly: true
@@ -157,10 +156,6 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 40Gi
             - name: trtllm-config
               configMap:
                 name: nemotron-lightning-trtllm-aggregate-config

@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Hugging Face access: offline. Runtime pods use the pre-populated model cache.
+# To enable online access, add hf-token-secret through envFrom.secretRef and
+# remove HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE.
 # Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
 # External references: model-cache is a logical reference that must stay consistent.
 # Optional resources: none; this is a DGD-only example.
@@ -35,6 +38,18 @@ spec:
                 - --tool-call-parser
                 - inkling
                 - --trust-remote-code
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
@@ -47,6 +62,7 @@ spec:
     - name: Worker
       type: worker
       replicas: 1
+      sharedMemorySize: 512Gi
       podTemplate:
         spec:
           containers:
@@ -86,13 +102,24 @@ spec:
                 - name: SERVED_MODEL_NAME
                   value: thinkingmachines/Inkling-NVFP4
                 - name: DYN_FORWARDPASS_METRIC_PORT
-                  value: ""
+                  value: ""  # Empty disables the forward-pass metric server.
                 - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
                   value: "1"
                 - name: HF_HOME
                   value: /tmp/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
               resources:
                 requests:
                   cpu: "64"
@@ -104,8 +131,6 @@ spec:
                 - name: model-cache
                   mountPath: /model-cache
                   readOnly: true
-                - name: dshm
-                  mountPath: /dev/shm
                 - name: tmp
                   mountPath: /tmp
                 - name: flashinfer-cache
@@ -114,10 +139,6 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 512Gi
             - name: tmp
               emptyDir:
                 sizeLimit: 200Gi
