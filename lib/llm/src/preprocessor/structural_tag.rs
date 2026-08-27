@@ -3,14 +3,60 @@
 
 //! Structural tag policy for chat tool-call guided decoding.
 
+mod v1;
+mod v2;
+
 use crate::local_model::runtime_config::{
-    StructuralTagMode, StructuralTagScope, TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+    ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
+    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 
-use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
+use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+
+struct StructuralTagBuildRequest<'a> {
+    tool_choice: &'a ToolChoice,
+    tools: &'a [ToolDefinition],
+    parallel_tool_calls: Option<bool>,
+    schema_mode: StructuralTagSchemaMode,
+    exclude_special_tokens: Option<bool>,
+    reasoning_boundary: StructuralTagReasoningBoundary,
+    tool_arguments_any_order: bool,
+    starts_in_reasoning: bool,
+    structured_output_schema: Option<&'a serde_json::Value>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SelectedStructuralTagBuilder {
+    V1(v1::StructuralTagBuilder),
+    V2(v2::StructuralTagBuilder),
+}
+
+impl SelectedStructuralTagBuilder {
+    fn for_parser(parser_name: &str) -> Option<Self> {
+        if v2::enabled()
+            && v2::supports_family(parser_name)
+            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
+        {
+            return Some(Self::V2(builder));
+        }
+
+        v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    fn build(
+        self,
+        request: &StructuralTagBuildRequest<'_>,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        match self {
+            Self::V1(builder) => builder.build(request),
+            Self::V2(builder) => builder.build(request),
+        }
+    }
+}
 
 /// Validate a forced `tool_choice` against the request's actual `tools` list.
 ///
@@ -64,19 +110,20 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
 /// parser registry can actually build one.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
-/// covering model-family/tool-choice intrinsic eligibility, the operator's global
-/// `structural_tag_mode`/`structural_tag_scope`, the `tool_choice=None` ban-tag
-/// exclusion, and real parser-registry builder availability. A caller can only
-/// reach `Required` by way of a real, registered
-/// [`dynamo_parsers::tool_calling::StructuralTagBuilder`] — it cannot ask for the
-/// eligibility half of this decision without also getting the registry-availability
-/// proof in the same value. Both the real preprocessing path
+/// covering model-family/tool-choice intrinsic eligibility, the configured
+/// structural-tag policy, tools-with-structured-output composition, the
+/// `tool_choice=None` ban-tag exclusion, and real parser-registry builder
+/// availability. A caller can only reach `Required` with a registered builder
+/// selected for the active parser generation — it cannot ask for the eligibility
+/// half of this decision without also getting the registry-availability proof in
+/// the same value. Both the real
+/// preprocessing path
 /// (`apply_tool_choice_structural_tag`) and the HTTP-layer reconstruction
 /// (`http::service::apply_request_tool_call_parsing_options`) must consult this
 /// function; neither may re-derive eligibility, mode, scope, or registry
 /// availability independently.
 pub(crate) enum StructuralTagDecision {
-    Required(&'static dynamo_parsers::tool_calling::StructuralTagBuilder),
+    Required(SelectedStructuralTagBuilder),
     NotApplicable,
 }
 
@@ -96,25 +143,40 @@ impl StructuralTagDecision {
 /// (`http::service::apply_request_tool_call_parsing_options`) must propagate
 /// this error rather than falling back to `NotApplicable`, or an invalid forced
 /// choice would silently install a structural tag anyway.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn structural_tag_decision(
     parser_name: Option<&str>,
     tool_choice: &ToolChoice,
     tools: &[ToolDefinition],
     parallel_tool_calls: Option<bool>,
-    mode: StructuralTagMode,
-    scope: StructuralTagScope,
+    config: Option<&StructuralTagConfig>,
+    has_structured_output: bool,
     exclude_tools_when_tool_choice_none: bool,
 ) -> Result<StructuralTagDecision, DynamoError> {
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
 
-    if mode == StructuralTagMode::Off
-        && !requires_intrinsic_structural_tag(parser_name, tool_choice)
-    {
+    if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
     }
+
+    let requires_tool_calls_with_structured_output = if has_structured_output {
+        match tool_choice {
+            ToolChoice::Auto => {
+                if config.is_some_and(|config| config.allow_tool_calls_with_structured_output)
+                    && !tools.is_empty()
+                {
+                    true
+                } else {
+                    return Ok(StructuralTagDecision::NotApplicable);
+                }
+            }
+            ToolChoice::None => return Ok(StructuralTagDecision::NotApplicable),
+            ToolChoice::Required | ToolChoice::Named(_) => false,
+        }
+    } else {
+        false
+    };
 
     if should_skip_tool_call_ban(exclude_tools_when_tool_choice_none, tool_choice) {
         // The prompt formatter already omits tools for this request. Avoid
@@ -131,7 +193,7 @@ pub(crate) fn structural_tag_decision(
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
-    let Some(builder) = OpenAIPreprocessor::structural_tag_builder_for_parser(parser_name) else {
+    let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name) else {
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
@@ -141,6 +203,12 @@ pub(crate) fn structural_tag_decision(
         }
         return Ok(StructuralTagDecision::Required(builder));
     }
+
+    if requires_tool_calls_with_structured_output {
+        return Ok(StructuralTagDecision::Required(builder));
+    }
+
+    let scope = config.map_or_else(Default::default, |config| config.scope);
 
     if !OpenAIPreprocessor::should_apply_tool_call_format(
         scope,
@@ -162,45 +230,69 @@ impl OpenAIPreprocessor {
         tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
         prompt_injected_reasoning: bool,
+        structured_output_schema: Option<&serde_json::Value>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
         let parser_name = self.tool_call_parser.as_deref();
+        let explicit_config = self.runtime_config.structural_tag.as_ref();
+
+        let mut config = explicit_config.cloned().unwrap_or_default();
+        if explicit_config.is_none() && self.backend_excludes_reasoning_from_structural_tag() {
+            config.reasoning_boundary = StructuralTagReasoningBoundary::Backend;
+        }
         let StructuralTagDecision::Required(builder) = structural_tag_decision(
             parser_name,
             tool_choice,
             tools,
             parallel_tool_calls,
-            self.runtime_config.structural_tag_mode,
-            self.runtime_config.structural_tag_scope,
+            explicit_config,
+            structured_output_schema.is_some(),
             self.runtime_config.exclude_tools_when_tool_choice_none,
         )?
         else {
             return Ok(false);
         };
-        // `structural_tag_decision` only returns `Required` once `parser_name` is
-        // confirmed `Some` (it is the source of the registry lookup that produced
-        // `builder`), so this is a real value, not a placeholder.
         let parser_name = parser_name.expect("Required decision implies a parser name");
 
-        if matches!(tool_choice, ToolChoice::None) {
-            return Self::apply_tool_call_ban(builder, preprocessed_request);
-        }
+        let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto)
+            && config.allow_tool_calls_with_structured_output
+        {
+            structured_output_schema
+        } else {
+            None
+        };
 
-        // `structural_tag_decision` already confirmed `should_apply_tool_call_format`
-        // for this non-None tool_choice before returning `Required`.
-        let ctx = dynamo_parsers::tool_calling::ToolCallFormatBuildContext {
+        let request = StructuralTagBuildRequest {
             tool_choice,
             tools,
             parallel_tool_calls,
-            schema_mode: self.runtime_config.structural_tag_schema,
-            starts_in_reasoning: prompt_injected_reasoning
-                && !self.tool_call_structural_tag_excludes_reasoning(),
+            schema_mode: config.schema,
+            exclude_special_tokens: config.exclude_special_tokens,
+            reasoning_boundary: config.reasoning_boundary,
+            tool_arguments_any_order: config.tool_arguments_any_order,
+            starts_in_reasoning: prompt_injected_reasoning,
+            structured_output_schema,
         };
 
-        Self::apply_tool_call_format(parser_name, builder, &ctx, preprocessed_request)
+        let applied =
+            apply_structural_tag(parser_name, builder.build(&request), preprocessed_request)?;
+        if applied && structured_output_schema.is_some() {
+            // Request preprocessing materializes `response_format` as guided JSON.
+            // The composite structural tag now owns that schema.
+            preprocessed_request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        if applied && prompt_injected_reasoning {
+            preprocessed_request.require_reasoning =
+                config.reasoning_boundary == StructuralTagReasoningBoundary::Backend;
+        }
+        Ok(applied)
     }
 
-    fn tool_call_structural_tag_excludes_reasoning(&self) -> bool {
+    fn backend_excludes_reasoning_from_structural_tag(&self) -> bool {
         match self
             .runtime_config
             .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
@@ -211,88 +303,11 @@ impl OpenAIPreprocessor {
                 tracing::warn!(
                     %error,
                     key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-                    "Ignoring invalid structural-tag reasoning metadata; using the compatibility behavior"
+                    "Ignoring invalid structural-tag reasoning metadata"
                 );
                 false
             }
         }
-    }
-
-    /// Find the structural tag builder for a parser, if supported.
-    fn structural_tag_builder_for_parser(
-        parser_name: &str,
-    ) -> Option<&'static dynamo_parsers::tool_calling::StructuralTagBuilder> {
-        let parser_map = dynamo_parsers::tool_calling::parsers::get_tool_parser_map();
-        let builder = parser_map
-            .get(parser_name)
-            .and_then(|tc| tc.structural_tag_builder.as_ref());
-
-        if builder.is_none() {
-            tracing::warn!(
-                parser = parser_name,
-                "Structural tag enabled but parser does not support it; \
-                 falling back to default behaviour"
-            );
-        }
-
-        builder
-    }
-
-    /// Apply the `tool_choice=none` ban tag, if configured.
-    fn apply_tool_call_ban(
-        builder: &dynamo_parsers::tool_calling::StructuralTagBuilder,
-        common_request: &mut PreprocessedRequest,
-    ) -> Result<bool, DynamoError> {
-        if let Some(ban_tag) = builder.build_tool_call_ban().map_err(|e| {
-            DynamoError::builder()
-                .error_type(ErrorType::Unknown)
-                .message(format!("failed to build tool-call ban structural tag: {e}"))
-                .build()
-        })? {
-            let gd = common_request
-                .sampling_options
-                .guided_decoding
-                .get_or_insert_default();
-            gd.structural_tag = Some(ban_tag);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Build and inject the tool-call format tag, if one is needed.
-    fn apply_tool_call_format(
-        parser_name: &str,
-        builder: &dynamo_parsers::tool_calling::StructuralTagBuilder,
-        ctx: &dynamo_parsers::tool_calling::ToolCallFormatBuildContext<'_>,
-        common_request: &mut PreprocessedRequest,
-    ) -> Result<bool, DynamoError> {
-        let structural_tag = match builder.build_tool_call_format(ctx) {
-            Ok(Some(tag)) => tag,
-            Ok(None) => {
-                tracing::debug!(
-                    parser = parser_name,
-                    "Builder returned None for structural_tag (tool_choice={:?})",
-                    ctx.tool_choice,
-                );
-                return Ok(false);
-            }
-            Err(e) => {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::Unknown)
-                    .message(format!(
-                        "failed to build structural_tag for parser '{parser_name}': {e}"
-                    ))
-                    .build());
-            }
-        };
-
-        let gd = common_request
-            .sampling_options
-            .guided_decoding
-            .get_or_insert_default();
-        gd.structural_tag = Some(structural_tag);
-        Ok(true)
     }
 
     /// Decide whether this request should use a tool-call format tag.
@@ -316,11 +331,95 @@ impl OpenAIPreprocessor {
     }
 }
 
+fn apply_structural_tag(
+    parser_name: &str,
+    structural_tag: anyhow::Result<Option<serde_json::Value>>,
+    request: &mut PreprocessedRequest,
+) -> Result<bool, DynamoError> {
+    let structural_tag = match structural_tag {
+        Ok(Some(tag)) => tag,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::Unknown)
+                .message(format!(
+                    "failed to build structural_tag for parser '{parser_name}': {error}"
+                ))
+                .build());
+        }
+    };
+
+    let guided_decoding = request
+        .sampling_options
+        .guided_decoding
+        .get_or_insert_default();
+    guided_decoding.structural_tag = Some(structural_tag);
+    Ok(true)
+}
+
+pub(super) fn validate_runtime_config(runtime_config: &ModelRuntimeConfig) -> anyhow::Result<()> {
+    let Some(config) = runtime_config.structural_tag.as_ref() else {
+        return Ok(());
+    };
+
+    let v2_only_option = config
+        .allow_tool_calls_with_structured_output
+        .then_some("allow_tool_calls_with_structured_output")
+        .or(config
+            .exclude_special_tokens
+            .is_some()
+            .then_some("exclude_special_tokens"))
+        .or(
+            (config.reasoning_boundary == StructuralTagReasoningBoundary::Backend)
+                .then_some("reasoning_boundary"),
+        )
+        .or(config
+            .tool_arguments_any_order
+            .then_some("tool_arguments_any_order"));
+    let Some(v2_only_option) = v2_only_option else {
+        return Ok(());
+    };
+
+    anyhow::ensure!(
+        v2::enabled(),
+        "structural_tag.{v2_only_option} requires {}=1",
+        env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+    );
+    let parser_name = runtime_config.tool_call_parser.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("structural_tag.{v2_only_option} requires a tool-call parser")
+    })?;
+    anyhow::ensure!(
+        v2::supports_family(parser_name),
+        "structural_tag.{v2_only_option} is not supported by parser '{parser_name}'"
+    );
+    anyhow::ensure!(
+        v2::StructuralTagBuilder::for_parser(parser_name).is_some(),
+        "parser '{parser_name}' does not provide a parsers-v2 structural-tag builder"
+    );
+
+    if config.reasoning_boundary == StructuralTagReasoningBoundary::Backend {
+        anyhow::ensure!(
+            runtime_config.reasoning_parser.is_some(),
+            "structural_tag.reasoning_boundary=backend requires a reasoning parser"
+        );
+        let capability = runtime_config
+            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)?
+            .unwrap_or(false);
+        anyhow::ensure!(
+            capability,
+            "structural_tag.reasoning_boundary=backend is not supported by this backend"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use crate::{
+        local_model::runtime_config::StructuralTagConfig,
         model_card::ModelDeploymentCard,
         protocols::common::{OutputOptions, SamplingOptions, StopConditions},
     };
@@ -331,7 +430,7 @@ mod tests {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig::default());
         mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
         mdc.runtime_config.exclude_tools_when_tool_choice_none = exclude_tools_when_none;
 
@@ -353,7 +452,7 @@ mod tests {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig::default());
         mdc.runtime_config.tool_call_parser = Some("kimi_k2".to_string());
         if let Some(excludes_reasoning) = excludes_reasoning {
             mdc.runtime_config
@@ -371,7 +470,6 @@ mod tests {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::Off;
         mdc.runtime_config.tool_call_parser = Some("kimi_k3".to_string());
         OpenAIPreprocessor::new(mdc).unwrap()
     }
@@ -392,6 +490,7 @@ mod tests {
                     &tools,
                     None,
                     true,
+                    None,
                     &mut request,
                 )
                 .unwrap()
@@ -465,7 +564,7 @@ mod tests {
                 "test fixture drifted: '{parser}' + {choice:?} is no longer intrinsic"
             );
             assert!(
-                OpenAIPreprocessor::structural_tag_builder_for_parser(parser).is_some(),
+                SelectedStructuralTagBuilder::for_parser(parser).is_some(),
                 "'{parser}' is intrinsic per the predicate but the parser registry has \
                  no structural-tag builder for it — the predicate and the registry have \
                  drifted apart"
@@ -490,11 +589,107 @@ mod tests {
     }
 
     #[test]
+    fn tools_with_structured_output_require_a_tag_independently_of_scope() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+        let config = StructuralTagConfig {
+            scope: StructuralTagScope::Auto,
+            allow_tool_calls_with_structured_output: true,
+            ..Default::default()
+        };
+
+        let decision = structural_tag_decision(
+            Some("qwen3_coder"),
+            &ToolChoice::Auto,
+            &tools,
+            None,
+            Some(&config),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(decision.is_required());
+    }
+
+    #[test]
+    fn structured_output_requires_explicit_tool_call_composition_opt_in() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+
+        for scope in [StructuralTagScope::Auto, StructuralTagScope::Always] {
+            let config = StructuralTagConfig {
+                scope,
+                allow_tool_calls_with_structured_output: false,
+                ..Default::default()
+            };
+            let decision = structural_tag_decision(
+                Some("qwen3_coder"),
+                &ToolChoice::Auto,
+                &tools,
+                None,
+                Some(&config),
+                true,
+                true,
+            )
+            .unwrap();
+
+            assert!(!decision.is_required());
+        }
+
+        let config = StructuralTagConfig {
+            scope: StructuralTagScope::Auto,
+            allow_tool_calls_with_structured_output: true,
+            ..Default::default()
+        };
+        let decision = structural_tag_decision(
+            Some("qwen3_coder"),
+            &ToolChoice::Auto,
+            &tools,
+            None,
+            Some(&config),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(!decision.is_required());
+    }
+
+    #[test]
+    fn structured_output_takes_precedence_over_a_tool_call_ban() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+        let config = StructuralTagConfig::default();
+
+        let decision = structural_tag_decision(
+            Some("qwen3_coder"),
+            &ToolChoice::None,
+            &tools,
+            None,
+            Some(&config),
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert!(!decision.is_required());
+    }
+
+    #[test]
     fn kimi_k2_required_installs_native_tag_when_global_mode_is_off() {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::Off;
         mdc.runtime_config.tool_call_parser = Some("kimi_k2".to_string());
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let tools = [ToolDefinition {
@@ -514,6 +709,7 @@ mod tests {
                 &tools,
                 None,
                 false,
+                None,
                 &mut request,
             )
             .unwrap();
@@ -557,6 +753,7 @@ mod tests {
                 &tools,
                 None,
                 false,
+                None,
                 &mut request,
             )
             .unwrap();
@@ -579,7 +776,14 @@ mod tests {
         let mut request = preprocessed_request();
 
         let err = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Required, &[], None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &[],
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .expect_err(
                 "kimi_k2 + required with no tools must be rejected, not silently \
                  resolved to a structural tag",
@@ -594,7 +798,14 @@ mod tests {
         let mut request = preprocessed_request();
 
         let err = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Required, &[], None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &[],
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .expect_err("required with no tools must be rejected before Kimi K3's XTML path");
         assert_eq!(err.error_type(), ErrorType::InvalidArgument);
         assert!(request.sampling_options.guided_decoding.is_none());
@@ -616,6 +827,7 @@ mod tests {
                 &tools,
                 None,
                 false,
+                None,
                 &mut request,
             )
             .expect_err(
@@ -632,9 +844,16 @@ mod tests {
         let mut request = preprocessed_request();
 
         let err = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Required, &[], None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &[],
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .expect_err(
-                "operator-enabled structural_tag_mode must not let required-with-no-tools \
+                "operator-configured structural tags must not let required-with-no-tools \
                  through for a non-Kimi registry-supported parser either",
             );
         assert_eq!(err.error_type(), ErrorType::InvalidArgument);
@@ -657,6 +876,7 @@ mod tests {
                 &tools,
                 None,
                 false,
+                None,
                 &mut request,
             )
             .expect_err(
@@ -675,13 +895,27 @@ mod tests {
 
         let mut request = preprocessed_request();
         let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::None, &[], None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::None,
+                &[],
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .unwrap();
         assert!(!applied);
 
         let mut request = preprocessed_request();
         let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Auto, &[], None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Auto,
+                &[],
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .unwrap();
         assert!(!applied);
     }
@@ -697,7 +931,14 @@ mod tests {
         let preprocessor = structural_tag_preprocessor(true);
         let mut request = preprocessed_request();
         let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::None, &tools, None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::None,
+                &tools,
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .unwrap();
 
         assert!(!applied);
@@ -706,7 +947,14 @@ mod tests {
         let preprocessor = structural_tag_preprocessor(false);
         let mut request = preprocessed_request();
         let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::None, &tools, None, false, &mut request)
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::None,
+                &tools,
+                None,
+                false,
+                None,
+                &mut request,
+            )
             .unwrap();
 
         assert!(applied);
