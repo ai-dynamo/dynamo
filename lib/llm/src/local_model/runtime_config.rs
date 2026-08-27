@@ -20,6 +20,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -564,6 +565,31 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
                 "unsupported_tool_call_parser",
                 format!(
                     "tool_call_parser '{parser}' is not supported; available parsers: {}",
+                    supported.join(", ")
+                ),
+            ));
+        }
+    }
+
+    if let Some(parser) = config
+        .reasoning_parser
+        .as_deref()
+        .filter(|parser| !parser.is_empty())
+    {
+        let mut supported = get_available_reasoning_parsers();
+        // A unified family owns reasoning in its single pass and has no v1 entry,
+        // but the frameworks still register it by name, so it stays valid here.
+        supported.extend_from_slice(unified_family_names());
+        supported.sort_unstable();
+        supported.dedup();
+        // get_reasoning_parser_from_name lowercases before its lookup, so compare
+        // on the same normalization rather than rejecting a spelling it accepts.
+        let normalized = parser.to_lowercase();
+        if !supported.contains(&normalized.as_str()) {
+            return Err(validation_error(
+                "unsupported_reasoning_parser",
+                format!(
+                    "reasoning_parser '{parser}' is not supported; available parsers: {}",
                     supported.join(", ")
                 ),
             ));
@@ -1261,6 +1287,33 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn test_validate_config_checks_reasoning_parser() {
+        let validate = |parser: &str| {
+            ModelRuntimeConfig {
+                reasoning_parser: Some(parser.to_string()),
+                ..Default::default()
+            }
+            .validate_config()
+        };
+
+        // Every registry entry and every unified family must stay valid: muse has
+        // no v1 reasoning parser, yet vLLM ships `--reasoning-parser muse_glimmer`.
+        for parser in get_available_reasoning_parsers()
+            .into_iter()
+            .chain(unified_family_names().iter().copied())
+        {
+            assert!(validate(parser).is_ok(), "{parser} must be supported");
+        }
+        // The lookup lowercases, so a capitalized spelling it would accept must not
+        // be rejected here.
+        assert!(validate("Qwen3").is_ok());
+        assert!(validate("").is_ok());
+
+        let error = validate("not_registered").unwrap_err();
+        assert!(error.contains("not_registered"));
     }
 
     #[test]
