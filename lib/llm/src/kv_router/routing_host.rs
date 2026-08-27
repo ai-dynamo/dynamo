@@ -90,12 +90,18 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
+        let mut terminal_handled = false;
         let completed = loop {
             tokio::select! {
                 biased;
 
                 _ = &mut stopped => {
                     tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
+                    let error = DynamoError::builder()
+                        .error_type(ErrorType::Cancelled)
+                        .message(format!("Request {} was cancelled", context.id()))
+                        .build();
+                    guard.abort_with_error(Some(&error)).await;
                     break false;
                 }
 
@@ -110,7 +116,14 @@ where
                         // Release the failed attempt before Migration can observe
                         // the item and start another one. This keeps serialized
                         // retries free of stale-cleanup ABA races.
-                        guard.abort().await;
+                        let retryable = item
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| crate::migration::is_migratable(error));
+                        if !retryable || !guard.release_for_retry().await {
+                            guard.abort_with_error(item.error.as_ref()).await;
+                        }
+                        terminal_handled = true;
                         yield item;
                         break false;
                     }
@@ -121,7 +134,7 @@ where
 
         if completed {
             guard.finish().await;
-        } else {
+        } else if !terminal_handled {
             guard.abort().await;
         }
     }

@@ -7,8 +7,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
 };
 pub use dynamo_kv_router::scheduling::{
     AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
+    OverloadedWorkerProvider, PotentialLoad, RequestClassifier, RequestLifecycle, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -32,7 +32,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
@@ -185,6 +185,14 @@ where
         })
     }
 
+    pub(crate) fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.inner.install_request_classifier(classifier, shutdown)
+    }
+
     pub async fn schedule_request(
         &self,
         request: ScheduleRequest,
@@ -192,6 +200,30 @@ where
         let response = self.inner.schedule_request(request).await;
         self.observe_schedule_result(&response);
         response
+    }
+
+    pub(super) async fn schedule_request_with_ingress_at(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let response = self
+            .inner
+            .schedule_request_with_ingress_at(request, ingress_at)
+            .await;
+        self.observe_schedule_result(&response);
+        response
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.inner.begin_request_lifecycle(request_id)
+    }
+
+    pub(crate) fn has_request_classifier(&self) -> bool {
+        self.inner.has_request_classifier()
     }
 
     #[expect(clippy::too_many_arguments)]

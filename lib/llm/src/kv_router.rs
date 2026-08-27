@@ -28,8 +28,8 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestClassifier,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
@@ -438,10 +438,9 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
-    // Keep the two overload cases apart. A single overloaded worker can be
-    // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. A filter rejection is unavailable,
-    // not overload, and becomes HTTP 503.
+    // A single overloaded worker can be retried elsewhere; pool-wide and
+    // admission-control overloads cannot. A filter rejection is unavailable, not
+    // overload, and becomes HTTP 503.
     let (error_type, overloaded) = match error {
         scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)
@@ -449,6 +448,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::DueTimeExpired => (ErrorType::ResourceExhausted, true),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -858,6 +858,20 @@ where
         })
     }
 
+    /// Attach a request classifier before placing this router into service.
+    ///
+    /// Drive the configured router through [`RoutingHost`] so response lifecycle
+    /// notifications reach the classifier.
+    pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        if !self
+            .scheduler
+            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+        {
+            anyhow::bail!("request classifier is already configured");
+        }
+        Ok(self)
+    }
+
     pub(crate) fn set_endpoint_registration(
         &mut self,
         registration: dynamo_runtime::discovery::EndpointRegistrationLease,
@@ -890,6 +904,13 @@ where
 
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
         self.required_worker_inputs
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.scheduler.begin_request_lifecycle(request_id)
     }
 
     /// Cancel background work and wait for KV event ingestion to stop.
@@ -1215,10 +1236,15 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        if self.scheduler.has_request_classifier() {
+            anyhow::bail!("request-classifier routers must be driven through RoutingHost");
+        }
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
                 block_mm_infos,
                 router_config_override,
                 update_states,
@@ -1268,7 +1294,9 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
                 block_mm_infos,
                 router_config_override,
                 false,
@@ -1298,7 +1326,9 @@ where
     async fn find_best_match_details_with_policy_class_inner(
         &self,
         context_id: Option<&str>,
+        ingress_at: Instant,
         tokens: &[u32],
+        input_tokens: usize,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
@@ -1338,7 +1368,7 @@ where
                 request_id: context_id.map(str::to_string),
             },
         };
-        let isl_tokens = tokens.len();
+        let isl_tokens = input_tokens;
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
@@ -1457,7 +1487,7 @@ where
         let (response, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request(schedule_request)
+                .schedule_request_with_ingress_at(schedule_request, ingress_at)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {
@@ -2111,6 +2141,16 @@ mod tests {
             .expect("filtered workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+    }
+
+    #[test]
+    fn classifier_rejections_map_to_resource_exhausted() {
+        let error = map_scheduler_error(KvSchedulerError::DueTimeExpired);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("classifier rejection should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
     }
 
     #[test]

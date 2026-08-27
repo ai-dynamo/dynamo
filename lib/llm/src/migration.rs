@@ -60,7 +60,7 @@ impl HasTokenIds for LLMEngineOutput {
 }
 
 /// Check if an error chain indicates the request should be migrated.
-fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     const MIGRATABLE: &[ErrorType] = &[
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
@@ -369,6 +369,11 @@ where
                         continue;
                     }
                 }
+                if let Some(error) = response.error.as_ref()
+                    && let Some(state) = self.request.migration_state.as_ref()
+                {
+                    state.abort_request_lifecycle(Some(error));
+                }
                 self.track_response(&response);
                 return Some(response);
             }
@@ -437,6 +442,12 @@ where
                 Ok(())
             }
             Some(Err(err)) => {
+                let typed_error = err
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<DynamoError>());
+                if let Some(state) = self.request.migration_state.as_ref() {
+                    state.abort_request_lifecycle(typed_error);
+                }
                 let outcome =
                     if error::match_error_chain(err.as_ref(), &[ErrorType::Cancelled], &[]) {
                         frontend_service::migration_outcome::CANCELLED

@@ -5,14 +5,16 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
+    DefaultWorkerSelector, WorkerSelectionPolicy,
+    config::KvRouterConfig,
     protocols::RoutingConstraints,
+    scheduling::{ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier},
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -27,7 +29,7 @@ use dynamo_runtime::{
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use super::*;
 use crate::{
@@ -37,6 +39,7 @@ use crate::{
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
     protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    protocols::common::preprocessor::MmRoutingInfo,
 };
 
 fn request() -> PreprocessedRequest {
@@ -566,6 +569,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
         WorkerWithDpRank::from_worker_id(0),
         &request(),
         false,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -702,6 +706,230 @@ async fn router_with_worker_configs(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+async fn router_with_classifier(
+    classifier: impl RequestClassifier,
+    session_affinity_ttl: Option<Duration>,
+) -> (RoutingHost, Runtime) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("request-classifier-routing-host".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let worker_id = 7;
+    let (_tx, workers) =
+        watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        ..Default::default()
+    };
+    let chooser = KvRouter::new(
+        endpoint,
+        client.clone(),
+        workers,
+        None,
+        16,
+        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        Some(config),
+        None,
+        "decode",
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+    .with_request_classifier(classifier)
+    .unwrap();
+    let inner = PushRouter::from_client(client, RouterMode::KV)
+        .await
+        .unwrap();
+    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    router
+        .inner
+        .client
+        .override_discovered_instances(vec![worker_id]);
+    router.inner.client.override_instance_avail(vec![worker_id]);
+    (router, runtime)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClassifierObservation {
+    Completed(usize),
+    Aborted,
+}
+
+struct RecordingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<ClassifierObservation>,
+}
+
+impl RequestClassifier for RecordingClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Ok(request) })
+    }
+
+    fn on_event(&mut self, event: ClassifyEvent<'_>) {
+        let observation = match event {
+            ClassifyEvent::Completed {
+                context_tokens: Some(context_tokens),
+                ..
+            } => Some(ClassifierObservation::Completed(context_tokens)),
+            ClassifyEvent::Aborted { .. } => Some(ClassifierObservation::Aborted),
+            _ => None,
+        };
+        if let Some(observation) = observation {
+            self.observations.send(observation).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn stale_affinity_rebind_classifies_once_without_intermediate_abort() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let (mut selection, operation) = router
+        .select_with_affinity(&request, RequestPhase::Aggregated, false)
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(observations_rx.try_recv().is_err());
+    let mut lifecycle = selection.lifecycle.take().unwrap();
+    lifecycle.observe_context_tokens(1);
+    lifecycle.complete();
+    assert_eq!(
+        observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(1))
+    );
+    router.kv_router().free(request.id()).await.unwrap();
+
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn query_only_selection_bypasses_classifier_and_request_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+
+    let (selection, operation) = router
+        .select_with_affinity(&request, RequestPhase::Aggregated, true)
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(selection.lifecycle.is_none());
+    assert!(operation.is_none());
+    drop(selection);
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+struct TokenContractClassifier {
+    classified: mpsc::UnboundedSender<usize>,
+    completed: mpsc::UnboundedSender<usize>,
+}
+
+impl RequestClassifier for TokenContractClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        self.classified.send(request.input_tokens()).unwrap();
+        Box::pin(async move { Ok(request) })
+    }
+
+    fn on_event(&mut self, event: ClassifyEvent<'_>) {
+        if let ClassifyEvent::Completed {
+            context_tokens: Some(context_tokens),
+            ..
+        } = event
+        {
+            self.completed.send(context_tokens).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_and_completion_use_authoritative_multimodal_token_counts() {
+    let (classified_tx, mut classified_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        TokenContractClassifier {
+            classified: classified_tx,
+            completed: completed_tx,
+        },
+        None,
+    )
+    .await;
+    let mut content = request();
+    content.mm_routing_info = Some(MmRoutingInfo {
+        routing_token_ids: vec![1, 2, 3, 4, 5, 0, 0, 0],
+        block_mm_infos: vec![None],
+        expanded_prompt_len: 5,
+    });
+    let request = Context::new(content);
+    let (mut selection, _) = router
+        .select_with_affinity(&request, RequestPhase::Aggregated, false)
+        .await
+        .unwrap();
+    assert_eq!(classified_rx.recv().await, Some(5));
+
+    let mut guard = router
+        .track_selection(&request, &mut selection, false)
+        .await
+        .unwrap();
+    guard.mark_dispatched();
+    let output = LLMEngineOutput {
+        completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 6,
+            total_tokens: 11,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+        ..Default::default()
+    };
+    guard.on_item(&Annotated::from_data(output)).await;
+    guard.finish().await;
+    assert_eq!(completed_rx.recv().await, Some(11));
+
+    drop(router);
+    runtime.shutdown();
 }
 
 async fn track_request(
@@ -1330,6 +1558,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         router_track_active_blocks: false,
         ..Default::default()
     };
+    let classifier_calls = Arc::new(AtomicUsize::new(0));
+    let (classifier_observations_tx, mut classifier_observations_rx) = mpsc::unbounded_channel();
     let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
         endpoint,
         client.clone(),
@@ -1349,6 +1579,11 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         load_context.cancellation_token(),
     )
     .await
+    .unwrap()
+    .with_request_classifier(RecordingClassifier {
+        calls: Arc::clone(&classifier_calls),
+        observations: classifier_observations_tx,
+    })
     .unwrap();
     let dispatch = Arc::new(RejectFirstDispatch::default());
     let push_router =
@@ -1373,6 +1608,12 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     assert_eq!(responses.len(), 1);
     assert!(responses[0].error.is_none());
     assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(classifier_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        classifier_observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(2))
+    );
+    assert!(classifier_observations_rx.try_recv().is_err());
     let attempts = {
         let attempts = dispatch.attempts.lock().unwrap();
         attempts.clone()

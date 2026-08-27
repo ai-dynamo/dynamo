@@ -9,6 +9,7 @@ use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
     router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+    scheduling::{ClassifyError, RequestLifecycle},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
@@ -121,8 +122,9 @@ pub struct TraceLink {
 }
 
 /// Frontend-local state shared by every attempt from one migration manager.
-/// The selected router records a failed worker before the error is exposed;
-/// later attempts use the accumulated set as an attempt-local exclusion.
+///
+/// It carries attempt-local worker exclusions and, when a classifier is configured,
+/// the logical request lifecycle between serialized attempts.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MigrationState {
     inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
@@ -132,6 +134,7 @@ pub(crate) struct MigrationState {
 struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl MigrationState {
@@ -188,6 +191,35 @@ impl MigrationState {
                 .message(message)
                 .build(),
         )
+    }
+
+    pub(crate) fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .take()
+    }
+
+    pub(crate) fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
+        let replaced = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .replace(lifecycle);
+        if replaced.is_some() {
+            tracing::warn!("Replacing an unclaimed request-classifier migration lifecycle");
+        }
+    }
+
+    pub(crate) fn abort_request_lifecycle(&self, error: Option<&DynamoError>) {
+        let Some(mut lifecycle) = self.take_request_lifecycle() else {
+            return;
+        };
+        lifecycle.abort(error.map(|error| error as &ClassifyError));
     }
 }
 
@@ -483,6 +515,14 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+
+    /// Return the unpadded prompt size seen by the model.
+    pub(crate) fn input_token_count(&self) -> usize {
+        self.mm_routing_info
+            .as_ref()
+            .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
+            .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
     }
 }
 
