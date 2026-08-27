@@ -1209,6 +1209,8 @@ func jsonSubsetDivergence(want, have any, path string) string {
 
 // failDeploymentNameCollision drives the request terminal. The status-only write preserves
 // the generated-spec annotation, so what this request meant to create stays inspectable.
+// The event follows the status write, so a failed write cannot leave a warning recorded
+// against a request that still reports Deploying and re-emit it on the next reconcile.
 func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
@@ -1219,11 +1221,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 
 	log.FromContext(ctx).Info("Refusing to adopt an existing DGD that failed the DGDR identity contract",
 		"dgd", liveDGD.Name, "namespace", dgdr.Namespace, "reason", mismatchReason)
-	r.Recorder.Eventf(dgdr, liveDGD, corev1.EventTypeWarning, ReasonDeploymentNameCollision, "Get", "%s", message)
 
-	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+	result, err := r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
 		nvidiacomv1beta1.ConditionTypeDeploymentReady, metav1.ConditionFalse,
 		ReasonDeploymentNameCollision, message)
+	if err != nil {
+		return result, err
+	}
+	r.Recorder.Eventf(dgdr, liveDGD, corev1.EventTypeWarning, ReasonDeploymentNameCollision, "Get", "%s", message)
+
+	return result, nil
 }
 
 // clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
