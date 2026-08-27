@@ -10,10 +10,12 @@
 //! `JailedStream`: the v2 parser owns incremental
 //! tool-call emission and drops a parameter value truncated at EOF rather than
 //! guessing it. The jail is never built for these families in either path
-//! (`apply_stream` for streaming, `parse_complete` for batch). Other families, and
-//! non-`auto` tool_choice, keep the v1 jail / aggregate-finalize path. The parser is
-//! selected by family name via `dynamo_parsers_v2::create_tool_parser_for_family`, so
-//! adding a family is a one-line change here plus support in that crate.
+//! (`apply_stream` for streaming, `parse_complete` for batch). Other families and
+//! non-`auto` requests without structural tags keep the v1 jail / aggregate-finalize
+//! path. Structural-tag requests emit native markup and use v2 parsing for every
+//! tool choice. The parser is selected by family name via
+//! `dynamo_parsers_v2::create_tool_parser_for_family`, so adding a family is a
+//! one-line change here plus support in that crate.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -52,6 +54,15 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 /// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
 pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
 
+/// Map engine-facing parser aliases onto the family keys used by
+/// `dynamo-parsers-v2`.
+pub(crate) fn canonical_family(family: &str) -> &str {
+    match family {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        family => family,
+    }
+}
+
 /// Whether the experimental v2 tool-parser routing is enabled. Read once from
 /// [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) —
 /// env vars are fixed for the process lifetime, so the result is cached.
@@ -63,7 +74,7 @@ pub(crate) fn enabled() -> bool {
 
 /// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
 pub(crate) fn supports_family(family: &str) -> bool {
-    V2_FAMILIES.contains(&family)
+    V2_FAMILIES.contains(&canonical_family(family))
 }
 
 /// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
@@ -124,7 +135,7 @@ pub(crate) fn parse_complete(
     family: &str,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String)> {
     let v2_tools = to_v2_tools(tools);
-    let mut parser = create_tool_parser_for_family(family, &v2_tools)?;
+    let mut parser = create_tool_parser_for_family(canonical_family(family), &v2_tools)?;
     let result = parser.parse_complete(content)?;
 
     let tool_calls = result
@@ -422,6 +433,7 @@ pub(crate) fn apply_stream<S>(
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
+    let family = canonical_family(&family).to_string();
     let v2_tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         // The caller only routes supported families here, but if a parser cannot be
@@ -773,6 +785,14 @@ mod tests {
     const MUSE_REASONING: &str = "<|start|>assistant to=self<|message|>Look it up.<|eom|>";
     const MUSE_TOOL: &str = "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>";
     const MUSE_ANSWER: &str = "<|start|>assistant to=user<|message|>It's 18C.<|eot|>";
+
+    #[test]
+    fn deepseek_v4_engine_aliases_select_the_v2_family() {
+        for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            assert!(supports_family(alias), "unsupported alias: {alias}");
+            assert_eq!(canonical_family(alias), "deepseek_v4");
+        }
+    }
 
     fn muse_turn() -> String {
         format!("{MUSE_REASONING}{MUSE_TOOL}{MUSE_ANSWER}")

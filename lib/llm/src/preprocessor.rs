@@ -2275,6 +2275,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        structural_tag::validate_runtime_config(&runtime_config)?;
         let token_budget = match runtime_config
             .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
         {
@@ -4570,11 +4571,11 @@ impl OpenAIPreprocessor {
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
             && tool_parser_v2::enabled()
             && tool_parser_v2::supports_family(parser_name)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-            )
+            && (uses_tool_call_structural_tag
+                || matches!(
+                    request.inner.tool_choice.as_ref(),
+                    None | Some(ChatCompletionToolChoiceOption::Auto)
+                ))
         {
             Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()))
         } else {
