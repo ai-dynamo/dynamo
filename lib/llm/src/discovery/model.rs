@@ -678,20 +678,20 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet that has a monitor.
-    /// When `config` is Some, updates ALL monitors (each WorkerSet has its own).
+    /// Get load threshold config from the first WorkerSet with a threshold handle.
+    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
         let mut result = None;
         for entry in self.worker_sets.iter() {
-            if let Some(ref monitor) = entry.value().worker_monitor {
+            if let Some(ref thresholds) = entry.value().load_thresholds {
                 if let Some(cfg) = config {
-                    monitor.set_load_threshold_config(cfg);
+                    thresholds.update(cfg);
                 }
                 if result.is_none() {
-                    result = Some(monitor.load_threshold_config());
+                    result = Some(thresholds.get());
                 }
             }
         }

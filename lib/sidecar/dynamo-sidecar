@@ -1,0 +1,49 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: dynamo-sidecar <engine> [OPTIONS]
+
+Engines:
+  vllm     Run the vLLM sidecar
+  sglang   Run the SGLang sidecar
+  trtllm   Run the TensorRT-LLM sidecar
+EOF
+}
+
+engine="${1:-}"
+
+case "$engine" in
+    vllm)
+        shift
+        exec dynamo-vllm-sidecar "$@"
+        ;;
+    sglang)
+        shift
+        exec dynamo-sglang-sidecar "$@"
+        ;;
+    trtllm)
+        shift
+        exec dynamo-trtllm-sidecar "$@"
+        ;;
+    help | -h | --help)
+        usage
+        ;;
+    "")
+        # A container that sets `command:` but omits `args:` lands here, because
+        # Kubernetes drops the image CMD once command is overridden. Exit non-zero
+        # so that misconfiguration surfaces instead of looking like a clean exit.
+        echo "dynamo-sidecar: no engine given" >&2
+        usage >&2
+        exit 2
+        ;;
+    *)
+        echo "dynamo-sidecar: unknown engine: $engine" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

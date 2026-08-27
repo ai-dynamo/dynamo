@@ -46,11 +46,11 @@ Start the Dynamo worker:
 
 ```bash
 dynamo-trtllm-sidecar \
-  --trtllm-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:50051 \
   --model-path <model>
 ```
 
-Use `TRTLLM_GRPC_ENDPOINT` instead of `--trtllm-endpoint` when the endpoint is
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
 ## Deploy on Kubernetes (quick start)
@@ -58,8 +58,10 @@ provided through the environment.
 `deploy/agg.yaml` deploys a frontend and one worker pod. The worker runs the
 sidecar next to a TensorRT-LLM engine and serves `Qwen/Qwen3-0.6B` on one GPU.
 
-There is no published sidecar image yet (see [Packaging](#packaging)), so you
-build and push your own.
+There is no published sidecar image yet (see [Packaging](#packaging)), so build
+and push the image from `lib/sidecar/Dockerfile`. It contains all three
+engine-specific sidecar executables; this manifest runs `dynamo-trtllm-sidecar`
+as the container command.
 
 ### Prerequisites
 
@@ -73,17 +75,17 @@ build and push your own.
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
+Build and push the image to a registry your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/trtllm/Dockerfile \
-  -t <your-registry>/dynamo-trtllm-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
-To build faster for one arch, pass just that platform (e.g. `linux/arm64` for
-GB200/Grace).
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. This manifest sets the container `command` to
+`dynamo-trtllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -146,6 +148,7 @@ all the gain.
 
 ## Packaging
 
-There is no published image yet. That is deferred to a follow-up change. Once
-the sidecar crate is published, you just install it onto a minimal base image.
-Until then, build and push your own as shown above.
+There is no published sidecar image yet. The image contains the vLLM,
+SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
+official packaging is available, build and push the sidecar image as described
+in [Build the image](../README.md#build-the-image).

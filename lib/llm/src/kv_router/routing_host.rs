@@ -195,6 +195,11 @@ where
     affinity: Option<AffinityCoordinator>,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    /// Retains the shared client, overload state, and cancellation subtree for this host.
+    ///
+    /// Compatibility construction paths that predate routing load ownership leave this unset.
+    #[allow(dead_code)]
+    routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -219,9 +224,50 @@ where
         Ok(Self::new_with_coordinator(inner, kv_router, affinity))
     }
 
+    pub fn new_with_load_context(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self, Error> {
+        let affinity = session_affinity_ttl
+            .map(AffinityCoordinator::new)
+            .transpose()?;
+
+        Ok(Self::new_with_load_context_and_coordinator(
+            inner,
+            kv_router,
+            load_context,
+            affinity,
+        ))
+    }
+
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
+        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
+    }
+
+    pub(crate) fn new_with_load_context_and_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
+        Self::new_with_optional_load_context_and_coordinator(
+            inner,
+            kv_router,
+            Some(load_context),
+            affinity,
+        )
+    }
+
+    fn new_with_optional_load_context_and_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
@@ -237,25 +283,29 @@ where
             affinity,
             hosted_occupancy: None,
             lora: None,
+            routing_context: load_context,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_builtin(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, None, None)
+        Self::new_builtin_with_capabilities(inner, load_context, None, None)
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, affinity, None)
+        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
@@ -312,6 +362,7 @@ where
                     load_estimator,
                     selector,
                 }),
+            routing_context: Some(load_context),
         })
     }
 
@@ -594,10 +645,7 @@ where
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, operation.is_some())
-            .await
-        {
+        let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
                 invalidate_on_non_cancellation(&mut operation, &error);

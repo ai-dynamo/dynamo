@@ -51,6 +51,14 @@ Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
 
 See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
 
+### 7. **Aggregated + LMCache MP Deployment** (`v1beta1/agg_lmcache.yaml`)
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See the [Deploy LMCache MP guide](../../../../docs/fern/pages/kubernetes/kv-cache-offloading/lmcache.mdx) for the full recipe.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `VllmDecodeWorker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

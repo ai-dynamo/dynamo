@@ -26,7 +26,7 @@ use dynamo_kv_router::{
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    router_hint::{RouterHint, RouterHintRootCandidates},
+    router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
@@ -63,6 +63,7 @@ pub mod prefill_router;
 pub mod publisher;
 mod route_lookup;
 mod routing_host;
+pub(crate) mod routing_load;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
@@ -74,6 +75,9 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_load::{
+    ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
+};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
@@ -618,6 +622,50 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let source = RouterLoadSource::from_worker_role_or_metric(worker_role, metric_worker_type);
+        let parent_token = endpoint.component().drt().child_token();
+        let scheduler_load = SchedulerLoadSender::disabled(source, parent_token.child_token());
+
+        Self::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            scheduler_load,
+            parent_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_with_worker_role_and_scheduler_load(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        scheduler_load: SchedulerLoadSender,
+        parent_token: CancellationToken,
+    ) -> Result<Self> {
         let required_worker_inputs = selector.required_worker_inputs();
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
@@ -641,8 +689,8 @@ where
                     | KvEventSourceRequirement::Unknown
             );
         let component = endpoint.component();
-        // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
-        let cancellation_token = component.drt().child_token();
+        // All chooser tasks are children of the routing load context owner.
+        let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
@@ -728,6 +776,7 @@ where
             Some(available_worker_provider),
             model_name.as_deref(),
             metric_worker_type,
+            scheduler_load,
             cancellation_token.child_token(),
         )
         .await?;
@@ -975,22 +1024,46 @@ where
             let prefix_blocks_to_beat =
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
             let (source, block_hashes) =
-                candidates.best_source(prefix_blocks_to_beat, |worker| {
-                    worker != target
-                        && configs.get(&worker.worker_id).is_some_and(|config| {
-                            config
-                                .router_hint_metadata_for_dp_rank(worker.dp_rank)
-                                .is_some_and(|source_metadata| {
-                                    source_metadata.worker_type == target_metadata.worker_type
-                                        && source_metadata.source_control_endpoint.is_some()
-                                })
-                        })
+                candidates.best_source(prefix_blocks_to_beat, |source| match source {
+                    RouterHintCandidateSource::Worker(worker) => {
+                        worker != target
+                            && configs.get(&worker.worker_id).is_some_and(|config| {
+                                config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
+                                    && config
+                                        .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                                        .is_some_and(|source_metadata| {
+                                            source_metadata.worker_type
+                                                == target_metadata.worker_type
+                                                && source_metadata
+                                                    .source_control_endpoint
+                                                    .is_some_and(|endpoint| !endpoint.is_empty())
+                                        })
+                            })
+                    }
+                    RouterHintCandidateSource::CacheOwner(owner) => candidates
+                        .routing_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.router_hint_source(owner))
+                        .is_some_and(|source| {
+                            source.attached_worker != Some(target)
+                                && source.metadata.worker_type == target_metadata.worker_type
+                                && !source.metadata.source_control_endpoint.is_empty()
+                        }),
                 })?;
-            let source_control_endpoint = configs
-                .get(&source.worker_id)?
-                .router_hint_metadata_for_dp_rank(source.dp_rank)?
-                .source_control_endpoint?
-                .to_string();
+            let source_control_endpoint = match source {
+                RouterHintCandidateSource::Worker(worker) => configs
+                    .get(&worker.worker_id)?
+                    .router_hint_metadata_for_dp_rank(worker.dp_rank)?
+                    .source_control_endpoint?
+                    .to_string(),
+                RouterHintCandidateSource::CacheOwner(owner) => candidates
+                    .routing_snapshot
+                    .as_ref()?
+                    .router_hint_source(owner)?
+                    .metadata
+                    .source_control_endpoint
+                    .clone(),
+            };
             (block_hashes, source_control_endpoint)
         };
 
@@ -2013,9 +2086,15 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         WorkerSelectionInput,
+        identity::{
+            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        },
         indexer::{LowerTierMatchDetails, MatchDetails},
         protocols::{
-            ExternalSequenceBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block,
+            ExternalSequenceBlockHash, OverlapScores, ResidencyOwner, ResidencyProjection,
+            ResidencyRoutingSnapshot, RouterHintSourceMetadata, StorageTier,
+            compute_seq_hash_for_block,
         },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
@@ -2527,6 +2606,19 @@ mod tests {
         runtime_config
     }
 
+    fn router_hint_cache_owner() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
+    }
+
     #[tokio::test]
     async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
@@ -2551,7 +2643,8 @@ mod tests {
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
             ],
-            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1), 2)],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1).into(), 2)],
+            routing_snapshot: None,
         };
 
         let hint =
@@ -2589,7 +2682,8 @@ mod tests {
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),
                 ],
-                owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+                owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0).into(), 2)],
+                routing_snapshot: None,
             };
 
             let hint =
@@ -2624,7 +2718,8 @@ mod tests {
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
             ],
-            owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0).into(), 2)],
+            routing_snapshot: None,
         };
 
         let hint =
@@ -2668,9 +2763,10 @@ mod tests {
                 ExternalSequenceBlockHash(103),
             ],
             owner_prefix_blocks: vec![
-                (WorkerWithDpRank::new(8, 0), 2),
-                (WorkerWithDpRank::new(9, 0), 3),
+                (WorkerWithDpRank::new(8, 0).into(), 2),
+                (WorkerWithDpRank::new(9, 0).into(), 3),
             ],
+            routing_snapshot: None,
         };
 
         let prefill_hint =
@@ -2696,6 +2792,61 @@ mod tests {
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),
                     ExternalSequenceBlockHash(103),
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn router_hint_resolves_persistent_owner_without_state_agent_fallback() {
+        let target = WorkerWithDpRank::new(7, 0);
+        let stale_source = WorkerWithDpRank::new(8, 0);
+        let mut workers = HashMap::new();
+        workers.insert(7, router_hint_runtime_config(None));
+        let mut stale_source_config =
+            router_hint_runtime_config(Some("tcp://stale-worker-endpoint:23280"));
+        stale_source_config.kv_event_source_mode = Some("state_agent_v2".to_string());
+        workers.insert(8, stale_source_config);
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: target,
+            },
+            None,
+            workers,
+        )
+        .await;
+        let owner = router_hint_cache_owner();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![
+                (RouterHintCandidateSource::Worker(stale_source), 2),
+                (RouterHintCandidateSource::CacheOwner(owner_key), 2),
+            ],
+            routing_snapshot: Some(Arc::new(ResidencyRoutingSnapshot::new(
+                ResidencyProjection::default(),
+                [(
+                    owner,
+                    RouterHintSourceMetadata {
+                        source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                        worker_type: "prefill".to_string(),
+                    },
+                    None,
+                )],
+            ))),
+        };
+
+        assert_eq!(
+            router.router_hint_for_selection(target, 0, Some(&candidates)),
+            Some(RouterHint {
+                source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
                 ],
             })
         );
