@@ -98,10 +98,13 @@ where
             });
 
         // A `watcher` stream is infinite and retries internally, so cancellation
-        // is the only thing that ends this task on a healthy cluster.
+        // is the only thing that ends this task on a healthy cluster. A stream
+        // that ends on its own is a fault: the writer drops with the task, the
+        // store stops tracking the cluster, and the daemon goes on aggregating
+        // from it. Warn so that a stale store is not a silent one.
         tokio::select! {
             _ = reflector_stream => {
-                tracing::debug!(kind, "Reflector stream ended");
+                tracing::warn!(kind, "Reflector stream ended before daemon shutdown; store is now stale");
             }
             _ = token.cancelled() => {
                 tracing::debug!(kind, "Reflector stopping on daemon shutdown");
