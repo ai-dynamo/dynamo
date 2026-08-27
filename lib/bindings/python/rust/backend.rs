@@ -101,9 +101,7 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || {
-            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
-        })
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
         .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
@@ -129,7 +127,7 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::from_args(Some(cli_argv)))
+        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
         .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
