@@ -343,3 +343,86 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     assert "install_media_decoders trtllm" in msg
     # The vendor loader's own text survives as the cause.
     assert "OpenCV (cv2) is required for video decoding" in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_extra, expected",
+    [
+        ({"mm_processor_kwargs": {"num_crops": 4}}, {"num_crops": 4}),
+        ({"extra_args": {"mm_processor_kwargs": {"num_crops": 4}}}, {"num_crops": 4}),
+        ({}, {}),
+        # Explicit top-level {} wins over extra_args.
+        (
+            {
+                "mm_processor_kwargs": {},
+                "extra_args": {"mm_processor_kwargs": {"num_crops": 9}},
+            },
+            {},
+        ),
+    ],
+)
+async def test_mm_processor_kwargs_forwarded(request_extra, expected) -> None:
+    """Overrides reach the engine inputs from either location; absent yields {},
+    which TRT-LLM's processor requires instead of None."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], **request_extra},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert processed["mm_processor_kwargs"] == expected
+
+
+@pytest.mark.asyncio
+async def test_mm_processor_kwargs_non_object_is_rejected() -> None:
+    """A non-object value is a client error, not a silently ignored field."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"token_ids": [1, 2, 3], "mm_processor_kwargs": "invalid"},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    assert excinfo.value.status == 400
+
+
+def test_expanded_prompt_len_drops_unknown_processor_kwargs() -> None:
+    """Sizing forwards only kwargs the processor declares valid."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    class _ValidKwargs:
+        __annotations__ = {"max_pixels": int}
+
+    ip = MagicMock()
+    ip.processor.image_processor.valid_kwargs = _ValidKwargs
+    ip.get_mm_token_ids.return_value = None
+    ip.get_num_tokens_per_image.return_value = 4
+    processor.input_processor = ip
+
+    processor._expanded_prompt_len(
+        [1, 2, 3], ["img"], {"max_pixels": 1024, "bogus_key": 1}
+    )
+
+    _, kwargs = ip.get_num_tokens_per_image.call_args
+    assert kwargs["max_pixels"] == 1024
+    assert "bogus_key" not in kwargs

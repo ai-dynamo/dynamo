@@ -12,6 +12,7 @@ import torch
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
@@ -289,6 +290,7 @@ class EncodeHelper:
         model_dir: str,
         model_type: str,
         engine,
+        mm_processor_kwargs: Optional[dict] = None,
     ):
         """
         Process image URLs via TRT-LLM's MultimodalEncoder (full EPD flow).
@@ -321,7 +323,7 @@ class EncodeHelper:
             {
                 "prompt_token_ids": prompt_token_ids_from_request,
                 "multi_modal_data": processed_mm_data,
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": mm_processor_kwargs or {},
             }
         ]
 
@@ -447,6 +449,12 @@ class EncodeHelper:
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
             token_ids = request.get("token_ids")
+            epd_mm_kwargs = resolve_mm_processor_kwargs(request)
+            if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
+                yield {
+                    "error": "Malformed mm_processor_kwargs field: expected an object"
+                }
+                return
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,  # type: ignore
                 image_urls,
@@ -454,6 +462,7 @@ class EncodeHelper:
                 model_dir,
                 model_type,
                 engine,
+                epd_mm_kwargs,
             ):
                 yield response
 
