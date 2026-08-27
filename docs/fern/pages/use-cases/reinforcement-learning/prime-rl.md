@@ -5,22 +5,25 @@ title: Prime-RL Integration Status
 subtitle: Track the Dynamo sidecar integration and its release and validation gates
 ---
 
-**Integration in progress.** Prime-RL's Dynamo integration is represented by open discovery and recipe PRs plus a draft combined sidecar PR. This page documents the intended boundary, review checklist, and graduation path. It intentionally does not convert unmerged branch commands into a supported production guide.
+**Integration in progress.** Prime-RL's Dynamo integration is represented by a newer stacked native-adapter PR, a research runbook branch, an older decomposed PR chain, and still-open Dynamo/vLLM dependencies. This page documents the intended boundary, review checklist, and graduation path. It intentionally does not convert branch commands or integration-author runs into a supported production guide.
 
 ## Current Evidence
 
 | Artifact | State checked 2026-08-27 | Role in the proposed integration |
 |---|---|---|
+| [Newer Prime-RL Dynamo adapter PR #3296 at `f687696`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3296) | Open; stacked on #3260 | Add Dynamo discovery, health, pause/resume, version fencing, opaque routed-expert bytes, filesystem, NIXL, and native NCCL updates. Its PR record reports focused tests and a two-step Qwen3-MoE Kubernetes GRPO run with NIXL policy update and post-update rollout. |
+| [Native vLLM reload/transfer prerequisite PR #3260 at `8bd4790`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3260) | Open draft; merge-conflicted | Replace Prime-RL's custom filesystem and NCCL plumbing with vLLM-native reload and checkpoint-format transfer. #3296 uses this exact head as its base, so the adapter cannot land independently of the prerequisite's final API and dependency pins. |
+| [Research runbook PR #3213 at `33d5cda`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3213) | Open | Port the older combined sidecar work to a pinned source-build stack and add local and Slurm-managed runbooks. Its PR record says the full source-artifact build and two-GPU run remain a research-host validation step. |
 | [Discovery integration PR #3176 at `828ddc7`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3176) | Open | Resolve Dynamo rollout engines and separate frontend inference from direct engine administration. |
 | [Training recipes PR #3180 at `2f67c72`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180) | Open | Example configurations for external Dynamo/vLLM rollout serving. |
-| [Combined sidecar PR #3181 at `b17ceea`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3181) | Open draft | Assemble generation, discovery, and external weight-update behavior in one integration branch. |
+| [Earlier combined sidecar PR #3181 at `b17ceea`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3181) | Open draft | Assemble the earlier generation, discovery, and external weight-update path. The newer #3296/#3260 stack and #3213 research branch do not make this earlier chain merged or establish which implementation maintainers will accept. |
 | [Dynamo native-vLLM umbrella PR #13481 at `b3d6a63`](https://github.com/ai-dynamo/dynamo/pull/13481) | Open; review required | Compose the Dynamo discovery, native-generate, routed-output, and sidecar leaves. Its PR record reports a three-step Qwen3-MoE run, a NIXL update to policy version 1, later version-1 rollouts, and post-update generation on the composite branch. |
 | [Dynamo discovery protocol PR #13606 at `5bc908ad`](https://github.com/ai-dynamo/dynamo/pull/13606) | Merged | Version the worker list and define optional `world_size` and `admin_base_url` transfer metadata without changing existing Python-backed producers. |
 | [Dynamo vLLM sidecar metadata PR #13607 at `862d2c2`](https://github.com/ai-dynamo/dynamo/pull/13607) | Open | Publish the sidecar's computed inference world size and optional controller-routable vLLM HTTP compatibility endpoint. |
 | [vLLM world-size PR #53204 at merge `9dba2c9b`](https://github.com/vllm-project/vllm/pull/53204) | Merged | Expose the authoritative per-engine world size over gRPC so consumers include TP, PP, and prefill-context parallelism rather than reconstructing an incomplete count. |
 | [Prime-RL documentation at `95734aa1`](https://github.com/PrimeIntellect-ai/prime-rl/tree/95734aa1dd3de26afee31e99b7b63b86ad8f4a2e/docs) | Project documentation snapshot | Framework-owned trainer and orchestration behavior outside the Dynamo adapter. |
 
-The upstream vLLM world-size prerequisite is merged, but the Dynamo producer remains open and is not part of the reviewed `5bc908ad` runtime. The umbrella PR's reported live run is useful branch-level evidence, but it is not an independent reproduction and does not make its still-open Dynamo and vLLM leaves available on `main`. The evidence owner is the Prime-RL integration contributor set together with Dynamo RL maintainers. A release audit must recheck whether these PRs merged, were superseded, or changed config/API shape before this page's status changes.
+The upstream vLLM world-size prerequisite is merged, but the Dynamo producer remains open and is not part of the reviewed `5bc908ad` runtime. The newer Prime-RL adapter materially strengthens branch-level evidence, but it is stacked on an open draft prerequisite and composes still-open Dynamo/vLLM sources; its Kubernetes execution venue is not a framework-contract requirement. The research runbook provides more reproducible source-build instructions but explicitly leaves its full build and two-GPU run open. Neither branch is an independent clean-room reproduction or a released compatibility surface, and the older PR chain remains unresolved. The evidence owner is the Prime-RL integration contributor set together with Dynamo RL maintainers. A release audit must determine which branch is accepted, pin its final dependency graph, and recheck whether every cited PR merged, was superseded, or changed config/API shape before this page's status changes.
 
 ## Intended Architecture
 
@@ -123,7 +126,7 @@ See [Observe, debug, replay, and simulate RL rollouts](operations-and-simulation
 
 ## Known Unsettled Areas
 
-- None of the three cited Prime-RL integration PRs is merged or released as of the evidence date.
+- Neither the newer #3296/#3260 stack, the #3213 research branch, nor the older #3176/#3180/#3181 chain is merged or released as of the evidence date.
 - Open recipe configurations can change without a deprecation period and are not a stable compatibility surface.
 - The final transport selection, group schema, resharding constraints, and recovery behavior must be recorded from the accepted implementation.
 - Dynamo discovery is read-only and does not create a fleet transaction.
