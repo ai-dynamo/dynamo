@@ -52,7 +52,7 @@ spec:
             value: '1'
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-cb5a78bc81476659052a2889271a5e10dd545d97-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           securityContext:
@@ -172,7 +172,7 @@ spec:
           # Disables cuDNN for Conv2d in MoonViT patch-embed; prevents a cudnnCreate crash on GB200.
           - name: GP_DISABLE_CUDNN
             value: '1'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-cb5a78bc81476659052a2889271a5e10dd545d97-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
