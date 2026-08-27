@@ -222,7 +222,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 }
             ],
             (0, 1),
-            "TRANSFER hint support requires",
+            "P2P KV transfer hint support requires",
             id="without-advertise-host",
         ),
         # Every published endpoint port must be in the valid TCP port range.
@@ -236,7 +236,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 }
             ],
             (0, 2),
-            "TRANSFER hint support requires",
+            "P2P KV transfer hint support requires",
             id="invalid-control-port",
         ),
         # The port list is worker-local, so it must match this worker's DP size.
@@ -250,7 +250,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 }
             ],
             (4, 2),
-            "TRANSFER hint support requires",
+            "P2P KV transfer hint support requires",
             id="wrong-local-port-count-for-managed-dp-range",
         ),
         # Exactly one secondary tier may provide transfer-hint source endpoints.
@@ -270,7 +270,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 },
             ],
             (0, 1),
-            "exactly one TRANSFER-capable",
+            "P2P KV transfer hint support requires exactly one capable",
             id="multiple-transfer-hint-tiers",
         ),
         # DP start rank must be non-negative.
@@ -284,7 +284,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 }
             ],
             (-1, 1),
-            "TRANSFER hint support requires",
+            "P2P KV transfer hint support requires",
             id="negative-dp-start",
         ),
         # DP size must be positive.
@@ -298,7 +298,7 @@ def test_publish_kv_hint_capabilities_skips_without_supported_hint_participant(
                 }
             ],
             (0, 0),
-            "TRANSFER hint support requires",
+            "P2P KV transfer hint support requires",
             id="zero-dp-size",
         ),
     ],

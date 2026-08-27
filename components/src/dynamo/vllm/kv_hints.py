@@ -105,10 +105,12 @@ def _transfer_hint_source_control_endpoints(
         return None
     control_ports = tier.get("control_ports")
     if not isinstance(control_ports, list):
-        raise ValueError("TRANSFER hint support requires control_ports to be a list")
+        raise ValueError(
+            "P2P KV transfer hint support requires control_ports to be a list"
+        )
     if len(control_ports) != dp_size:
         raise ValueError(
-            "TRANSFER hint support requires control_ports to contain exactly "
+            "P2P KV transfer hint support requires control_ports to contain exactly "
             f"{dp_size} entries for the worker-local DP ranks; "
             f"got {len(control_ports)}"
         )
@@ -152,9 +154,10 @@ def resolve_kv_transfer_hint_sources(
     transfer_hint_tiers = _transfer_hint_tiers(engine_args)
     if not transfer_hint_tiers:
         return None
+    # kv.source_locations@1.0 describes one P2P source and cannot disambiguate tiers.
     if len(transfer_hint_tiers) > 1:
         raise ValueError(
-            "TRANSFER hint support requires exactly one TRANSFER-capable "
+            "P2P KV transfer hint support requires exactly one capable "
             "secondary tier; found multiple tiers advertising "
             f"{KV_HINT_TRANSFER_CAPABILITY_KEY}"
         )
@@ -164,7 +167,7 @@ def resolve_kv_transfer_hint_sources(
     )
     if endpoints is None:
         raise ValueError(
-            "TRANSFER hint support requires advertisable source control endpoints "
+            "P2P KV transfer hint support requires advertisable source control endpoints "
             "for all managed DP ranks"
         )
 
