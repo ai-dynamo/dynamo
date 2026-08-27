@@ -30,7 +30,7 @@ use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -463,7 +463,7 @@ impl Default for CRoutingResult {
 /// Container holding routers and preprocessor for query routing
 pub struct RouterHandles {
     prefill_router: Arc<PrefillRouter>,
-    decode_router: Arc<KvRouter>,
+    decode_router: ManagedKvRouter,
     #[allow(dead_code)]
     model_manager: Arc<ModelManager>,
     #[allow(dead_code)]
@@ -785,7 +785,7 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for_with_worker_role(
+            .managed_kv_router_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
@@ -861,9 +861,8 @@ pub unsafe extern "C" fn create_routers(
             None,
             model_name.clone(),
             actual_namespace.clone(),
-            // C bindings construct no KvWorkerMonitor; overload publishing is
-            // unused on this path (matches the prior namespace-lookup miss).
-            None,
+            decode_router.load_context().load_thresholds(),
+            drt.child_token(),
         );
 
         // Spawn background discovery watcher for prefill workers.

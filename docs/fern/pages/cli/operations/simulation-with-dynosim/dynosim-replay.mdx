@@ -8,7 +8,7 @@ subtitle: Replay a synthetic workload or saved trace against one simulated confi
 A DynoSim run evaluates one workload against one simulated Dynamo configuration. This is an
 **offline replay**: the harness drives simulated engine cores directly without starting a frontend,
 registering workers, or sending HTTP requests. The command runs on your local machine, but the
-configuration you evaluate can be a candidate for either Kubernetes or local CLI deployment. It
+configuration you evaluate can be a candidate for either Kubernetes or local deployment. It
 does not require GPUs and produces an AIPerf-style summary plus a JSON report.
 
 Use [Simulate a Local Deployment with Mocker](mocker-live-simulation.mdx) instead when you need to exercise the
@@ -140,7 +140,7 @@ Compare this report with the aggregated baseline. If the result is worth explori
 <Step title="Validate the result" id="validate-the-result">
 DynoSim models scheduler, KV-cache, routing, and timing behavior, but it does not replace a
 real-hardware benchmark. Validate the candidate with AIPerf against either a
-[Kubernetes deployment](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or a [local CLI deployment](../benchmarking-with-aiperf.mdx) to include
+[Kubernetes deployment](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or a [local deployment](../benchmarking-with-aiperf.mdx) to include
 frontend, transport, engine, and GPU behavior.
 </Step>
 </Steps>

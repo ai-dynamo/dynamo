@@ -37,6 +37,10 @@ not preserve all parser-related request semantics.
 
 ## Run
 
+### Runtime compatibility
+
+The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+
 Start vLLM with its gRPC listener:
 
 ```bash
@@ -51,10 +55,10 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
-Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
 ### RL workflows
@@ -69,7 +73,7 @@ vllm-rs serve Qwen/Qwen3-0.6B \
   --weight-transfer-config '{"backend":"nccl"}'
 
 DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:50051 \
   --enable-rl
 ```
 
@@ -108,7 +112,7 @@ cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --extra-engine-args '{"speedup_ratio":1000}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
 The mocker does not advertise RL capabilities; use a compatible vLLM server for RL route testing.
@@ -123,8 +127,10 @@ and fidelity limits.
 that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published vLLM sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
+There is no published sidecar image yet, so build and push the image from
+`lib/sidecar/Dockerfile`. It contains the vLLM, SGLang, and TensorRT-LLM
+sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
+command.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
@@ -140,14 +146,17 @@ The sidecar waits for both the Control and Inference services through the standa
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
+Build and push the image to a registry your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/vllm/Dockerfile \
-  -t <your-registry>/dynamo-vllm-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
+
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. These manifests set the container `command` to
+`dynamo-vllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -193,5 +202,8 @@ must reach `2/2 Running`. Apply it the same way and call the frontend as above.
 
 ## Packaging
 
-There is no published image yet; the quick start above builds one from
-`Dockerfile`. Official packaging is deferred to a follow-up change.
+There is no published sidecar image yet. See
+[Build the image](../README.md#build-the-image). The image contains the vLLM,
+SGLang, and TensorRT-LLM executables; each deployment sets its container
+`command` to the one it needs. Official packaging is deferred to a follow-up
+change.

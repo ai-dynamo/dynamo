@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, FpmPublisher};
-use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission};
+use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission, RequestOutputBuffering};
 use crate::loadgen::WorkloadDriver;
 use crate::replay::TraceSimulationReport;
 
@@ -241,7 +241,7 @@ impl LiveRuntime {
                     kv_event_publishers: router.sink(worker_idx as _),
                     admission_tx: Some(admission_tx.clone()),
                     fpm_publisher: FpmPublisher::default(),
-                    request_output_capacity: None,
+                    request_output_buffering: RequestOutputBuffering::FullResponse,
                     allow_zero_output: true,
                 })
                 .collect();

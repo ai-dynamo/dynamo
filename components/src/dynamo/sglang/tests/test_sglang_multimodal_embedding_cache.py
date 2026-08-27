@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
+from dynamo.common.http import (
+    HttpConnectionError,
+    HttpError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -64,14 +70,12 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
 
     monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
 
-    # No unit test may reach the network. Giving the handler a real url policy
-    # (below) removed the AttributeError that used to abort _maybe_nvdec_decoder
-    # before it fetched, so on an NVDEC-capable host these cache tests started
-    # issuing a real request for their example.com URL: ~400s of teardown while
-    # the event loop waited on the connection, which killed the CI job. The
-    # broad except in _maybe_nvdec_decoder turns this into the URL passthrough
-    # the cache tests already expected; tests that exercise fetching stub it
-    # with their own payload.
+    # Keep cache-only tests independent of host NVDEC capabilities. Tests that
+    # exercise the NVDEC path enable it explicitly.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: False)
+
+    # Raise an error if a unit test triggers a network fetch without a
+    # corresponding fetch stub
     async def _no_network(*_args, **_kwargs):
         raise AssertionError(
             "unit tests must not fetch over the network; stub fetch_bytes"
@@ -709,27 +713,39 @@ async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
         is None
     )
     fetch.assert_not_called()
-    fetch.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_maybe_nvdec_decoder_falls_back_on_error(
-    nvdec_handler, monkeypatch
-) -> None:
-    """A failed FETCH degrades to URL passthrough, because there are no bytes.
-
-    Distinct from a failed decoder build, which returns the bytes it already has
-    (see test_decode_failure_falls_back_to_the_fetched_bytes). The URL is the
-    fallback only when nothing was retrieved.
-    """
+@pytest.mark.parametrize(
+    "error",
+    [
+        HttpTimeoutError("timed out"),
+        HttpConnectionError("connection reset"),
+        HttpError("other protected-fetch failure"),
+        HttpStatusError(403, "Forbidden", "https://x/clip.mp4"),
+    ],
+    ids=["timeout", "connection", "other-http-error", "status"],
+)
+async def test_fetch_failure_is_terminal(nvdec_handler, monkeypatch, error) -> None:
+    """Any failure during protected fetch is raised immediately, ensuring SGLang does not receive the URL."""
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    url = "https://x/clip.mp4"
     monkeypatch.setattr(
         f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.mp4"),
+        AsyncMock(return_value=url),
     )
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(side_effect=RuntimeError("boom"))
-    )
-    assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") is None
+    fetch = AsyncMock(side_effect=error)
+    decode = Mock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", decode)
+
+    with pytest.raises(type(error)) as exc_info:
+        await nvdec_handler._build_encode_inputs([url], "VIDEO")
+
+    assert exc_info.value is error
+    fetch.assert_awaited_once()
+    decode.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -744,29 +760,26 @@ async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
     existed -- a loopback URL the policy rejected was fetched anyway, and a
     refused file:// path resolved to a readable local file.
     """
-    from dynamo.common.http.url_validator import UrlValidationError
-
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    error = UrlValidationError("blocked IP")
     monkeypatch.setattr(
         f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(side_effect=UrlValidationError("blocked IP")),
+        AsyncMock(side_effect=error),
     )
     fetch = AsyncMock()
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
 
-    with pytest.raises(UrlValidationError):
-        await nvdec_handler._maybe_nvdec_decoder(
-            "http://169.254.169.254/latest/meta-data"
-        )
-    fetch.assert_not_called()
-
-    # ...and it propagates through the batch builder rather than being mapped
-    # back to the URL there.
-    with pytest.raises(UrlValidationError):
+    # The error also propagates through the batch builder rather than being
+    # mapped back to the URL there. Returning None from the inner adapter
+    # would restore the rejected URL here.
+    with pytest.raises(UrlValidationError) as exc_info:
         await nvdec_handler._build_encode_inputs(
             ["http://169.254.169.254/latest/meta-data"], "VIDEO"
         )
+
+    assert exc_info.value is error
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -863,6 +876,31 @@ async def test_decode_failure_without_software_decoder_is_actionable(
     # h264 + NVDEC "available" but failing: the message still leads with the
     # capability/hardware framing and carries the install remedy.
     assert "install_media_decoders sglang" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_codec_probe_failure_is_not_retried(nvdec_handler, monkeypatch) -> None:
+    """A failed codec probe is reported without probing the same bytes again."""
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    probe_error = RuntimeError("codec probe failed")
+    probe = Mock(side_effect=probe_error)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", probe)
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: False
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4")
+
+    assert exc_info.value.__cause__ is probe_error
+    assert "codec probe failed" in str(exc_info.value)
+    probe.assert_called_once_with(b"bytes")
 
 
 @pytest.mark.asyncio

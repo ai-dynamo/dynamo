@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lmcache
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          command:
+          - /bin/sh
+          - -c
+          - exec python3 -m dynamo.vllm "$@" --kv-transfer-config "$(cat /etc/lmcache/kv-transfer-config.json)"
+          - --
+          env:
+          - name: PYTHONHASHSEED
+            value: "0"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          # Root uid required for CUDA IPC between vLLM and the LMCache server:
+          # the shared-CUDA-tensor handshake fails under a non-root uid.
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /etc/lmcache
+            name: kv-transfer-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/vllm
+        # Required for CUDA IPC between vLLM and the LMCache server
+        hostIPC: true
+        volumes:
+        - configMap:
+            name: lmcache-mp-connection   # = <LMCacheEngine.metadata.name>-connection
+          name: kv-transfer-config
+    replicas: 1
+    # Disable the /dev/shm tmpfs; the worker shares memory with the LMCache
+    # server over host IPC instead.
+    sharedMemorySize: "0"
+    type: worker
