@@ -149,7 +149,7 @@ def test_publish_kv_hint_capabilities_keeps_source_endpoint_off_state_agent_work
         runtime_config,
         engine_args,
         WorkerType.Prefill,
-        publish_transfer_source_endpoints=False,
+        publish_source_endpoints=False,
     )
 
     published_keys = {

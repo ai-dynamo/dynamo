@@ -746,7 +746,7 @@ async def register_vllm_model(
         config.engine_args,
         worker_type,
         dp_range,
-        publish_transfer_source_endpoints=not state_agent_enabled,
+        publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
     tower_connector_lora_enabled = bool(
