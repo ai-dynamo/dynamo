@@ -15,7 +15,7 @@
 
 # Navigation structure for Dynamo docs
 # Tab-based navigation: Home, Kubernetes Guide, Local Guide, Developer Guide,
-# Backends, Use Cases, Recipes, Observability, Reference,
+# Backends, Well-Lit Paths, Recipes, Observability, Reference,
 # Blog, and Community. The Kubernetes Guide and Local Guide tabs retain their
 # kubernetes/ and cli/ URL prefixes; Recipes retains its recipes/ prefix.
 # Other content tabs use skip-slug: true so their page URLs remain stable.
@@ -41,7 +41,7 @@ tabs:
     display-name: Backends
     icon: server
   use-cases:
-    display-name: Use Cases
+    display-name: Well-Lit Paths
     icon: puzzle-piece
     skip-slug: true
   recipes:
