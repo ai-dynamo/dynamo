@@ -188,6 +188,15 @@ overrides:
     license: LicenseRef-Intel-ISSL
     source: "Intel Simplified Software License — https://www.intel.com/content/www/us/en/developer/articles/license/end-user-license-agreement.html"
 
+  # --- Intel XPU Manager dpkg ---
+  # The upstream xpu-smi deb does not install a Debian copyright file that the
+  # dpkg generator can parse, but the Intel xpumanager project and package
+  # sources are MIT licensed.
+  - ecosystem: dpkg
+    name: xpu-smi
+    license: MIT
+    source: "Intel XPU Manager upstream LICENSE — https://github.com/intel/xpumanager/blob/master/LICENSE"
+
   # --- NVIDIA CUDA Toolkit dpkgs ---
   # Apt-installed CUDA components from the NVIDIA repo. Their copyright files
   # reference /usr/share/common-licenses/GPL-3 because some bundled GDB-related
@@ -347,6 +356,8 @@ overrides:
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
+  - { ecosystem: python, name: helion,                    license: "BSD-3-Clause",  source: "PyTorch Helion — https://github.com/pytorch/helion/blob/main/LICENSE" }
+  - { ecosystem: python, name: hpc-ops,                   license: "MIT AND BSD-3-Clause",  source: "Tencent HPC-Ops and bundled CUTLASS — https://github.com/Tencent/hpc-ops/blob/main/LICENSE.txt" }
   - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
   - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
   - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }
@@ -358,8 +369,10 @@ overrides:
   - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
   - { ecosystem: python, name: mscclpp,                   license: "MIT",       source: "MSCCL++ upstream — https://github.com/microsoft/mscclpp/blob/main/LICENSE" }
   - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
-  - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-core, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
@@ -381,6 +394,11 @@ overrides:
   - { ecosystem: python, name: torchaudio,                license: "BSD-2-Clause",  source: "Meta torchaudio — https://github.com/pytorch/audio/blob/main/LICENSE" }
   - { ecosystem: python, name: triton,                    license: "MIT",       source: "OpenAI Triton — https://github.com/openai/triton/blob/main/LICENSE" }
   - { ecosystem: python, name: vsa,                       license: "Apache-2.0",  source: "vsa (visual self-attention, sglang component) — Apache-2.0" }
+
+  # --- Sglang v0.5.18 — Python packages with missing license metadata ---
+  - { ecosystem: python, name: omegaconf,                  license: "BSD-3-Clause", source: "OmegaConf upstream — https://github.com/omry/omegaconf/blob/main/LICENSE" }
+  - { ecosystem: python, name: sgl-deep-ep,                license: "MIT",          source: "SGLang DeepEP — https://github.com/sgl-project/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: webencodings,               license: "BSD-3-Clause", source: "webencodings upstream — https://github.com/gsnedders/python-webencodings/blob/master/LICENSE" }
 
   # --- Sglang cuda12.9 — Go module additions (UNKNOWN from syft) ---
   # All well-known projects; syft can't run go-license-detector against

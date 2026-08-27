@@ -25,9 +25,6 @@ inputs:
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
-  aws_account_id:
-    description: 'AWS Account ID'
-    required: false
   no_cache:
     description: 'Disable Docker build cache'
     required: false
@@ -70,7 +67,6 @@ runs:
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         PLATFORM: ${{ inputs.platform }}
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -149,6 +145,15 @@ runs:
           else
             echo "::warning::IRSA web identity token not available; sccache S3 cache will be disabled"
           fi
+        fi
+
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
         fi
 
         TARGET_ARG=""
@@ -333,10 +338,9 @@ runs:
 
     # Upload comprehensive build metrics as artifact
     - name: Upload Comprehensive Build Metrics
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
       if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
-

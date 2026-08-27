@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{RouterConfigOverride, kv_router_config_from_dynamo_env},
+    config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env},
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -30,7 +30,7 @@ use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -113,11 +113,12 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
 }
 
 /// # Safety
-/// the namespace_c_str and component_c_str are passed as pointers to C strings
+/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
+    endpoint_c_str: *const c_char,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -165,9 +166,25 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
     let component: String = component_cow.into_owned();
 
+    if endpoint_c_str.is_null() {
+        tracing::error!("Serving endpoint name is required");
+        return DynamoLlmResult::ERR;
+    }
+    let endpoint = match unsafe { CStr::from_ptr(endpoint_c_str) }.to_str() {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Serving endpoint name must not be empty");
+            return DynamoLlmResult::ERR;
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to convert serving endpoint name to UTF-8");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, endpoint, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -209,16 +226,17 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
+    endpoint: String,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
-    tracing::info!("Creating KV Publisher for model: {}", component);
+    tracing::info!(%namespace, %component, %endpoint, "Creating endpoint-scoped KV publisher");
     match DRT
         .get()
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, kv_block_size, None)
+            KvEventPublisher::new(backend.endpoint(endpoint), kv_block_size, None)
         }
         Err(e) => Err(e),
     }
@@ -445,7 +463,7 @@ impl Default for CRoutingResult {
 /// Container holding routers and preprocessor for query routing
 pub struct RouterHandles {
     prefill_router: Arc<PrefillRouter>,
-    decode_router: Arc<KvRouter>,
+    decode_router: ManagedKvRouter,
     #[allow(dead_code)]
     model_manager: Arc<ModelManager>,
     #[allow(dead_code)]
@@ -737,7 +755,13 @@ pub unsafe extern "C" fn create_routers(
             );
         }
 
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config = match try_kv_router_config_from_dynamo_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "Invalid KV router environment configuration");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
         kv_router_config.skip_initial_worker_wait = true;
 
         // Build endpoint using the actual namespace discovered from workers,
@@ -761,11 +785,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(
+            .managed_kv_router_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -833,12 +858,11 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             None,
+            None,
             model_name.clone(),
             actual_namespace.clone(),
-            enable_eagle,
-            // C bindings construct no KvWorkerMonitor; overload publishing is
-            // unused on this path (matches the prior namespace-lookup miss).
-            None,
+            decode_router.load_context().load_thresholds(),
+            drt.child_token(),
         );
 
         // Spawn background discovery watcher for prefill workers.
@@ -1277,16 +1301,15 @@ unsafe fn preprocess_request(
     let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
+    let encoding = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => preprocessor.tokenize_rendered_prompt(&prompt),
+        Ok(None) => preprocessor.tokenize(""),
         Err(e) => {
             tracing::error!(error = ?e, "Failed to apply chat template");
             return Err(QueryRouterResult::ErrQueryFailed);
         }
     };
-
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+    let encoding = match encoding {
         Ok(enc) => enc,
         Err(e) => {
             tracing::error!(error = ?e, "Failed to tokenize");

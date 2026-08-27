@@ -21,7 +21,7 @@ import math
 import shlex
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
@@ -38,77 +38,153 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-class Container(BaseModel):
+class DgdModel(BaseModel):
+    """Pydantic base that preserves Kubernetes field aliases on serialization."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    def model_dump(self, *args, **kwargs):
+        kwargs.setdefault("by_alias", True)
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(*args, **kwargs)
+
+
+class Container(DgdModel):
+    name: str = "main"
     image: Optional[str] = None
     workingDir: Optional[str] = None
     command: Optional[list[str]] = None
     args: Optional[list[str]] = None
     resources: Optional[dict] = None  # For RDMA/custom resources
-    model_config = {"extra": "allow"}
+    env: Optional[list[dict[str, Any]]] = None
+    volumeMounts: Optional[list[dict[str, Any]]] = None
 
 
-class PodSpec(BaseModel):
-    mainContainer: Optional[Container] = None
-    model_config = {"extra": "allow"}
+class PodSpec(DgdModel):
+    containers: list[Container] = Field(default_factory=list)
+    volumes: Optional[list[dict[str, Any]]] = None
 
 
-class ServiceResources(BaseModel):
-    requests: Optional[dict[str, str | dict]] = None
-    limits: Optional[dict[str, str | dict]] = None
+class PodTemplate(DgdModel):
+    spec: PodSpec = Field(default_factory=PodSpec)
 
 
-class Service(BaseModel):
-    replicas: Optional[int] = None
-    resources: Optional[ServiceResources] = None
-    extraPodSpec: Optional[PodSpec] = None
-    subComponentType: Optional[str] = None
-    multinode: Optional[MultinodeConfig | dict[str, Any]] = None
-    model_config = {"extra": "allow"}
-
-
-class Services(BaseModel):
-    Frontend: Service
-    model_config = {"extra": "allow"}
-
-
-class Spec(BaseModel):
-    services: dict[str, Service]
-    model_config = {"extra": "allow"}
-
-
-class Metadata(BaseModel):
-    name: str
-    model_config = {"extra": "allow"}
-
-
-class Config(BaseModel):
-    metadata: Metadata
-    spec: Spec
-    model_config = {"extra": "allow"}
-
-
-class MultinodeConfig(BaseModel):
+class MultinodeConfig(DgdModel):
     nodeCount: int
 
 
-class DgdPlannerServiceConfig(BaseModel):
-    """Planner service configuration.
+class Component(DgdModel):
+    name: str
+    component_type: str = Field(alias="type")
+    replicas: Optional[int] = None
+    podTemplate: PodTemplate = Field(default_factory=PodTemplate)
+    multinode: Optional[MultinodeConfig | dict[str, Any]] = None
+    scalingAdapter: Optional[dict[str, Any]] = None
+    runtimeVersionOverride: Optional[str] = None
+
+
+class Spec(DgdModel):
+    components: list[Component]
+
+
+class Metadata(DgdModel):
+    name: str
+    namespace: Optional[str] = None
+
+
+class Config(DgdModel):
+    apiVersion: str = "nvidia.com/v1beta1"
+    kind: str = "DynamoGraphDeployment"
+    metadata: Metadata
+    spec: Spec
+
+
+class DgdPlannerComponentConfig(Component):
+    """Planner component configuration.
 
     Planner reads profiling data from a ConfigMap (planner-profile-data)
     automatically created and mounted by the profiler; no PVC dependencies
     """
 
-    componentType: str = "planner"
+    name: str = "Planner"
+    component_type: str = Field(default="planner", alias="type")
     replicas: int = 1
-    extraPodSpec: PodSpec = PodSpec(
-        mainContainer=Container(
-            image="my-registry/dynamo-planner:my-tag",  # placeholder
-            workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
-            command=["python3", "-m", "dynamo.planner"],
-            args=[],
+    podTemplate: PodTemplate = Field(
+        default_factory=lambda: PodTemplate(
+            spec=PodSpec(
+                containers=[
+                    Container(
+                        image="my-registry/dynamo-planner:my-tag",  # placeholder
+                        workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
+                        command=["python3", "-m", "dynamo.planner"],
+                        args=[],
+                    )
+                ]
+            )
         )
     )
-    model_config = {"extra": "allow"}
+
+
+def get_component_by_name(config: Config, name: str) -> Component | None:
+    """Return a component by its stable DGD name."""
+    return next(
+        (component for component in config.spec.components if component.name == name),
+        None,
+    )
+
+
+def find_main_container(component: Component) -> Container | None:
+    """Return the component's ``main`` container when one is defined."""
+    return next(
+        (
+            container
+            for container in component.podTemplate.spec.containers
+            if container.name == "main"
+        ),
+        None,
+    )
+
+
+def get_main_container(component: Component) -> Container:
+    """Return the component's required ``main`` container.
+
+    Raises:
+        ValueError: If the component does not define a ``main`` container.
+    """
+    container = find_main_container(component)
+    if container is not None:
+        return container
+    raise ValueError(f"Component {component.name!r} does not define a main container")
+
+
+def get_component_dict(config: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Return a raw v1beta1 component dictionary by name."""
+    components = config.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return None
+    return next(
+        (
+            component
+            for component in components
+            if isinstance(component, dict) and component.get("name") == name
+        ),
+        None,
+    )
+
+
+def get_main_container_dict(component: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a raw component's ``main`` container dictionary."""
+    containers = component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+    if not isinstance(containers, list):
+        return None
+    return next(
+        (
+            container
+            for container in containers
+            if isinstance(container, dict) and container.get("name") == "main"
+        ),
+        None,
+    )
 
 
 def break_arguments(args: list[str] | None) -> list[str]:
@@ -243,7 +319,7 @@ def clamp_total_gpus_to_budget(
     )
 
 
-def _get_per_instance_gpus(worker_service: Service) -> int | None:
+def _get_per_instance_gpus(worker_component: Component) -> int | None:
     """Derive per-instance GPU count from worker CLI args (TP x PP).
 
     Data-parallel workers are independent replicas, so multinode placement
@@ -251,12 +327,9 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
     total GPUs consumed across all replicas.
     """
     args: list[str] | None = None
-    if (
-        worker_service.extraPodSpec
-        and worker_service.extraPodSpec.mainContainer
-        and worker_service.extraPodSpec.mainContainer.args
-    ):
-        args = break_arguments(worker_service.extraPodSpec.mainContainer.args)
+    main_container = get_main_container(worker_component)
+    if main_container.args:
+        args = break_arguments(main_container.args)
 
     if not args:
         return None
@@ -311,38 +384,36 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
 
 
 def set_multinode_config(
-    worker_service: Service, gpu_count: int, num_gpus_per_node: int
+    worker_component: Component, gpu_count: int, num_gpus_per_node: int
 ) -> None:
     """Set multinode configuration based on per-instance GPU placement needs."""
-    effective_gpu_count = _get_per_instance_gpus(worker_service) or gpu_count
+    effective_gpu_count = _get_per_instance_gpus(worker_component) or gpu_count
 
     if effective_gpu_count <= num_gpus_per_node:
         # Single node: remove multinode configuration if present
-        if (
-            hasattr(worker_service, "multinode")
-            and worker_service.multinode is not None
-        ):
-            worker_service.multinode = None
+        if worker_component.multinode is not None:
+            worker_component.multinode = None
     else:
         # Multi-node: set nodeCount = math.ceil(per-instance GPUs / GPUs per node)
         node_count = math.ceil(effective_gpu_count / num_gpus_per_node)
-        if not hasattr(worker_service, "multinode") or worker_service.multinode is None:
+        if worker_component.multinode is None:
             # Create multinode configuration if it doesn't exist
-            worker_service.multinode = MultinodeConfig(nodeCount=node_count)
+            worker_component.multinode = MultinodeConfig(nodeCount=node_count)
         else:
             # Handle both dict (from YAML) and MultinodeConfig object cases
-            if isinstance(worker_service.multinode, dict):
-                worker_service.multinode["nodeCount"] = node_count
+            if isinstance(worker_component.multinode, dict):
+                worker_component.multinode["nodeCount"] = node_count
             else:
-                worker_service.multinode.nodeCount = node_count
+                worker_component.multinode.nodeCount = node_count
 
 
-def get_service_name_by_type(
+def get_component_name_by_type(
     config: Config, backend: str, sub_component_type: SubComponentType
 ) -> str:
-    """Helper function to get service name by subComponentType.
+    """Return a component name by its v1beta1 component type.
 
-    First tries to find service by subComponentType, then falls back to component name.
+    First match ``spec.components[].type``, then fall back to the backend's
+    canonical component name.
 
     Args:
         config: Configuration object
@@ -350,21 +421,24 @@ def get_service_name_by_type(
         sub_component_type: The type of sub-component to look for (PREFILL or DECODE)
 
     Returns:
-        The service name
+        The component name
     """
-    # Check if config has the expected structure
-    if not config.spec or not config.spec.services:
-        # Fall back to default name if structure is unexpected
+    if not config.spec or not config.spec.components:
         if sub_component_type == SubComponentType.DECODE:
             return WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name
-        else:
-            return WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
+        return WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
 
-    # Look through services to find one with matching subComponentType
-    services = config.spec.services
-    for service_name, service_config in services.items():
-        if service_config.subComponentType == sub_component_type.value:
-            return service_name
+    for component in config.spec.components:
+        if component.component_type == sub_component_type.value:
+            return component.name
+
+    generic_workers = [
+        component
+        for component in config.spec.components
+        if component.component_type == "worker"
+    ]
+    if len(generic_workers) == 1:
+        return generic_workers[0].name
 
     # Fall back to default component names
     if sub_component_type == SubComponentType.DECODE:
@@ -372,22 +446,17 @@ def get_service_name_by_type(
     else:
         default_name = WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
 
-    # Check if the default name exists in services
-    if default_name in services:
-        return default_name
-
-    # Last resort: return the default name anyway
     return default_name
 
 
-def get_worker_service_from_config(
+def get_worker_component_from_config(
     config: Config,
     backend: str = "sglang",
     sub_component_type: SubComponentType = SubComponentType.DECODE,
-) -> Service:
-    """Helper function to get a worker service from config.
+) -> Component:
+    """Return a worker component from a v1beta1 config.
 
-    First tries to find service by subComponentType, then falls back to component name.
+    First match the component type, then fall back to the canonical component name.
 
     Args:
         config: Configuration dictionary
@@ -395,35 +464,34 @@ def get_worker_service_from_config(
         sub_component_type: The type of sub-component to look for (PREFILL or DECODE). Defaults to DECODE.
 
     Returns:
-        The worker service from the configuration
+        The worker component from the configuration
     """
     if backend not in WORKER_COMPONENT_NAMES:
         raise ValueError(
             f"Unsupported backend: {backend}. Supported backends: {list(WORKER_COMPONENT_NAMES.keys())}"
         )
 
-    # Get the service name using the type-aware logic
-    service_name = get_service_name_by_type(config, backend, sub_component_type)
+    component_name = get_component_name_by_type(config, backend, sub_component_type)
+    component = get_component_by_name(config, component_name)
+    if component is None:
+        raise ValueError(f"Missing worker component {component_name!r}")
+    return component
 
-    # Get the actual service from the config
-    return config.spec.services[service_name]
 
-
-def setup_worker_service_resources(
-    worker_service: Service, gpu_count: int, num_gpus_per_node: Optional[int] = None
+def setup_worker_component_resources(
+    worker_component: Component,
+    gpu_count: int,
+    num_gpus_per_node: Optional[int] = None,
 ) -> None:
-    """Helper function to set up worker service resources (requests and limits)."""
+    """Set worker GPU resources on the v1beta1 main container."""
     # Handle multinode configuration if num_gpus_per_node is provided
     if num_gpus_per_node is not None:
-        set_multinode_config(worker_service, gpu_count, num_gpus_per_node)
+        set_multinode_config(worker_component, gpu_count, num_gpus_per_node)
 
-    # Ensure resources exists
-    if worker_service.resources is None:
-        worker_service.resources = ServiceResources()
-
-    # Ensure limits exists
-    if worker_service.resources.limits is None:
-        worker_service.resources.limits = {}
+    main_container = get_main_container(worker_component)
+    if main_container.resources is None:
+        main_container.resources = {}
+    limits = main_container.resources.setdefault("limits", {})
 
     # Calculate GPU value
     gpu_value = (
@@ -441,26 +509,24 @@ def setup_worker_service_resources(
             resource_dict: The resource dictionary (either limits or requests) to update
             gpu_value: The GPU value to set
         """
-        resource_dict["gpu"] = str(gpu_value)
-
-        # also update custom rdma/ib if it exists (some cluster requires this)
-        if "custom" in resource_dict:
-            if isinstance(resource_dict["custom"], dict):
-                if "rdma/ib" in resource_dict["custom"]:
-                    resource_dict["custom"]["rdma/ib"] = str(gpu_value)
+        resource_dict["nvidia.com/gpu"] = str(gpu_value)
+        if "rdma/ib" in resource_dict:
+            resource_dict["rdma/ib"] = str(gpu_value)
 
     # Update limits
-    _update_resource_dict(worker_service.resources.limits, gpu_value)
-    # Also update requests if they exist
-    if worker_service.resources.requests is not None:
-        _update_resource_dict(worker_service.resources.requests, gpu_value)
+    _update_resource_dict(limits, gpu_value)
+    requests = main_container.resources.get("requests")
+    if isinstance(requests, dict):
+        _update_resource_dict(requests, gpu_value)
 
 
-def validate_and_get_worker_args(worker_service: Service, backend: str) -> list[str]:
-    """Helper function to validate worker service and get its arguments.
+def validate_and_get_worker_args(
+    worker_component: Component, backend: str
+) -> list[str]:
+    """Validate a worker component and return its main-container arguments.
 
     Args:
-        worker_service: Worker service object to validate
+        worker_component: Worker component object to validate
         backend: Backend name (e.g., "sglang", "vllm", "trtllm"). Defaults to "sglang".
 
     Returns:
@@ -471,13 +537,7 @@ def validate_and_get_worker_args(worker_service: Service, backend: str) -> list[
             f"Unsupported backend: {backend}. Supported backends: {list(WORKER_COMPONENT_NAMES.keys())}"
         )
 
-    if not worker_service.extraPodSpec or not worker_service.extraPodSpec.mainContainer:
-        raise ValueError(
-            f"Missing extraPodSpec or mainContainer in {backend} decode worker service '{WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name}'"
-        )
-
-    args = worker_service.extraPodSpec.mainContainer.args
-    return break_arguments(args)
+    return break_arguments(get_main_container(worker_component).args)
 
 
 def set_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
@@ -513,6 +573,27 @@ def set_unique_argument_value(args: list[str], arg_name: str, value: str) -> lis
     return append_argument(filtered, [arg_name, value])
 
 
+def set_unique_env_value(
+    env: list[dict[str, Any]] | None, name: str, value: str
+) -> list[dict[str, Any]]:
+    """Set one canonical ``name``/``value`` env entry, dropping any duplicates.
+
+    Mutates and returns a list of Kubernetes-style ``{"name", "value"}`` env
+    dicts. Existing entries for ``name`` (including ``valueFrom`` variants) are
+    removed before the canonical literal value is appended, so callers can set
+    identity-bearing env vars idempotently without leaving a stale entry for the
+    downstream process to read.
+    """
+    env_list = env if isinstance(env, list) else []
+    env_list[:] = [
+        entry
+        for entry in env_list
+        if not (isinstance(entry, dict) and entry.get("name") == name)
+    ]
+    env_list.append({"name": name, "value": value})
+    return env_list
+
+
 def update_image(config: dict, image: str) -> dict:
     """Update container image for non-planner DGD services.
 
@@ -527,11 +608,17 @@ def update_image(config: dict, image: str) -> dict:
     """
     cfg = Config.model_validate(config)
 
-    for service_name, service_config in cfg.spec.services.items():
-        if getattr(service_config, "componentType", None) == "planner":
+    for component in cfg.spec.components:
+        if component.component_type == "planner":
             continue
-        if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
-            service_config.extraPodSpec.mainContainer.image = image
-            logger.debug(f"Updated image for {service_name} to {image}")
+        container = find_main_container(component)
+        if container is None:
+            logger.debug(
+                "Skipping image update for component %s without a main container",
+                component.name,
+            )
+            continue
+        container.image = image
+        logger.debug("Updated image for %s to %s", component.name, image)
 
     return cfg.model_dump()

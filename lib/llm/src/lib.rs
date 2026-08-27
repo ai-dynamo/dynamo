@@ -8,10 +8,12 @@
 
 pub mod backend;
 pub mod common;
+mod direct_zmq_fan_in;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
+pub mod first_token;
 pub mod fpm_publisher;
 pub mod fpm_trace;
 pub mod frontend_config;
@@ -19,6 +21,7 @@ pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
+pub mod kv_dc_relay;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;
@@ -30,6 +33,7 @@ pub mod namespace;
 pub mod perf;
 pub mod preprocessor;
 pub mod protocols;
+pub mod reasoning_field;
 pub mod recorder;
 pub mod request_template;
 pub mod request_trace;

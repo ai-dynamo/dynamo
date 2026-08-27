@@ -3,10 +3,13 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream,
+    DiscoverySpec, DiscoveryStream, ModelCardInstanceId, model_with_updated_taints,
+    reconcile_discovery_snapshot, validate_event_source_reregistration,
+    validate_model_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -108,15 +111,25 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
         // EventChannel matching - unified query
         (
             DiscoveryInstance::EventChannel {
-                namespace: inst_ns,
-                component: inst_comp,
+                scope: inst_scope,
                 topic: inst_topic,
                 ..
             },
             DiscoveryQuery::EventChannels(query),
         ) => {
-            query.namespace.as_ref().is_none_or(|ns| ns == inst_ns)
-                && query.component.as_ref().is_none_or(|c| c == inst_comp)
+            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
+                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
+        }
+
+        (
+            DiscoveryInstance::EventSource {
+                scope: inst_scope,
+                topic: inst_topic,
+                ..
+            },
+            DiscoveryQuery::EventSources(query),
+        ) => {
+            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
                 && query.topic.as_ref().is_none_or(|t| t == inst_topic)
         }
 
@@ -127,7 +140,8 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::EventSources(_),
         ) => false,
         (
             DiscoveryInstance::Model { .. },
@@ -135,7 +149,8 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::EventSources(_),
         ) => false,
         (
             DiscoveryInstance::EventChannel { .. },
@@ -148,6 +163,19 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. },
         ) => false,
+        (DiscoveryInstance::EventChannel { .. }, DiscoveryQuery::EventSources(_)) => false,
+        (
+            DiscoveryInstance::EventSource { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::EventChannels(_),
+        ) => false,
     }
 }
 
@@ -159,14 +187,48 @@ impl Discovery for MockDiscovery {
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.into_instance(self.instance_id);
-
-        self.registry
-            .instances
-            .lock()
-            .unwrap()
-            .push(instance.clone());
+        let instance_id = instance.id();
+        let mut instances = self.registry.instances.lock().unwrap();
+        if let Some(existing) = instances
+            .iter_mut()
+            .find(|existing| existing.id() == instance_id)
+        {
+            match &instance {
+                DiscoveryInstance::Endpoint(_) => {
+                    *existing = instance.clone();
+                    return Ok(instance);
+                }
+                DiscoveryInstance::EventSource { .. } => {
+                    validate_event_source_reregistration(existing, &instance)?;
+                    return Ok(existing.clone());
+                }
+                DiscoveryInstance::Model { .. } => {
+                    validate_model_reregistration(existing, &instance)?;
+                    return Ok(existing.clone());
+                }
+                DiscoveryInstance::EventChannel { .. } => {}
+            }
+        }
+        instances.push(instance.clone());
 
         Ok(instance)
+    }
+
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
+        let target_id = DiscoveryInstanceId::Model(id);
+        let mut instances = self.registry.instances.lock().unwrap();
+        let existing = instances
+            .iter_mut()
+            .find(|existing| existing.id() == target_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("model discovery record {target_id:?} is not registered")
+            })?;
+        *existing = model_with_updated_taints(existing, taints)?;
+        Ok(())
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -195,39 +257,29 @@ impl Discovery for MockDiscovery {
         query: DiscoveryQuery,
         _cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
-        use std::collections::HashSet;
-
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
+            let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
 
             loop {
-                let current: Vec<_> = {
+                let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = {
                     let instances = registry.instances.lock().unwrap();
                     instances
                         .iter()
                         .filter(|instance| matches_query(instance, &query))
                         .cloned()
+                        .map(|instance| (instance.id(), instance))
                         .collect()
                 };
 
-                let current_ids: HashSet<DiscoveryInstanceId> = current.iter().map(|i| i.id()).collect();
-
-                // Emit Added events for new instances
-                for instance in current {
-                    let id = instance.id();
-                    if known_instances.insert(id) {
-                        yield Ok(DiscoveryEvent::Added(instance));
-                    }
+                let (events, reconciled) =
+                    reconcile_discovery_snapshot(&known_instances, current);
+                for event in events {
+                    yield Ok(event);
                 }
 
-                // Emit Removed events for instances that are gone
-                for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
-                    known_instances.remove(&id);
-                    yield Ok(DiscoveryEvent::Removed(id));
-                }
-
+                known_instances = reconciled;
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         };
@@ -239,7 +291,46 @@ impl Discovery for MockDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
     use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn watch_emits_same_id_endpoint_update() {
+        let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let query = DiscoveryQuery::Endpoint {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+        };
+        let spec = |transport: &str| DiscoverySpec::Endpoint {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+            transport: TransportType::Tcp(transport.to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+
+        let original = client.register(spec("127.0.0.1:8000")).await.unwrap();
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("mock watch should emit the initial instance")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, DiscoveryEvent::Added(original));
+
+        let updated = client.register(spec("127.0.0.1:9000")).await.unwrap();
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("mock watch should emit the updated instance")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(event, DiscoveryEvent::Added(updated.clone()));
+        assert_eq!(client.list(query).await.unwrap(), vec![updated]);
+    }
 
     fn model_spec(
         namespace: &str,
@@ -282,6 +373,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_taint_updates_use_the_authoritative_registry() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let model = client
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "model",
+                    "runtime_config": {"taints": ["a"]}
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+
+        client
+            .update_model_taints(id.clone(), HashSet::from(["b".to_string()]))
+            .await
+            .unwrap();
+        client
+            .update_model_taints(id.clone(), HashSet::from(["a".to_string()]))
+            .await
+            .unwrap();
+
+        let stored = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["a"])
+        );
+
+        client.unregister(model).await.unwrap();
+        assert!(
+            client
+                .update_model_taints(id, HashSet::new())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_model_registration_preserves_updated_taints_without_duplicates() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let spec = DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {"taints": ["initial"]}
+            }),
+            model_suffix: None,
+        };
+        let original = client.register(spec.clone()).await.unwrap();
+        let DiscoveryInstanceId::Model(id) = original.id() else {
+            unreachable!()
+        };
+        client
+            .update_model_taints(id, HashSet::from(["updated".to_string()]))
+            .await
+            .unwrap();
+
+        let replayed = client.register(spec).await.unwrap();
+        let models = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(models, vec![replayed.clone()]);
+        let DiscoveryInstance::Model { card_json, .. } = replayed else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["updated"])
+        );
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_rejects_foreign_worker_id() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let foreign_id = ModelCardInstanceId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 8,
+            model_suffix: None,
+        };
+
+        let error = client
+            .update_model_taints(foreign_id, HashSet::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("this discovery client owns worker 7")
+        );
+    }
+
+    #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
         let client1 = MockDiscovery::new(Some(1), registry.clone());
@@ -293,6 +505,7 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
 
         let query = DiscoveryQuery::Endpoint {
@@ -340,6 +553,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_source_removal_is_publisher_specific() {
+        use crate::discovery::{EventScope, EventSourceQuery};
+
+        let client = MockDiscovery::new(Some(42), SharedMockRegistry::new());
+        let endpoint = crate::protocols::EndpointId {
+            namespace: "workers".to_string(),
+            component: "backend".to_string(),
+            name: "kv-state".to_string(),
+        };
+        let query = DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+            endpoint.clone(),
+            "kv-events",
+        ));
+        let spec = |publisher_id, worker_id| DiscoverySpec::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"worker_id": worker_id, "dp_rank": 0}),
+        };
+
+        let old = client.register(spec(100, 7)).await.unwrap();
+        assert_eq!(client.register(spec(100, 7)).await.unwrap(), old);
+        assert!(client.register(spec(100, 8)).await.is_err());
+        assert_eq!(client.list(query.clone()).await.unwrap(), vec![old.clone()]);
+
+        let current = client.register(spec(205, 7)).await.unwrap();
+        assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
+
+        client.unregister(old).await.unwrap();
+        assert_eq!(client.list(query).await.unwrap(), vec![current]);
+    }
+
+    #[tokio::test]
     async fn register_allows_same_model_name_on_same_endpoint() {
         let registry = SharedMockRegistry::new();
         let discovery1 = MockDiscovery::new(Some(1), registry.clone());
@@ -358,6 +606,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_distinct_base_cards_with_same_source_path_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+        let spec = |display_name: &str| DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": display_name,
+                "source_path": "org/base-model",
+            }),
+            model_suffix: None,
+        };
+
+        discovery1.register(spec("public-name-a")).await.unwrap();
+        let err = discovery2
+            .register(spec("public-name-b"))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Cannot register model 'public-name-b' on endpoint 'ns/comp/generate': a different model 'public-name-a' is already registered there"
+        ));
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
     }
 
     #[tokio::test]

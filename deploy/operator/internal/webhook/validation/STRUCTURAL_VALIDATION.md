@@ -1,5 +1,23 @@
 # Structural validation
 
+Structural validation is the operator's convention for custom-resource webhook
+validation. It mirrors the Go API type tree and composes typed Kubernetes
+`field.ErrorList` values through exact `field.Path` values.
+
+## Migration status
+
+Keep this table current whenever a resource validator is migrated.
+
+| Resource | Status | Canonical implementation |
+| --- | --- | --- |
+| `DynamoGraphDeployment` | Structural | `dynamographdeployment.go`, `dynamographdeployment_v1alpha1.go` |
+| `DynamoComponentDeployment` | Structural | `dynamocomponentdeployment.go`, `dynamocomponentdeployment_v1alpha1.go` |
+| `DynamoGraphDeploymentRequest` | Structural | `dynamographdeploymentrequest.go` |
+| `DynamoModel` | Structural | `dynamomodel.go` |
+| `DynamoCheckpoint` | Structural | `dynamocheckpoint.go` |
+
+## Contract
+
 - Follow the Kubernetes API validation style: typed validators compose
   `field.ErrorList` through `*field.Path` and report all independent errors.
 - Validation must follow the Go API type tree. Every API struct with custom

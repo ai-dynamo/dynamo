@@ -5,8 +5,13 @@
 
 Idempotent: re-running with the same --version is a no-op.
 Only the framework's own pin lines are modified; torch ecosystem, recipe
-YAMLs, release-artifact docs, and historical support-matrix rows stay put.
+YAMLs, release-artifact docs, and per-release pins in releases.data.ts stay put.
+
+The support matrix now lives in docs/fern/components/releases.data.ts (the
+single source of truth for the Reference pages); the development-head pin is
+MAIN_TOT, the analog of the old support-matrix.md "main (ToT)" row.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,8 +37,12 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
         '"tensorrt-llm=={ver}"',
     ),
     (
-        "docs/reference/support-matrix.md",
-        re.compile(r"^(\| \*\*main \(ToT\)\*\* \| `[^`]+` \| `)[^`]+(` \|)", re.M),
+        "docs/fern/components/releases.data.ts",
+        # Rewrite MAIN_TOT.trtllm — the development-head (ToT) TRT-LLM pin, the
+        # releases.data.ts analog of the old support-matrix "main (ToT)" row.
+        # Anchored to the MAIN_TOT literal and non-greedy to the first trtllm
+        # key, so the per-release `trtllm:` pins in RELEASES are never touched.
+        re.compile(r'(?s)(export const MAIN_TOT\b.*?\btrtllm:\s*")[^"]+(")'),
         r"\g<1>{ver}\g<2>",
     ),
 ]
@@ -56,8 +65,8 @@ def apply(framework: str, version: str, repo_root: Path) -> int:
                 f"{rel}: regex matched 0 occurrences "
                 f"(pattern broken or pin already non-conformant)"
             )
-        if n > 1 and rel == "docs/reference/support-matrix.md":
-            raise SystemExit(f"{rel}: matched {n} ToT rows; expected 1")
+        if n > 1 and rel == "docs/fern/components/releases.data.ts":
+            raise SystemExit(f"{rel}: matched {n} MAIN_TOT trtllm pins; expected 1")
         if new_text != text:
             path.write_text(new_text)
             written.add(path)

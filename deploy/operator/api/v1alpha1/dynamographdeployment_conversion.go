@@ -112,6 +112,12 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	if src.Restart != nil {
 		dst.Restart = &v1beta1.Restart{}
 		ConvertFromRestart(src.Restart, dst.Restart)
@@ -419,6 +425,12 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	if src.Restart != nil {
 		dst.Restart = &Restart{}
 		ConvertToRestart(src.Restart, dst.Restart)
@@ -640,6 +652,16 @@ func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *S
 func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &v1beta1.PlacementStatus{
+			State: v1beta1.PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -677,6 +699,16 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &PlacementStatus{
+			State: PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {

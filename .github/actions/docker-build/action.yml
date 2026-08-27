@@ -31,9 +31,12 @@ inputs:
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
-  aws_account_id:
-    description: 'AWS Account ID'
-    required: false
+  ecr_registry:
+    description: 'ECR registry hostname'
+    required: true
+  ecr_repository:
+    description: 'ECR repository path'
+    required: true
 
 outputs:
   image_tag:
@@ -44,7 +47,7 @@ runs:
   using: "composite"
   steps:
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435  # v3.11.1
       with:
         driver: docker-container
         # Enable BuildKit for enhanced metadata
@@ -56,18 +59,31 @@ runs:
       run: |
         docker system prune -af
     - name: Set up Python
-      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
       with:
         python-version: '3.12'
         pip-install: jinja2 pyyaml
     - name: Generate Dockerfile
       shell: bash
+      env:
+        FRAMEWORK: ${{ inputs.framework }}
+        TARGET: ${{ inputs.target }}
       run: |
+        if [[ ! "${FRAMEWORK}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+          echo "::error::Invalid framework: ${FRAMEWORK}"
+          exit 1
+        fi
+
+        if [[ ! "${TARGET}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+          echo "::error::Invalid target: ${TARGET}"
+          exit 1
+        fi
+
         echo "::group::Generating Dockerfile"
-        echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+        echo "Generating Dockerfile for target: ${TARGET} and framework: ${FRAMEWORK}"
         python ./container/render.py \
-            --target=${{ inputs.target }} \
-            --framework=${{ inputs.framework }} \
+            --target="${TARGET}" \
+            --framework="${FRAMEWORK}" \
             --platform=${{ inputs.platform }} \
             --cuda-version=${{ inputs.cuda_version }} \
             --show-result \
@@ -77,7 +93,7 @@ runs:
       if: ${{ inputs.target == 'frontend' }}
       shell: bash
       env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        ECR_HOSTNAME: ${{ inputs.ecr_registry }}
       run: |
         sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
         curl --retry 5 --retry-delay 2 --fail --show-error -sSL -o /tmp/rustup-init.sh https://sh.rustup.rs
@@ -102,19 +118,29 @@ runs:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
+        FRAMEWORK: ${{ inputs.framework }}
+        TARGET: ${{ inputs.target }}
+        IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
         PLATFORM: ${{ inputs.platform }}
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        ECR_HOSTNAME: ${{ inputs.ecr_registry }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
         CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
+
+        if [[ ! "${FRAMEWORK}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+          echo "::error::Invalid framework: ${FRAMEWORK}"
+          exit 1
+        fi
+
         # Determine image tag
-        if [ -n "${{ inputs.image_tag }}" ]; then
-          IMAGE_TAG="${{ inputs.image_tag }}"
+        if [ -n "${IMAGE_TAG_INPUT}" ]; then
+          IMAGE_TAG="${IMAGE_TAG_INPUT}"
         else
-          IMAGE_TAG="${{ inputs.framework }}:latest"
+          IMAGE_TAG="${FRAMEWORK}:latest"
         fi
 
         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
@@ -126,29 +152,29 @@ runs:
 
         # Create build logs directory
         mkdir -p build-logs
-        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-$(echo '${{ inputs.platform }}' | sed 's/linux\///').log"
+        BUILD_LOG_FILE="build-logs/build-${FRAMEWORK}-${PLATFORM#linux/}.log"
         echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
         # Set base cache args and set --cache-to if this is a main commit
         # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
-        CACHE_ARGS=""
-        if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_ARGS="--cache-to type=inline "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+        CACHE_ARGS=()
+        if [[ "${TARGET}" != "frontend" ]]; then
+          CACHE_ARGS+=(--cache-to "type=inline")
+          CACHE_ARGS+=(--cache-from "type=registry,ref=${ECR_HOSTNAME}/${ECR_REPOSITORY}:${FRAMEWORK}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache")
+          CACHE_ARGS+=(--cache-from "type=registry,ref=${ECR_HOSTNAME}/${ECR_REPOSITORY}:main-${FRAMEWORK}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}")
+          CACHE_ARGS+=(--cache-from "type=registry,ref=${ECR_HOSTNAME}/${ECR_REPOSITORY}:release-${FRAMEWORK}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache")
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
             # Release branches also use release cache
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+            CACHE_ARGS+=(--cache-to "type=registry,ref=${ECR_HOSTNAME}/${ECR_REPOSITORY}:release-${FRAMEWORK}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max")
           elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+            CACHE_ARGS+=(--cache-to "type=registry,ref=${ECR_HOSTNAME}/${ECR_REPOSITORY}:${FRAMEWORK}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max")
           fi
         fi
 
-        EPP_IMAGE_ARG=""
-        if [[ ${{ inputs.target }} == "frontend" ]]; then
-          EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
+        EPP_IMAGE_ARGS=()
+        if [[ "${TARGET}" == "frontend" ]]; then
+          EPP_IMAGE_ARGS+=(--build-arg "EPP_IMAGE=${EPP_IMAGE}")
         fi
 
         docker buildx build \
@@ -156,8 +182,9 @@ runs:
           --tag "$IMAGE_TAG" \
           --load \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS \
-          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
+          "${CACHE_ARGS[@]}" \
+          "${EPP_IMAGE_ARGS[@]}" \
+          . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -170,6 +197,11 @@ runs:
     - name: Capture Build Metrics
       id: metrics
       shell: bash
+      env:
+        FRAMEWORK: ${{ inputs.framework }}
+        TARGET: ${{ inputs.target }}
+        WORKFLOW_ID: ${{ github.run_id }}
+        JOB_ID: ${{ job.check_run_id }}
       run: |
 
         # Create metrics directory
@@ -202,12 +234,12 @@ runs:
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
         echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
-        JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
+        JOB_KEY="${FRAMEWORK}-${PLATFORM_ARCH}"
         echo "  Job Key: ${JOB_KEY}"
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
+        METRICS_FILE="build-metrics/metrics-${FRAMEWORK}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         # Extract additional metadata from the built image
         if [ -n "$IMAGE_TAG" ]; then
@@ -227,8 +259,8 @@ runs:
         # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
-          "framework": "${{ inputs.framework }}",
-          "target": "${{ inputs.target }}",
+          "framework": "${FRAMEWORK}",
+          "target": "${TARGET}",
           "platform": "${{ inputs.platform }}",
           "platform_arch": "${PLATFORM_ARCH}",
           "cuda_version": "${{ inputs.cuda_version }}",
@@ -248,18 +280,24 @@ runs:
       id: comprehensive-metrics
       if: always()
       shell: bash
+      env:
+        FRAMEWORK: ${{ inputs.framework }}
+        WORKFLOW_ID: ${{ github.run_id }}
+        JOB_ID: ${{ job.check_run_id }}
       run: |
         echo "=========================================="
         echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
         echo "=========================================="
 
+        if [[ ! "${FRAMEWORK}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+          echo "::warning::Skipping metrics for invalid framework: ${FRAMEWORK}"
+          exit 0
+        fi
+
         # Create metrics directory
         mkdir -p build-metrics
 
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
-        WORKFLOW_ID="${{ github.run_id }}"
-        JOB_ID="${{ job.check_run_id }}"
-        FRAMEWORK_LOWER=$(echo "${{ inputs.framework }}" | tr '[:upper:]' '[:lower:]')
 
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
@@ -268,10 +306,10 @@ runs:
         BUILD_LOG="build-logs/single-stage-build.log"
 
         # Path to container metadata created in previous step
-        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+        CONTAINER_METADATA="build-metrics/metrics-${FRAMEWORK}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         # Output single comprehensive JSON with all build stages
-        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+        COMPREHENSIVE_JSON="build-metrics/build-${FRAMEWORK}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         echo "🚀 Parsing BuildKit outputs and merging with container metrics..."
 
@@ -320,7 +358,7 @@ runs:
 
     # Upload comprehensive build metrics as artifact
     - name: Upload Comprehensive Build Metrics
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}

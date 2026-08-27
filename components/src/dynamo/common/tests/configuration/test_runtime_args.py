@@ -40,6 +40,17 @@ def test_fpm_trace_defaults_disabled(monkeypatch):
     assert "DYN_FPM_TRACE" not in os.environ
 
 
+def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
+    monkeypatch.setenv("DYN_KV_STATE_ENDPOINT", "dynamo/kv/events")
+    env_config, help_text = _parse_runtime_args([])
+    cli_config, _ = _parse_runtime_args(["--kv-state-endpoint", "other/cache/updates"])
+
+    assert env_config.kv_state_endpoint == "dynamo/kv/events"
+    assert cli_config.kv_state_endpoint == "other/cache/updates"
+    assert "--kv-state-endpoint" in help_text
+    assert "DYN_KV_STATE_ENDPOINT" in help_text
+
+
 def test_fpm_trace_env_enables_and_is_canonicalized(monkeypatch):
     monkeypatch.setenv("DYN_FPM_TRACE", "on")
 
@@ -111,3 +122,28 @@ def test_fpm_trace_help_lists_flag_and_env(monkeypatch):
     assert "--fpm-trace" in help_text
     assert "--no-fpm-trace" in help_text
     assert "DYN_FPM_TRACE" in help_text
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled"])
+def test_default_thinking_mode_cli(mode, monkeypatch):
+    monkeypatch.delenv("DYN_DEFAULT_THINKING_MODE", raising=False)
+
+    config, help_text = _parse_runtime_args(["--dyn-default-thinking-mode", mode])
+
+    assert config.dyn_default_thinking_mode == mode
+    assert "DYN_DEFAULT_THINKING_MODE" in help_text
+
+
+def test_default_thinking_mode_env(monkeypatch):
+    monkeypatch.setenv("DYN_DEFAULT_THINKING_MODE", "disabled")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_default_thinking_mode == "disabled"
+
+
+def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
+    monkeypatch.delenv("DYN_DEFAULT_THINKING_MODE", raising=False)
+
+    with pytest.raises(SystemExit):
+        _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])

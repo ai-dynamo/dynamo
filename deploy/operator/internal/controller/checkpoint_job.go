@@ -10,9 +10,9 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -49,11 +49,10 @@ func buildCheckpointJob(
 	// Stamp the owning checkpoint so the controller's source-pod watch can map the Job's pod back to
 	// this DynamoCheckpoint.
 	podTemplate.Labels[consts.SnapshotOwnerLabel] = ckpt.Name
-	targetContainerName := ckpt.Spec.Job.TargetContainerName
-	if targetContainerName == "" {
-		targetContainerName = consts.MainContainerName
+	targetContainerName, err := captureTargetContainer(ckpt)
+	if err != nil {
+		return nil, err
 	}
-	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
 
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
@@ -78,12 +77,12 @@ func buildCheckpointJob(
 	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
 		return nil, err
 	} else if ok {
-		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		checkpointjob.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+		checkpointjob.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
 		if podTemplate.Annotations == nil {
 			podTemplate.Annotations = map[string]string{}
 		}
-		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
+		checkpointjob.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
 	}
 
 	// Decide whether cuda-checkpoint needs --launch-job from the rendered pod
@@ -172,16 +171,14 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
-
-	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
+	return checkpointjob.NewCheckpointJob(podTemplate, checkpointjob.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
+		TargetContainer:       targetContainerName,
 		CheckpointID:          hash,
-		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
+		ArtifactVersion:       checkpointjob.ArtifactVersion(ckpt.Annotations[checkpointjob.CheckpointArtifactVersionAnnotation]),
 		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
-		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
 		WrapLaunchJob:         wrapLaunchJob,
 	})
 }

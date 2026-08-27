@@ -46,6 +46,7 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
+        KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
         SLASpec,
@@ -381,7 +382,7 @@ class TestValidateDgdrDynamoFeatures:
         with caplog.at_level(logging.WARNING):
             validate_dgdr_dynamo_features(dgdr, aic_supported=False)
         assert "AIC does not support" in caplog.text
-        assert "Rust perf shim fallback" in caplog.text
+        assert "AIC core fallback" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -539,13 +540,15 @@ class TestAssembleFinalConfig:
         dgd_config = {
             "kind": "DynamoGraphDeployment",
             "spec": {
-                "services": {
-                    "decode": {
-                        "componentType": "worker",
-                        "subComponentType": "decode",
-                        "extraPodSpec": {"mainContainer": {"args": []}},
+                "components": [
+                    {
+                        "name": "decode",
+                        "type": "decode",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
                     }
-                }
+                ]
             },
         }
 
@@ -558,7 +561,7 @@ class TestAssembleFinalConfig:
             resolved_backend="trtllm",
         )
 
-        args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+        args = result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
             "args"
         ]
         idx = args.index("--trtllm.enable_chunked_prefill")
@@ -582,7 +585,244 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_enables_scaling_adapter_on_worker_services(self, tmp_path):
+    def test_kv_router_sets_router_mode_env(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+        # command/args are left untouched.
+        assert "args" not in container
+        assert "command" not in container
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_disabled_kv_router_preserves_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=False)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--custom-arg"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        assert result is dgd_config
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["args"] == ["--custom-arg"]
+        assert "env" not in container
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_preserves_existing_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--http-port", "9000"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        # Existing args are untouched; routing is expressed via env only.
+        assert container["args"] == ["--http-port", "9000"]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_handles_command_form_frontend(self, tmp_path):
+        """A frontend produced by ``_update_frontend_cli`` puts the module
+        entrypoint in ``command`` and model flags in ``args``. Setting the env
+        var must not corrupt either list (no duplicate ``-m dynamo.frontend``).
+        """
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "command": [
+                                            "python3",
+                                            "-m",
+                                            "dynamo.frontend",
+                                        ],
+                                        "args": [
+                                            "--model-name",
+                                            "m",
+                                            "--model-path",
+                                            "/models/m",
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["command"] == ["python3", "-m", "dynamo.frontend"]
+        assert container["args"] == [
+            "--model-name",
+            "m",
+            "--model-path",
+            "/models/m",
+        ]
+        assert container["env"] == [{"name": "DYN_ROUTER_MODE", "value": "kv"}]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_replaces_existing_router_mode_env(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "env": [
+                                            {"name": "FOO", "value": "bar"},
+                                            {
+                                                "name": "DYN_ROUTER_MODE",
+                                                "value": "round-robin",
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        container = result["spec"]["components"][0]["podTemplate"]["spec"][
+            "containers"
+        ][0]
+        assert container["env"] == [
+            {"name": "FOO", "value": "bar"},
+            {"name": "DYN_ROUTER_MODE", "value": "kv"},
+        ]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_missing_frontend(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {"spec": {"components": [{"name": "decode", "type": "worker"}]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert "has no frontend component" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_frontend_without_main_container(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontend = {
+            "name": "Frontend",
+            "type": "frontend",
+            "podTemplate": {"spec": {"containers": [{"name": "sidecar"}]}},
+        }
+        dgd_config = {"spec": {"components": [frontend]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert frontend["podTemplate"]["spec"]["containers"] == [{"name": "sidecar"}]
+        assert "has no main container" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_configures_every_frontend(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontends = [
+            {
+                "name": name,
+                "type": "frontend",
+                "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+            }
+            for name in ("FrontendA", "FrontendB")
+        ]
+        dgd_config = {"spec": {"components": frontends}}
+
+        assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        for frontend in frontends:
+            assert frontend["podTemplate"]["spec"]["containers"][0]["env"] == [
+                {"name": "DYN_ROUTER_MODE", "value": "kv"}
+            ]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_enables_scaling_adapter_on_worker_components(self, tmp_path):
         """Planner-generated workers should be scaled through DGDSA."""
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
         ops = _make_ops(tmp_path)
@@ -590,19 +830,11 @@ class TestAssembleFinalConfig:
         dgd_config = {
             "kind": "DGD",
             "spec": {
-                "services": {
-                    "Frontend": {"componentType": "frontend", "replicas": 1},
-                    "decode": {
-                        "componentType": "worker",
-                        "subComponentType": "decode",
-                        "replicas": 1,
-                    },
-                    "prefill": {
-                        "componentType": "worker",
-                        "subComponentType": "prefill",
-                        "replicas": 1,
-                    },
-                }
+                "components": [
+                    {"name": "Frontend", "type": "frontend", "replicas": 1},
+                    {"name": "decode", "type": "decode", "replicas": 1},
+                    {"name": "prefill", "type": "prefill", "replicas": 1},
+                ]
             },
         }
         planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
@@ -620,32 +852,40 @@ class TestAssembleFinalConfig:
             )
 
         assert result == [planner_cm, dgd_config]
-        services = dgd_config["spec"]["services"]
-        assert services["decode"]["scalingAdapter"] == {"enabled": True}
-        assert services["prefill"]["scalingAdapter"] == {"enabled": True}
-        assert "scalingAdapter" not in services["Frontend"]
+        components = {
+            component["name"]: component
+            for component in dgd_config["spec"]["components"]
+        }
+        assert components["decode"]["scalingAdapter"] == {"enabled": True}
+        assert components["prefill"]["scalingAdapter"] == {"enabled": True}
+        assert "scalingAdapter" not in components["Frontend"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_enable_planner_worker_scaling_adapters_updates_existing_config(self):
         dgd_config = {
             "spec": {
-                "services": {
-                    "decode": {
-                        "componentType": "worker",
+                "components": [
+                    {
+                        "name": "decode",
+                        "type": "decode",
                         "scalingAdapter": {"enabled": False},
                     },
-                    "Planner": {"componentType": "planner"},
-                }
+                    {"name": "Planner", "type": "planner"},
+                ]
             }
         }
 
         enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode="decode"))
 
-        assert dgd_config["spec"]["services"]["decode"]["scalingAdapter"] == {
+        components = {
+            component["name"]: component
+            for component in dgd_config["spec"]["components"]
+        }
+        assert components["decode"]["scalingAdapter"] == {
             "enabled": True,
         }
-        assert "scalingAdapter" not in dgd_config["spec"]["services"]["Planner"]
+        assert "scalingAdapter" not in components["Planner"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -663,23 +903,20 @@ class TestAssembleFinalConfig:
     ):
         dgd_config = {
             "spec": {
-                "services": {
-                    "Frontend": {"componentType": "frontend"},
-                    "prefill": {
-                        "componentType": "worker",
-                        "subComponentType": "prefill",
-                    },
-                    "decode": {
-                        "componentType": "worker",
-                        "subComponentType": "decode",
-                    },
-                }
+                "components": [
+                    {"name": "Frontend", "type": "frontend"},
+                    {"name": "prefill", "type": "prefill"},
+                    {"name": "decode", "type": "decode"},
+                ]
             }
         }
 
         enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode=mode))
 
-        services = dgd_config["spec"]["services"]
+        services = {
+            component["name"]: component
+            for component in dgd_config["spec"]["components"]
+        }
         for service_name in enabled_services:
             assert services[service_name]["scalingAdapter"] == {"enabled": True}
         for service_name in disabled_services:
@@ -688,13 +925,13 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_enable_planner_worker_scaling_adapters_uses_service_name_fallback(self):
+    def test_enable_planner_worker_scaling_adapters_uses_component_name_fallback(self):
         dgd_config = {
             "spec": {
-                "services": {
-                    "VllmPrefillWorker": {"componentType": "worker"},
-                    "VllmDecodeWorker": {"componentType": "worker"},
-                }
+                "components": [
+                    {"name": "VllmPrefillWorker", "type": "worker"},
+                    {"name": "VllmDecodeWorker", "type": "worker"},
+                ]
             }
         }
 
@@ -702,50 +939,48 @@ class TestAssembleFinalConfig:
             dgd_config, _make_planner(mode="prefill")
         )
 
-        services = dgd_config["spec"]["services"]
-        assert services["VllmPrefillWorker"]["scalingAdapter"] == {"enabled": True}
-        assert services["VllmPrefillWorker"]["subComponentType"] == "prefill"
-        assert "scalingAdapter" not in services["VllmDecodeWorker"]
-        assert "subComponentType" not in services["VllmDecodeWorker"]
+        components = {
+            component["name"]: component
+            for component in dgd_config["spec"]["components"]
+        }
+        assert components["VllmPrefillWorker"]["scalingAdapter"] == {"enabled": True}
+        assert components["VllmPrefillWorker"]["type"] == "prefill"
+        assert "scalingAdapter" not in components["VllmDecodeWorker"]
+        assert components["VllmDecodeWorker"]["type"] == "worker"
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_enable_planner_worker_scaling_adapters_handles_agg_worker(self):
         dgd_config = {
             "spec": {
-                "services": {
-                    "Frontend": {"componentType": "frontend"},
-                    "TRTLLMWorker": {"componentType": "worker"},
-                }
+                "components": [
+                    {"name": "Frontend", "type": "frontend"},
+                    {"name": "TRTLLMWorker", "type": "worker"},
+                ]
             }
         }
 
         enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode="agg"))
 
-        assert dgd_config["spec"]["services"]["TRTLLMWorker"]["scalingAdapter"] == {
+        components = {
+            component["name"]: component
+            for component in dgd_config["spec"]["components"]
+        }
+        assert components["TRTLLMWorker"]["scalingAdapter"] == {
             "enabled": True,
         }
-        assert (
-            dgd_config["spec"]["services"]["TRTLLMWorker"]["subComponentType"]
-            == "decode"
-        )
-        assert "scalingAdapter" not in dgd_config["spec"]["services"]["Frontend"]
+        assert components["TRTLLMWorker"]["type"] == "decode"
+        assert "scalingAdapter" not in components["Frontend"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_enable_planner_worker_scaling_adapters_skips_advisory_mode(self):
         dgd_config = {
             "spec": {
-                "services": {
-                    "prefill": {
-                        "componentType": "worker",
-                        "subComponentType": "prefill",
-                    },
-                    "decode": {
-                        "componentType": "worker",
-                        "subComponentType": "decode",
-                    },
-                }
+                "components": [
+                    {"name": "prefill", "type": "prefill"},
+                    {"name": "decode", "type": "decode"},
+                ]
             }
         }
 
@@ -753,8 +988,10 @@ class TestAssembleFinalConfig:
             dgd_config, _make_planner(mode="disagg", advisory=True)
         )
 
-        assert "scalingAdapter" not in dgd_config["spec"]["services"]["prefill"]
-        assert "scalingAdapter" not in dgd_config["spec"]["services"]["decode"]
+        assert all(
+            "scalingAdapter" not in component
+            for component in dgd_config["spec"]["components"]
+        )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -768,7 +1005,7 @@ class TestAssembleFinalConfig:
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
-        dgd_config = {"kind": "DGD", "spec": {"services": {}}}
+        dgd_config = {"kind": "DGD", "spec": {"components": []}}
         planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
 
         with (
@@ -806,7 +1043,7 @@ class TestAssembleFinalConfig:
         )
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
-        dgd_config = {"kind": "DGD", "spec": {"services": {}}}
+        dgd_config = {"kind": "DGD", "spec": {"components": []}}
         planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
         profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
@@ -847,7 +1084,7 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
-        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        mocker_base = {"kind": "MockerDGD", "spec": {"components": []}}
         planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
 
         with (
@@ -893,7 +1130,7 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
-        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        mocker_base = {"kind": "MockerDGD", "spec": {"components": []}}
         planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
         profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
@@ -924,15 +1161,15 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_only_no_planner_returns_mocker_config(self, tmp_path):
-        """Mocker-only (no planner): generate_mocker_config is called,
-        add_planner_to_config is not, profile data is still attached."""
+    def test_mocker_only_rapid_returns_mocker_config_without_profile_data(
+        self, tmp_path
+    ):
+        """Mocker-only rapid uses AIC data and does not attach profile files."""
         dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
-        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
-        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
+        mocker_base = {"kind": "MockerDGD", "spec": {"components": []}}
 
         with (
             patch(
@@ -944,7 +1181,6 @@ class TestAssembleFinalConfig:
             ) as mock_planner,
             patch(
                 f"{_DGD_GEN}.add_profile_data_to_config",
-                return_value=profile_cm,
             ) as mock_profile,
         ):
             result = assemble_final_config(
@@ -957,13 +1193,21 @@ class TestAssembleFinalConfig:
 
         mock_mocker.assert_called_once()
         mock_planner.assert_not_called()
-        mock_profile.assert_called_once()
-        assert result == [profile_cm, mocker_base]
+        mock_profile.assert_not_called()
+        assert result is mocker_base
 
 
 # ---------------------------------------------------------------------------
 # add_profile_data_to_config — mocker_enabled guard (DYN-2409)
 # ---------------------------------------------------------------------------
+
+
+def _test_component(name: str, component_type: str, args: list[str]) -> dict:
+    return {
+        "name": name,
+        "type": component_type,
+        "podTemplate": {"spec": {"containers": [{"name": "main", "args": args}]}},
+    }
 
 
 class TestAddProfileDataMockerGuard:
@@ -974,41 +1218,33 @@ class TestAddProfileDataMockerGuard:
         """Minimal DGD with sglang-style 'prefill' and 'decode' workers."""
         return {
             "spec": {
-                "services": {
-                    "Planner": {
-                        "extraPodSpec": {
-                            "mainContainer": {"args": ["--config", "{}"]},
-                        }
-                    },
-                    "prefill": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "args": [
-                                    "-m",
-                                    "dynamo.sglang",
-                                    "--model-path",
-                                    "Qwen/Qwen3-32B",
-                                    "--disaggregation-mode",
-                                    "prefill",
-                                ]
-                            }
-                        }
-                    },
-                    "decode": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "args": [
-                                    "-m",
-                                    "dynamo.sglang",
-                                    "--model-path",
-                                    "Qwen/Qwen3-32B",
-                                    "--disaggregation-mode",
-                                    "decode",
-                                ]
-                            }
-                        }
-                    },
-                }
+                "components": [
+                    _test_component("Planner", "planner", ["--config", "{}"]),
+                    _test_component(
+                        "prefill",
+                        "prefill",
+                        [
+                            "-m",
+                            "dynamo.sglang",
+                            "--model-path",
+                            "Qwen/Qwen3-32B",
+                            "--disaggregation-mode",
+                            "prefill",
+                        ],
+                    ),
+                    _test_component(
+                        "decode",
+                        "decode",
+                        [
+                            "-m",
+                            "dynamo.sglang",
+                            "--model-path",
+                            "Qwen/Qwen3-32B",
+                            "--disaggregation-mode",
+                            "decode",
+                        ],
+                    ),
+                ]
             }
         }
 
@@ -1020,10 +1256,11 @@ class TestAddProfileDataMockerGuard:
         with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
             add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=False)
 
+        components = {
+            component["name"]: component for component in dgd["spec"]["components"]
+        }
         for name in ("prefill", "decode"):
-            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
+            args = components[name]["podTemplate"]["spec"]["containers"][0]["args"]
             assert (
                 "--planner-profile-data" not in args
             ), f"sglang worker '{name}' should not have --planner-profile-data"
@@ -1036,10 +1273,11 @@ class TestAddProfileDataMockerGuard:
         with patch(f"{_DGD_GEN}._load_profiling_data", return_value={"prefill": {}}):
             add_profile_data_to_config(dgd, str(tmp_path), mocker_enabled=True)
 
+        components = {
+            component["name"]: component for component in dgd["spec"]["components"]
+        }
         for name in ("prefill", "decode"):
-            args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
+            args = components[name]["podTemplate"]["spec"]["containers"][0]["args"]
             assert (
                 "--planner-profile-data" in args
             ), f"mocker worker '{name}' should have --planner-profile-data"
@@ -1219,7 +1457,12 @@ class TestRunProfileSkipsInterpolationForAggConfig:
         # Simulate naive fallback result: agg config, resolved backend
         agg_dgd = {
             "metadata": {"name": "vllm-agg"},
-            "spec": {"services": {"Frontend": {}, "VllmWorker": {}}},
+            "spec": {
+                "components": [
+                    {"name": "Frontend", "type": "frontend"},
+                    {"name": "VllmWorker", "type": "worker"},
+                ]
+            },
         }
         pick_result = {
             "best_config_df": None,
@@ -1268,6 +1511,10 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             ) as mock_interp,
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=agg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
+            patch(
+                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                return_value=False,
+            ),
             patch(
                 f"{_PROFILE_SLA}.get_model_config_from_model_path",
                 side_effect=Exception("no model"),
@@ -1318,11 +1565,11 @@ class TestRunProfileSkipsInterpolationForAggConfig:
         disagg_dgd = {
             "metadata": {"name": "vllm-disagg"},
             "spec": {
-                "services": {
-                    "Frontend": {},
-                    "VllmPrefillWorker": {},
-                    "VllmDecodeWorker": {},
-                }
+                "components": [
+                    {"name": "Frontend", "type": "frontend"},
+                    {"name": "VllmPrefillWorker", "type": "prefill"},
+                    {"name": "VllmDecodeWorker", "type": "decode"},
+                ]
             },
         }
         pick_result = {
@@ -1373,6 +1620,10 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=disagg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
             patch(
+                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                return_value=False,
+            ),
+            patch(
                 f"{_PROFILE_SLA}.get_model_config_from_model_path",
                 side_effect=Exception("no model"),
             ),
@@ -1410,8 +1661,14 @@ class TestValidateDgdServiceNameLengths:
     except ImportError:
         pass
 
-    def _make_final_config(self, service_names: list[str]) -> dict:
-        return {"spec": {"services": {name: {} for name in service_names}}}
+    def _make_final_config(self, component_names: list[str]) -> dict:
+        return {
+            "spec": {
+                "components": [
+                    {"name": name, "type": "worker"} for name in component_names
+                ]
+            }
+        }
 
     def _make_dgdr(self) -> "DynamoGraphDeploymentRequestSpec":
         return DynamoGraphDeploymentRequestSpec(
@@ -1465,7 +1722,10 @@ class TestValidateDgdServiceNameLengths:
         monkeypatch.delenv("DGDR_NAME", raising=False)
         dgdr = self._make_dgdr()
         # "x" * 40 + "svc" (3) = 43 ≤ 45 → passes
-        config = {"metadata": {"name": "x" * 40}, "spec": {"services": {"svc": {}}}}
+        config = {
+            "metadata": {"name": "x" * 40},
+            "spec": {"components": [{"name": "svc", "type": "worker"}]},
+        }
         _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
 
     def test_fallback_raises_when_config_name_causes_violation(self, monkeypatch):
@@ -1477,10 +1737,13 @@ class TestValidateDgdServiceNameLengths:
         # "x" * 40 + "TRTLLMPrefillWorker" (19) = 59 > 45
         config = {
             "metadata": {"name": "x" * 40},
-            "spec": {"services": {"TRTLLMPrefillWorker": {}}},
+            "spec": {
+                "components": [{"name": "TRTLLMPrefillWorker", "type": "prefill"}]
+            },
         }
-        with pytest.raises(ValueError, match="pod-naming limit"):
+        with pytest.raises(ValueError, match="pod-naming limit") as exc_info:
             _validate_dgd_service_name_lengths(dgdr, config)
+        assert f"Shorten the DGD name '{'x' * 40}'" in str(exc_info.value)
 
     def test_skips_when_neither_dgdr_name_nor_config_name_available(
         self, monkeypatch, caplog
@@ -1512,5 +1775,6 @@ class TestValidateDgdServiceNameLengths:
             overrides=OverridesSpec(dgd={"metadata": {"name": long_override}}),
         )
         config = self._make_final_config(["svc"])
-        with pytest.raises(ValueError, match="pod-naming limit"):
+        with pytest.raises(ValueError, match="pod-naming limit") as exc_info:
             _validate_dgd_service_name_lengths(dgdr, config)
+        assert f"Shorten the DGD name '{long_override}'" in str(exc_info.value)

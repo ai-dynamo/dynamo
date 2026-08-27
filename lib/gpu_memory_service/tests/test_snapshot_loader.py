@@ -4,6 +4,14 @@
 """Unit tests for the GMS snapshot loader CLI."""
 
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
 from _fake_vmm import FakeVMM
 
 try:
@@ -58,6 +66,14 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
 
     with pytest.raises(RuntimeError, match=expected):
         loader._list_checkpoint_devices(str(tmp_path))
+
+
+def test_list_checkpoint_devices_can_scope_to_one_device(tmp_path, monkeypatch):
+    (tmp_path / "device-0").mkdir()
+    (tmp_path / "device-1").mkdir()
+    monkeypatch.setattr(loader, "get_vmm", lambda: FakeVMM(devices=[0, 1]))
+
+    assert loader._list_checkpoint_devices(str(tmp_path), device=0) == [0]
 
 
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):

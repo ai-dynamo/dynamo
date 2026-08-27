@@ -35,11 +35,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AffinityTarget {
-    pub worker_id: u64,
-    pub dp_rank: Option<u32>,
-}
+pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
 enum AffinityEntry {
     Initializing {
@@ -545,21 +541,23 @@ impl AffinityAcquire {
 
     pub(crate) fn into_stream(
         self,
-        selected_target: AffinityTarget,
+        dispatched_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         match self {
             Self::Initialize(initialization) => {
-                let lease = initialization.commit(selected_target)?;
-                lease.publish(selected_target);
+                let lease = initialization.commit(dispatched_target)?;
+                lease.publish(dispatched_target);
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
-                if let Err(error) = validate_bound_target("session", target, Some(selected_target))
-                {
+                if let Err(error) = validate_dispatch_target("session", target, dispatched_target) {
                     lease.invalidate();
                     return Err(error);
                 }
+                // TODO: Revisit this split with the DP-rank-routing design. Decide whether a
+                // session binds at worker or rank scope; changing persisted scope requires an
+                // ordered replica-migration protocol, not conversion of a dispatch target.
                 lease.publish(target);
                 Ok(lease.into_stream(stream))
             }
@@ -800,6 +798,39 @@ fn validate_bound_target(
         ))),
         _ => Ok(()),
     }
+}
+
+/// Validates that a request was dispatched within an existing session binding.
+///
+/// Unlike an explicit requested target, a dispatch target may add a DP rank to a worker-only
+/// binding because load-aware scheduling chooses that rank for this request only.
+fn validate_dispatch_target(
+    session_id: &str,
+    bound: AffinityTarget,
+    dispatched: AffinityTarget,
+) -> Result<(), Error> {
+    if bound.worker_id != dispatched.worker_id {
+        return Err(invalid_argument(format!(
+            "session {session_id} is bound to worker {}, not {}",
+            bound.worker_id, dispatched.worker_id
+        )));
+    }
+    if let Some(bound_rank) = bound.dp_rank {
+        match dispatched.dp_rank {
+            Some(dispatched_rank) if dispatched_rank == bound_rank => {}
+            Some(dispatched_rank) => {
+                return Err(invalid_argument(format!(
+                    "session {session_id} is bound to DP rank {bound_rank}, not {dispatched_rank}"
+                )));
+            }
+            None => {
+                return Err(invalid_argument(format!(
+                    "session {session_id} is bound to DP rank {bound_rank}, but dispatch did not select a DP rank"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {

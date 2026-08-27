@@ -28,7 +28,6 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
@@ -37,6 +36,7 @@ from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -60,9 +60,11 @@ from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativ
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
+    get_compatible_global_disagg_request_id,
 )
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
     request_cache_salt,
 )
 
@@ -74,6 +76,8 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
 
 class TRTLLMEnginePauseController:
@@ -247,8 +251,11 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
-    # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
+    # Force conversation-affinity ADP routing regardless of engine config detection.
     conversation_affinity: bool = False
+    # Select whether the engine or Dynamo owns initial DP-rank placement in affinity mode.
+    conversation_affinity_dp_rank_source: str = "engine"
+    first_token_source: Optional[Any] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -276,6 +283,9 @@ class HandlerBase(BaseGenerativeHandler):
         # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
         # engine-side assignment of conversation-affinity regardless of engine detection.
         self._engine_conversation_affinity_override: bool = config.conversation_affinity
+        self._conversation_affinity_dp_rank_source: str = (
+            config.conversation_affinity_dp_rank_source
+        )
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -288,6 +298,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
+        self.first_token_source = config.first_token_source
         # Sleep/wake state
         self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
@@ -713,10 +724,31 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
-        # Canary probe: use its pre-built disagg params (skip prefill_result decode
-        # and skip the mode-specific request_type overrides).
-        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
-            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+        use_request_disagg_params = request.get(HEALTH_CHECK_KEY) or (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+
+        if (
+            use_request_disagg_params
+            and ep_disaggregated_params is not None
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
+            return disaggregated_params, ep_disaggregated_params, {}
+
+        # Canary probes and text-only conditional-disagg bypasses run a full
+        # context+generation request on a disagg-mode worker, so they use
+        # the pre-built params and skip the normal prefill-result handoff.
+        if use_request_disagg_params and request.get("disaggregated_params"):
+            return (
+                LlmDisaggregatedParams(**request["disaggregated_params"]),
+                ep_disaggregated_params,
+                {},
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -726,7 +758,7 @@ class HandlerBase(BaseGenerativeHandler):
             else:
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only",
-                    disagg_request_id=get_global_disagg_request_id(
+                    disagg_request_id=get_compatible_global_disagg_request_id(
                         self.disagg_machine_id
                     ),
                 )
@@ -735,8 +767,8 @@ class HandlerBase(BaseGenerativeHandler):
             # ep_disaggregated_params, so the PYTHON transceiver can track
             # requests across prefill/decode workers.
             if disaggregated_params.disagg_request_id is None:
-                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
-                    self.disagg_machine_id
+                disaggregated_params.disagg_request_id = (
+                    get_compatible_global_disagg_request_id(self.disagg_machine_id)
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
@@ -920,6 +952,9 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
     ) -> AsyncGenerator[dict, None]:
         """Track in-flight count, reject during sleep, then delegate to implementation."""
+        routing = request.get("routing") or {}
+        if self.first_token_source is not None:
+            self.first_token_source.bind(context, routing.get("dp_rank"))
         started = await self._mark_request_started()
         if not started:
             yield {
@@ -953,6 +988,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+
         request_token_ids = request.get("token_ids")
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
@@ -994,6 +1031,18 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
+        bypass_remote_prefill = (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+        if bypass_remote_prefill:
+            request_id = request.get("id") or request.get("request_id", "unknown-id")
+            logging.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request %s as AGG (prefill+decode on this worker).",
+                request_id,
+            )
+            request["disaggregated_params"] = {"request_type": "context_and_generation"}
 
         # Setup disaggregated params based on PREFILL/DECODE mode
         (
@@ -1023,6 +1072,7 @@ class HandlerBase(BaseGenerativeHandler):
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
+            and not bypass_remote_prefill
         ):
             logging.error("DECODE: disaggregated_params is None but required!")
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
@@ -1032,6 +1082,8 @@ class HandlerBase(BaseGenerativeHandler):
         # outputs are interleaved by choice index, so maintain one cursor per
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
+        prompt_logprobs_payload = None
+        first_output_seen = False
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -1051,7 +1103,7 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Handle prompt_logprobs
             prompt_logprobs_value = output_options.get("prompt_logprobs")
-            if prompt_logprobs_value:
+            if prompt_logprobs_value is not None:
                 if hasattr(sampling_params, "prompt_logprobs"):
                     setattr(
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
@@ -1084,7 +1136,14 @@ class HandlerBase(BaseGenerativeHandler):
             if default_max_tokens is not None:
                 sampling_params.max_tokens = default_max_tokens
 
-        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+        # PREFILL forces max_tokens=1 above but must still apply the rest of
+        # the stop conditions (native TRT-LLM context_only overrides only
+        # max_tokens). Without this, TRT-LLM could stop on EOS at that single
+        # forced token and skip the KV handoff to decode entirely.
+        if (
+            is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name])
+            or self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
             apply_stop_conditions_to_sampling_params(
                 sampling_params, request["stop_conditions"]
             )
@@ -1111,9 +1170,8 @@ class HandlerBase(BaseGenerativeHandler):
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
 
-        # Resolve the engine-owned conversation-affinity gate once (lazily; the engine is
-        # initialized by first request). When on, the engine's ConversationAwareADPRouter
-        # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
+        # Resolve the engine conversation-affinity gate once (lazily; the engine is
+        # initialized by first request).
         if self._conversation_affinity is None:
             if (
                 self._engine_conversation_affinity_override
@@ -1142,11 +1200,26 @@ class HandlerBase(BaseGenerativeHandler):
         conversation_params = None
         scheduling_params = None
         if conv_affinity:
-            # Let the engine pick the rank from the conversation id (agent_context.session_id);
-            # do NOT force a rank (an explicit rank is honored before affinity and bypasses it).
             conversation_params = conversation_params_for(
                 session_id_from_request(request)
             )
+            if (
+                self._conversation_affinity_dp_rank_source == "dynamo"
+                and conversation_params is not None
+                and dp_rank is not None
+            ):
+                # TensorRT-LLM#16815 records this explicit first-turn placement as the
+                # conversation binding. On later turns, the recorded binding takes
+                # precedence if Dynamo supplies a different rank.
+                scheduling_params = SchedulingParams(
+                    attention_dp_rank=dp_rank,
+                    attention_dp_relax=False,
+                )
+                logging.debug(
+                    "Using dynamo router dp_rank=%s for initial conversation-affinity "
+                    "placement",
+                    dp_rank,
+                )
         elif dp_rank is not None:
             scheduling_params = SchedulingParams(
                 attention_dp_rank=dp_rank,
@@ -1179,11 +1252,13 @@ class HandlerBase(BaseGenerativeHandler):
                 cache_salt=cache_salt,
             )
 
-            # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete).
+            # In disagg decode mode with remote prefill, wrap abort() to defer
+            # until the first token is received (KV transfer complete).
             abort_guard = (
                 _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE
+                and disaggregated_params is not None
+                and not bypass_remote_prefill
                 else None
             )
 
@@ -1219,6 +1294,13 @@ class HandlerBase(BaseGenerativeHandler):
                             "token_ids": output.token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
+                        if (
+                            self.first_token_source is not None
+                            and out["token_ids"]
+                            and not first_output_seen
+                        ):
+                            first_output_seen = True
+                            context.notify_first_token()
 
                         # Extract logprobs from the output. Logprobs are
                         # aligned with the cumulative token list, so use the
@@ -1230,6 +1312,11 @@ class HandlerBase(BaseGenerativeHandler):
                             out["log_probs"] = log_probs
                         if top_logprobs:
                             out["top_logprobs"] = top_logprobs
+
+                        if prompt_logprobs_payload is None:
+                            prompt_logprobs_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                output
+                            )
 
                         if output.finish_reason:
                             out["finish_reason"] = output.finish_reason
@@ -1256,28 +1343,27 @@ class HandlerBase(BaseGenerativeHandler):
                                     "this indicates a possible bug"
                                 )
 
+                            if prompt_logprobs_payload is not None:
+                                out.setdefault("engine_data", {})[
+                                    "prompt_logprobs"
+                                ] = prompt_logprobs_payload
+
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
 
-                            prompt_tokens_details = None
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
-                                    )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                # Clamp to prompt size: image token_ids are unexpanded
+                                # placeholders, so the engine count (measured over the
+                                # expanded prompt) can exceed it.
+                                prompt_tokens_details = {
+                                    "cached_tokens": min(
+                                        num_input_tokens, int(res.cached_tokens or 0)
+                                    ),
+                                }
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1290,6 +1376,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
+                        #
+                        # Stays a yield under push egress: this hop is
+                        # pure-Python generator delegation on one thread. Only
+                        # the outermost hop into Rust pushes.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 
@@ -1436,6 +1526,8 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other

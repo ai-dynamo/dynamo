@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import dataclasses
-import importlib
 import inspect
 import json
 import logging
@@ -23,15 +21,19 @@ from typing import (
 )
 
 import sglang as sgl
+from sglang.srt.managers.io_struct import ProfileReq
 from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import get_lora_manager
+from dynamo.common.model_taints import MODEL_TAINT_ROUTE, register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import (
+    HttpError,
     KvEventPublisher,
     ModelInput,
     ModelType,
@@ -43,8 +45,9 @@ from dynamo.llm import (
 )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
-from dynamo.sglang._compat import start_profile_compat
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -101,107 +104,6 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
-
-
-class RLMixin:
-    """Mixin providing generic tokenizer_manager passthrough for RL training.
-
-    Requires the host class to have ``self.engine`` with a
-    ``tokenizer_manager`` attribute.
-    """
-
-    engine: sgl.Engine  # provided by BaseWorkerHandler
-
-    def _resolve_arg(self, arg: Any) -> Any:
-        """Resolve a single argument from the generic call body.
-
-        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
-        treat it as a typed constructor: import the class from
-        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
-        Otherwise return the value as-is.
-        """
-        if isinstance(arg, dict) and len(arg) == 1:
-            key = next(iter(arg))
-            if isinstance(key, str) and key.startswith("io_struct."):
-                class_name = key[len("io_struct.") :]
-                module = importlib.import_module("sglang.srt.managers.io_struct")
-                cls = getattr(module, class_name)
-                return cls(**arg[key])
-        return arg
-
-    def _normalize_result(self, result: Any) -> dict:
-        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
-        if result is None:
-            return {"status": "ok"}
-        if isinstance(result, tuple):
-            if len(result) == 2:
-                return {"success": result[0], "message": result[1]}
-            if len(result) == 3:
-                return {
-                    "success": result[0],
-                    "message": result[1],
-                    "num_paused_requests": result[2],
-                }
-        if isinstance(result, list):
-            return {
-                "result": [
-                    (
-                        dataclasses.asdict(item)
-                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                        else item
-                    )
-                    for item in result
-                ]
-            }
-        if dataclasses.is_dataclass(result) and not isinstance(result, type):
-            return dataclasses.asdict(result)
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, (str, int, float, bool)):
-            return {"result": result}
-        return {"result": str(result)}
-
-    async def call_tokenizer_manager(self, body: dict) -> dict:
-        """Generic passthrough to any tokenizer_manager method.
-
-        Body format::
-
-            {
-                "method": "method_name",
-                "args": [arg1, arg2, ...],
-                "kwargs": {"key": value, ...}
-            }
-
-        Each element in args/kwargs is either a plain value or a typed
-        constructor ``{"io_struct.ClassName": {kwargs}}``.
-        """
-        method_name = body["method"]
-        raw_args = body.get("args", [])
-        raw_kwargs = body.get("kwargs", {})
-
-        args = [self._resolve_arg(a) for a in raw_args]
-        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
-
-        tm = self.engine.tokenizer_manager
-        # Ensure the handle_loop task is running so communicator responses
-        # are received.  Several tokenizer_manager methods call this
-        # internally, but not all of them (e.g. flush_cache does not).
-        if hasattr(tm, "auto_create_handle_loop"):
-            tm.auto_create_handle_loop()
-
-        method = getattr(tm, method_name)
-        result = await method(*args, **kwargs)
-        return self._normalize_result(result)
-
-    def register_rl_engine_routes(self, runtime) -> None:
-        """Register RL-specific engine routes.
-
-        Args:
-            runtime: The DistributedRuntime instance to register routes on.
-        """
-        runtime.register_engine_route(
-            "call_tokenizer_manager", self.call_tokenizer_manager
-        )
 
 
 class LoraMixin:
@@ -411,17 +313,32 @@ class LoraMixin:
                                 else:
                                     lora_worker_type = WorkerType.Aggregated
                                     lora_needs = []
+
+                            # Reuse the base-model metadata builder so LoRA
+                            # cards advertise the same token-overflow policy,
+                            # parser configuration, and routing capabilities.
+                            # Lazy import: static test collection lacks parts of SGLang.
+                            from dynamo.sglang.register import get_runtime_config
+
+                            runtime_config = await get_runtime_config(
+                                self.engine,
+                                self.config.server_args,
+                                self.config.dynamo_args,
+                            )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
-                                kv_cache_block_size=self.config.server_args.page_size,
+                                kv_cache_block_size=kv_event_block_size(
+                                    self.config.server_args
+                                ),
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                runtime_config=runtime_config,
                                 # Publish the worker's per-worker LoRA slot budget so the frontend
                                 # allocator sizes placement against real capacity instead of the
                                 # hard-coded default.
@@ -629,7 +546,7 @@ class LoraMixin:
             yield {"status": "error", "message": str(e)}
 
 
-class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
+class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -670,8 +587,10 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
+        self._max_input_token_id: Optional[int] = None
 
         if engine is not None:
+            self._max_input_token_id = self._resolve_max_input_token_id(engine)
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
                 if self.use_sglang_tokenizer
@@ -689,6 +608,10 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             SGLangEnginePauseController(engine) if engine is not None else None
         )
         self._pause_lock = asyncio.Lock()
+
+        # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
+        # phase, so concurrent scale_elastic_ep calls must not overlap.
+        self._scale_ep_lock = asyncio.Lock()
 
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
@@ -876,7 +799,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             body: Dict with profiling parameters passed to start_profile.
         """
-        await start_profile_compat(self.engine.tokenizer_manager, body)
+        await self.engine.tokenizer_manager.start_profile(ProfileReq(**body))
         return {"status": "ok", "message": "Profiling started"}
 
     async def stop_profile(self, body: dict) -> dict:
@@ -948,12 +871,109 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if req.abort_all_requests:
             self.engine.tokenizer_manager.abort_request(abort_all=True)
 
-        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        self.engine.tokenizer_manager._update_weight_version_if_provided(
+            req.new_version
+        )
         return {
             "success": True,
             "message": f"Weight version updated to {req.new_version}",
             "new_version": req.new_version,
         }
+
+    def _supports_elastic_ep(self) -> bool:
+        """Whether this handler's engine can serve runtime elastic-EP scaling.
+
+        Not every worker qualifies: encode-only workers run with ``engine=None``,
+        and some engine stand-ins (e.g. route unit-test doubles) have no
+        ``tokenizer_manager``. Probe for the ``scale_elastic_ep`` entry point so
+        those cases skip the route instead of registering one that fails at call
+        time.
+        """
+        if self.engine is None:
+            return False
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        return tokenizer_manager is not None and hasattr(
+            tokenizer_manager, "scale_elastic_ep"
+        )
+
+    def _require_elastic_ep_backend(self) -> Optional[dict]:
+        """Return an error dict if elastic EP is not enabled, else ``None``."""
+        if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
+            return {
+                "status": "error",
+                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
+            }
+        return None
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale up the expert-parallel group to ``new_ep_size`` ranks.
+
+        SGLang integrates the GPUs contributed by a separately-launched joining
+        group (``--elastic-ep-join-mode scale``), redistributes experts (ePLB)
+        across the widened EP group, and keeps serving on the leader — no
+        restart.
+
+        Only scale-up is supported today: SGLang rejects a target smaller than
+        the current EP size. ``new_ep_size`` is the target number of EP ranks.
+        """
+
+        def err(message: str) -> dict:
+            return {"status": "error", "message": message}
+
+        body = body or {}
+        if not isinstance(body, dict):
+            return err("request body must be a JSON object")
+
+        new_ep_size = body.get("new_ep_size")
+        if new_ep_size is None:
+            return err("Missing required field: new_ep_size")
+        # bool is an int subclass — reject it so True/False can't pose as a size.
+        if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
+            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
+        if new_ep_size <= 0:
+            return err("new_ep_size must be a positive integer")
+
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+
+        from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
+
+        tokenizer_manager = self.engine.tokenizer_manager
+        async with self._scale_ep_lock:
+            try:
+                result = await tokenizer_manager.scale_elastic_ep(
+                    ScaleElasticEPReqInput(new_ep_size=new_ep_size)
+                )
+            except Exception as e:
+                logger.error("[ElasticEP] Scaling failed: %s", e)
+                return err(str(e))
+
+        response = {
+            "status": "ok" if result.success else "error",
+            "message": result.message
+            or (
+                f"Scaled to ep_size={new_ep_size}"
+                if result.success
+                else "scale_elastic_ep failed"
+            ),
+            "old_ep_size": result.old_ep_size,
+            "new_ep_size": result.new_ep_size,
+        }
+        if not result.success:
+            response["pending_ep_size"] = result.pending_ep_size
+        return response
+
+    async def is_scaling_elastic_ep(self, body: dict) -> dict:
+        """Return the engine's current elastic-EP scale state.
+
+        Lets a caller poll for scale-up completion (``scale_phase`` reaches
+        ``serving_expanded``).
+        """
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+        return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
@@ -961,34 +981,43 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("control/start_profile", self.start_profile)
-        runtime.register_engine_route("control/stop_profile", self.stop_profile)
-        runtime.register_engine_route(
-            "control/release_memory_occupation", self.release_memory_occupation
+        configured_routes = resolve_configured_engine_routes(
+            self.engine,
+            self.config.dynamo_args.engine_routes,
         )
-        runtime.register_engine_route(
-            "control/resume_memory_occupation", self.resume_memory_occupation
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_disk", self.update_weights_from_disk
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_tensor", self.update_weights_from_tensor
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_distributed",
-            self.update_weights_from_distributed,
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_ipc", self.update_weights_from_ipc
-        )
-        runtime.register_engine_route(
-            "control/update_weight_version", self.update_weight_version
-        )
-        if getattr(self.config, "dynamo_args", None) and getattr(
-            self.config.dynamo_args, "enable_rl", False
-        ):
-            self.register_rl_engine_routes(runtime)
+        built_in_routes = {
+            "control/start_profile": self.start_profile,
+            "control/stop_profile": self.stop_profile,
+            "control/release_memory_occupation": self.release_memory_occupation,
+            "control/resume_memory_occupation": self.resume_memory_occupation,
+            "control/update_weights_from_disk": self.update_weights_from_disk,
+            "control/update_weights_from_tensor": self.update_weights_from_tensor,
+            "control/update_weights_from_distributed": (
+                self.update_weights_from_distributed
+            ),
+            "control/update_weights_from_ipc": self.update_weights_from_ipc,
+            "control/update_weight_version": self.update_weight_version,
+        }
+        # Register elastic-EP scaling only on workers whose engine can serve it
+        # (see _supports_elastic_ep); the rest simply don't expose the route.
+        if self._supports_elastic_ep():
+            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes[
+                "control/is_scaling_elastic_ep"
+            ] = self.is_scaling_elastic_ep
+        reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
+        for path, _ in configured_routes:
+            if path in reserved_routes:
+                raise ValueError(
+                    f"Configured SGLang engine route /engine/{path} collides "
+                    "with a built-in route"
+                )
+
+        register_model_taint_route(runtime, self.generate_endpoint)
+        for path, handler in built_in_routes.items():
+            runtime.register_engine_route(path, handler)
+        for path, configured_handler in configured_routes:
+            runtime.register_engine_route(path, configured_handler)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -1012,10 +1041,109 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
+        self._validate_nvext_token_data(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _resolve_max_input_token_id(engine: sgl.Engine) -> Optional[int]:
+        """Resolve the largest token ID accepted by the model embedding table."""
+        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        model_config = getattr(tokenizer_manager, "model_config", None)
+        return BaseWorkerHandler._resolve_max_input_token_id_from_model_config(
+            model_config
+        )
+
+    @staticmethod
+    def _resolve_max_input_token_id_from_model_config(
+        model_config: Any,
+    ) -> Optional[int]:
+        model_vocab_size: object = getattr(model_config, "vocab_size", None)
+
+        # Compatibility fallback for SGLang model configs that expose the
+        # Hugging Face text config but not the derived vocab_size attribute.
+        if model_vocab_size is None:
+            hf_text_config = getattr(model_config, "hf_text_config", None)
+            model_vocab_size = getattr(hf_text_config, "vocab_size", None)
+
+        if (
+            isinstance(model_vocab_size, bool)
+            or not isinstance(model_vocab_size, int)
+            or model_vocab_size <= 0
+        ):
+            return None
+        return model_vocab_size - 1
+
+    def _resolve_request_multimodal_token_ids(
+        self, request: Dict[str, Any]
+    ) -> frozenset[int]:
+        mm_data = request.get("multi_modal_data")
+        if not isinstance(mm_data, dict):
+            return frozenset()
+
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        mm_tokens = getattr(mm_processor, "mm_tokens", None)
+        token_ids = set()
+
+        if mm_tokens is not None:
+            for modality in ("image", "video", "audio"):
+                if not mm_data.get(f"{modality}_url"):
+                    continue
+                token_id = getattr(mm_tokens, f"{modality}_token_id", None)
+                if isinstance(token_id, int) and not isinstance(token_id, bool):
+                    token_ids.add(token_id)
+
+        # Some processors, including LLaVA's wrapper, expose only the image
+        # token on ModelConfig. LLaVA also represents video frames as images.
+        if mm_data.get("image_url") or mm_data.get("video_url"):
+            model_config = getattr(tokenizer_manager, "model_config", None)
+            image_token_id = getattr(model_config, "image_token_id", None)
+            if isinstance(image_token_id, int) and not isinstance(image_token_id, bool):
+                token_ids.add(image_token_id)
+
+        return frozenset(token_ids)
+
+    def _validate_token_ids(
+        self,
+        token_ids: Any,
+        allowed_oov_ids: frozenset[int] = frozenset(),
+    ) -> None:
+        if not isinstance(token_ids, list):
+            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+
+        max_input_token_id = self._max_input_token_id
+        for index, token_id in enumerate(token_ids):
+            if isinstance(token_id, bool) or not isinstance(token_id, int):
+                raise HttpError(
+                    400,
+                    f"nvext.token_data[{index}] must be an integer token ID",
+                )
+            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
+            if (
+                max_input_token_id is not None and token_id > max_input_token_id
+            ) and token_id not in allowed_oov_ids:
+                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+
+    def _validate_nvext_token_data(
+        self,
+        request: Dict[str, Any],
+        token_ids: Any,
+    ) -> None:
+        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        extra_args = request.get("extra_args")
+        if not isinstance(extra_args, dict):
+            return
+        nvext = extra_args.get("nvext")
+        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
+            return
+
+        self._validate_token_ids(
+            token_ids,
+            self._resolve_request_multimodal_token_ids(request),
+        )
 
     @staticmethod
     def _get_guided_decoding_params(
@@ -1025,6 +1153,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
+                reject_nonprogressing_guided_json_ref_cycles(json_schema)
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:

@@ -1,0 +1,487 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Observability
+subtitle: View Dynamo metrics, configure structured logs and distributed traces, capture scheduler telemetry, and check deployment health
+---
+
+Dynamo provides four core signals for running deployments:
+
+- **Metrics** expose request, latency, routing, worker, cache, and operator measurements. Metrics are
+  enabled by default, and the operator creates the resources required for Prometheus discovery.
+- **Logs** record component events on standard output. Enable structured JSONL output when you need
+  reliable filtering and request correlation.
+- **Distributed traces** follow requests from the frontend through participating Dynamo components.
+  Configure an OpenTelemetry Protocol (OTLP) collector endpoint to export them.
+- **Health status** is available through `/live` and `/health`. The operator uses these signals for
+  Kubernetes health probes.
+
+The monitoring stack must already be installed. See [Install Observability](../installation/observability.md)
+for the Prometheus, Grafana, DCGM exporter, Loki, and Alloy setup.
+
+Use this page to:
+
+- [View metrics and dashboards](#view-metrics-and-dashboards)
+- [Configure structured logs](#configure-structured-logs)
+- [Export distributed traces and logs](#export-distributed-traces-and-logs)
+- [Capture Forward Pass Metrics](#capture-forward-pass-metrics)
+- [Check and customize health probes](#check-and-customize-health-probes)
+- [Troubleshoot collection](#troubleshoot-collection)
+
+For exact metric names, labels, variables, schemas, and endpoint responses, use the
+[Observability Reference](../../reference/observability/metrics-catalog.mdx).
+
+## View Metrics and Dashboards
+
+Application metrics are enabled by default. The operator creates a `PodMonitor` and labels managed
+pods for discovery, so a normal DynamoGraphDeployment (DGD) requires no metrics configuration.
+Operator metrics use a separate `ServiceMonitor` created by the Helm chart.
+
+<Steps toc={true}>
+<Step title="Verify Prometheus discovery" id="verify-prometheus-discovery">
+
+Confirm that the application and operator monitors exist:
+
+```bash
+kubectl get podmonitor,servicemonitor -n dynamo-system
+```
+
+Then confirm the Dynamo targets are `UP` in Prometheus. If Prometheus is not externally available,
+port-forward it:
+
+```bash
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n monitoring
+```
+
+Open `http://localhost:9090/targets` and find the Dynamo targets.
+
+</Step>
+<Step title="Load the Dynamo dashboards" id="load-the-dynamo-dashboards">
+
+Apply the supplied dashboard ConfigMaps and the Loki data source:
+
+```bash
+# Application dashboard
+kubectl apply -n monitoring \
+  -f deploy/observability/grafana-dynamo-dashboard-configmap.yaml
+
+# Operator dashboard
+kubectl apply -f deploy/observability/grafana-operator-dashboard-configmap.yaml
+
+# Logging dashboard and Loki data source
+kubectl apply -n monitoring \
+  -f deploy/observability/logging/grafana/loki-datasource.yaml
+kubectl apply -n monitoring \
+  -f deploy/observability/logging/grafana/logging-dashboard.yaml
+```
+
+Each dashboard ConfigMap carries the Grafana discovery label, so the Grafana sidecar imports it
+automatically.
+
+</Step>
+<Step title="Open the dashboards" id="open-the-dashboards">
+
+Retrieve the Grafana credentials and port-forward the service:
+
+```bash
+export GRAFANA_USER=$(kubectl get secret -n monitoring prometheus-grafana \
+  -o jsonpath="{.data.admin-user}" | base64 --decode)
+export GRAFANA_PASSWORD=$(kubectl get secret -n monitoring prometheus-grafana \
+  -o jsonpath="{.data.admin-password}" | base64 --decode)
+echo "Grafana user: $GRAFANA_USER / password: $GRAFANA_PASSWORD"
+
+kubectl port-forward svc/prometheus-grafana 3000:80 -n monitoring
+```
+
+Open `http://localhost:3000`. Under **Dashboards**, open the Dynamo application, operator, or logs
+dashboard. The application dashboard includes frontend latency and request metrics, KV router and
+worker metrics, GPU utilization, and pod resource usage.
+
+</Step>
+<Step title="Query Dynamo metrics" id="query-dynamo-metrics">
+
+Use the dashboard or Prometheus to inspect a Dynamo-specific signal:
+
+```promql
+# Total frontend requests
+dynamo_frontend_requests_total
+
+# Requests waiting for a worker to start generating
+sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})
+
+# Requests currently being processed by backend workers
+sum(dynamo_component_inflight_requests{
+  dynamo_component="backend",
+  dynamo_endpoint="generate"
+})
+```
+
+See the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx),
+[Metric Labels](../../reference/observability/metric-labels.mdx), and
+[Operator Metrics](../../reference/observability/operator-metrics.mdx) for the complete lookup
+information.
+
+</Step>
+</Steps>
+
+### Enable NIXL Telemetry
+
+NIXL transfer metrics are optional and are populated during disaggregated serving or multimodal
+embedding transfers.
+
+<Steps toc={true}>
+<Step title="Enable telemetry on the worker" id="enable-nixl-telemetry">
+
+Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
+
+```yaml
+spec:
+  services:
+    VllmDecodeWorker:
+      componentType: worker
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+```
+
+NIXL exposes these metrics on its telemetry port, which defaults to `19090`. See
+[Environment Variables](../../reference/observability/environment-variables.mdx#system-and-metrics)
+for the complete NIXL telemetry configuration.
+
+</Step>
+<Step title="Verify NIXL metrics" id="verify-nixl-metrics">
+
+Apply the updated DGD and send traffic through the transfer path. Then confirm the NIXL metric
+families appear in Prometheus. The series are created only after transfers occur.
+
+</Step>
+</Steps>
+
+To disable the default application metrics for an entire deployment, set the
+`nvidia.com/enable-metrics: "false"` annotation on the DGD.
+
+## Configure Structured Logs
+
+Dynamo writes logs to standard output by default. Configure JSONL output when Loki or another log
+backend needs structured fields for filtering and trace correlation.
+
+<Steps toc={true}>
+<Step title="Enable JSONL logging" id="enable-jsonl-logging">
+
+Set the logging variables at graph level to apply them to every component:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-logging
+spec:
+  envs:
+    - name: DYN_LOGGING_CONSOLE_FORMAT
+      value: "jsonl"
+    - name: DYN_LOG
+      value: "info"
+```
+
+See [Logging](../../reference/observability/logging.mdx) for the output fields and
+[Environment Variables](../../reference/observability/environment-variables.mdx#logging) for the
+complete configuration.
+
+</Step>
+<Step title="Override a component log level" id="override-component-log-level">
+
+Add a component-level value when one component needs more detail than the rest of the graph:
+
+```yaml
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: DYN_LOG
+              value: "info,dynamo_runtime::system_status_server:trace"
+```
+
+The component value overrides the graph-level value for that container.
+
+</Step>
+<Step title="Inspect the logs" id="inspect-structured-logs">
+
+After applying the DGD, stream the deployment logs directly from Kubernetes:
+
+```bash
+kubectl logs -n dynamo-system \
+  -l nvidia.com/dynamo-graph-deployment-name=vllm-agg-logging \
+  --all-containers=true --prefix=true --timestamps -f
+```
+
+If the Loki stack and supplied dashboard are installed, open **Dashboards > Dynamo Logs** in Grafana
+to filter by DGD, namespace, and component type.
+
+</Step>
+</Steps>
+
+## Export Distributed Traces and Logs
+
+Dynamo exports distributed spans and structured log records over OTLP. This is separate from request
+trace capture, which records replay metadata and optional request payloads.
+
+<Steps toc={true}>
+<Step title="Identify the collector endpoint" id="identify-the-collector-endpoint">
+
+Choose an OTLP endpoint reachable from the Dynamo pods. The following example uses a collector named
+`otel-collector` in the `observability` namespace:
+
+```text
+http://otel-collector.observability.svc.cluster.local:4317
+```
+
+The collector is responsible for routing traces and logs to the configured storage backends.
+
+</Step>
+<Step title="Enable OTLP export" id="enable-otlp-export">
+
+Add the OpenTelemetry settings to the DGD:
+
+```yaml
+spec:
+  envs:
+    - name: OTEL_EXPORT_ENABLED
+      value: "true"
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: "http://otel-collector.observability.svc.cluster.local:4317"
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: "grpc"
+```
+
+`OTEL_EXPORT_ENABLED` is the master switch for distributed traces and exported logs. For
+HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL` to `http/protobuf`. Use signal-specific endpoints
+only when traces and logs use different collectors.
+
+</Step>
+<Step title="Generate and inspect a trace" id="generate-and-inspect-a-trace">
+
+Apply the updated DGD and send an inference request through the frontend. In your tracing backend,
+find the frontend root request span and its child spans from participating Dynamo components.
+Structured log events emitted inside the request can include the trace and span identifiers used for
+correlation.
+
+See [Environment Variables](../../reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs)
+for all export settings. For the internal signal flow, see
+[Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md).
+
+</Step>
+</Steps>
+
+## Capture Forward Pass Metrics
+
+Forward Pass Metrics (FPM) tracing records backend scheduler telemetry to rotating gzip JSONL files.
+It is an opt-in diagnostic capture rather than a routine distributed trace.
+
+<Steps toc={true}>
+<Step title="Prepare persistent storage" id="prepare-fpm-storage">
+
+Create or select a persistent volume claim that can retain trace files across pod replacement. The
+example below expects an existing PVC named `fpm-traces`.
+
+</Step>
+<Step title="Enable FPM tracing" id="enable-fpm-tracing">
+
+Mount the PVC on each worker that should write a trace and set the output prefix inside the mount:
+
+```yaml
+spec:
+  pvcs:
+    - create: false
+      name: fpm-traces
+  services:
+    VllmWorker:
+      volumeMounts:
+        - name: fpm-traces
+          mountPoint: /var/log/dynamo
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: DYN_FPM_TRACE
+              value: "1"
+            - name: DYN_FPM_OUTPUT_PATH
+              value: /var/log/dynamo/fpm
+```
+
+Replace `VllmWorker` with every worker service that should write scheduler telemetry.
+
+</Step>
+<Step title="Collect the trace files" id="collect-fpm-trace-files">
+
+Apply the updated DGD and run the workload you want to investigate. Dynamo writes a separate
+producer-specific file sequence for each worker. Retrieve the resulting `.jsonl.gz` files from the
+PVC for analysis.
+
+Graceful shutdown flushes accepted records, but node loss, forced termination, queue pressure, and
+transport loss can create gaps. Treat these files as diagnostic data, not as a durable event log or
+replay input.
+
+See [Forward Pass Metrics Traces](../../reference/observability/forward-pass-metrics-traces.mdx) for
+supported topologies, capture modes, rotation, retention, and the record schema.
+
+</Step>
+</Steps>
+
+## Check and Customize Health Probes
+
+Dynamo exposes `/live` and `/health`, and the operator configures Kubernetes startup, liveness, and
+readiness probes that consume those endpoints. Most deployments should keep the operator defaults.
+Override them only when model startup, failure-detection requirements, or a custom engine health
+endpoint requires different behavior.
+
+<Steps toc={true}>
+<Step title="Check pod readiness" id="check-pod-readiness">
+
+List the pods for a DGD and inspect their readiness state:
+
+```bash
+kubectl get pods -n dynamo-system \
+  -l nvidia.com/dynamo-graph-deployment-name=<dgd-name>
+```
+
+A ready pod has passed the readiness probe configured by the operator.
+
+</Step>
+<Step title="Review the operator defaults" id="review-health-probe-defaults">
+
+The frontend uses an exec readiness probe that calls `/health`. Workers use the system port, which
+defaults to `9090`:
+
+| Probe | Path | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- |
+| Liveness | `/live` | 5 seconds | 30 seconds | 1 |
+| Readiness | `/health` | 10 seconds | 30 seconds | 60 |
+| Startup | `/live` | 10 seconds | 5 seconds | 720 |
+
+The worker startup probe allows approximately two hours for model download and engine warm-up.
+User-specified probes take precedence over these defaults. See the
+[API Reference](../../reference/kubernetes-api/full-api-reference.mdx) for defaults that vary by component type.
+
+</Step>
+<Step title="Inspect a failing probe" id="inspect-a-failing-probe">
+
+Describe the pod and inspect recent events and container logs:
+
+```bash
+kubectl describe pod -n dynamo-system <pod-name>
+kubectl logs -n dynamo-system <pod-name> --all-containers=true
+```
+
+If startup is delayed by downloading model weights, prefer
+[Model Caching](../model-deployment/model-loading/model-caching.mdx) over extending the probe indefinitely.
+
+</Step>
+<Step title="Override the probes" id="override-health-probes">
+
+Set standard Kubernetes probes on the `main` container in the component's `podTemplate`. This example
+extends the startup window and allows several consecutive liveness failures:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  components:
+  - name: VllmWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 1080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 3
+```
+
+For a startup budget, calculate `failureThreshold` as the expected startup time in seconds divided by
+`periodSeconds`. Change paths or ports only when a custom engine exposes health differently.
+
+Multinode deployments adjust probes by backend and node role. Review
+[Multinode Deployments](../model-deployment/multinode-deployments.md) before overriding probes on a
+multinode worker.
+
+See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,
+status codes, and active worker checks.
+
+</Step>
+</Steps>
+
+## Troubleshoot Collection
+
+### Metrics Do Not Appear in Prometheus
+
+1. Confirm that the `PodMonitor` and `ServiceMonitor` exist:
+
+   ```bash
+   kubectl get podmonitor,servicemonitor -n dynamo-system
+   ```
+
+2. Open the Prometheus targets page and confirm that the Dynamo targets are `UP`.
+3. Check the Prometheus selector configuration:
+
+   ```bash
+   kubectl get prometheus -o yaml | \
+     grep -iE "podMonitorSelector|serviceMonitorSelector"
+   ```
+
+<Note>
+Prometheus metric families are registered lazily. A newly started or idle deployment can show empty
+families until the first relevant request or transfer occurs.
+</Note>
+
+### Dashboard Does Not Appear in Grafana
+
+1. Confirm that the dashboard ConfigMap carries the discovery label:
+
+   ```bash
+   kubectl get configmap -n monitoring <dashboard-configmap-name> \
+     -o jsonpath='{.metadata.labels.grafana_dashboard}'
+   ```
+
+   The command should return `1`.
+
+2. Confirm that the Grafana sidecar watches for the label:
+
+   ```bash
+   kubectl get deployment -n monitoring prometheus-grafana -o yaml | \
+     grep -A5 sidecar
+   ```
+
+3. Restart Grafana to force a refresh:
+
+   ```bash
+   kubectl rollout restart deployment/prometheus-grafana -n monitoring
+   ```
+
+### Traces or Exported Logs Do Not Appear
+
+- Confirm `OTEL_EXPORT_ENABLED=true` is applied to every participating component.
+- Confirm the collector service name, namespace, port, and protocol match the DGD configuration.
+- Confirm the collector can route the signal to the selected backend.
+- For exported logs, enable structured JSONL output and confirm that the log endpoint is configured;
+  a logs endpoint does not fall back to a traces-only endpoint.

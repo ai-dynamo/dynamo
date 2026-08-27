@@ -4,7 +4,7 @@
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="library/golang"
-ARG BASE_IMAGE_TAG="1.26.3"
+ARG BASE_IMAGE_TAG="1.26.6"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -21,12 +21,10 @@ WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
-COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
 # Copy source code
 COPY . .
-COPY --from=snapshot . /snapshot/
 
 # Lint stage
 FROM base AS linter
@@ -42,6 +40,10 @@ FROM base AS tester
 
 # Install make if not present
 RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Make the production Helm configuration available to operatorenv tests.
+COPY --from=operator-chart . /helm/charts/platform/components/operator/
+ENV OPERATOR_CHART_DIR=/helm/charts/platform/components/operator
 
 # Run tests using Makefile
 RUN make test
@@ -202,7 +204,7 @@ COPY --from=sources_collect /sources.zip /sources.zip
 
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v4.0.3
+FROM nvcr.io/nvidia/distroless/go:v4.0.9
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .

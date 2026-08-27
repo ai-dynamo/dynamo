@@ -392,6 +392,12 @@ class TestVllmRendererApi:
             omni_fields,
             abort_omni_fields,
         )
+        # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
+        # reads EngineCoreRequest fields by name, so the append is compatible
+        # with every known request-shape variant above.
+        valid_request_fields = valid_request_fields + tuple(
+            (*fields, "model_intermediate_buffer") for fields in valid_request_fields
+        )
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields in valid_request_fields, (
             "EngineCoreRequest fields changed!\n"
@@ -410,6 +416,7 @@ class TestVllmRendererApi:
             "stop_reason",
             "events",
             "kv_transfer_params",
+            "ec_transfer_params",
             "trace_headers",
             "prefill_stats",
             "routed_experts",
@@ -425,6 +432,7 @@ class TestVllmRendererApi:
             "stop_reason",
             "events",
             "kv_transfer_params",
+            "ec_transfer_params",
             "trace_headers",
             "num_cached_tokens",
             "num_external_computed_tokens",
@@ -537,6 +545,10 @@ class TestVllmRendererApi:
         preprocessing and tool_parser.extract_tool_calls_streaming(...)
         during streaming post-processing.
         """
+        assert isinstance(ToolParser.engine_based_streaming, bool), (
+            "ToolParser.engine_based_streaming contract changed; update the "
+            "engine-parser flush path in frontend/prepost.py"
+        )
         assert hasattr(ToolParser, "adjust_request"), (
             "ToolParser no longer has 'adjust_request'; "
             "update preprocess_chat_request in "
@@ -579,6 +591,16 @@ class TestVllmRendererApi:
         and extract_reasoning on the non-streaming finalize path to separate
         reasoning tokens from content tokens.
         """
+        assert isinstance(ReasoningParser.engine_based_streaming, bool), (
+            "ReasoningParser.engine_based_streaming contract changed; update "
+            "the engine-parser path in frontend/prepost.py"
+        )
+        assert hasattr(
+            ReasoningParser, "has_engine_confirmed_reasoning_end"
+        ), "ReasoningParser no longer exposes the engine-confirmed end state"
+        assert hasattr(
+            ReasoningParser, "adjust_initial_state_from_prompt"
+        ), "ReasoningParser no longer exposes prompt-state adjustment"
         assert hasattr(ReasoningParser, "extract_reasoning_streaming"), (
             "ReasoningParser no longer has 'extract_reasoning_streaming'; "
             "update StreamingPostProcessor in "

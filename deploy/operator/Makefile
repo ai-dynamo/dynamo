@@ -4,6 +4,24 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
+ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
+
+CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller
+CLUSTERTEST_TIMEOUT ?= 30m
+CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
+CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
+CLUSTERTEST_KUBECONFIG = $(LOCALBIN)/clustertest.kubeconfig
+CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+CLUSTERTEST_PROFILER_IMAGE ?= $(DYNAMO_CLUSTERTEST_PROFILER_IMAGE)
+CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
+CLUSTERTEST_PLATFORM ?= linux/$(GOARCH)
+CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
+CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
+CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
+CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/v1alpha1/crds
+CLUSTERTEST_VOLCANO_VERSION = $(shell go list -m -f '{{.Version}}' volcano.sh/apis)
+CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL = https://raw.githubusercontent.com/volcano-sh/volcano/$(CLUSTERTEST_VOLCANO_VERSION)/config/crd/volcano/bases/scheduling.volcano.sh_podgroups.yaml
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -231,6 +249,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	done
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= (del(.providerOverride) | del(.multinode.properties.leader) | del(.multinode.properties.worker))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.
@@ -298,30 +318,59 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /test | grep -v /cmd) -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest ## Run tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/(e2e|test|cmd)($$|/)') -coverprofile cover.out
 
-# Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
-.PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
+.PHONY: envtest
+envtest: setup-envtest ## Run envtest-backed operator tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
+
+.PHONY: setup-clustertest
+setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster and install its prerequisites.
+	@test -n '$(CLUSTERTEST_PROFILER_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must name a locally available production planner image"; exit 1; }
+	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_PROFILER_IMAGE)' >/dev/null 2>&1 || { echo "Error: planner image $(CLUSTERTEST_PROFILER_IMAGE) is not available locally"; exit 1; }
+	@test -n '$(CLUSTERTEST_OPERATOR_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must name a locally available production operator image"; exit 1; }
+	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_OPERATOR_IMAGE)' >/dev/null 2>&1 || { echo "Error: operator image $(CLUSTERTEST_OPERATOR_IMAGE) is not available locally"; exit 1; }
+	@for image in '$(CLUSTERTEST_PROFILER_IMAGE)' '$(CLUSTERTEST_OPERATOR_IMAGE)'; do \
+		printf 'FROM %s\n' "$$image" | $(CONTAINER_TOOL) build --platform '$(CLUSTERTEST_PLATFORM)' --provenance=false --tag "$$image" --file - .; \
+	done
+	@if $(KIND) get clusters | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
+		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
+		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
+	else \
+		$(KIND) create cluster --name '$(CLUSTERTEST_KIND_NAME)' --image '$(CLUSTERTEST_NODE_IMAGE)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
+	fi
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f config/crd/bases
+	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)'
+	go mod download github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
+	curl --fail --location --silent --show-error '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
+		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f -
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' wait --for=condition=Established crd --all --timeout=2m
+	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_PROFILER_IMAGE)'
+	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_OPERATOR_IMAGE)'
+
+.PHONY: clustertest
+clustertest: ## Run Pod- and Job-backed controller tests against the explicitly unlocked cluster.
+	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "Error: DYNAMO_CLUSTERTEST_CONTEXT must be set"; exit 1; }
+	@test -n "$${DYNAMO_CLUSTERTEST_PROFILER_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must be set"; exit 1; }
+	@test -n "$${DYNAMO_CLUSTERTEST_OPERATOR_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must be set"; exit 1; }
+	go test -tags=clustertest $(CLUSTERTEST_PACKAGES) \
+		-run '^TestCluster' -count=1 -v -timeout=$(CLUSTERTEST_TIMEOUT)
+
+.PHONY: integration
+integration: envtest setup-clustertest ## Run envtests and clustertests, creating the standard Kind cluster.
+	KUBECONFIG='$(CLUSTERTEST_KUBECONFIG)' \
+		DYNAMO_CLUSTERTEST_CONTEXT='$(CLUSTERTEST_CONTEXT)' \
+		DYNAMO_CLUSTERTEST_PROFILER_IMAGE='$(CLUSTERTEST_PROFILER_IMAGE)' \
+		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
+		$(MAKE) clustertest
+
+# Deprecated manual smoke test for the legacy Kustomize install path.
+.PHONY: test-e2e
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
-
-# DGDR e2e test configuration.
-# Override these via the command line, e.g.:
-#   make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
-DGDR_TEST_TIMEOUT ?= 75m
-DGDR_NAMESPACE ?= dynamo-test
-DGDR_IMAGE ?=
-
-.PHONY: test-e2e-dgdr  # Run DGDR e2e tests against a live cluster with the operator installed.
-test-e2e-dgdr:
-ifndef DGDR_IMAGE
-	$(error DGDR_IMAGE is required. Example: make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0)
-endif
-	go test ./test/e2e/dgdr/ -v -ginkgo.v -timeout=$(DGDR_TEST_TIMEOUT) \
-		-dgdr-namespace=$(DGDR_NAMESPACE) \
-		-dgdr-image=$(DGDR_IMAGE) \
-		$(DGDR_TEST_FLAGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
@@ -346,7 +395,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-context snapshot=../snapshot -t ${IMG} .
+	$(CONTAINER_TOOL) build -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -365,7 +414,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
 	$(CONTAINER_TOOL) buildx use project-v3-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-context snapshot=../snapshot --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm project-v3-builder
 	rm Dockerfile.cross
 
@@ -542,7 +591,8 @@ clean-bin: ## Remove all downloaded tool binaries.
 export PATH := $(LOCALBIN):$(PATH)
 
 ## Tool Versions
-KUBECTL_VERSION ?= v1.31.4
+KUBECTL_VERSION ?= v1.36.1
+KIND_VERSION ?= v0.32.0
 HELM_VERSION ?= v3.17.3
 YQ_VERSION ?= v4.45.4
 KUSTOMIZE_VERSION ?= v5.5.0
@@ -552,6 +602,7 @@ GOLANGCI_LINT_VERSION ?= v1.64.8
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
+KIND ?= $(LOCALBIN)/kind-$(KIND_VERSION)
 HELM ?= $(LOCALBIN)/helm-$(HELM_VERSION)
 YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 KUSTOMIZE ?= $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
@@ -571,6 +622,17 @@ $(KUBECTL):
 		-o $(KUBECTL)
 	ln -sf $(KUBECTL) $(LOCALBIN)/kubectl
 	chmod +x $(KUBECTL) $(LOCALBIN)/kubectl
+
+.PHONY: kind
+kind: $(KIND) ## Download kind locally if necessary.
+$(KIND):
+	mkdir -p $(LOCALBIN)
+	rm -f $(LOCALBIN)/kind-*
+	curl --retry $(CURL_RETRIES) -fsL \
+		https://kind.sigs.k8s.io/dl/$(KIND_VERSION)/kind-$(GOOS)-$(GOARCH) \
+		-o $(KIND)
+	ln -sf $(KIND) $(LOCALBIN)/kind
+	chmod +x $(KIND) $(LOCALBIN)/kind
 
 .PHONY: helm
 helm: $(HELM) ## Download helm locally if necessary.
@@ -604,8 +666,9 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-.PHONY: envtest
-envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
+.PHONY: setup-envtest
+setup-envtest: $(ENVTEST) ## Download setup-envtest and envtest Kubernetes assets locally if necessary.
+	$(ENVTEST_ASSETS_CMD) >/dev/null
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
@@ -661,12 +724,11 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api-reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
-	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
-	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/kubernetes/api-reference.md
+	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
+	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 

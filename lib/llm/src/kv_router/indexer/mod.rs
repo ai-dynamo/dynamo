@@ -7,12 +7,16 @@ use anyhow::Result;
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     approx::PruneConfig,
-    config::KvRouterConfig,
+    config::{ApproximateCachePolicyKind, KvRouterConfig},
     indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
-        ThreadPoolIndexer,
+        ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
+        KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, ThreadPoolIndexer,
+        record_unsupported_residency_event,
     },
-    protocols::{DpRank, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -30,11 +34,23 @@ mod recovery;
 pub mod remote;
 mod side;
 
-pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
+pub use self::embedding_cache::{
+    EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
+};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
+#[cfg(feature = "ckf-diagnostics")]
+pub(crate) use recovery::WorkerQueryHealthSnapshot;
+pub(crate) use recovery::{
+    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
+    RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
+};
+#[cfg(test)]
+pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
@@ -67,9 +83,91 @@ pub enum Indexer {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedApproximatePrimaryPolicy {
+    Disabled,
+    Ttl,
+    Lru,
+    TtlRemoteFallback,
+}
+
+fn resolve_approximate_primary_policy(
+    config: &KvRouterConfig,
+) -> Result<ResolvedApproximatePrimaryPolicy> {
+    if config.use_kv_events
+        && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+    {
+        anyhow::bail!(
+            "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
+        );
+    }
+    if config.overlap_score_credit <= 0.0 {
+        return Ok(ResolvedApproximatePrimaryPolicy::Disabled);
+    }
+    if config.use_kv_events
+        || config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl
+    {
+        return Ok(ResolvedApproximatePrimaryPolicy::Ttl);
+    }
+    if config.use_remote_indexer || config.serve_indexer {
+        return Ok(ResolvedApproximatePrimaryPolicy::TtlRemoteFallback);
+    }
+    Ok(ResolvedApproximatePrimaryPolicy::Lru)
+}
+
+async fn dump_local_events(
+    mut events: Vec<RouterEvent>,
+    lower_tiers: &LowerTierIndexers,
+) -> Result<Vec<RouterEvent>, KvRouterError> {
+    for (tier, indexer) in lower_tiers.entries() {
+        events.extend(indexer.dump_events().await?.into_iter().map(|mut event| {
+            event.storage_tier = tier;
+            event
+        }));
+    }
+    Ok(events)
+}
+
 impl Indexer {
+    /// Publish a control-plane projection snapshot for subsequent lookups.
+    ///
+    /// Discovery and attachment reconciliation stay in lib/llm; router-core
+    /// only consumes this immutable resolved view.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_routing_snapshot(snapshot)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
+    }
+
+    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+        matches!(
+            self,
+            Self::KvIndexer {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            } | Self::Concurrent {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            }
+        )
     }
 
     pub async fn new(
@@ -79,8 +177,17 @@ impl Indexer {
         model_name: Option<&str>,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
-        if kv_router_config.overlap_score_credit == 0.0 {
+        let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
+        if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
             return Ok(Self::None);
+        }
+
+        if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
+            tracing::warn!(
+                use_remote_indexer = kv_router_config.use_remote_indexer,
+                serve_indexer = kv_router_config.serve_indexer,
+                "Approximate LRU requires a router-local primary indexer; falling back to TTL"
+            );
         }
 
         if kv_router_config.router_predicted_ttl_secs.is_some() && !kv_router_config.use_kv_events {
@@ -89,7 +196,6 @@ impl Indexer {
                  do not combine a primary approximate indexer with a side approximate indexer"
             );
         }
-
         if kv_router_config.use_remote_indexer {
             let model_name = model_name
                 .ok_or_else(|| {
@@ -119,18 +225,30 @@ impl Indexer {
 
         if !kv_router_config.use_kv_events {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-            let prune_config = Some(PruneConfig {
+            let prune_config = PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-            });
+            };
+            let retention = if approximate_policy == ResolvedApproximatePrimaryPolicy::Lru {
+                tracing::info!(
+                    "Starting local primary approximate indexer with capacity-bounded LRU retention"
+                );
+                ApproximateRetentionConfig::Lru {
+                    fallback_ttl: prune_config,
+                }
+            } else {
+                ApproximateRetentionConfig::Ttl(prune_config)
+            };
             if kv_router_config.router_event_threads > 1 {
                 return Ok(Self::Concurrent {
-                    primary: Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
-                        ConcurrentRadixTreeCompressed::new(),
-                        kv_router_config.router_event_threads as usize,
-                        block_size,
-                        Some(kv_indexer_metrics.clone()),
-                        prune_config,
-                    )),
+                    primary: Arc::new(
+                        ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                            ConcurrentRadixTreeCompressed::new(),
+                            kv_router_config.router_event_threads as usize,
+                            block_size,
+                            Some(kv_indexer_metrics.clone()),
+                            Some(retention),
+                        ),
+                    ),
                     lower_tier: LowerTierIndexers::new_with_metrics(
                         kv_router_config.router_event_threads as usize,
                         block_size,
@@ -142,11 +260,11 @@ impl Indexer {
             }
 
             return Ok(Self::KvIndexer {
-                primary: KvIndexer::new_with_pruning(
+                primary: KvIndexer::new_with_approximate_retention(
                     cancellation_token.child_token(),
                     block_size,
                     kv_indexer_metrics.clone(),
-                    prune_config,
+                    Some(retention),
                 ),
                 lower_tier: LowerTierIndexers::new_with_metrics(
                     1,
@@ -204,72 +322,109 @@ impl Indexer {
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
-            Self::KvIndexer { primary, .. } => primary.dump_events().await,
-            Self::Concurrent { primary, .. } => primary.dump_events().await,
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => {
-                panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
-                );
-            }
+            Self::None => Err(KvRouterError::Unsupported(
+                "event dumping requires a KV indexer".to_string(),
+            )),
         }
     }
 
-    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+    pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(_) => {
+                match self {
+                    Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                        lower_tier.record_unsupported_residency_event(&event);
+                    }
+                    Self::Remote { .. } | Self::None => {
+                        record_unsupported_residency_event(None, &event);
+                    }
+                }
+                return Ok(());
+            }
+        };
+        let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Self::KvIndexer {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    if let Err(e) = primary.event_sender().send(event.clone()).await {
-                        tracing::warn!("Failed to send event to indexer: {e}");
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary
+                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
+                            .await?;
                     }
 
                     for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
-                    if let Err(e) = primary.event_sender().send(event).await {
-                        tracing::warn!("Failed to send event to indexer: {e}");
-                    }
-                }
-                _ => {
+                } else if targets_primary {
+                    primary
+                        .event_sender()
+                        .send(event)
+                        .await
+                        .map_err(|_| KvRouterError::IndexerOffline)?;
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
-                        .apply_event(event)
-                        .await;
+                        .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Concurrent {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary.apply_event(event.clone()).await;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary.apply_event_and_wait(event.clone()).await?;
+                    }
 
                     for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
-                    primary.apply_event(event).await;
-                }
-                _ => {
+                } else if targets_primary {
+                    primary.enqueue_event(event)?;
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
-                        .apply_event(event)
-                        .await;
+                        .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Remote { .. } | Self::None => {}
         }
+        Ok(())
     }
 
-    pub(crate) async fn remove_worker(&self, worker_id: WorkerId) {
+    #[cfg(test)]
+    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+        if let Err(error) = self.try_apply_event(event).await {
+            tracing::error!(%error, "Failed to enqueue KV event");
+        }
+    }
+
+    /// Cold-reset one logical rank and wait until all local index tiers have completed the removal.
+    ///
+    /// NOTE: Unlike ordinary event application, rank removal is an infallible lane operation.
+    /// Its FIFO completion must be visible before source activation or clearing a pending reset.
+    pub(crate) async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer {
                 primary,
@@ -277,14 +432,18 @@ impl Indexer {
                 approx,
                 ..
             } => {
+                primary
+                    .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                    .await?;
                 for indexer in lower_tier.all() {
-                    indexer.remove_worker(worker_id).await;
-                }
-                if let Err(e) = primary.remove_worker_sender().send(worker_id).await {
-                    tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
+                    indexer
+                        .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                        .await?;
                 }
                 if let Some(approx) = approx {
-                    approx.remove_worker(worker_id).await;
+                    approx
+                        .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                        .await?;
                 }
             }
             Self::Concurrent {
@@ -293,60 +452,62 @@ impl Indexer {
                 approx,
                 ..
             } => {
+                primary
+                    .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                    .await?;
                 for indexer in lower_tier.all() {
-                    indexer.remove_worker(worker_id).await;
+                    indexer
+                        .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                        .await?;
                 }
-                KvIndexerInterface::remove_worker(primary.as_ref(), worker_id).await;
                 if let Some(approx) = approx {
-                    approx.remove_worker(worker_id).await;
+                    approx
+                        .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                        .await?;
                 }
             }
             Self::Remote { approx, .. } => {
                 if let Some(approx) = approx {
-                    approx.remove_worker(worker_id).await;
+                    approx
+                        .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                        .await?;
                 }
             }
             Self::None => {}
         }
+        Ok(())
     }
 
-    pub(crate) async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+    pub(crate) fn uses_approximate_lru(&self) -> bool {
         match self {
-            Self::KvIndexer {
-                primary,
-                lower_tier,
-                approx,
-                ..
-            } => {
-                for indexer in lower_tier.all() {
-                    KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker_id, dp_rank).await;
-                }
-                KvIndexerInterface::remove_worker_dp_rank(primary, worker_id, dp_rank).await;
-                if let Some(approx) = approx {
-                    approx.remove_worker_dp_rank(worker_id, dp_rank).await;
-                }
+            Self::KvIndexer { primary, .. } => primary.approximate_lru_enabled(),
+            Self::Concurrent { primary, .. } => primary.approximate_lru_enabled(),
+            Self::Remote { .. } | Self::None => false,
+        }
+    }
+
+    pub(crate) fn set_approximate_lru_capacity_now(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer { primary, .. } => {
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
             }
-            Self::Concurrent {
-                primary,
-                lower_tier,
-                approx,
-                ..
-            } => {
-                for indexer in lower_tier.all() {
-                    KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker_id, dp_rank).await;
-                }
-                KvIndexerInterface::remove_worker_dp_rank(primary.as_ref(), worker_id, dp_rank)
-                    .await;
-                if let Some(approx) = approx {
-                    approx.remove_worker_dp_rank(worker_id, dp_rank).await;
-                }
+            Self::Concurrent { primary, .. } => {
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
             }
-            Self::Remote { approx, .. } => {
-                if let Some(approx) = approx {
-                    approx.remove_worker_dp_rank(worker_id, dp_rank).await;
-                }
-            }
-            Self::None => {}
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
+        match self {
+            Self::KvIndexer { primary, .. } => primary.approximate_lru_stats().await,
+            Self::Concurrent { primary, .. } => primary.approximate_lru_stats().await,
+            Self::Remote { .. } | Self::None => Ok(ApproximateLruStats::default()),
         }
     }
 }
@@ -476,6 +637,14 @@ mod tests {
         assert!(!Indexer::None.supports_overlap_refresh());
     }
 
+    #[test]
+    fn router_hint_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_router_hint_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
+        assert!(!Indexer::None.supports_router_hint_chain_retention());
+    }
+
     async fn flush_indexer(indexer: &Indexer) {
         match indexer {
             Indexer::KvIndexer {
@@ -500,6 +669,66 @@ mod tests {
             }
             Indexer::Remote { .. } | Indexer::None => {}
         }
+    }
+
+    async fn assert_rank_reset_is_acknowledged(indexer: Indexer) {
+        let reset_rank = WorkerWithDpRank::new(7, 0);
+        let retained_rank = WorkerWithDpRank::new(7, 1);
+
+        for dp_rank in [reset_rank.dp_rank, retained_rank.dp_rank] {
+            indexer
+                .apply_event(store_event(7, dp_rank, 1, &[], &[41], StorageTier::Device))
+                .await;
+            indexer
+                .apply_event(store_event(
+                    7,
+                    dp_rank,
+                    2,
+                    &[41],
+                    &[42],
+                    StorageTier::HostPinned,
+                ))
+                .await;
+        }
+        flush_indexer(&indexer).await;
+
+        indexer
+            .reset_worker_dp_rank_and_wait(reset_rank.worker_id, reset_rank.dp_rank)
+            .await
+            .unwrap();
+
+        let matches = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(41), LocalBlockHash(42)])
+            .await
+            .unwrap();
+        assert!(
+            !matches
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&reset_rank)
+        );
+        assert_eq!(
+            matches.device.overlap_scores.scores.get(&retained_rank),
+            Some(&1)
+        );
+        let host_hits = &matches
+            .lower_tier
+            .get(&StorageTier::HostPinned)
+            .unwrap()
+            .hits;
+        assert!(!host_hits.contains_key(&reset_rank));
+        assert_eq!(host_hits.get(&retained_rank), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn single_thread_rank_reset_waits_for_all_local_tiers() {
+        assert_rank_reset_is_acknowledged(make_test_indexer()).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_rank_reset_waits_for_all_local_tiers() {
+        assert_rank_reset_is_acknowledged(make_test_concurrent_indexer()).await;
     }
 
     #[tokio::test]
@@ -557,6 +786,30 @@ mod tests {
                 .and_then(|tier| tier.hits.get(&worker)),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn router_dump_includes_all_allocated_physical_tiers() {
+        let indexer = make_test_indexer();
+        for (event_id, tier, block) in [
+            (1, StorageTier::Device, 11),
+            (2, StorageTier::HostPinned, 12),
+            (3, StorageTier::Disk, 13),
+        ] {
+            indexer
+                .apply_event(store_event(7, 0, event_id, &[], &[block], tier))
+                .await;
+        }
+        flush_indexer(&indexer).await;
+
+        let events = indexer.dump_events().await.unwrap();
+        for tier in [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::Disk,
+        ] {
+            assert!(events.iter().any(|event| event.storage_tier == tier));
+        }
     }
 
     #[tokio::test]
@@ -1052,89 +1305,30 @@ mod tests {
         let indexer = make_test_concurrent_indexer();
         let worker = WorkerWithDpRank::new(7, 0);
 
-        // Worker has the same blocks in both device and host-pinned storage.
+        // Device owns the prefix block; host-pinned extends it by one block.
         indexer
-            .apply_event(store_event(
-                7,
-                0,
-                1,
-                &[],
-                &[11, 12, 13],
-                StorageTier::Device,
-            ))
+            .apply_event(store_event(7, 0, 1, &[], &[41], StorageTier::Device))
             .await;
         indexer
-            .apply_event(store_event(
-                7,
-                0,
-                2,
-                &[],
-                &[11, 12, 13],
-                StorageTier::HostPinned,
-            ))
+            .apply_event(store_event(7, 0, 2, &[41], &[42], StorageTier::HostPinned))
             .await;
         flush_indexer(&indexer).await;
 
         let matches = indexer
-            .find_matches_by_tier(vec![
-                LocalBlockHash(11),
-                LocalBlockHash(12),
-                LocalBlockHash(13),
-            ])
+            .find_matches_by_tier(vec![LocalBlockHash(41), LocalBlockHash(42)])
             .await
             .unwrap();
 
-        // Device overlap should be 3 blocks.
-        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&3));
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&1));
 
-        // Lower-tier must NOT report additional hits for the same worker
-        // whose blocks are already fully accounted for in the device tier.
         let host_hits = matches
             .lower_tier
             .get(&StorageTier::HostPinned)
             .and_then(|tier| tier.hits.get(&worker).copied())
             .unwrap_or(0);
         assert_eq!(
-            host_hits, 0,
-            "lower-tier should not double-count blocks already matched in device tier \
-             (got {host_hits} host-pinned hits for a worker with full device overlap)"
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_remove_worker_removes_lower_tier_state() {
-        let indexer = make_test_concurrent_indexer();
-        let worker = WorkerWithDpRank::new(20, 0);
-
-        indexer
-            .apply_event(store_event(20, 0, 1, &[], &[31], StorageTier::HostPinned))
-            .await;
-        flush_indexer(&indexer).await;
-
-        let before = indexer
-            .find_matches_by_tier(vec![LocalBlockHash(31)])
-            .await
-            .unwrap();
-        assert_eq!(
-            before
-                .lower_tier
-                .get(&StorageTier::HostPinned)
-                .and_then(|tier| tier.hits.get(&worker)),
-            Some(&1)
-        );
-
-        indexer.remove_worker(20).await;
-        flush_indexer(&indexer).await;
-
-        let after = indexer
-            .find_matches_by_tier(vec![LocalBlockHash(31)])
-            .await
-            .unwrap();
-        assert!(
-            !after
-                .lower_tier
-                .get(&StorageTier::HostPinned)
-                .is_some_and(|tier| tier.hits.contains_key(&worker))
+            host_hits, 1,
+            "lower-tier should extend the device prefix without double-counting it"
         );
     }
 }

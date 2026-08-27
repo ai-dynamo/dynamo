@@ -25,9 +25,10 @@ on:
         type: boolean
         default: false
       build_timeout_minutes:
+        description: 'Timeout for the image build job. Matches the 60 min the other framework builds get in pr.yaml.'
         required: false
         type: number
-        default: 30
+        default: 60
       no_cache:
         description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
         required: false
@@ -49,9 +50,6 @@ on:
         type: string
         default: ''
       cpu_parallel_test_markers:
-        required: true
-        type: string
-      cpu_sequential_test_markers:
         required: true
         type: string
       gpu_test_markers:
@@ -76,7 +74,7 @@ on:
 
 jobs:
   image:
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: runtime
@@ -98,7 +96,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-gpu-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -143,7 +141,7 @@ jobs:
         working-directory: lib/llm
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_REGION: ${{ vars.AWS_DEFAULT_REGION }}
         shell: bash
         run: |
           /workspace/container/use-sccache.sh install
@@ -151,7 +149,20 @@ jobs:
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          # dynamo_llm lib unit tests mutate process env via `temp_env`
+          # (std::env::set_var/remove_var); in a multi-threaded libtest binary that
+          # write reallocates `environ` while another test thread (a parallel test's
+          # std::env::var, or a native UCX/CUDA thread) is inside getenv() -> teardown
+          # SIGSEGV after all tests pass (~14% under CI node contention). getenv/setenv
+          # aren't thread-safe and serial_test can't serialize the readers, so run the
+          # libtest binaries single-threaded via RUST_TEST_THREADS=1. Use the env var,
+          # NOT `-- --test-threads=1`: under --all-targets the CLI flag is also handed
+          # to the criterion `--bench` targets, which reject it ("unexpected argument")
+          # and fail the run; RUST_TEST_THREADS is read by libtest and ignored by
+          # criterion. (Verified on the GPU tester: whole command runs green with
+          # benches; lib suite 7s -> 35s single-threaded, other targets sub-second; and
+          # under 12x contention 3/3 parallel shards segfault vs 0/3 single-threaded.)
+          RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
@@ -160,7 +171,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -193,7 +204,7 @@ jobs:
   parallel:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: parallel
@@ -214,7 +225,7 @@ jobs:
   sequential:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: sequential
@@ -224,8 +235,8 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
-      cpu_only_test_timeout_minutes: 30
+      cpu_only_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}
@@ -235,7 +246,7 @@ jobs:
   gpu:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: gpu

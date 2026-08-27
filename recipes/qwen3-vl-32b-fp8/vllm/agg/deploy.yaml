@@ -22,7 +22,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/examples/multimodal
       envs:
         - name: HF_HOME
@@ -49,7 +49,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/examples/multimodal
           env:
             - name: SERVED_MODEL_NAME

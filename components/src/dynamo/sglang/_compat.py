@@ -38,35 +38,10 @@ def _warn_require_reasoning_unsupported() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Top-level sglang exports: Engine, ServerArgs
-#
-# Some SGLang dev builds (including 0.5.x snapshots) do not re-export these
-# from sglang/__init__.py, while Dynamo historically uses `import sglang as sgl`
-# followed by `sgl.Engine(...)` throughout this backend.
-# ---------------------------------------------------------------------------
-def ensure_sglang_top_level_exports() -> None:
-    """Restore top-level SGLang exports omitted by some install flavors."""
-    import sglang as sgl
-
-    if not hasattr(sgl, "Engine"):
-        from sglang.srt.entrypoints.engine import Engine
-
-        sgl.Engine = Engine
-
-    if not hasattr(sgl, "ServerArgs"):
-        from sglang.srt.server_args import ServerArgs
-
-        sgl.ServerArgs = ServerArgs
-
-
-ensure_sglang_top_level_exports()
-
-
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.15 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -106,6 +81,32 @@ def ensure_sglang_tensor_image_size() -> None:
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Apply a post-resolution, pre-publish SGLang configuration update.
+
+    SGLang 0.5.18 replaced ``ServerArgs.override`` with
+    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
+    of the instance must observe. SGLang 0.5.17 exposes the former API. The
+    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
+    preserve its legacy assignment behavior until its engine pin is upgraded.
+    """
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
+    # upgraded to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
+
+
 @lru_cache(maxsize=32)
 def _get_async_generate_supported_kwarg_names(
     async_generate: Any,
@@ -138,10 +139,12 @@ def filter_supported_async_generate_kwargs(
 ) -> dict[str, Any]:
     """Return only async_generate kwargs accepted by this SGLang engine.
 
-    SGLang occasionally adds optional Engine.async_generate kwargs before every
-    supported install flavor has them. Keep the compatibility boundary narrow:
-    callers decide which kwargs are optional, and this helper only drops those
-    optional kwargs when the installed engine cannot accept them.
+    Both supported CUDA releases accept Dynamo's optional kwargs. The separately
+    pinned XPU image still uses SGLang 0.5.11, which predates ``mm_hashes`` and
+    ``require_reasoning``. Keep the compatibility boundary narrow: callers
+    decide which kwargs are optional, and this helper only drops those optional
+    kwargs when the installed engine cannot accept them. Remove this filtering
+    when the XPU SGLang pin is upgraded to 0.5.16+.
     """
     async_generate = engine.async_generate
     signature_source = getattr(async_generate, "__func__", async_generate)
@@ -173,64 +176,9 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
-@lru_cache(maxsize=32)
-def _start_profile_accepts_request_object(start_profile: Any) -> bool:
-    """Return whether TokenizerManager.start_profile expects a ProfileReq."""
-    try:
-        signature = inspect.signature(start_profile)
-    except (TypeError, ValueError):
-        logger.debug(
-            "Could not inspect SGLang TokenizerManager.start_profile signature; "
-            "using the legacy keyword-argument API"
-        )
-        return False
-
-    return "req" in signature.parameters
-
-
-def _build_profile_request(body: dict[str, Any]) -> Any:
-    from sglang.srt.managers.io_struct import ProfileReq
-
-    return ProfileReq(**body)
-
-
-async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> None:
-    """Start profiling across SGLang's old and new control APIs.
-
-    SGLang 0.5.14 accepts profiling fields as keyword arguments. SGLang 0.5.15
-    accepts one ``ProfileReq`` object instead.
-    """
-    start_profile = tokenizer_manager.start_profile
-    signature_source = getattr(start_profile, "__func__", start_profile)
-
-    try:
-        accepts_request_object = _start_profile_accepts_request_object(signature_source)
-    except TypeError:
-        accepts_request_object = _start_profile_accepts_request_object.__wrapped__(
-            signature_source
-        )
-
-    if accepts_request_object:
-        await start_profile(_build_profile_request(body))
-    else:
-        await start_profile(**body)
-
-
-def enable_disjoint_streaming_output(server_args: Any) -> None:
-    """Enable SGLang's disjoint streaming output.
-
-    Diffusion workers pass a ``SimpleNamespace`` stub that does not carry the
-    field, so this is a no-op when the attribute is absent.
-    """
-    if hasattr(server_args, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
-
-
 __all__ = [
-    "enable_disjoint_streaming_output",
     "ensure_sglang_tensor_image_size",
-    "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "override_server_args",
     "require_reasoning_kwargs",
-    "start_profile_compat",
 ]

@@ -3,9 +3,14 @@
 
 """Unit tests for DynamoMediaConnector and its ImageLoader integration."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 from PIL import Image
 
+import dynamo.common.multimodal.media_connector as media_connector_module
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 pytestmark = [
@@ -17,6 +22,32 @@ pytestmark = [
 
 def _make_pil_image() -> Image.Image:
     return Image.new("RGB", (4, 4), color="blue")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.jpg"),
+    ],
+)
+async def test_connector_does_not_fallback_on_client_error(client_error, monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    parent_fetch = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
+    connector = object.__new__(connector_class)
+    connector._image_loader = AsyncMock()
+    connector._image_loader.load_image.side_effect = client_error
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await connector.fetch_image_async("https://example.com/x.jpg")
+
+    assert exc_info.value is client_error
+    parent_fetch.assert_not_awaited()
 
 
 class TestImageLoaderCache:

@@ -29,7 +29,7 @@ from typing import Generator
 
 import pytest
 import torch
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -65,11 +65,13 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         *,
         frontend_port: int,
         system_port: int,
+        fpm_port: int,
         worker_id: str = "vllm-prompt-embeds-worker",
     ):
         self.worker_id = worker_id
         self.frontend_port = int(frontend_port)
         self.system_port = int(system_port)
+        self.fpm_port = int(fpm_port)
 
         # On XPU, set an explicit max-num-seqs to ensure the worker can handle
         # concurrent requests without OOM or scheduling timeouts on single-device CI.
@@ -101,6 +103,7 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
 
@@ -159,6 +162,7 @@ def start_services(
     _ = predownload_models  # Ensures model is downloaded before starting services
     frontend_port = dynamo_dynamic_ports.frontend_port
     system_port = dynamo_dynamic_ports.system_ports[0]
+    fpm_port = dynamo_dynamic_ports.fpm_port
 
     with DynamoFrontendProcess(
         request,
@@ -178,6 +182,7 @@ def start_services(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
+            fpm_port=fpm_port,
         ):
             logger.info("Vllm Worker with prompt embeds started for tests")
             yield dynamo_dynamic_ports
@@ -192,9 +197,10 @@ def dynamo_client(start_services: ServicePorts):
     )
 
 
-def create_embeddings_base64(shape: tuple[int, ...]) -> str:
-    """Create random embeddings tensor and return as base64-encoded PyTorch format."""
-    embeddings = torch.randn(*shape, dtype=torch.float32)
+def create_embeddings_base64(shape: tuple[int, ...], *, seed: int | None = None) -> str:
+    """Create embeddings tensor and return as base64-encoded PyTorch format."""
+    generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    embeddings = torch.randn(*shape, dtype=torch.float32, generator=generator)
     buffer = io.BytesIO()
     torch.save(embeddings, buffer)
     buffer.seek(0)
@@ -247,7 +253,7 @@ class TestPromptEmbedsE2E:
         invalid_data = b"this is not a valid pytorch tensor format!" * 10
         invalid_base64 = base64.b64encode(invalid_data).decode("utf-8")
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(BadRequestError) as exc_info:
             dynamo_client.completions.create(
                 model=TEST_MODEL,
                 prompt="",
@@ -256,19 +262,15 @@ class TestPromptEmbedsE2E:
                 extra_body={"prompt_embeds": invalid_base64},
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert any(
-            keyword in error_msg
-            for keyword in ["pytorch", "tensor", "invalid", "decode", "error"]
-        ), f"Expected tensor decode error, got: {error_msg}"
+        assert exc_info.value.status_code == 400
+        error_msg = str(exc_info.value)
+        assert (
+            "Failed to decode prompt_embeds as PyTorch tensor" in error_msg
+        ), f"Expected the worker's tensor decode error, got: {error_msg}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
         """
         CRITICAL REGRESSION TEST: Ensure prompt_tokens is correctly reported.
-
-        This validates the v2.0.4 fix where prompt_tokens was incorrectly
-        reported as 0 when using embeddings. The worker extracts sequence
-        length from tensor shape and includes it in completion_usage.
 
         Rust tests cannot verify this - it requires E2E validation.
         """
@@ -337,7 +339,10 @@ class TestPromptEmbedsE2E:
         This validates the worker can handle multiple embedding requests
         simultaneously without race conditions or resource conflicts.
         """
-        embeddings_base64 = create_embeddings_base64((10, 1024))
+        # Keep the transport input reproducible. Random hidden-state-shaped tensors
+        # can legitimately make the model emit only filtered special tokens or
+        # incomplete byte sequences, neither of which produces visible text.
+        embeddings_base64 = create_embeddings_base64((10, 1024), seed=1234)
 
         def send_request():
             return dynamo_client.completions.create(
@@ -360,4 +365,10 @@ class TestPromptEmbedsE2E:
         assert len(results) == NUM_CONCURRENT, "All concurrent requests should complete"
         for response in results:
             assert response.choices, "Each response should have choices"
-            assert len(response.choices[0].text) > 0, "Each response should have text"
+            assert (
+                response.choices[0].finish_reason is not None
+            ), "Each response should finish"
+            assert response.usage is not None, "Each response should report usage"
+            assert (
+                response.usage.completion_tokens > 0
+            ), "Each response should generate completion tokens"

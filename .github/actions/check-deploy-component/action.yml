@@ -6,7 +6,7 @@ description: 'Run validation checks for a deploy component'
 
 inputs:
   component:
-    description: 'Component to check: operator or snapshot'
+    description: 'Component to check: operator'
     required: true
   platform:
     description: 'Docker platform used for linter and tester targets'
@@ -23,8 +23,6 @@ runs:
           --platform ${{ inputs.platform }} \
           --target linter \
           --progress=plain \
-          --build-context snapshot=../snapshot \
-          --build-context operator=../operator \
           .
 
     - name: Tester
@@ -35,19 +33,18 @@ runs:
           --platform ${{ inputs.platform }} \
           --target tester \
           --progress=plain \
-          --build-context snapshot=../snapshot \
-          --build-context operator=../operator \
+          --build-context operator-chart=../helm/charts/platform/components/operator \
           .
 
     - name: Set up Go
       if: ${{ inputs.component == 'operator' }}
-      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.6'
 
     - name: Set up Python
       if: ${{ inputs.component == 'operator' }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: "3.11"
 

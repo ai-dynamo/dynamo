@@ -3,8 +3,9 @@
 
 import asyncio
 import re as re_mod
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -19,13 +20,16 @@ if not torch.cuda.is_available():
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.llmapi import DisaggregatedParams
+from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    BYPASS_REMOTE_PREFILL_ANNOTATION,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -53,6 +57,7 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    prompt_logprobs: int | None = None
     max_tokens: int | None = None
     min_tokens: int | None = None
     stop_token_ids: list[int] | None = None
@@ -110,6 +115,14 @@ class TestOverrideSamplingParams:
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
+
+    def test_disabled_top_k_sentinel_is_converted(self):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"top_k": -1}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.top_k == 0
 
     def test_truthy_values_are_applied(self):
         """Test that normal truthy values are correctly set."""
@@ -193,97 +206,6 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
-
-
-class TestLLMEngineOverrideSamplingParams:
-    """Tests for the unified LLMEngine _override_sampling_params path."""
-
-    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {"answer": {"type": "string"}},
-        "required": ["answer"],
-    }
-    JSON_SCHEMA_STRING: ClassVar[str] = (
-        '{"type":"object","properties":{"answer":{"type":"string"}},'
-        '"required":["answer"]}'
-    )
-
-    def test_n_is_passed_through(self):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 2
-
-    def test_existing_best_of_greater_than_n_is_preserved(self):
-        sampling_params = MockSamplingParams(best_of=4)
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 4
-
-    @pytest.mark.parametrize(
-        ("guided_decoding", "expected_attribute", "expected_value"),
-        [
-            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
-            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
-            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
-            (
-                {"grammar": 'root ::= "yes" | "no"'},
-                "grammar",
-                'root ::= "yes" | "no"',
-            ),
-            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
-        ],
-        ids=["json-object", "json-string", "regex", "grammar", "choice"],
-    )
-    def test_guided_decoding_constraints_are_converted(
-        self, guided_decoding, expected_attribute, expected_value
-    ):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"guided_decoding": guided_decoding}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert not isinstance(result.guided_decoding, dict)
-        assert getattr(result.guided_decoding, expected_attribute) == expected_value
-
-    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
-        sampling_params = MockSamplingParams()
-        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
-        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
-        assert result.guided_decoding.regex == expected
-
-
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        (None, "xgrammar"),
-        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
-    ],
-    ids=["configured", "engine-override"],
-)
-def test_unified_guided_decoding_backend_matches_legacy(override, expected):
-    argv = [
-        "--model-path",
-        "Qwen/Qwen3-0.6B",
-        "--guided-decoding-backend",
-        "xgrammar",
-    ]
-    if override is not None:
-        argv.extend(["--override-engine-args", override])
-
-    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
-
-    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -626,6 +548,29 @@ class TestMultimodalGuard:
         assert result == [10, 20, 30]
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_rejected_cache_uuid_does_not_mutate_request(self):
+        handler = _ConcreteHandler.__new__(_ConcreteHandler)
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {"image_url": ["cached-image"]},
+            "max_tokens": 8,
+            "prefill_result": {
+                "disaggregated_params": {
+                    "worker_id": 7,
+                    "_epd_metadata": {"_prefill_prompt": "describe image"},
+                }
+            },
+        }
+        original_request = deepcopy(request)
+
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            async for _ in handler._generate_locally_impl(request, MagicMock()):
+                pass
+
+        assert request == original_request
+
+    @pytest.mark.asyncio
     async def test_decode_with_prefill_metadata_bypasses_guard(self):
         handler = self._make_handler(multimodal_processor=None)
         handler.disaggregation_mode = DisaggregationMode.DECODE
@@ -725,6 +670,13 @@ class TestDisaggRequestId:
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
 
+    def _make_decode_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        return handler
+
     def test_disagg_request_id_populated_in_prefill_mode(self):
         """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
         handler = self._make_prefill_handler()
@@ -790,9 +742,21 @@ class TestDisaggRequestId:
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
 
+    def test_decode_conditional_bypass_uses_request_disagg_params(self):
+        """Conditional-disagg bypass runs full context+generation on decode."""
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=None,
+        )
+        assert params.request_type == "context_and_generation"
 
-class TestHealthCheckPriority:
-    """Verify generate_locally forwards the correct priority to generate_async.
+
+class TestGenerateLocally:
+    """Verify generate_locally forwards request options to generate_async.
 
     Health check requests (built by TrtllmHealthCheckPayload) must reach
     the TRT-LLM engine at priority=1.0.  Regular inference requests
@@ -813,23 +777,35 @@ class TestHealthCheckPriority:
         handler.default_sampling_params = MockSamplingParams()
         return handler
 
-    def _make_mock_generation_result(self):
+    def _make_mock_generation_result(self, prompt_logprobs=None):
         """Mock GenerationResult that yields a single finished token."""
-        output = MagicMock()
-        output.token_ids = [42]
-        output.finish_reason = "stop"
-        output.stop_reason = None
-        output.request_perf_metrics = None
+        if prompt_logprobs is None:
+            prompt_logprobs = []
+        return self._make_mock_generation_result_sequence([prompt_logprobs])
 
-        res = MagicMock()
-        res.outputs = [output]
-        res.finished = True
+    def _make_mock_generation_result_sequence(self, prompt_logprobs_per_chunk):
+        """Mock GenerationResult with cumulative output across streaming chunks."""
+        results = []
+        last_index = len(prompt_logprobs_per_chunk) - 1
+        for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
+            output = MagicMock()
+            output.token_ids = list(range(42, 43 + index))
+            output.finish_reason = "stop" if index == last_index else None
+            output.stop_reason = None
+            output.request_perf_metrics = None
+            output.prompt_logprobs = prompt_logprobs
+
+            res = MagicMock()
+            res.outputs = [output]
+            res.finished = index == last_index
+            results.append(res)
 
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
         async def mock_aiter(self_mock):
-            yield res
+            for res in results:
+                yield res
 
         generation_result.__aiter__ = mock_aiter
         return generation_result
@@ -882,6 +858,105 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
+        handler = self._make_handler()
+        prompt_logprob = MagicMock(
+            logprob=-0.25,
+            rank=1,
+            decoded_token="two",
+        )
+        generation_result = self._make_mock_generation_result(
+            prompt_logprobs=[None, {2: prompt_logprob}]
+        )
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].prompt_logprobs == 0
+        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
+            None,
+            {
+                "2": {
+                    "logprob": -0.25,
+                    "rank": 1,
+                    "decoded_token": "two",
+                }
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_prompt_logprobs_is_not_returned(self):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert "prompt_logprobs" not in chunks[-1].get("engine_data", {})
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_can_arrive_after_empty_streaming_chunk(self):
+        handler = self._make_handler()
+        prompt_logprob = MagicMock(
+            logprob=-0.25,
+            rank=1,
+            decoded_token="two",
+        )
+        generation_result = self._make_mock_generation_result_sequence(
+            [[], [None, {2: prompt_logprob}]]
+        )
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
+            None,
+            {
+                "2": {
+                    "logprob": -0.25,
+                    "rank": 1,
+                    "decoded_token": "two",
+                }
+            },
+        ]
+
+    def test_trtllm_sampling_params_accepts_zero_prompt_logprobs(self):
+        sampling_params = SamplingParams(prompt_logprobs=0)
+
+        assert sampling_params.prompt_logprobs == 0
 
     @pytest.mark.asyncio
     async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
@@ -959,7 +1034,16 @@ class TestHealthCheckPriority:
         assert kwargs["cache_salt"] == "tenant-a"
 
     @pytest.mark.asyncio
-    async def test_prefill_skips_generation_stop_conditions(self):
+    async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
+        # PREFILL forces max_tokens=1 (asserted separately below) but must
+        # otherwise apply the full stop conditions, matching native TRT-LLM
+        # context_only behavior: it overrides only max_tokens, not the rest
+        # of the request's stop parameters. Skipping ignore_eos here in
+        # particular let TRT-LLM treat EOS as a stop condition on prefill's
+        # single sampled token, so a prompt whose first token happened to be
+        # EOS terminated the request right there instead of letting the KV
+        # handoff to decode proceed -- the request "succeeded" with zero
+        # visible output instead of continuing generation normally.
         handler = self._make_handler()
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         handler.disagg_machine_id = 0
@@ -994,9 +1078,53 @@ class TestHealthCheckPriority:
         _, kwargs = handler.engine.llm.generate_async.call_args
         sampling_params = kwargs["sampling_params"]
         assert sampling_params.max_tokens == 1
-        assert sampling_params.min_tokens is None
+        assert sampling_params.min_tokens == 8
+        assert sampling_params.ignore_eos is True
+        assert set(sampling_params.stop_token_ids) == {100, 300}
+        assert kwargs["streaming"] is False
+
+    @pytest.mark.asyncio
+    async def test_prefill_does_not_force_ignore_eos_when_not_requested(self):
+        # Negative case: a request that doesn't ask to ignore EOS or expose a
+        # visible stop token must not have ignore_eos forced on during
+        # prefill. min_tokens and the hidden stop token are still preserved,
+        # same as the positive case -- only ignore_eos differs here.
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        handler.disagg_machine_id = 0
+        handler.default_sampling_params = MockSamplingParams(stop_token_ids=[300])
+        generation_result = MagicMock()
+
+        async def empty_aiter(_self):
+            for _ in ():
+                yield
+
+        generation_result.__aiter__ = empty_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": False,
+                "stop_token_ids_hidden": [100],
+            },
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks == []
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        sampling_params = kwargs["sampling_params"]
+        assert sampling_params.max_tokens == 1
+        assert sampling_params.min_tokens == 8
         assert sampling_params.ignore_eos is False
-        assert sampling_params.stop_token_ids == [300]
+        assert set(sampling_params.stop_token_ids) == {100, 300}
         assert kwargs["streaming"] is False
 
 
@@ -1129,11 +1257,17 @@ class TestConversationAffinity:
     ``SchedulingParams`` as before.
     """
 
-    def _make_handler(self, *, conversation_affinity: bool) -> HandlerBase:
+    def _make_handler(
+        self,
+        *,
+        conversation_affinity: bool,
+        dp_rank_source: str = "engine",
+    ) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
+        config.conversation_affinity_dp_rank_source = dp_rank_source
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -1241,6 +1375,60 @@ class TestConversationAffinity:
         conv_params = kwargs["conversation_params"]
         assert conv_params is not None
         assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_forwards_rank(self, monkeypatch):
+        """Dynamo-owned placement forwards both the rank and conversation id."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-42:agent-0"},
+            },
+        )
+        scheduling_params = kwargs["scheduling_params"]
+        assert scheduling_params is not None
+        assert scheduling_params.attention_dp_rank == 3
+        assert scheduling_params.attention_dp_relax is False
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_and_no_session_suppresses_rank(
+        self, monkeypatch
+    ):
+        """Without a conversation id, preserve TRT-LLM's no-id balancing path."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert kwargs["conversation_params"] is None
 
     @pytest.mark.asyncio
     async def test_affinity_on_without_session_id_passes_none_conversation_params(

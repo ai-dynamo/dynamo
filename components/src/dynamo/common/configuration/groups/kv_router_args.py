@@ -11,9 +11,11 @@ unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 """
 
 import argparse
+import json
+import logging
 import os
 import warnings
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -23,12 +25,15 @@ from dynamo.common.configuration.utils import (
     nullable_float,
 )
 
+logger = logging.getLogger(__name__)
+
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
     "overlap_score_credit_decay",
     "prefill_load_scale",
+    "decode_active_request_weight",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
@@ -38,18 +43,47 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_tracking_hash",
+    "router_tracking_key_file",
+    "router_tracking_key_id",
     "router_prefill_load_model",
     "router_ttl_secs",
+    "router_approximate_cache_policy",
     "router_queue_threshold",
     "router_policy_config",
+    "router_prefill_policy",
+    "router_decode_policy",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "conditional_disagg_enabled",
+    "conditional_disagg_policy",
+    "conditional_disagg_eff_isl_threshold",
+    "conditional_disagg_eff_isl_ratio_threshold",
+    "conditional_disagg_prefill_busy_threshold",
+    "conditional_disagg_decode_busy_threshold",
     "router_predicted_ttl_secs",
 )
+
+CONDITIONAL_DISAGG_POLICY_CHOICES: tuple[str, ...] = (
+    "isl_bounding",
+    "prefill_load",
+    "isl_or_load",
+)
+LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES: frozenset[str] = frozenset(
+    {"prefill_load", "isl_or_load"}
+)
+
+_CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
+    "policy": "conditional_disagg_policy",
+    "eff_isl_threshold": "conditional_disagg_eff_isl_threshold",
+    "eff_isl_ratio_threshold": "conditional_disagg_eff_isl_ratio_threshold",
+    "prefill_busy_threshold": "conditional_disagg_prefill_busy_threshold",
+    "decode_busy_threshold": "conditional_disagg_decode_busy_threshold",
+}
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
@@ -101,6 +135,58 @@ def _default_prefill_load_scale() -> float:
     return 1.0
 
 
+def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "--router-conditional-disagg-config must be a JSON object"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--router-conditional-disagg-config must be a JSON object")
+
+    unknown = sorted(set(parsed) - set(_CONDITIONAL_DISAGG_CONFIG_FIELDS))
+    if unknown:
+        raise ValueError(
+            "--router-conditional-disagg-config has unknown field(s): "
+            + ", ".join(unknown)
+        )
+    if "policy" in parsed and not isinstance(parsed["policy"], str):
+        raise ValueError("--router-conditional-disagg-config policy must be a string")
+    if "eff_isl_threshold" in parsed and (
+        not isinstance(parsed["eff_isl_threshold"], int)
+        or isinstance(parsed["eff_isl_threshold"], bool)
+    ):
+        raise ValueError(
+            "--router-conditional-disagg-config eff_isl_threshold must be an integer"
+        )
+    if "eff_isl_ratio_threshold" in parsed and (
+        parsed["eff_isl_ratio_threshold"] is None
+        or not isinstance(parsed["eff_isl_ratio_threshold"], (int, float))
+        or isinstance(parsed["eff_isl_ratio_threshold"], bool)
+    ):
+        raise ValueError(
+            "--router-conditional-disagg-config eff_isl_ratio_threshold must be a number"
+        )
+    for field in ("prefill_busy_threshold", "decode_busy_threshold"):
+        if parsed.get(field) is None:
+            continue
+        if not isinstance(parsed[field], (int, float)) or isinstance(
+            parsed[field], bool
+        ):
+            raise ValueError(
+                f"--router-conditional-disagg-config {field} must be a number"
+            )
+    return parsed
+
+
+def _conditional_disagg_config_arg(value: str) -> dict[str, Any]:
+    try:
+        return _parse_conditional_disagg_config(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
@@ -108,6 +194,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_credit: float
     overlap_score_credit_decay: float
     prefill_load_scale: float
+    decode_active_request_weight: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -117,16 +204,29 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_tracking_hash: str = "public-xxh3-v1"
+    router_tracking_key_file: Optional[str] = None
+    router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
     router_ttl_secs: float
+    router_approximate_cache_policy: str = "ttl"
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
+    router_prefill_policy: Optional[str] = None
+    router_decode_policy: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    conditional_disagg_enabled: bool = False
+    conditional_disagg_config: Optional[dict[str, Any]] = None
+    conditional_disagg_policy: str = "isl_bounding"
+    conditional_disagg_eff_isl_threshold: int = 2048
+    conditional_disagg_eff_isl_ratio_threshold: float = 0.7
+    conditional_disagg_prefill_busy_threshold: Optional[float] = None
+    conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -137,9 +237,46 @@ class KvRouterConfigBase(ConfigBase):
         for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
             setattr(self, field, value)
 
+    def apply_conditional_disagg_config(self) -> None:
+        if (
+            self.conditional_disagg_config is not None
+            and not self.conditional_disagg_enabled
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config requires --router-conditional-disagg"
+            )
+
+        if self.conditional_disagg_config is not None:
+            for key, value in self.conditional_disagg_config.items():
+                setattr(self, _CONDITIONAL_DISAGG_CONFIG_FIELDS[key], value)
+
+        if not self.conditional_disagg_enabled:
+            return
+        if self.conditional_disagg_policy not in LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES:
+            return
+        # Load-aware conditional-disagg policies need a prefill busy threshold.
+        # If threshold is not user-provided via --router-conditional-disagg-config,
+        # default to --router-queue-threshold when that flag is set.
+        if self.conditional_disagg_prefill_busy_threshold is not None:
+            return
+        if self.router_queue_threshold is not None:
+            self.conditional_disagg_prefill_busy_threshold = self.router_queue_threshold
+            logger.info(
+                "conditional_disagg prefill_busy_threshold defaults to "
+                "--router-queue-threshold=%s",
+                self.router_queue_threshold,
+            )
+        else:
+            raise ValueError(
+                f"conditional_disagg policy={self.conditional_disagg_policy!r} "
+                "needs prefill_busy_threshold, but neither "
+                "prefill_busy_threshold nor --router-queue-threshold is set"
+            )
+
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
+        self.apply_conditional_disagg_config()
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
@@ -171,7 +308,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
                 "Must be finite and non-negative; values above 1.0 give device "
-                "overlap extra credit and can make the adjusted prefill cost negative."
+                "overlap extra credit, with adjusted prefill cost clamped at zero."
             ),
             arg_type=float,
             dest="overlap_score_credit",
@@ -210,6 +347,20 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-active-request-weight",
+            env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
+                "each active request on a candidate worker. Use this to balance "
+                "decode batch size when step latency depends more on request count "
+                "than resident KV footprint. Must be finite and non-negative."
+            ),
+            arg_type=float,
+            dest="decode_active_request_weight",
         )
         add_argument(
             g,
@@ -292,8 +443,9 @@ class KvRouterArgGroup(ArgGroup):
             dest="router_track_output_blocks",
             help=(
                 "KV Router: Track output blocks during generation. When enabled, the router adds "
-                "placeholder blocks as tokens are generated and applies fractional decay based on "
-                "progress toward expected output sequence length."
+                "placeholder blocks as tokens are generated. With expected output sequence length, "
+                "fractional decay applies to output blocks and the structurally exclusive prompt "
+                "suffix; shared prompt blocks retain full weight."
             ),
             obsolete_flag="--track-output-blocks",
         )
@@ -324,6 +476,28 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-tracking-hash",
+            env_var="DYN_ROUTER_TRACKING_HASH",
+            default="public-xxh3-v1",
+            choices=["public-xxh3-v1", "keyed-xxh3-v1"],
+            help="KV Router: Hash function for router-derived active-sequence identities.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-file",
+            env_var="DYN_ROUTER_TRACKING_KEY_FILE",
+            default=None,
+            help="KV Router: File containing the 32-byte provider tracking key.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-id",
+            env_var="DYN_ROUTER_TRACKING_KEY_ID",
+            default=None,
+            help="KV Router: Provider-managed tracking-key epoch identifier.",
+        )
+        add_argument(
+            g,
             flag_name="--router-prefill-load-model",
             env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
             default="none",
@@ -344,6 +518,19 @@ class KvRouterArgGroup(ArgGroup):
                 "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-approximate-cache-policy",
+            env_var="DYN_ROUTER_APPROXIMATE_CACHE_POLICY",
+            default="ttl",
+            choices=["ttl", "lru"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Retention policy for the local primary "
+                "approximate indexer used with --no-router-kv-events. 'ttl' keeps "
+                "the existing time-based behavior; 'lru' uses each worker rank's "
+                "advertised KV capacity. Side indexers remain TTL-only."
+            ),
         )
         add_argument(
             g,
@@ -371,11 +558,66 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_POLICY_CONFIG",
             default=None,
             help=(
-                "KV Router: Startup-only YAML policy-family and cache-bucket "
-                "queue configuration. "
+                "KV Router: Startup-only YAML configuration for policy-class queues "
+                "and custom worker-selection instances. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
+            ),
+            arg_type=str,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-conditional-disagg",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Enable conditional disaggregation. "
+                "When enabled, the router may bypass the remote prefill step "
+                "and route requests directly to a decode worker. The configured "
+                "policy determines whether local prefill and decode is preferable "
+                "for each request."
+            ),
+            dest="conditional_disagg_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-config",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: JSON object for conditional "
+                "disaggregation policy settings. Supported fields: policy, "
+                "eff_isl_threshold, eff_isl_ratio_threshold, "
+                "prefill_busy_threshold, decode_busy_threshold."
+            ),
+            arg_type=_conditional_disagg_config_arg,
+            dest="conditional_disagg_config",
+            metavar="JSON",
+        )
+        add_argument(
+            g,
+            flag_name="--router-prefill-policy",
+            env_var="DYN_ROUTER_PREFILL_POLICY",
+            default=None,
+            help=(
+                "KV Router: Process-local named worker-selection instance for "
+                "disaggregated prefill workers in this router process. "
+                "Overrides worker_selection.prefill from --router-policy-config. "
+                "Use 'default' for Dynamo's built-in worker selector."
+            ),
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-policy",
+            env_var="DYN_ROUTER_DECODE_POLICY",
+            default=None,
+            help=(
+                "KV Router: Process-local named worker-selection instance for decode "
+                "workers in this router process. "
+                "Overrides worker_selection.decode from --router-policy-config. "
+                "Use 'default' for Dynamo's built-in worker selector."
             ),
             arg_type=str,
         )

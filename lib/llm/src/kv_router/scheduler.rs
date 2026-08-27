@@ -6,26 +6,28 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    AdmissionLease, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
-    PolicyClassAdmissionStrategies, PotentialLoad, RequestOutcome, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
-use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles};
+use super::SchedulerLoadSender;
+use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
 use super::sequence::{
     RuntimeSequencePublisher, SequenceError, SequenceRequest, create_multi_worker_sequences,
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
@@ -45,14 +47,14 @@ where
 
 impl<Sel, RF> KvScheduler<Sel, RF>
 where
-    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
     /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so
     /// long-waiting requests can be re-scored at dequeue time.
     #[expect(clippy::too_many_arguments)]
     pub async fn start(
-        component: Component,
+        endpoint: Endpoint,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
@@ -60,53 +62,23 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
         cancellation_token: CancellationToken,
-    ) -> Result<Self, KvSchedulerError> {
-        Self::start_with_admission_strategies(
-            component,
-            block_size,
-            workers_with_configs,
-            selector,
-            kv_router_config,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            model_name,
-            worker_type,
-            cancellation_token,
-            PolicyClassAdmissionStrategies::new(),
-        )
-        .await
-    }
-
-    #[expect(clippy::too_many_arguments)]
-    pub async fn start_with_admission_strategies(
-        component: Component,
-        block_size: u32,
-        workers_with_configs: RuntimeConfigWatch,
-        selector: Sel,
-        kv_router_config: &KvRouterConfig,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        model_name: Option<&str>,
-        worker_type: &'static str,
-        cancellation_token: CancellationToken,
-        admission_strategies: PolicyClassAdmissionStrategies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
-        let router_id = component.drt().discovery().instance_id();
+        let router_id = endpoint.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
-            component.clone(),
+            endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
-            worker_type,
+            scheduler_load,
             cancellation_token.child_token(),
         )
         .await
@@ -133,24 +105,48 @@ where
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
 
-        let inner = Arc::new(
-            LocalScheduler::new_with_policy_profile_and_admission_strategies(
-                slots,
-                workers_with_configs.clone(),
-                profile,
-                block_size,
-                selector,
-                prefill_load_estimator,
-                overlap_scores_refresh,
-                overloaded_worker_provider,
-                queue_recheck_interval,
-                kv_router_config.router_track_prefill_tokens,
-                cancellation_token.child_token(),
-                worker_type,
-                watch_worker_configs,
-                admission_strategies,
-            )?,
-        );
+        let inner = Arc::new(LocalScheduler::new_with_policy_profile(
+            slots,
+            workers_with_configs.clone(),
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+            queue_recheck_interval,
+            kv_router_config.router_track_prefill_tokens,
+            cancellation_token.child_token(),
+            worker_type,
+            watch_worker_configs,
+        )?);
+        if worker_type == WORKER_TYPE_PREFILL {
+            let locality_observer: NonMaxOverlapSelectionObserver =
+                Arc::new(move |request_id, selection| {
+                    let overlap_blocks_lost = selection.overlap_blocks_lost();
+                    if let Some(metrics) = RouterRequestMetrics::get() {
+                        metrics.observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
+                    }
+                    tracing::debug!(
+                        request_id,
+                        worker_type,
+                        selected_worker_id = selection.selected_worker.worker_id,
+                        selected_dp_rank = selection.selected_worker.dp_rank,
+                        selected_overlap_blocks = selection.selected_overlap_blocks,
+                        highest_overlap_worker_id = selection.highest_overlap_worker.worker_id,
+                        highest_overlap_dp_rank = selection.highest_overlap_worker.dp_rank,
+                        highest_overlap_blocks = selection.highest_overlap_blocks,
+                        overlap_blocks_lost,
+                        "Router selected a worker with lower KV cache overlap"
+                    );
+                });
+            if !inner.set_non_max_overlap_selection_observer(locality_observer) {
+                return Err(KvSchedulerError::InitFailed(
+                    "non-max-overlap observer is already installed".to_string(),
+                ));
+            }
+        }
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
@@ -358,6 +354,14 @@ where
         self.update_queue_metrics();
     }
 
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        self.inner.select_without_admission(request).await
+    }
+
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.inner.register_workers(worker_ids);
     }
@@ -378,8 +382,15 @@ where
         Ok(())
     }
 
-    pub async fn mark_dispatched(&self, request_id: &str) {
-        self.inner.mark_dispatched(request_id).await;
+    /// Release `request_id` only if it is still booked on `worker`.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.inner.free_if_worker(request_id, worker).await?;
+        self.update_queue_metrics();
+        Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
@@ -457,6 +468,7 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -518,7 +530,7 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            component.endpoint("generate"),
             64,
             cfg_rx,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
@@ -526,8 +538,14 @@ mod tests {
             None,
             None::<Arc<NoopOverlapScoresRefresh>>,
             None,
+            None,
             Some("test-model"),
             "decode",
+            super::super::routing_load::scheduler_load_channel(
+                super::super::RouterLoadSource::Decode,
+                cancellation_token.child_token(),
+            )
+            .0,
             cancellation_token.clone(),
         )
         .await

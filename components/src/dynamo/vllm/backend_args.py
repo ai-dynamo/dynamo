@@ -1,15 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(DIS-2240): Remove deprecated multimodal flags across engine
-
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
 import argparse
 import logging
 import os
 import warnings
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -19,6 +17,12 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .benchmark_points import (
+    BENCHMARK_MODES,
+    BenchmarkMode,
+    BenchmarkPoints,
+    load_benchmark_points_file,
+)
 from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,28 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 def _warn_deprecated(message: str) -> None:
     logger.warning(message)
     warnings.warn(message, DeprecationWarning, stacklevel=3)
+
+
+# Env vars of the removed multimodal role flags. The flags fail at argparse,
+# but a leftover env var would otherwise be silently ignored and start the
+# worker in the wrong role — reject it with the migration path instead.
+_REMOVED_MULTIMODAL_ENV_VARS = {
+    "DYN_VLLM_MULTIMODAL_ENCODE_WORKER": "--disaggregation-mode=encode",
+    "DYN_VLLM_MULTIMODAL_WORKER": (
+        "--disaggregation-mode=agg or --disaggregation-mode=prefill"
+    ),
+    "DYN_VLLM_MULTIMODAL_DECODE_WORKER": "--disaggregation-mode=decode",
+}
+
+
+def _reject_removed_multimodal_env_vars() -> None:
+    for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip().lower() in ("true", "1", "yes", "on"):
+            raise ValueError(
+                f"{env_var} is no longer supported; use --enable-multimodal with "
+                f"{replacement} (env: DYN_VLLM_ENABLE_MULTIMODAL, "
+                "DYN_VLLM_DISAGGREGATION_MODE)."
+            )
 
 
 class _StoreExplicitBenchmarkOption(argparse.Action):
@@ -66,24 +92,6 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--is-prefill-worker",
-            env_var="DYN_VLLM_IS_PREFILL_WORKER",
-            default=False,
-            help="DEPRECATED: use --disaggregation-mode=prefill. "
-            "Enable prefill functionality for this worker.",
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--is-decode-worker",
-            env_var="DYN_VLLM_IS_DECODE_WORKER",
-            default=False,
-            help="DEPRECATED: use --disaggregation-mode=decode. "
-            "Mark this as a decode worker which does not publish KV events.",
-        )
-
-        add_negatable_bool_argument(
-            g,
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
@@ -97,27 +105,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_ROUTE_TO_ENCODER",
             default=False,
             help="Enable routing to separate encoder workers for multimodal processing.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-encode-worker",
-            env_var="DYN_VLLM_MULTIMODAL_ENCODE_WORKER",
-            default=False,
-            help="Run as multimodal encode worker component for processing images/videos.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-worker",
-            env_var="DYN_VLLM_MULTIMODAL_WORKER",
-            default=False,
-            help="Run as multimodal worker component for LLM inference with multimodal data.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-decode-worker",
-            env_var="DYN_VLLM_MULTIMODAL_DECODE_WORKER",
-            default=False,
-            help="Run as multimodal decode worker in disaggregated mode.",
         )
         add_negatable_bool_argument(
             g,
@@ -190,6 +177,26 @@ class DynamoVllmArgGroup(ArgGroup):
             "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--realtime",
+            env_var="DYN_VLLM_REALTIME",
+            default=False,
+            help="Serve a ModelType.Realtime bidirectional endpoint through "
+            "the OpenAI /v1/realtime protocol. Standard vLLM currently "
+            "supports transcription sessions only. Aggregated workers only.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--classify-worker",
+            env_var="DYN_VLLM_CLASSIFY_WORKER",
+            default=False,
+            help="Run as a sequence-classification worker, exposing /v1/classify and "
+            "/v1/pooling endpoints. Engine must be started with vLLM's --runner pooling. "
+            "Skips KV events, KV router registration, and InstrumentedScheduler injection.",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -231,7 +238,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--benchmark-mode",
             env_var="DYN_BENCHMARK_MODE",
             default=None,
-            choices=["prefill", "decode", "agg"],
+            choices=BENCHMARK_MODES,
             help=(
                 "Run self-benchmark on startup before accepting requests. "
                 "Sweeps iteration-total prefill tokens/KV reads/batch size and/or "
@@ -240,6 +247,21 @@ class DynamoVllmArgGroup(ArgGroup):
                 "geometrically to the engine limit. KV-read axes use complete "
                 "power-of-two block ladders plus their exact feasible maxima, "
                 "then apply the configured per-axis sample limits."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-points-file",
+            env_var="DYN_BENCHMARK_POINTS_FILE",
+            default=None,
+            help=(
+                "JSON file containing explicit pure prefill/decode benchmark points "
+                "applied uniformly to every data-parallel rank. The file completely "
+                "replaces generated grid sampling for the phases selected by "
+                "--benchmark-mode; generated-grid sampling options, including legacy "
+                "granularity options, are ignored. It is read and normalized once "
+                "before vLLM workers start, then the same contents are forwarded to "
+                "every rank."
             ),
         )
         add_argument(
@@ -394,6 +416,19 @@ class DynamoVllmArgGroup(ArgGroup):
                 "(default: /tmp/benchmark_results.json)."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-collect-imbalanced",
+            env_var="DYN_BENCHMARK_COLLECT_IMBALANCED",
+            default=False,
+            help=(
+                "Also measure batches whose requests differ in length. Those "
+                "points come from an explicit --benchmark-points-file carrying "
+                "per-request rows, and are skipped unless this is set. Off by "
+                "default -- they exist to calibrate an intra-batch work-delta "
+                "correction and cost several forward passes per coordinate."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-timeout",
@@ -416,15 +451,10 @@ class DynamoVllmConfig(ConfigBase):
     disaggregation_mode: Union[
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
-    is_prefill_worker: bool
-    is_decode_worker: bool
     use_vllm_tokenizer: bool
 
     # Multimodal
     route_to_encoder: bool
-    multimodal_encode_worker: bool
-    multimodal_worker: bool
-    multimodal_decode_worker: bool
     enable_multimodal: bool
     # Enables RL-style token-in/token-out defaults.
     enable_rl: bool = False
@@ -434,6 +464,8 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    realtime: bool = False
+    classify_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -447,8 +479,13 @@ class DynamoVllmConfig(ConfigBase):
     # GMS shadow mode
     gms_shadow_mode: bool = False
 
+    # Extra served names beyond the primary, parsed from --served-model-name.
+    # None (not []) since ConfigBase copies class defaults by reference.
+    served_model_aliases: Optional[List[str]] = None
+
     # Benchmark / self-profiling
-    benchmark_mode: Optional[str] = None
+    benchmark_mode: Optional[BenchmarkMode] = None
+    benchmark_points_file: Optional[str] = None
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
@@ -462,25 +499,46 @@ class DynamoVllmConfig(ConfigBase):
     decode_max_kv_read_token_samples_explicit: bool = False
     decode_max_batch_size_samples_explicit: bool = False
     prefix_max_batch_size_samples_explicit: bool = False
+    # Whether to measure the manifest's imbalanced prefill points (those
+    # carrying explicit rows or a partition). Off by default: an imbalanced
+    # point costs a forward pass but only pays off for work-delta calibration,
+    # and a manifest written for that purpose is still useful without them --
+    # its uniform points are an ordinary sweep. Leaving them out therefore
+    # means "collect less", never "collect something different".
+    benchmark_collect_imbalanced: bool = False
+    # None -> probe the model config for a sparse-attention index budget.
+    # None -> a sibling of --benchmark-output-path.
     benchmark_prefill_granularity: Optional[int] = None
     benchmark_prefill_kv_read_granularity: Optional[int] = None
     benchmark_prefill_batch_granularity: Optional[int] = None
     benchmark_decode_length_granularity: Optional[int] = None
     benchmark_decode_batch_granularity: Optional[int] = None
+    _benchmark_points: Optional[BenchmarkPoints] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
+        _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
-        self._validate_multimodal_role_exclusivity()
-        self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
+        self._validate_realtime_worker_exclusivity()
+        self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
+        self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
 
-    def _resolve_legacy_benchmark_sampling(self) -> None:
+    def _load_explicit_benchmark_points(self) -> None:
+        self._benchmark_points = None
+        if self.benchmark_points_file is None:
+            return
         if self.benchmark_mode is None:
+            raise ValueError("--benchmark-points-file requires --benchmark-mode")
+
+        self._benchmark_points = load_benchmark_points_file(self.benchmark_points_file)
+
+    def _resolve_legacy_benchmark_sampling(self) -> None:
+        if self.benchmark_mode is None or self._benchmark_points is not None:
             return
 
         mappings = (
@@ -550,21 +608,25 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_benchmark_sampling(self) -> None:
         if self.benchmark_mode is None:
             return
-        uniform_limits = (
-            "prefill_max_new_token_samples",
-            "prefill_max_kv_read_token_samples",
-            "decode_max_kv_read_token_samples",
-            "decode_max_batch_size_samples",
-        )
-        for name in uniform_limits:
-            if getattr(self, name) < 2:
-                raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
-        if self.prefix_max_batch_size_samples < 1:
-            raise ValueError("--prefix-max-batch-size-samples must be positive")
+        if self._benchmark_points is None:
+            uniform_limits = (
+                "prefill_max_new_token_samples",
+                "prefill_max_kv_read_token_samples",
+                "decode_max_kv_read_token_samples",
+                "decode_max_batch_size_samples",
+            )
+            for name in uniform_limits:
+                if getattr(self, name) < 2:
+                    raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
+            if self.prefix_max_batch_size_samples < 1:
+                raise ValueError("--prefix-max-batch-size-samples must be positive")
         if self.benchmark_warmup_iterations < 0:
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
             raise ValueError("--benchmark-timeout must be positive")
+        # Fail at startup rather than at manifest-writing time: a repeat count
+        # of zero produces a manifest with no prefill rows, and the run that
+        # reads it back looks like one that simply had nothing to measure.
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -574,186 +636,29 @@ class DynamoVllmConfig(ConfigBase):
             )
 
     def _resolve_disaggregation_mode(self) -> None:
-        """Resolve disaggregation_mode from new enum or legacy boolean flags.
-
-        Priority:
-        1. If --disaggregation-mode was explicitly provided, use it.
-           Raise if legacy booleans are also set.
-        2. If legacy --is-prefill-worker or --is-decode-worker is set,
-           emit DeprecationWarning and translate to enum.
-        3. If legacy multimodal flags are set, translate to enum,
-           emit DeprecationWarning and translate to enum, raise if conflicting
-           with --disaggregation-mode.
-        3. Apply default (AGGREGATED) if nothing was provided.
-        4. Sync boolean fields from the resolved enum value.
-        """
-        # Convert string to enum (non-None means explicitly provided)
-        explicit_mode = self.disaggregation_mode is not None
+        """Resolve disaggregation_mode from its CLI value."""
         if isinstance(self.disaggregation_mode, str):
             if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
             else:
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
 
-        # Check for legacy boolean flags
-        has_legacy = self.is_prefill_worker or self.is_decode_worker
-
-        if has_legacy and explicit_mode:
-            raise ValueError(
-                "Cannot combine --is-prefill-worker/--is-decode-worker with "
-                "--disaggregation-mode. Use only --disaggregation-mode."
-            )
-
-        if has_legacy:
-            if self.is_prefill_worker and self.is_decode_worker:
-                raise ValueError(
-                    "Cannot set both --is-prefill-worker and --is-decode-worker"
-                )
-            if self.is_prefill_worker:
-                warnings.warn(
-                    "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                self.disaggregation_mode = DisaggregationMode.PREFILL
-            elif self.is_decode_worker:
-                warnings.warn(
-                    "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                self.disaggregation_mode = DisaggregationMode.DECODE
-
-        # Porting multimodal legacy flags
-        if (
-            self.multimodal_decode_worker
-            or self.multimodal_encode_worker
-            or self.multimodal_worker
-        ):
-            self._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
-        # Apply default if neither new flag nor legacy flags were provided
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED
-
-        # Sync booleans from enum (canonical source of truth)
-        self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
-        self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
-
-    def _resolve_disaggregation_model_from_legacy_multimodal_flags(self) -> None:
-        """
-        Resolve disaggregation mode from legacy multimodal flags, emit DeprecationWarning
-        and raise ValueError if conflicting with --disaggregation-mode.
-
-        Transformation rules:
-        1. If --multimodal-decode-worker is set, use DisaggregationMode.DECODE.
-        2. If --multimodal-encode-worker is set, use DisaggregationMode.ENCODE.
-        3. If --multimodal-worker is set, default to DisaggregationMode.AGGREGATED unless
-           --disaggregation-mode is set.
-        """
-        if self.multimodal_decode_worker:
-            _warn_deprecated(
-                "--multimodal-decode-worker is deprecated; use "
-                "--enable-multimodal --disaggregation-mode=decode. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.DECODE
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
-                )
-            self.disaggregation_mode = DisaggregationMode.DECODE
-            self.enable_multimodal = True
-        if self.multimodal_encode_worker:
-            _warn_deprecated(
-                "--multimodal-encode-worker is deprecated; use "
-                "--enable-multimodal --disaggregation-mode=encode. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.ENCODE
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
-                )
-            self.disaggregation_mode = DisaggregationMode.ENCODE
-            self.enable_multimodal = True
-        if self.multimodal_worker:
-            _warn_deprecated(
-                "--multimodal-worker is deprecated; use --enable-multimodal "
-                "with --disaggregation-mode=pd or --disaggregation-mode=prefill. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.AGGREGATED
-                and self.disaggregation_mode != DisaggregationMode.PREFILL
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
-                )
-            # only set 'self.disaggregation_mode' if it is not already set, '--multimodal-worker' may be specified with
-            # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
-            if self.disaggregation_mode is None:
-                self.disaggregation_mode = DisaggregationMode.AGGREGATED
-            self.enable_multimodal = True
-
-    def _count_multimodal_roles(self) -> int:
-        """Return the number of multimodal worker roles set (0 or 1 allowed).
-
-        Note: --route-to-encoder is a modifier flag, not a worker type.
-        """
-        return sum(
-            [
-                bool(self.multimodal_encode_worker),
-                bool(self.multimodal_worker),
-                bool(self.multimodal_decode_worker),
-            ]
-        )
-
-    def _validate_multimodal_role_exclusivity(self) -> None:
-        """Ensure only one multimodal role is set at a time."""
-        if self._count_multimodal_roles() > 1:
-            raise ValueError(
-                "Use only one of --multimodal-encode-worker, --multimodal-worker, "
-                "--multimodal-decode-worker"
-            )
-
-    def _validate_multimodal_requires_flag(self) -> None:
-        """Require --enable-multimodal when any multimodal role is set."""
-        if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
-            raise ValueError(
-                "Use --enable-multimodal when enabling any multimodal component"
-            )
 
     def _validate_custom_encoder(self) -> None:
         """Validate the aggregated CustomEncoder configuration.
 
         The encoder runs in-process in a single aggregated worker on the
-        token-in/token-out path and produces image embeds for the mixed
-        EmbedsPrompt, so it is a multimodal, aggregated-only, token-mode
-        component. Enforce those here (fail fast) instead of silently bypassing
+        token-in/token-out path and produces decoder-adapted image artifacts, so
+        it is a multimodal, aggregated-only, token-mode component. Enforce those
+        here (fail fast) instead of silently bypassing
         the multimodal gate at request time, no-op'ing in a decode worker that
         never reaches the custom-encoder branch, or loading the encoder in
         --use-vllm-tokenizer text mode where it is never invoked.
         """
         if not self.custom_encoder_class:
             return
-        if (
-            self.multimodal_worker
-            or self.multimodal_encode_worker
-            or self.multimodal_decode_worker
-        ):
-            raise ValueError(
-                "--custom-encoder-class is incompatible with the legacy multimodal "
-                "role flags (--multimodal-worker / --multimodal-encode-worker / "
-                "--multimodal-decode-worker): the custom encoder is its own "
-                "aggregated multimodal path and bypasses vLLM's built-in "
-                "multimodal processing."
-            )
         if not self.enable_multimodal:
             raise ValueError(
                 "--custom-encoder-class requires --enable-multimodal "
@@ -794,7 +699,7 @@ class DynamoVllmConfig(ConfigBase):
                 f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
                 "Pooling models do not have prefill/decode phases."
             )
-        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+        if self.enable_multimodal:
             raise ValueError(
                 "--embedding-worker cannot be combined with multimodal flags."
             )
@@ -805,4 +710,79 @@ class DynamoVllmConfig(ConfigBase):
                 "generation scheduler and not compatible with pooling engines. "
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
+            )
+
+    def _validate_realtime_worker_exclusivity(self) -> None:
+        """Realtime serving uses a dedicated aggregated bidirectional worker."""
+        if not self.realtime:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+            )
+        if self.embedding_worker:
+            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+        if self.classify_worker:
+            raise ValueError("--realtime cannot be combined with --classify-worker.")
+        for enabled, option in (
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(f"--realtime cannot be combined with {option}.")
+        if self.enable_multimodal:
+            raise ValueError(
+                "--realtime cannot be combined with multimodal worker flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError("--realtime cannot be combined with --enable-lora.")
+
+    def _validate_classify_worker_exclusivity(self) -> None:
+        """Classify worker is aggregated-only and exclusive of multimodal /
+        embedding roles. Mirrors the embedding-worker constraints — both are
+        pooling roles with no prefill/decode phases."""
+        if not self.classify_worker:
+            return
+        if self.embedding_worker:
+            raise ValueError(
+                "--classify-worker and --embedding-worker are mutually exclusive; "
+                "a worker registers exactly one pooling model type."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--classify-worker is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                "Pooling models do not have prefill/decode phases."
+            )
+        if self.enable_multimodal:
+            raise ValueError(
+                "--classify-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--classify-worker cannot be combined with --benchmark-mode. "
+                "Benchmark mode injects InstrumentedScheduler, which is a "
+                "generation scheduler and not compatible with pooling engines."
+            )
+        if self.headless:
+            raise ValueError(
+                "--classify-worker cannot be combined with --headless. "
+                "Headless mode returns before WorkerFactory.create(), so the "
+                "classify/pooling endpoint would never be registered."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--classify-worker cannot be combined with --enable-lora. "
+                "The pooling-family handler does not forward lora_request to "
+                "engine_client.encode(), so an adapter-targeted request would "
+                "silently run against the base model."
             )

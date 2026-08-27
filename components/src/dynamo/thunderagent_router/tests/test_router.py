@@ -20,12 +20,18 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider that returns a fixed snapshot."""
+    """Stand-in for WorkerCapacityProvider with configurable worker state."""
 
     workers: dict[int, int] = field(default_factory=dict)
+    live_workers: Optional[set[int]] = None
 
     def snapshot(self) -> dict[int, int]:
         return dict(self.workers)
+
+    def live_worker_ids(self) -> set[int]:
+        if self.live_workers is not None:
+            return set(self.live_workers)
+        return set(self.workers)
 
 
 def make_router(
@@ -61,6 +67,58 @@ async def test_after_request_records_real_tokens():
 
 
 @pytest.mark.asyncio
+async def test_status_snapshot_reports_programs_and_worker_utilization():
+    workers = {
+        1: 1000,
+        2: 500,
+    }
+    router, _ = make_router(capacity_workers=workers)
+
+    await router.before_request("p1", estimated_prompt_tokens=100)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=25)
+    await router.before_request("p2", estimated_prompt_tokens=50)
+
+    snapshot = await router.status_snapshot()
+
+    assert snapshot["programs_total"] == 2
+    assert snapshot["paused_total"] == 0
+    assert snapshot["lifecycle_counts"]["active"] == 2
+    assert snapshot["status_counts"]["acting"] == 1
+    assert snapshot["status_counts"]["reasoning"] == 1
+    assert snapshot["workers"]["1"]["capacity"] == 1000
+    assert snapshot["workers"]["1"]["used"] == 225
+    assert snapshot["workers"]["1"]["active_programs"] == 1
+    assert {
+        (program["program_id"], program["assigned_worker_id"])
+        for program in snapshot["programs"]
+    } == {("p1", 1), ("p2", 2)}
+
+
+@pytest.mark.asyncio
+async def test_metrics_snapshot_reports_lifecycle_counters_and_gauges():
+    router, _ = make_router(capacity_workers={1: 1000})
+
+    await router.before_request("p1", estimated_prompt_tokens=100)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=20)
+    assert await router.end_program("p1") is True
+
+    async def fail_status_snapshot() -> dict:
+        raise AssertionError("metrics_snapshot must not build detailed status rows")
+
+    router.status_snapshot = fail_status_snapshot  # type: ignore[method-assign]
+
+    metrics = await router.metrics_snapshot()
+
+    assert metrics["counters"]["programs_created_total"] == 1
+    assert metrics["counters"]["programs_ended_total"] == 1
+    assert metrics["counters"]["requests_admitted_total"] == 1
+    assert metrics["counters"]["worker_assignments_total"] == 1
+    assert metrics["gauges"]["programs_total"] == 0
+    assert metrics["gauges"]["paused_total"] == 0
+    assert metrics["gauges"]["workers_total"] == 1
+
+
+@pytest.mark.asyncio
 async def test_before_request_records_exact_prompt_estimate_before_admission():
     router, _ = make_router()
     await router.before_request("p1", estimated_prompt_tokens=1234)
@@ -76,6 +134,50 @@ async def test_assigned_worker_hint_reflects_sticky_assignment():
     await router.assign_worker("p1", 3)
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
     assert decision.assigned_worker_hint == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_assignment_moves_to_replacement():
+    router, capacity = make_router(capacity_workers={1: 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {1, 2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.live_workers = {2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+    assert router._stat_worker_assignments == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_replacement_bypasses_new_program_fairness_gate():
+    router, capacity = make_router(capacity_workers={1: 300})
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    waiter = asyncio.create_task(
+        router.before_request("waiting", estimated_prompt_tokens=100)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert router._table.programs["waiting"].lifecycle == ProgramLifecycle.PAUSED
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {2}
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 @pytest.mark.asyncio
@@ -103,6 +205,8 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     assert decision.was_paused is True
     assert decision.priority_jump == cfg.resume_priority_boost
     assert decision.assigned_worker_hint == 1
+    metrics = await router.metrics_snapshot()
+    assert metrics["counters"]["worker_assignments_total"] == 2
 
 
 @pytest.mark.asyncio
@@ -315,3 +419,272 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
     assert paused == 6
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_of_new_program_leaves_no_trace():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=0.5,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+    assert router._worker_used(1) == 950
+
+    waiter = asyncio.create_task(
+        router.before_request("new", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert "new" in router._table.paused
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert "new" not in router._table.programs
+    assert "new" not in router._table.paused
+
+    assert await router.end_program("existing") is True
+    decision = await asyncio.wait_for(
+        router.before_request("other", estimated_prompt_tokens=50), timeout=1.5
+    )
+    assert decision.was_paused is False
+    assert decision.assigned_worker_hint == 1
+
+    assignments_before_tick = router._stat_worker_assignments
+    await router._scheduler_tick()
+
+    assert "new" not in router._table.programs
+    assert router._worker_used(1) == 150
+    assert router._stat_worker_assignments == assignments_before_tick
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_of_existing_program_restores_prior_turn():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=2.0,
+    )
+    router, _ = make_router(config=cfg)
+
+    await router.before_request("p1")
+    await router.assign_worker("p1", 1)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("p1")
+
+    program = router._table.programs["p1"]
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+    assert program.status == ProgramStatus.ACTING
+    assert program.step_count == 1
+    assert program.token_total == 110
+    assert program.assigned_worker_id is None
+    assert "p1" in router._table.paused
+    waiting_before = program.waiting
+    acting_since_before = program.acting_since
+    assert waiting_before is not None
+    assert not waiting_before.is_set()
+
+    waiter = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=500)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert router._table.programs["p1"] is program
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+    assert program.status == ProgramStatus.ACTING
+    assert program.step_count == 1
+    assert program.token_total == 110
+    assert program.assigned_worker_id is None
+    assert program.acting_since == acting_since_before
+    assert "p1" in router._table.paused
+    assert program.waiting is waiting_before
+    assert not program.waiting.is_set()
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+
+    first = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(first), timeout=0.05)
+    assert "shared" in router._table.paused
+    first_program = router._table.programs["shared"]
+
+    second = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+    assert router._table.programs["shared"] is first_program
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await asyncio.sleep(0)
+
+    assert "shared" in router._table.programs
+    assert "shared" in router._table.paused
+    assert router._table.programs["shared"] is not first_program
+    assert router._table.programs["shared"].step_count == 1
+
+    assert await router.end_program("existing") is True
+    await router._scheduler_tick()
+
+    decision = await asyncio.wait_for(second, timeout=1.5)
+    assert decision.was_paused is True
+    assert decision.assigned_worker_hint == 1
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_serializes_a_later_turn():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+    )
+    router, _ = make_router(config=cfg)
+
+    await router.before_request("p1")
+    await router.assign_worker("p1", 1)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("p1")
+    program = router._table.programs["p1"]
+
+    cancelled = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=500)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(cancelled), timeout=0.05)
+
+    later = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=777)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(later), timeout=0.05)
+    assert program.token_total == 500
+    assert program.step_count == 2
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    await asyncio.sleep(0)
+
+    assert router._table.programs["p1"] is program
+    assert program.token_total == 777
+    assert program.step_count == 2
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+
+    later.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await later
+
+    assert router._table.programs["p1"] is program
+    assert program.token_total == 110
+    assert program.step_count == 1
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_two_cancelled_admissions_of_new_program_leave_no_trace():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    await router.before_request("existing", estimated_prompt_tokens=850)
+
+    first = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(first), timeout=0.05)
+
+    second = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=75)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+
+    assert "shared" not in router._table.programs
+    assert "shared" not in router._table.paused
+    assert "shared" not in router._admission_gates
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_rollback_completes_when_cancellation_is_redelivered():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+
+    waiter = asyncio.create_task(
+        router.before_request("new", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert "new" in router._table.paused
+
+    await router._lock.acquire()
+    try:
+        waiter.cancel()
+        await asyncio.sleep(0.01)
+        assert "new" in router._table.programs, "rollback should be parked on the lock"
+        waiter.cancel()
+        await asyncio.sleep(0.01)
+        assert "new" in router._table.programs
+    finally:
+        router._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert "new" not in router._table.programs
+    assert "new" not in router._table.paused

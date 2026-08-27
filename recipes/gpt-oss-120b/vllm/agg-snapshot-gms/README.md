@@ -9,21 +9,27 @@ This experimental recipe creates a checkpoint before starting a single-GPU
 vLLM worker. Dynamo Snapshot restores the worker process while GPU Memory
 Service (GMS) reloads model weights from shared storage.
 
-The manifest uses an immutable Dynamo main-branch nightly. Build the Snapshot
-agent and placeholder from the same checkout so their checkpoint tooling
-matches the runtime.
+The generic `deploy.yaml` uses example image tags. Build a placeholder from the
+same vLLM runtime you serve, and install a Snapshot agent whose CRIU tooling
+matches that placeholder.
+
+GMS + Snapshot is still experimental. The operator admits IntraPod GMS with
+`checkpoint.enabled` (InterPod GMS and Snapshot-plus-failover are rejected).
+See [Snapshotting GPU Workers](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md).
 
 ## Prerequisites
 
-- Dynamo Platform built from a commit that contains the manifest's nightly
-  commit, with checkpointing and the `gmsSnapshot` feature gate enabled.
+- Dynamo Platform with checkpointing enabled and a Snapshot operator that
+  serves `nvidia.com/v1alpha1` `PodSnapshot` resources.
 - Kubernetes 1.34 or later with stable Dynamic Resource Allocation (DRA), a
   healthy NVIDIA GPU DRA driver, and the `gpu.nvidia.com` `DeviceClass`. See
   the [NVIDIA GPU DRA driver installation guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html).
-- One x86_64 B200 node with the NVIDIA container runtime and an NVIDIA R610 or
-  newer driver. See
-  [Cold Start Optimizations and Resiliency Support Matrix](../../../../docs/kubernetes/cold-start-and-resiliency.md)
-  and [Snapshotting GPU Workers](../../../../docs/kubernetes/snapshot.md).
+- One x86_64 B200 node with the NVIDIA container runtime. GMS + Snapshot
+  documents NVIDIA driver R610 or newer; a functional test has also passed on
+  driver 595.58. See
+  [Snapshotting GPU Workers](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md)
+  and
+  [Compatibility](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/general/compatibility.mdx).
 - A filesystem-mode, ReadWriteMany (RWX) storage class for the model and
   checkpoint PVCs.
 - A container registry available to the GPU nodes.
@@ -54,8 +60,6 @@ Configure Dynamo Platform with:
 
 ```yaml
 dynamo-operator:
-  featureGates:
-    gmsSnapshot: true
   checkpoint:
     enabled: true
     storage:
@@ -66,7 +70,7 @@ dynamo-operator:
 ```
 
 This configuration requires an existing `snapshot-pvc` in the workload
-namespace.
+namespace unless you also set `checkpoint.storage.pvc.create: true`.
 
 ## Create Shared Storage
 
@@ -100,54 +104,53 @@ The operator mounts this PVC as `checkpoint-storage` in the checkpoint Job. The
 manifest declares the same volume on the restored worker so `gms-loader` can
 read the saved weights.
 
-## Build the Snapshot Images
+## Build the Placeholder Image
 
-The main nightly does not publish a matching Snapshot agent or placeholder
-image. Build both from this checkout, push them to your registry, and update
-`deploy.yaml` with `PLACEHOLDER_IMAGE`:
+The public vLLM runtime does not include restore tooling. Build a placeholder
+from the same runtime with
+[`deploy/checkpoint-placeholder`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/checkpoint-placeholder/Dockerfile).
+The Snapshot agent bind-mounts `criu`, `cuda-checkpoint`, and `nsrestore` into
+that image at restore time:
 
 ```bash
 export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260717-5930e58
-export SNAPSHOT_AGENT_IMAGE=registry.example.com/dynamo/snapshot-agent:20260717
 export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:20260717-5930e58
 
-make -C deploy/snapshot docker-build-agent \
-  IMG="${SNAPSHOT_AGENT_IMAGE}"
-make -C deploy/snapshot docker-push-agent \
-  IMG="${SNAPSHOT_AGENT_IMAGE}"
-make -C deploy/snapshot docker-build-placeholder \
-  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
-make -C deploy/snapshot docker-push-placeholder \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
+docker build \
+  --build-arg BASE_IMAGE="${RUNTIME_IMAGE}" \
+  -t "${PLACEHOLDER_IMAGE}" \
+  deploy/checkpoint-placeholder
+docker push "${PLACEHOLDER_IMAGE}"
 ```
 
-The placeholder retains the matching Dynamo, vLLM, and GMS runtime and adds the
-checkpoint-and-restore tools. Use immutable tags for both derived images.
+Update `deploy.yaml` so the worker `main` container uses `PLACEHOLDER_IMAGE`
+and the frontend, `gms-saver`, and `gms-loader` containers use `RUNTIME_IMAGE`.
+Use immutable tags.
+
+The Snapshot agent and operator images come from
+[github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot); do not
+build them from this repository.
 
 ## Install the Snapshot Agent
 
-Install the local Snapshot chart once in an infrastructure namespace. This
+Install the published Snapshot chart once in an infrastructure namespace. This
 `podMount` configuration lets the operator mount each workload namespace's PVC
 into its checkpoint and restore pods:
 
 ```bash
 export SNAPSHOT_NAMESPACE=dynamo-snapshot
-export SNAPSHOT_AGENT_REPOSITORY="${SNAPSHOT_AGENT_IMAGE%:*}"
-export SNAPSHOT_AGENT_TAG="${SNAPSHOT_AGENT_IMAGE##*:}"
 
 helm --kube-context "${KUBE_CONTEXT}" upgrade --install snapshot \
-  ./deploy/helm/charts/snapshot \
+  oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version 0.1.0-alpha.1 \
   --namespace "${SNAPSHOT_NAMESPACE}" \
   --create-namespace \
   --set storage.accessMode=podMount \
   --set storage.pvc.create=false \
-  --set rbac.namespaceRestricted=false \
-  --set daemonset.image.repository="${SNAPSHOT_AGENT_REPOSITORY}" \
-  --set daemonset.image.tag="${SNAPSHOT_AGENT_TAG}" \
-  --set-json 'daemonset.imagePullSecrets=[]'
+  --set rbac.namespaceRestricted=false
 
-kubectl --context "${KUBE_CONTEXT}" rollout status daemonset/snapshot-agent \
+kubectl --context "${KUBE_CONTEXT}" rollout status \
+  daemonset/snapshot-agent \
   -n "${SNAPSHOT_NAMESPACE}" --timeout=300s
 kubectl --context "${KUBE_CONTEXT}" get pods \
   -n "${SNAPSHOT_NAMESPACE}" \
@@ -155,8 +158,7 @@ kubectl --context "${KUBE_CONTEXT}" get pods \
 ```
 
 If the registry needs authentication, create its pull secret in
-`${SNAPSHOT_NAMESPACE}` and configure `daemonset.imagePullSecrets` instead of
-clearing the chart default.
+`${SNAPSHOT_NAMESPACE}` and configure `daemonset.imagePullSecrets`.
 
 ## Download the Model
 
@@ -324,6 +326,10 @@ manifest and Snapshot images built from the same main-branch checkout:
 
 These values are a functional baseline, not a performance guarantee. Storage,
 node, driver, and cluster conditions affect timings.
+
+The available validation node used NVIDIA driver 595.58, below the documented
+R610+ GMS support floor. The functional test passed, but R610+ remains the
+recipe prerequisite.
 
 ## Artifact Layout and Cleanup
 

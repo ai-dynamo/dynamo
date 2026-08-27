@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::future;
 use std::sync::Arc;
 
 use crate::common::protocols::MockEngineArgs;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
 };
@@ -19,14 +19,11 @@ use dynamo_kv_router::{
 pub(super) struct ReplayNoopPublisher;
 
 impl SequencePublisher for ReplayNoopPublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
+    fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        Ok(())
     }
 
-    fn publish_load(&self, _load: ActiveLoad) {}
+    fn publish_scheduler_load(&self, _load: SchedulerLoadSnapshot) {}
 
     fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
@@ -110,8 +107,28 @@ pub(super) fn replay_slots(
     ))
 }
 
-pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
-    DefaultWorkerSelector::new(Some(config.clone()), "replay")
+pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
+    replay_selector_with_seed(config, None)
+}
+
+pub(super) fn replay_selector_with_seed(
+    config: &KvRouterConfig,
+    selector_seed: Option<u64>,
+) -> anyhow::Result<DefaultWorkerSelector> {
+    if let Some(instance) = config
+        .selected_worker_selection_policy_instance()
+        .map_err(anyhow::Error::from)?
+    {
+        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+    }
+
+    Ok(match selector_seed {
+        #[cfg(feature = "replay-bench")]
+        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
+        #[cfg(not(feature = "replay-bench"))]
+        Some(_) => unreachable!("canonical KV Router replay requires the replay-bench feature"),
+        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+    })
 }
 
 pub(crate) fn replay_router_config(
@@ -123,4 +140,40 @@ pub(crate) fn replay_router_config(
         config.router_queue_policy = policy;
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_selector_rejects_custom_worker_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: test
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        let error = match replay_selector(&config) {
+            Err(error) => error,
+            Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+        );
+    }
 }

@@ -13,20 +13,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
+use dynamo_llm::protocols::common::extensions::{
+    HEADER_TENANT_ID, last_non_empty_trimmed_value, request_cache_salt,
+};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
-use crate::envoy_helpers::find_header;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -71,10 +72,14 @@ fn cache_namespace_with_header_override(
     headers: &[(String, String)],
     body_cache_namespace: Option<String>,
 ) -> Option<String> {
-    find_header(headers, HEADER_TENANT_ID)
-        .filter(|tenant_id| !tenant_id.is_empty())
-        .map(str::to_owned)
-        .or(body_cache_namespace)
+    last_non_empty_trimmed_value(
+        headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(HEADER_TENANT_ID))
+            .map(|(_, value)| value.as_str()),
+    )
+    .map(str::to_owned)
+    .or(body_cache_namespace)
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -92,11 +97,12 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
-    decode_router: Arc<KvRouter>,
+    decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
+    served_model: String,
 }
 
 impl Router {
@@ -121,7 +127,8 @@ impl Router {
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
         // generation-suffixed worker namespace changes during a rolling update.
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -132,11 +139,12 @@ impl Router {
         let model_manager = Arc::new(ModelManager::new());
 
         let decode_router = model_manager
-            .kv_chooser_for(
+            .managed_kv_router_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -174,12 +182,11 @@ impl Router {
             Some(prefill_config),
             None,
             None,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
-            enable_eagle,
-            // ext-proc constructs no KvWorkerMonitor; overload publishing is
-            // unused on this path (matches the prior namespace-lookup miss).
-            None,
+            decode_router.load_context().load_thresholds(),
+            drt.child_token(),
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
@@ -204,7 +211,16 @@ impl Router {
             runtime,
             pod_store,
             pod_store_ready,
+            served_model: model_name,
         })
+    }
+
+    /// The model this pool serves, from the discovered model card.
+    ///
+    /// Authoritative, unlike the `model` field of a request body, which the
+    /// router accepts without checking.
+    pub fn served_model(&self) -> &str {
+        &self.served_model
     }
 
     /// Tokenize a JSON request body and extract router queue priorities.
@@ -223,12 +239,10 @@ impl Router {
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
             cache_namespace,
@@ -1078,6 +1092,7 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            reservation_id: None,
         })
     }
 
@@ -1094,9 +1109,19 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str) {
+    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
+        }
+        if let Some(usage) = usage {
+            tracing::debug!(
+                request_id,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                total_tokens = ?usage.total_tokens,
+                cached_tokens = ?usage.cached_tokens,
+                "Request complete with usage"
+            );
         }
         if let Err(e) = self.free_request(request_id).await {
             tracing::debug!(
@@ -1125,7 +1150,10 @@ mod tests {
 
     #[test]
     fn empty_tenant_header_falls_back_to_body_cache_namespace() {
-        let headers = vec![(HEADER_TENANT_ID.to_string(), String::new())];
+        let headers = vec![
+            (HEADER_TENANT_ID.to_string(), String::new()),
+            ("X-Tenant-ID".to_string(), "   ".to_string()),
+        ];
 
         assert_eq!(
             cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
@@ -1137,6 +1165,21 @@ mod tests {
     #[test]
     fn absent_cache_namespace_stays_absent() {
         assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
+
+    #[test]
+    fn last_non_empty_trimmed_tenant_header_wins() {
+        let headers = vec![
+            (HEADER_TENANT_ID.to_string(), "tenant-client".to_string()),
+            ("X-Tenant-ID".to_string(), "   ".to_string()),
+            (HEADER_TENANT_ID.to_string(), " tenant-gateway ".to_string()),
+        ];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-gateway")
+        );
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a

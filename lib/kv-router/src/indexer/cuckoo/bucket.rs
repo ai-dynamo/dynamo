@@ -95,12 +95,6 @@ impl OwnedPackedCkfLane {
         })
     }
 
-    pub(super) fn clear(&mut self) {
-        for bucket in &mut self.buckets {
-            bucket.set(0);
-        }
-    }
-
     pub(super) fn byte_len(&self) -> usize {
         std::mem::size_of_val(self.buckets.as_ref())
     }
@@ -169,20 +163,11 @@ impl<const D: usize> TransposedCkfTable<D> {
         self.store(bucket, lane, value);
     }
 
+    #[cfg(test)]
     pub(super) fn load_image(&self, bucket: usize, lane: usize) -> PackedBucket {
         debug_assert!(bucket < self.bucket_count);
         debug_assert!(lane < D);
         self.load(bucket, lane)
-    }
-
-    pub(super) fn clear_lane(&self, lane: usize) {
-        debug_assert!(lane < D);
-        // A per-image atomic occupancy tracker won the reset microbenchmark but regressed the
-        // combined Relay workload by about 5.1% at N=1 and 3.0% at N=16. Keep the full scan
-        // unless a replacement avoids steady-state image bookkeeping and passes end-to-end.
-        for bucket in 0..self.bucket_count {
-            self.store(bucket, lane, PackedBucket::default());
-        }
     }
 
     #[inline]

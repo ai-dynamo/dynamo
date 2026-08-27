@@ -1,15 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Helpers for engine-owned conversation-aware ADP routing (opt-in).
+"""Helpers for conversation-aware ADP routing (opt-in).
 
 When TensorRT-LLM's ``attention_dp_config.kv_cache_routing_conversation_affinity`` is
 enabled, the engine's ``ConversationAwareADPRouter`` pins a conversation to an
-attention-DP rank (sticky, load-balanced first turn). Dynamo must then:
+attention-DP rank. Dynamo must always forward the stable conversation id via
+``ConversationParams``. Initial placement can then be owned by either:
 
-  1. forward the stable conversation id via ``ConversationParams``, and
-  2. NOT force ``attention_dp_rank`` — an explicit rank is honored *before* affinity
-     in the engine and would bypass it.
+  1. TensorRT-LLM, which load-balances the first turn when no explicit rank is sent; or
+  2. Dynamo, which sends its selected ``attention_dp_rank`` and relies on TensorRT-LLM
+     to record that initial ``conversation_id -> rank`` binding.
+
+Dynamo-owned initial placement requires a TensorRT-LLM build containing
+NVIDIA/TensorRT-LLM#16815 (or equivalent). The default remains engine-owned so older
+TensorRT-LLM builds retain their existing behavior.
 
 The conversation id is the frontend-forwarded ``agent_context.session_id`` — no new
 routing plumbing is added on the Rust side (see the serialized

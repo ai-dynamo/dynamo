@@ -14,17 +14,12 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
 use super::backend::{Indexer, create_indexer_with_metrics};
 use super::listener::spawn_zmq_listener;
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct IndexerKey {
-    pub model_name: String,
-    pub routing_group: String,
-}
 
 pub struct IndexerEntry {
     pub indexer: Indexer,
@@ -309,13 +304,13 @@ impl ListenerRecord {
 }
 
 pub struct WorkerEntry {
-    key: IndexerKey,
+    key: RoutingPartitionId,
     listeners: HashMap<u32, Arc<ListenerRecord>>,
 }
 
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
-    indexers: DashMap<IndexerKey, IndexerEntry>,
+    indexers: DashMap<RoutingPartitionId, IndexerEntry>,
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
@@ -418,10 +413,7 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name,
-            routing_group,
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key != key {
@@ -504,10 +496,7 @@ impl WorkerRegistry {
         model_name: &str,
         routing_group: &str,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name: model_name.to_string(),
-            routing_group: routing_group.to_string(),
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key != key {
@@ -546,10 +535,7 @@ impl WorkerRegistry {
         model_name: &str,
         routing_group: &str,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name: model_name.to_string(),
-            routing_group: routing_group.to_string(),
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         let (record, remove_worker) = {
             let mut entry = self
@@ -741,11 +727,14 @@ impl WorkerRegistry {
             .collect()
     }
 
-    pub fn get_indexer(&self, key: &IndexerKey) -> Option<Ref<'_, IndexerKey, IndexerEntry>> {
+    pub fn get_indexer(
+        &self,
+        key: &RoutingPartitionId,
+    ) -> Option<Ref<'_, RoutingPartitionId, IndexerEntry>> {
         self.indexers.get(key)
     }
 
-    pub fn get_or_create_indexer(&self, key: IndexerKey, block_size: u32) -> Indexer {
+    pub fn get_or_create_indexer(&self, key: RoutingPartitionId, block_size: u32) -> Indexer {
         let entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -774,7 +763,7 @@ impl WorkerRegistry {
         entry.indexer.clone()
     }
 
-    pub fn all_indexers_with_block_size(&self) -> Vec<(IndexerKey, Indexer, u32)> {
+    pub fn all_indexers_with_block_size(&self) -> Vec<(RoutingPartitionId, Indexer, u32)> {
         self.indexers
             .iter()
             .map(|entry| {
@@ -818,7 +807,7 @@ impl WorkerRegistry {
         );
     }
 
-    fn maybe_remove_indexer(&self, key: &IndexerKey) {
+    fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
         if self.workers.iter().any(|entry| entry.value().key == *key) {
             return;
         }
@@ -1123,10 +1112,7 @@ mod tests {
         // trivially without exercising the filter.
         let registry = test_registry();
 
-        let key = IndexerKey {
-            model_name: "llama3".to_string(),
-            routing_group: "acme".to_string(),
-        };
+        let key = RoutingPartitionId::new("llama3", "acme");
 
         // Inject the empty-listener WorkerEntry directly.
         registry.workers.insert(

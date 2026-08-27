@@ -22,17 +22,97 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
+use super::{
+    EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
+};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
+    ResidencyOwner, ResidencyOwnerKey, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+    WorkerWithDpRank,
 };
+use crate::router_hint::{RouterHintCandidateSource, RouterHintRootCandidates};
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
-type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
+type HintSourceSet = FxHashSet<ResidencyOwnerKey>;
+
+#[derive(Default)]
+struct RoutingFrontier {
+    workers: WorkerSet,
+    hint_sources: HintSourceSet,
+}
+
+type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, RoutingFrontier>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
-type WorkerBlockIndex =
-    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
+#[derive(Debug, Clone, Default)]
+pub struct RouterHintExtensions {
+    pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
+    pub owner_prefix_blocks: FxHashMap<RouterHintCandidateSource, usize>,
+}
+
+impl RouterHintExtensions {
+    fn record_match<'a>(
+        &mut self,
+        pos: usize,
+        child_hash: ExternalSequenceBlockHash,
+        workers: impl IntoIterator<Item = &'a WorkerWithDpRank>,
+        hint_sources: impl IntoIterator<Item = &'a ResidencyOwnerKey>,
+    ) {
+        match self
+            .block_hashes
+            .binary_search_by_key(&pos, |(existing_pos, _)| *existing_pos)
+        {
+            Ok(idx) => {
+                if self.block_hashes[idx].1 != child_hash {
+                    return;
+                }
+            }
+            Err(idx) => self.block_hashes.insert(idx, (pos, child_hash)),
+        }
+
+        for worker in workers {
+            self.owner_prefix_blocks
+                .insert(RouterHintCandidateSource::Worker(*worker), pos + 1);
+        }
+        for owner in hint_sources {
+            self.owner_prefix_blocks
+                .insert(RouterHintCandidateSource::CacheOwner(*owner), pos + 1);
+        }
+    }
+}
+type OwnerBlockIndex = FxHashMap<ExternalSequenceBlockHash, TransitionKey>;
+
+/// Compact identity stored per edge. Full owners are retained once in the
+/// reverse index for reset filtering and exact recovery dumps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum IndexedResidencyOwner {
+    Worker(WorkerWithDpRank),
+    Exact(ResidencyOwnerKey),
+}
+
+impl IndexedResidencyOwner {
+    fn from_exact(owner: ResidencyOwner) -> Self {
+        match owner {
+            ResidencyOwner::Worker(worker) => Self::Worker(worker),
+            ResidencyOwner::CacheOwner(_) => Self::Exact(owner.compact_key()),
+        }
+    }
+
+    #[inline]
+    fn project(self, projection: &ResidencyProjection) -> Option<WorkerWithDpRank> {
+        match self {
+            Self::Worker(worker) => Some(worker),
+            Self::Exact(key) => projection.project_key(key),
+        }
+    }
+}
+
+struct OwnerBlockState {
+    owner: ResidencyOwner,
+    blocks: OwnerBlockIndex,
+}
+
+type WorkerBlockIndex = FxHashMap<IndexedResidencyOwner, OwnerBlockState>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
@@ -44,26 +124,37 @@ struct TransitionKey {
 enum EdgeOwnersEntry {
     Single {
         child_hash: ExternalSequenceBlockHash,
-        owner: WorkerWithDpRank,
+        owner: IndexedResidencyOwner,
+    },
+    Pair {
+        child_hash: ExternalSequenceBlockHash,
+        owners: [IndexedResidencyOwner; 2],
     },
     Multi {
         child_hash: ExternalSequenceBlockHash,
-        owners: WorkerSet,
+        workers: WorkerSet,
+        exact_owners: FxHashSet<ResidencyOwnerKey>,
     },
 }
 
 impl EdgeOwnersEntry {
-    fn new(child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> Self {
+    fn new(child_hash: ExternalSequenceBlockHash, owner: IndexedResidencyOwner) -> Self {
         Self::Single { child_hash, owner }
     }
 
     fn child_hash(&self) -> ExternalSequenceBlockHash {
         match self {
-            Self::Single { child_hash, .. } | Self::Multi { child_hash, .. } => *child_hash,
+            Self::Single { child_hash, .. }
+            | Self::Pair { child_hash, .. }
+            | Self::Multi { child_hash, .. } => *child_hash,
         }
     }
 
-    fn insert(&mut self, child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> bool {
+    fn insert(
+        &mut self,
+        child_hash: ExternalSequenceBlockHash,
+        owner: IndexedResidencyOwner,
+    ) -> bool {
         match self {
             Self::Single {
                 child_hash: existing_hash,
@@ -72,50 +163,123 @@ impl EdgeOwnersEntry {
                 if *existing_hash != child_hash {
                     return false;
                 }
-
                 if *existing_owner == owner {
                     return true;
                 }
-
-                let mut owners = WorkerSet::default();
-                owners.insert(*existing_owner);
-                owners.insert(owner);
-                *self = Self::Multi { child_hash, owners };
+                *self = Self::Pair {
+                    child_hash,
+                    owners: [*existing_owner, owner],
+                };
                 true
             }
-            Self::Multi {
+            Self::Pair {
                 child_hash: existing_hash,
                 owners,
             } => {
                 if *existing_hash != child_hash {
                     return false;
                 }
-                owners.insert(owner);
+                if owners.contains(&owner) {
+                    return true;
+                }
+                let mut workers = WorkerSet::default();
+                let mut exact_owners = FxHashSet::default();
+                for owner in owners.iter().copied().chain(std::iter::once(owner)) {
+                    match owner {
+                        IndexedResidencyOwner::Worker(worker) => {
+                            workers.insert(worker);
+                        }
+                        IndexedResidencyOwner::Exact(owner) => {
+                            exact_owners.insert(owner);
+                        }
+                    }
+                }
+                *self = Self::Multi {
+                    child_hash,
+                    workers,
+                    exact_owners,
+                };
+                true
+            }
+            Self::Multi {
+                child_hash: existing_hash,
+                workers,
+                exact_owners,
+            } => {
+                if *existing_hash != child_hash {
+                    return false;
+                }
+                match owner {
+                    IndexedResidencyOwner::Worker(worker) => {
+                        workers.insert(worker);
+                    }
+                    IndexedResidencyOwner::Exact(owner) => {
+                        exact_owners.insert(owner);
+                    }
+                }
                 true
             }
         }
     }
 
-    fn remove(&mut self, owner: WorkerWithDpRank) -> bool {
+    fn remove(&mut self, owner: IndexedResidencyOwner) -> bool {
         match self {
             Self::Single {
                 owner: existing_owner,
                 ..
             } => *existing_owner == owner,
-            Self::Multi { child_hash, owners } => {
-                if !owners.remove(&owner) {
+            Self::Pair { child_hash, owners } => {
+                let Some(removed) = owners.iter().position(|candidate| *candidate == owner) else {
+                    return false;
+                };
+                let remaining = owners[1 - removed];
+                *self = Self::Single {
+                    child_hash: *child_hash,
+                    owner: remaining,
+                };
+                false
+            }
+            Self::Multi {
+                child_hash,
+                workers,
+                exact_owners,
+            } => {
+                let removed = match owner {
+                    IndexedResidencyOwner::Worker(worker) => workers.remove(&worker),
+                    IndexedResidencyOwner::Exact(owner) => exact_owners.remove(&owner),
+                };
+                if !removed {
                     return false;
                 }
 
-                if owners.is_empty() {
+                let remaining = workers.len() + exact_owners.len();
+                if remaining == 0 {
                     return true;
                 }
 
-                if owners.len() == 1 {
-                    let remaining_owner = owners.iter().next().copied().unwrap();
-                    *self = Self::Single {
+                if remaining <= 2 {
+                    let mut owners = workers
+                        .iter()
+                        .copied()
+                        .map(IndexedResidencyOwner::Worker)
+                        .chain(
+                            exact_owners
+                                .iter()
+                                .copied()
+                                .map(IndexedResidencyOwner::Exact),
+                        );
+                    let first = owners.next().expect("at least one owner remains");
+                    if remaining == 1 {
+                        *self = Self::Single {
+                            child_hash: *child_hash,
+                            owner: first,
+                        };
+                        return false;
+                    }
+                    let second = owners.next().expect("two owners remain");
+                    *self = Self::Pair {
                         child_hash: *child_hash,
-                        owner: remaining_owner,
+                        owners: [first, second],
                     };
                 }
 
@@ -124,20 +288,180 @@ impl EdgeOwnersEntry {
         }
     }
 
-    fn contains(&self, owner: &WorkerWithDpRank) -> bool {
+    #[inline]
+    fn contains_worker(&self, worker: &WorkerWithDpRank, projection: &ResidencyProjection) -> bool {
         match self {
-            Self::Single {
-                owner: existing_owner,
+            Self::Single { owner, .. } => owner.project(projection).as_ref() == Some(worker),
+            Self::Pair { owners, .. } => owners
+                .iter()
+                .any(|owner| owner.project(projection).as_ref() == Some(worker)),
+            Self::Multi {
+                workers,
+                exact_owners,
                 ..
-            } => existing_owner == owner,
-            Self::Multi { owners, .. } => owners.contains(owner),
+            } => {
+                workers.contains(worker)
+                    || exact_owners
+                        .iter()
+                        .any(|owner| projection.project_key(*owner).as_ref() == Some(worker))
+            }
         }
     }
 
-    fn collect_workers(&self) -> Vec<WorkerWithDpRank> {
+    fn collect_workers(&self, projection: &ResidencyProjection) -> Vec<WorkerWithDpRank> {
         match self {
-            Self::Single { owner, .. } => vec![*owner],
-            Self::Multi { owners, .. } => owners.iter().copied().collect(),
+            Self::Single { owner, .. } => owner.project(projection).into_iter().collect(),
+            Self::Pair { owners, .. } => {
+                let first = owners[0].project(projection);
+                let second = owners[1].project(projection);
+                match (first, second) {
+                    (Some(first), Some(second)) if first != second => vec![first, second],
+                    (Some(worker), _) | (_, Some(worker)) => vec![worker],
+                    (None, None) => Vec::new(),
+                }
+            }
+            Self::Multi {
+                workers,
+                exact_owners,
+                ..
+            } => {
+                let mut projected = workers.clone();
+                projected.extend(
+                    exact_owners
+                        .iter()
+                        .filter_map(|owner| projection.project_key(*owner)),
+                );
+                projected.into_iter().collect()
+            }
+        }
+    }
+
+    fn collect_matching_workers(
+        &self,
+        projection: &ResidencyProjection,
+        active: &WorkerSet,
+        matched: &mut WorkerSet,
+    ) {
+        match self {
+            Self::Single { owner, .. } => {
+                matched.extend(
+                    owner
+                        .project(projection)
+                        .filter(|worker| active.contains(worker)),
+                );
+            }
+            Self::Pair { owners, .. } => {
+                matched.extend(
+                    owners
+                        .iter()
+                        .filter_map(|owner| owner.project(projection))
+                        .filter(|worker| active.contains(worker)),
+                );
+            }
+            Self::Multi {
+                workers,
+                exact_owners,
+                ..
+            } => {
+                if workers.len() <= active.len() {
+                    matched.extend(
+                        workers
+                            .iter()
+                            .copied()
+                            .filter(|worker| active.contains(worker)),
+                    );
+                } else {
+                    matched.extend(
+                        active
+                            .iter()
+                            .copied()
+                            .filter(|worker| workers.contains(worker)),
+                    );
+                }
+                if projection.is_empty() {
+                    return;
+                }
+                matched.extend(
+                    exact_owners
+                        .iter()
+                        .filter_map(|owner| projection.project_key(*owner))
+                        .filter(|worker| active.contains(worker)),
+                );
+            }
+        }
+    }
+
+    fn collect_router_hint_sources(
+        &self,
+        snapshot: &ResidencyRoutingSnapshot,
+        sources: &mut HintSourceSet,
+    ) {
+        let mut insert = |owner: ResidencyOwnerKey| {
+            if snapshot.has_router_hint_source(owner) {
+                sources.insert(owner);
+            }
+        };
+        match self {
+            Self::Single {
+                owner: IndexedResidencyOwner::Exact(owner),
+                ..
+            } => insert(*owner),
+            Self::Single { .. } => {}
+            Self::Pair { owners, .. } => {
+                for owner in owners {
+                    if let IndexedResidencyOwner::Exact(owner) = owner {
+                        insert(*owner);
+                    }
+                }
+            }
+            Self::Multi { exact_owners, .. } => {
+                for owner in exact_owners {
+                    insert(*owner);
+                }
+            }
+        }
+    }
+
+    fn collect_matching_router_hint_sources(
+        &self,
+        active: &HintSourceSet,
+        matched: &mut HintSourceSet,
+    ) {
+        let mut retain = |owner: ResidencyOwnerKey| {
+            if active.contains(&owner) {
+                matched.insert(owner);
+            }
+        };
+        match self {
+            Self::Single {
+                owner: IndexedResidencyOwner::Exact(owner),
+                ..
+            } => retain(*owner),
+            Self::Single { .. } => {}
+            Self::Pair { owners, .. } => {
+                for owner in owners {
+                    if let IndexedResidencyOwner::Exact(owner) = owner {
+                        retain(*owner);
+                    }
+                }
+            }
+            Self::Multi { exact_owners, .. } => {
+                if exact_owners.len() <= active.len() {
+                    matched.extend(
+                        exact_owners
+                            .iter()
+                            .copied()
+                            .filter(|owner| active.contains(owner)),
+                    );
+                } else {
+                    matched.extend(
+                        active
+                            .iter()
+                            .copied()
+                            .filter(|owner| exact_owners.contains(owner)),
+                    );
+                }
+            }
         }
     }
 }
@@ -168,6 +492,8 @@ impl LowerTierContinuation {
 pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
+    pub router_hint_extensions: Option<RouterHintExtensions>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -189,29 +515,66 @@ impl LowerTierIndexer {
     ) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
 
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            let scope = event
+                .reset_scope()
+                .map_err(|_| KvCacheEventError::UnsupportedResidencyDomain)?
+                .expect("Cleared events always resolve a reset scope");
+            match scope {
+                ResetScope::All => {
+                    self.remove_owner_impl(worker_blocks, ResidencyOwner::worker(worker));
+                    if let Some(state_source) = event.state_source {
+                        self.remove_owner_impl(
+                            worker_blocks,
+                            ResidencyOwner::cache_owner(state_source),
+                        );
+                    }
+                }
+                ResetScope::Domain(ResidencyDomain::Worker) => {
+                    self.remove_owner_impl(worker_blocks, ResidencyOwner::worker(worker));
+                }
+                ResetScope::Domain(ResidencyDomain::CacheOwner) => {
+                    let cache_owner = event
+                        .state_source
+                        .ok_or(KvCacheEventError::UnsupportedResidencyDomain)?;
+                    self.remove_owner_impl(worker_blocks, ResidencyOwner::cache_owner(cache_owner));
+                }
+            }
+            return Ok(());
+        }
+
+        let owner = event
+            .residency_owner()
+            .map_err(|_| KvCacheEventError::UnsupportedResidencyDomain)?;
         match event.event.data {
             KvCacheEventData::Stored(store_data) => {
-                self.store_blocks_impl(worker_blocks, worker, store_data);
-                Ok(())
+                self.store_blocks_impl(worker_blocks, owner, store_data)
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
+                self.remove_blocks_impl(worker_blocks, owner, &remove_data.block_hashes)
             }
-            KvCacheEventData::Cleared => {
-                self.clear_worker_impl(worker_blocks, event.worker_id);
-                Ok(())
-            }
+            KvCacheEventData::Cleared => unreachable!("Cleared returned above"),
         }
     }
 
     fn store_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
-        worker: WorkerWithDpRank,
+        owner: ResidencyOwner,
         store_data: KvCacheStoreData,
-    ) {
+    ) -> Result<(), KvCacheEventError> {
         let mut parent_hash = store_data.parent_hash;
-        let worker_map = worker_blocks.entry(worker).or_default();
+        let indexed_owner = IndexedResidencyOwner::from_exact(owner);
+        let owner_state = worker_blocks
+            .entry(indexed_owner)
+            .or_insert_with(|| OwnerBlockState {
+                owner,
+                blocks: OwnerBlockIndex::default(),
+            });
+        if owner_state.owner != owner {
+            return Err(KvCacheEventError::UnsupportedResidencyDomain);
+        }
+        let worker_map = &mut owner_state.blocks;
 
         for block in store_data.blocks {
             let key = TransitionKey {
@@ -232,10 +595,10 @@ impl LowerTierIndexer {
 
             let inserted = match self.edges.entry(key) {
                 dashmap::mapref::entry::Entry::Occupied(mut edge) => {
-                    edge.get_mut().insert(block.block_hash, worker)
+                    edge.get_mut().insert(block.block_hash, indexed_owner)
                 }
                 dashmap::mapref::entry::Entry::Vacant(edge) => {
-                    edge.insert(EdgeOwnersEntry::new(block.block_hash, worker));
+                    edge.insert(EdgeOwnersEntry::new(block.block_hash, indexed_owner));
                     true
                 }
             };
@@ -247,46 +610,54 @@ impl LowerTierIndexer {
             worker_map.insert(block.block_hash, key);
             parent_hash = Some(block.block_hash);
         }
+        Ok(())
     }
 
     fn remove_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
-        worker: WorkerWithDpRank,
+        owner: ResidencyOwner,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), KvCacheEventError> {
+        let indexed_owner = IndexedResidencyOwner::from_exact(owner);
         let remove_worker_entry = {
-            let Some(worker_map) = worker_blocks.get_mut(&worker) else {
+            let Some(owner_state) = worker_blocks.get_mut(&indexed_owner) else {
                 return Err(KvCacheEventError::BlockNotFound);
             };
+            if owner_state.owner != owner {
+                return Err(KvCacheEventError::UnsupportedResidencyDomain);
+            }
+            let worker_map = &mut owner_state.blocks;
 
             for block_hash in block_hashes {
                 let Some(key) = worker_map.remove(block_hash) else {
                     return Err(KvCacheEventError::BlockNotFound);
                 };
 
-                self.remove_worker_from_edge(key, worker);
+                self.remove_owner_from_edge(key, indexed_owner);
             }
 
             worker_map.is_empty()
         };
 
         if remove_worker_entry {
-            worker_blocks.remove(&worker);
+            worker_blocks.remove(&indexed_owner);
         }
 
         Ok(())
     }
 
     fn clear_worker_impl(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
-        let workers: Vec<_> = worker_blocks
-            .keys()
-            .copied()
-            .filter(|worker| worker.worker_id == worker_id)
+        let owners: Vec<_> = worker_blocks
+            .iter()
+            .filter_map(|(indexed, state)| {
+                matches!(state.owner, ResidencyOwner::Worker(worker) if worker.worker_id == worker_id)
+                    .then_some((*indexed, state.owner))
+            })
             .collect();
 
-        for worker in workers {
-            self.remove_worker_dp_rank_impl(worker_blocks, worker);
+        for (_, owner) in owners {
+            self.remove_owner_impl(worker_blocks, owner);
         }
     }
 
@@ -295,18 +666,37 @@ impl LowerTierIndexer {
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
     ) {
-        let Some(worker_map) = worker_blocks.remove(&worker) else {
-            return;
-        };
+        let owners: Vec<_> = worker_blocks
+            .values()
+            .filter_map(|state| {
+                matches!(state.owner, ResidencyOwner::Worker(candidate) if candidate == worker)
+                    .then_some(state.owner)
+            })
+            .collect();
 
-        for (_, key) in worker_map {
-            self.remove_worker_from_edge(key, worker);
+        for owner in owners {
+            self.remove_owner_impl(worker_blocks, owner);
         }
     }
 
-    fn remove_worker_from_edge(&self, key: TransitionKey, worker: WorkerWithDpRank) {
+    fn remove_owner_impl(&self, worker_blocks: &mut WorkerBlockIndex, owner: ResidencyOwner) {
+        let indexed_owner = IndexedResidencyOwner::from_exact(owner);
+        let Some(owner_state) = worker_blocks.remove(&indexed_owner) else {
+            return;
+        };
+        if owner_state.owner != owner {
+            worker_blocks.insert(indexed_owner, owner_state);
+            return;
+        }
+
+        for (_, key) in owner_state.blocks {
+            self.remove_owner_from_edge(key, indexed_owner);
+        }
+    }
+
+    fn remove_owner_from_edge(&self, key: TransitionKey, owner: IndexedResidencyOwner) {
         if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
-            && edge.get_mut().remove(worker)
+            && edge.get_mut().remove(owner)
         {
             edge.remove();
         }
@@ -325,14 +715,33 @@ impl LowerTierIndexer {
         self.remove_worker_dp_rank_impl(worker_blocks, WorkerWithDpRank::new(worker_id, dp_rank));
     }
 
-    pub fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
+    pub fn root_workers(
+        &self,
+        local_hash: LocalBlockHash,
+        projection: &ResidencyProjection,
+    ) -> Vec<WorkerWithDpRank> {
         self.edges
             .get(&TransitionKey {
                 parent_hash: None,
                 local_hash,
             })
-            .map(|edge| edge.collect_workers())
+            .map(|edge| edge.collect_workers(projection))
             .unwrap_or_default()
+    }
+
+    fn root_router_hint_sources(
+        &self,
+        local_hash: LocalBlockHash,
+        snapshot: &ResidencyRoutingSnapshot,
+    ) -> HintSourceSet {
+        let mut sources = HintSourceSet::default();
+        if let Some(edge) = self.edges.get(&TransitionKey {
+            parent_hash: None,
+            local_hash,
+        }) {
+            edge.collect_router_hint_sources(snapshot, &mut sources);
+        }
+        sources
     }
 
     /// Reconstruct store events from the per-worker block index. Each block
@@ -342,10 +751,18 @@ impl LowerTierIndexer {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        for (worker, block_map) in worker_blocks {
-            for (block_hash, key) in block_map {
-                events.push(RouterEvent::new(
-                    worker.worker_id,
+        for owner_state in worker_blocks.values() {
+            let owner = owner_state.owner;
+            for (block_hash, key) in &owner_state.blocks {
+                // NOTE: LowerTierIndexer intentionally has no physical-tier identity. Device is
+                // a placeholder here; every recovery/export boundary must retag these events with
+                // the registry tier before validating or replaying them.
+                let (worker_id, dp_rank, source) = match owner {
+                    ResidencyOwner::Worker(worker) => (worker.worker_id, worker.dp_rank, None),
+                    ResidencyOwner::CacheOwner(cache_owner) => (0, 0, Some(cache_owner)),
+                };
+                let mut event = RouterEvent::with_residency_domain(
+                    worker_id,
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -357,14 +774,31 @@ impl LowerTierIndexer {
                                 mm_extra_info: None,
                             }],
                         }),
-                        dp_rank: worker.dp_rank,
+                        dp_rank,
                     },
-                ));
+                    crate::protocols::StorageTier::Device,
+                    owner.domain(),
+                );
+                event.state_source = source;
+                events.push(event);
                 event_id += 1;
             }
         }
 
         events
+    }
+
+    fn worker_block_counts(worker_blocks: &WorkerBlockIndex) -> FxHashMap<WorkerWithDpRank, usize> {
+        worker_blocks
+            .values()
+            .filter_map(|state| match state.owner {
+                ResidencyOwner::Worker(worker) => Some((worker, state.blocks.len())),
+                ResidencyOwner::CacheOwner(_) => None,
+            })
+            .fold(FxHashMap::default(), |mut counts, (worker, count)| {
+                *counts.entry(worker).or_insert(0) += count;
+                counts
+            })
     }
 
     pub fn query_contiguous_hits<S>(
@@ -396,6 +830,64 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
+        self.query_match_details_with_options_and_projection(
+            local_hashes,
+            continuations,
+            false,
+            &ResidencyProjection::default(),
+        )
+    }
+
+    pub fn query_match_details_with_options<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_router_hint_extensions: bool,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        self.query_match_details_with_options_and_projection(
+            local_hashes,
+            continuations,
+            retain_router_hint_extensions,
+            &ResidencyProjection::default(),
+        )
+    }
+
+    pub fn query_match_details_with_options_and_projection<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_router_hint_extensions: bool,
+        projection: &ResidencyProjection,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        let snapshot = ResidencyRoutingSnapshot::from_projection(projection.clone());
+        self.query_match_details_with_options_and_snapshot(
+            local_hashes,
+            continuations,
+            retain_router_hint_extensions,
+            &snapshot,
+        )
+    }
+
+    pub fn query_match_details_with_options_and_snapshot<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_router_hint_extensions: bool,
+        snapshot: &ResidencyRoutingSnapshot,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        let projection = snapshot.projection();
+        let mut router_hint_extensions =
+            retain_router_hint_extensions.then(RouterHintExtensions::default);
+
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
         // walking from that position. The set of positions is fixed — the walk
@@ -418,7 +910,29 @@ impl LowerTierIndexer {
                     .1
                     .entry(continuation.last_matched_hash)
                     .or_default()
+                    .workers
                     .insert(*worker);
+            }
+
+            if retain_router_hint_extensions && let Some(&first_hash) = local_hashes.first() {
+                let sources = self.root_router_hint_sources(first_hash, snapshot);
+                if !sources.is_empty() {
+                    let idx = match pos_index.get(&0) {
+                        Some(&idx) => idx,
+                        None => {
+                            let idx = breakpoints.len();
+                            pos_index.insert(0, idx);
+                            breakpoints.push((0, FrontierBuckets::default()));
+                            idx
+                        }
+                    };
+                    breakpoints[idx]
+                        .1
+                        .entry(None)
+                        .or_default()
+                        .hint_sources
+                        .extend(sources);
+                }
             }
             breakpoints.sort_unstable_by_key(|(pos, _)| *pos);
         }
@@ -440,31 +954,38 @@ impl LowerTierIndexer {
 
             let mut overflow = FrontierBuckets::default();
 
-            for (parent_hash, workers) in states {
+            for (parent_hash, frontier) in states {
                 advance_state_to_breakpoint(
                     self,
                     local_hashes,
                     pos,
                     parent_hash,
-                    workers,
+                    frontier,
                     next_breakpoint,
                     &mut overflow,
                     &mut final_states,
+                    router_hint_extensions.as_mut(),
+                    projection,
                 );
             }
 
             if !overflow.is_empty()
                 && let Some((_, next_buckets)) = breakpoints.get_mut(idx + 1)
             {
-                for (hash, workers) in overflow {
-                    next_buckets.entry(hash).or_default().extend(workers);
+                for (hash, frontier) in overflow {
+                    let next = next_buckets.entry(hash).or_default();
+                    next.workers.extend(frontier.workers);
+                    next.hint_sources.extend(frontier.hint_sources);
                 }
             }
         }
 
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
-        let mut results = LowerTierMatchDetails::default();
+        let mut results = LowerTierMatchDetails {
+            router_hint_extensions,
+            ..Default::default()
+        };
         for (worker, continuation) in continuations {
             let (final_pos, final_hash) = final_states
                 .get(worker)
@@ -532,6 +1053,9 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
+                    "approximate LRU is not supported for lower-tier indexers".to_string(),
+                ))),
                 #[cfg(feature = "bench")]
                 WorkerTask::InstallObservation { writer, resp } => {
                     observation.install(writer, resp);
@@ -560,8 +1084,11 @@ impl SyncIndexer for LowerTierIndexer {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker { worker_id, .. } => {
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
                     self.remove_worker(&mut worker_blocks, worker_id);
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id, dp_rank, ..
@@ -573,9 +1100,7 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::Stats(sender) => {
                     let stats = WorkerLookupStats::from_worker_block_counts(
-                        worker_blocks
-                            .iter()
-                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                        Self::worker_block_counts(&worker_blocks),
                     );
                     let _ = sender.send(stats);
                 }
@@ -599,7 +1124,8 @@ impl SyncIndexer for LowerTierIndexer {
         };
 
         let mut continuations = FxHashMap::default();
-        for worker in self.root_workers(first_hash) {
+        let projection = ResidencyProjection::default();
+        for worker in self.root_workers(first_hash, &projection) {
             continuations.insert(worker, LowerTierContinuation::from_root(0));
         }
 
@@ -633,19 +1159,22 @@ fn advance_state_to_breakpoint(
     local_hashes: &[LocalBlockHash],
     start_pos: usize,
     start_hash: Option<ExternalSequenceBlockHash>,
-    workers: WorkerSet,
+    frontier: RoutingFrontier,
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    projection: &ResidencyProjection,
 ) {
     let mut cur_pos = start_pos;
     let mut cur_hash = start_hash;
-    let mut active = workers;
+    let mut active_workers = frontier.workers;
+    let mut active_hint_sources = frontier.hint_sources;
 
     // When only one worker is active we can skip all set bookkeeping and just
     // do a straight edge-lookup loop.
-    if active.len() == 1 {
-        let worker = active.into_iter().next().unwrap();
+    if active_workers.len() == 1 && active_hint_sources.is_empty() {
+        let worker = active_workers.into_iter().next().unwrap();
         advance_single_worker(
             index,
             local_hashes,
@@ -655,22 +1184,28 @@ fn advance_state_to_breakpoint(
             next_breakpoint,
             overflow,
             final_states,
+            router_hint_extensions.as_deref_mut(),
+            projection,
         );
         return;
     }
 
     // Reusable scratch buffer for partitioning workers each iteration, avoids
     // allocating new HashSets on every step.
-    let mut scratch = WorkerSet::default();
+    let mut worker_scratch = WorkerSet::default();
+    let mut hint_source_scratch = HintSourceSet::default();
 
-    while cur_pos < next_breakpoint && !active.is_empty() {
+    while cur_pos < next_breakpoint
+        && (!active_workers.is_empty() || !active_hint_sources.is_empty())
+    {
         // Look up the edge for the current (parent_hash, local_hash) pair.
         // If no edge exists, no worker can continue — finalize everyone.
         let Some(edge) = index.edges.get(&TransitionKey {
             parent_hash: cur_hash,
             local_hash: local_hashes[cur_pos],
         }) else {
-            finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
+            finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+            active_hint_sources.clear();
             break;
         };
 
@@ -678,51 +1213,62 @@ fn advance_state_to_breakpoint(
         // For single-owner edges we can check membership in O(1) instead of
         // iterating all active workers. For multi-owner edges we iterate
         // whichever side is smaller.
-        match edge.value() {
-            EdgeOwnersEntry::Single { owner, .. } => {
-                if active.remove(owner) {
-                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
-                    active.insert(*owner);
-                } else {
-                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
-                    break;
-                }
-            }
-            EdgeOwnersEntry::Multi { owners, .. } => {
-                if owners.len() <= active.len() {
-                    scratch.clear();
-                    for owner in owners {
-                        if active.remove(owner) {
-                            scratch.insert(*owner);
-                        }
+        if !active_workers.is_empty() {
+            match edge.value() {
+                EdgeOwnersEntry::Single { owner, .. } => {
+                    if let Some(worker) = owner.project(projection)
+                        && active_workers.remove(&worker)
+                    {
+                        finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+                        active_workers.insert(worker);
+                    } else {
+                        finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
                     }
-                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
-                    std::mem::swap(&mut active, &mut scratch);
-                } else {
-                    scratch.clear();
-                    for worker in active.drain() {
-                        if owners.contains(&worker) {
-                            scratch.insert(worker);
-                        } else {
-                            final_states.insert(worker, (cur_pos, cur_hash));
-                        }
-                    }
-                    std::mem::swap(&mut active, &mut scratch);
                 }
-
-                if active.is_empty() {
-                    break;
+                EdgeOwnersEntry::Pair { .. } | EdgeOwnersEntry::Multi { .. } => {
+                    // Exact ownership may contain both Worker and CacheOwner entries
+                    // that project to the same routing worker. Project the edge once,
+                    // then intersect the two sets in linear expected time.
+                    worker_scratch.clear();
+                    edge.collect_matching_workers(projection, &active_workers, &mut worker_scratch);
+                    for worker in &worker_scratch {
+                        active_workers.remove(worker);
+                    }
+                    finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+                    std::mem::swap(&mut active_workers, &mut worker_scratch);
                 }
             }
         }
 
-        cur_hash = Some(edge.child_hash());
+        if !active_hint_sources.is_empty() {
+            hint_source_scratch.clear();
+            edge.collect_matching_router_hint_sources(
+                &active_hint_sources,
+                &mut hint_source_scratch,
+            );
+            std::mem::swap(&mut active_hint_sources, &mut hint_source_scratch);
+        }
+
+        if active_workers.is_empty() && active_hint_sources.is_empty() {
+            break;
+        }
+
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            extensions.record_match(
+                cur_pos,
+                child_hash,
+                active_workers.iter(),
+                active_hint_sources.iter(),
+            );
+        }
+        cur_hash = Some(child_hash);
         cur_pos += 1;
 
         // If we're down to one worker, switch to the scalar loop for the
         // remaining positions to avoid set overhead.
-        if active.len() == 1 {
-            let worker = active.into_iter().next().unwrap();
+        if active_workers.len() == 1 && active_hint_sources.is_empty() {
+            let worker = active_workers.into_iter().next().unwrap();
             advance_single_worker(
                 index,
                 local_hashes,
@@ -732,12 +1278,14 @@ fn advance_state_to_breakpoint(
                 next_breakpoint,
                 overflow,
                 final_states,
+                router_hint_extensions.as_deref_mut(),
+                projection,
             );
             return;
         }
     }
 
-    if active.is_empty() {
+    if active_workers.is_empty() && active_hint_sources.is_empty() {
         return;
     }
 
@@ -745,9 +1293,11 @@ fn advance_state_to_breakpoint(
     // the end of the sequence they're finalized; otherwise they overflow into
     // the next breakpoint for continued walking.
     if cur_pos >= local_hashes.len() {
-        finalize_workers(final_states, active, cur_pos, cur_hash);
+        finalize_workers(final_states, active_workers, cur_pos, cur_hash);
     } else {
-        overflow.entry(cur_hash).or_default().extend(active);
+        let next = overflow.entry(cur_hash).or_default();
+        next.workers.extend(active_workers);
+        next.hint_sources.extend(active_hint_sources);
     }
 }
 
@@ -764,6 +1314,8 @@ fn advance_single_worker(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    projection: &ResidencyProjection,
 ) {
     while *cur_pos < next_breakpoint {
         let Some(edge) = index.edges.get(&TransitionKey {
@@ -774,19 +1326,32 @@ fn advance_single_worker(
             return;
         };
 
-        if !edge.contains(&worker) {
+        if !edge.contains_worker(&worker, projection) {
             final_states.insert(worker, (*cur_pos, *cur_hash));
             return;
         }
 
-        *cur_hash = Some(edge.child_hash());
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            extensions.record_match(
+                *cur_pos,
+                child_hash,
+                std::iter::once(&worker),
+                std::iter::empty(),
+            );
+        }
+        *cur_hash = Some(child_hash);
         *cur_pos += 1;
     }
 
     if *cur_pos >= local_hashes.len() {
         final_states.insert(worker, (*cur_pos, *cur_hash));
     } else {
-        overflow.entry(*cur_hash).or_default().insert(worker);
+        overflow
+            .entry(*cur_hash)
+            .or_default()
+            .workers
+            .insert(worker);
     }
 }
 
@@ -806,15 +1371,38 @@ mod tests {
     use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
     use rustc_hash::FxHashMap;
 
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        WorkerWithDpRank,
+        ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
+        RouterEvent, RouterHintSourceMetadata, StorageTier, WireResidencyDomain, WorkerWithDpRank,
     };
+    use crate::router_hint::RouterHintCandidateSource;
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
+    }
+
+    fn projection(worker: WorkerWithDpRank) -> ResidencyProjection {
+        ResidencyProjection::new([(cache_owner_id(), worker)]).unwrap()
     }
 
     fn store_event(
@@ -838,6 +1426,42 @@ mod tests {
                 ),
             }),
         )
+    }
+
+    fn store_event_in_domain(
+        worker_id: u64,
+        event_id: u64,
+        parent_hash: Option<u64>,
+        local_values: &[u64],
+        external_hashes: &[u64],
+        domain: ResidencyDomain,
+    ) -> RouterEvent {
+        let event = crate::protocols::KvCacheEvent {
+            event_id,
+            dp_rank: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &local_hashes(local_values),
+                    external_hashes,
+                ),
+            }),
+        };
+        match domain {
+            ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                ResidencyDomain::Worker,
+            ),
+            ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                cache_owner_id(),
+            ),
+        }
     }
 
     struct TestLowerTierIndex {
@@ -870,7 +1494,8 @@ mod tests {
         }
 
         fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
-            self.index.root_workers(local_hash)
+            self.index
+                .root_workers(local_hash, &projection(WorkerWithDpRank::new(7, 0)))
         }
 
         fn query_contiguous_hits<S>(
@@ -882,7 +1507,13 @@ mod tests {
             S: std::hash::BuildHasher,
         {
             self.index
-                .query_contiguous_hits(local_hashes, continuations)
+                .query_match_details_with_options_and_projection(
+                    local_hashes,
+                    continuations,
+                    false,
+                    &projection(WorkerWithDpRank::new(7, 0)),
+                )
+                .hits
         }
 
         fn query_match_details<S>(
@@ -893,7 +1524,12 @@ mod tests {
         where
             S: std::hash::BuildHasher,
         {
-            self.index.query_match_details(local_hashes, continuations)
+            self.index.query_match_details_with_options_and_projection(
+                local_hashes,
+                continuations,
+                false,
+                &projection(WorkerWithDpRank::new(7, 0)),
+            )
         }
 
         fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
@@ -914,6 +1550,130 @@ mod tests {
         let workers = index.root_workers(LocalBlockHash(11));
         assert_eq!(workers.len(), 1);
         assert!(workers.contains(&WorkerWithDpRank::new(7, 0)));
+    }
+
+    #[test]
+    fn logical_domains_share_one_tree_without_sharing_ownership() {
+        let mut index = TestLowerTierIndex::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        for domain in [ResidencyDomain::Worker, ResidencyDomain::CacheOwner] {
+            index
+                .apply_event(store_event_in_domain(
+                    7,
+                    1,
+                    None,
+                    &[11, 12],
+                    &[101, 102],
+                    domain,
+                ))
+                .unwrap();
+        }
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                2,
+                None,
+                &[21],
+                &[201],
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                3,
+                Some(201),
+                &[22],
+                &[202],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+
+        let continuations = FxHashMap::from_iter([(worker, LowerTierContinuation::from_root(0))]);
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&2)
+        );
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[21, 22]), &continuations)
+                .get(&worker),
+            Some(&2),
+            "one physical walk may cross ownership domains for the same routing worker"
+        );
+        index
+            .apply_event(RouterEvent::with_residency_domain(
+                7,
+                crate::protocols::KvCacheEvent {
+                    event_id: 4,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&2),
+            "Worker reset must retain duplicate CacheOwner ownership"
+        );
+
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                5,
+                None,
+                &[11, 12],
+                &[101, 102],
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+
+        index
+            .apply_event(RouterEvent::with_cache_owner(
+                7,
+                crate::protocols::KvCacheEvent {
+                    event_id: 6,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+                cache_owner_id(),
+            ))
+            .unwrap();
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&2),
+            "CacheOwner reset must retain duplicate Worker ownership"
+        );
+
+        index
+            .apply_event(RouterEvent {
+                worker_id: 7,
+                state_source: None,
+                storage_tier: StorageTier::Device,
+                residency_domain: WireResidencyDomain::default(),
+                event: crate::protocols::KvCacheEvent {
+                    event_id: 7,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&0)
+        );
     }
 
     #[tokio::test]
@@ -1166,6 +1926,69 @@ mod tests {
     }
 
     #[test]
+    fn router_hint_source_stops_at_missing_edge_before_later_breakpoint() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                0,
+                None,
+                &[11],
+                &[101],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                1,
+                Some(101),
+                &[13],
+                &[103],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(8, 0),
+            LowerTierContinuation::new(2, ExternalSequenceBlockHash(101)),
+        );
+        let owner = cache_owner_id();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let snapshot = ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                },
+                None,
+            )],
+        );
+
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 99, 13]),
+            &continuations,
+            true,
+            &snapshot,
+        );
+        let extensions = details.router_hint_extensions.unwrap();
+
+        assert_eq!(
+            extensions
+                .owner_prefix_blocks
+                .get(&RouterHintCandidateSource::CacheOwner(owner_key)),
+            Some(&1)
+        );
+        assert_eq!(
+            extensions.block_hashes,
+            vec![(0, ExternalSequenceBlockHash(101))]
+        );
+    }
+
+    #[test]
     fn duplicate_store_is_idempotent_for_remove() {
         let mut index = TestLowerTierIndex::new();
         let event = store_event(13, 0, 0, Some(800), &[61], &[601]);
@@ -1318,7 +2141,7 @@ mod tests {
     }
 
     #[test]
-    fn cleared_event_is_worker_wide_across_dp_ranks() {
+    fn cleared_event_only_removes_target_dp_rank() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(29, 0, 0, Some(1200), &[101], &[1001]))
@@ -1340,9 +2163,10 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(2200)),
         );
 
-        let hits = index.query_contiguous_hits(&local_hashes(&[101]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 0)), Some(&0));
-        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 1)), Some(&0));
+        let cleared_hits = index.query_contiguous_hits(&local_hashes(&[101]), &continuations);
+        assert_eq!(cleared_hits.get(&WorkerWithDpRank::new(29, 0)), Some(&0));
+        let sibling_hits = index.query_contiguous_hits(&local_hashes(&[201]), &continuations);
+        assert_eq!(sibling_hits.get(&WorkerWithDpRank::new(29, 1)), Some(&1));
     }
 
     #[test]

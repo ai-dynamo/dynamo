@@ -9,6 +9,7 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -16,11 +17,14 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import aiohttp
 import pytest
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
+    _test_disagg_per_role_router_modes,
+    _test_disagg_per_role_session_affinity,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -37,22 +41,28 @@ from tests.router.e2e_harness import (
     allocate_frontend_ports,
     build_test_payload,
     run_basic_router_test,
+    run_disagg_kv_event_publisher_disabled_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
+    run_kv_event_publisher_disabled_test,
     run_router_decisions_test,
 )
 from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
+    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
+    wait_for_frontend_ready,
 )
 from tests.router.mocker_process import (
     DisaggMockerProcess,
     MockerProcess,
     launch_disagg_workers,
+    wait_for_disagg_workers,
 )
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
@@ -157,6 +167,38 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
         id="decode-blocks",
     ),
 )
+DISAGG_STARTUP_CASES = (
+    pytest.param(
+        ("frontend", "decode", "prefill"),
+        False,
+        id="frontend-decode-prefill",
+    ),
+    pytest.param(
+        ("frontend", "prefill", "decode"),
+        False,
+        id="frontend-prefill-decode",
+    ),
+    pytest.param(
+        ("decode", "frontend", "prefill"),
+        False,
+        id="decode-frontend-prefill",
+    ),
+    pytest.param(
+        ("prefill", "frontend", "decode"),
+        False,
+        id="prefill-frontend-decode",
+    ),
+    pytest.param(
+        ("prefill", "decode", "frontend"),
+        False,
+        id="workers-before-frontend",
+    ),
+    pytest.param(
+        ("frontend", "decode", "prefill"),
+        True,
+        id="frontend-decode-prefill-bootstrap",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: TCP round-robin mocker router path timed out"
 )
@@ -170,14 +212,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
-        "aiconfigurator", reason="router AIC test requires aiconfigurator"
+        "aiconfigurator_core",
+        reason="router AIC test requires aiconfigurator-core",
     )
-    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
-    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
-    # predating it don't ship engine.py.
+    # Rust AIC callback imports aiconfigurator_core.sdk.engine.compile_engine.
     pytest.importorskip(
-        "aiconfigurator.sdk.engine",
-        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
+        "aiconfigurator_core.sdk.engine",
+        reason="router AIC test requires aiconfigurator_core.sdk.engine",
     )
     return ROUTER_AIC_CONFIG.copy()
 
@@ -205,8 +246,21 @@ class CounterWorkerProcess:
     """
 
     def __init__(
-        self, request, store_backend: str = "etcd", request_plane: str = "nats"
+        self,
+        request,
+        store_backend: str = "etcd",
+        request_plane: str = "nats",
+        router_mode: str = "device-aware-weighted",
+        initial_taints: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
+        system_ports: tuple[int, int] | None = None,
     ):
+        if initial_taints is not None and len(initial_taints) != 2:
+            raise ValueError(
+                "initial_taints must contain exactly two worker taint sets"
+            )
+        if system_ports is not None and len(system_ports) != 2:
+            raise ValueError("system_ports must contain exactly two worker ports")
+
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "counter"
@@ -215,6 +269,9 @@ class CounterWorkerProcess:
         self._request = request
         self._store_backend = store_backend
         self._request_plane = request_plane
+        self._router_mode = router_mode
+        self._initial_taints = initial_taints or ((), ())
+        self._system_ports = system_ports
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -230,55 +287,76 @@ class CounterWorkerProcess:
         assert self._gpu_count_file is not None
         return self._gpu_count_file
 
+    def _worker_command(
+        self,
+        count_file: str,
+        device_type: str,
+        initial_taints: tuple[str, ...],
+    ) -> list[str]:
+        command = [
+            sys.executable,
+            COUNTER_WORKER_SCRIPT,
+            count_file,
+            device_type,
+            self.endpoint_path,
+            "--discovery-backend",
+            self._store_backend,
+            "--request-plane",
+            self._request_plane,
+            "--router-mode",
+            self._router_mode,
+        ]
+        if self._router_mode == "kv":
+            command.append("--no-router-kv-events")
+        for taint in initial_taints:
+            command.extend(["--initial-taint", taint])
+        return command
+
+    def _worker_process_options(
+        self, worker_index: int
+    ) -> tuple[dict[str, str], list[int], list[str]]:
+        env = os.environ.copy()
+        if self._system_ports is None:
+            return env, [], []
+
+        system_port = self._system_ports[worker_index]
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        return env, [system_port], []
+
     def __enter__(self):
         cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
         os.close(cpu_fd)
         gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
         os.close(gpu_fd)
 
-        env = os.environ.copy()
+        cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
         self._cpu_proc = ManagedProcess(
-            command=[
-                sys.executable,
-                COUNTER_WORKER_SCRIPT,
+            command=self._worker_command(
                 self._cpu_count_file,
                 "cpu",
-                self.endpoint_path,
-                "--discovery-backend",
-                self._store_backend,
-                "--request-plane",
-                self._request_plane,
-                "--router-mode",
-                "device-aware-weighted",
-            ],
-            env=env,
+                self._initial_taints[0],
+            ),
+            env=cpu_env,
             timeout=60,
             display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
+            health_check_ports=cpu_health_ports,
+            health_check_urls=cpu_health_urls,
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="counter-worker-cpu",
         )
+        gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
         self._gpu_proc = ManagedProcess(
-            command=[
-                sys.executable,
-                COUNTER_WORKER_SCRIPT,
+            command=self._worker_command(
                 self._gpu_count_file,
                 "gpu",
-                self.endpoint_path,
-                "--discovery-backend",
-                self._store_backend,
-                "--request-plane",
-                self._request_plane,
-                "--router-mode",
-                "device-aware-weighted",
-            ],
-            env=env,
+                self._initial_taints[1],
+            ),
+            env=gpu_env,
             timeout=60,
             display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
+            health_check_ports=gpu_health_ports,
+            health_check_urls=gpu_health_urls,
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="counter-worker-gpu",
@@ -306,6 +384,72 @@ class CounterWorkerProcess:
                     os.unlink(path)
                 except OSError:
                     pass
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    ("topology", "request_plane"),
+    [
+        pytest.param("aggregated", "tcp", id="aggregated"),
+        pytest.param("disaggregated", "nats", id="disaggregated"),
+    ],
+    indirect=["request_plane"],
+)
+def test_mocker_kv_event_publisher_disabled_diagnostic(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    topology,
+    request_plane,
+):
+    dp_size = 1 if topology == "aggregated" else 2
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": dp_size,
+        "enable_prefix_caching": False,
+    }
+
+    if topology == "aggregated":
+        run_kv_event_publisher_disabled_test(
+            engine_process_cls=MockerProcess,
+            engine_args_name="mocker_args",
+            engine_args=mocker_args,
+            request=request,
+            request_plane=request_plane,
+            block_size=BLOCK_SIZE,
+            model_name=MODEL_NAME,
+            expected_rank_count=dp_size,
+            engine_process_kwargs={"num_mockers": 1},
+            test_payload=TEST_PAYLOAD,
+        )
+        return
+
+    decode_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": dp_size,
+    }
+
+    run_disagg_kv_event_publisher_disabled_test(
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        expected_prefill_rank_count=dp_size,
+        worker_context_factory=lambda namespace: launch_disagg_workers(
+            request,
+            namespace,
+            "prefill_first",
+            prefill_mocker_args=mocker_args,
+            decode_mocker_args=decode_mocker_args,
+            num_prefill_mockers=1,
+            num_decode_mockers=1,
+            enable_disagg_bootstrap=False,
+            request_plane=request_plane,
+        ),
+        test_payload=TEST_PAYLOAD,
+    )
 
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
@@ -696,22 +840,24 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
+    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,router_approximate_cache_policy,event_plane",
     [
-        (True, False, False, None, None),  # Event plane with local indexer
-        (True, False, False, 5.0, None),  # Event plane with local side indexer
-        (True, False, True, None, None),  # Event plane with remote indexer
-        (True, False, True, 5.0, None),  # Remote plus local side indexer
-        (False, False, False, None, None),  # Approximate (--no-kv-events)
+        (True, False, False, None, "ttl", None),  # Event plane with local indexer
+        (True, False, False, 5.0, "ttl", None),  # Event plane with local side indexer
+        (True, False, True, None, "ttl", None),  # Event plane with remote indexer
+        (True, False, True, 5.0, "ttl", None),  # Remote plus local side indexer
+        (False, False, False, None, "ttl", None),  # Approximate (--no-kv-events)
+        (False, False, False, None, "lru", None),  # Capacity-bounded approximate LRU
         (
             False,
             False,
             True,
             None,
+            "ttl",
             None,
         ),  # Approximate mode with a singleton served remote indexer
         # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
-        (True, True, False, None, "zmq"),
+        (True, True, False, None, "ttl", "zmq"),
     ],
     ids=[
         "local_indexer",
@@ -719,6 +865,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         "remote_indexer",
         "remote_indexer_predict_on_route",
         "no_kv_events",
+        "no_kv_events_lru",
         "no_kv_events_remote",
         "zmq_nats_free",
     ],
@@ -733,6 +880,7 @@ def test_router_decisions(
     raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    router_approximate_cache_policy,
     event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
@@ -741,7 +889,7 @@ def test_router_decisions(
     - Event-plane mode with local indexers on workers
     - Event-plane mode with a served remote indexer
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
-      based on routing decisions with TTL-based expiration and pruning
+      based on routing decisions using either TTL or capacity-bounded LRU retention
     - Approximate mode with a singleton served remote indexer
     - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
@@ -752,10 +900,11 @@ def test_router_decisions(
 
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
+        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, router_approximate_cache_policy=%s, event_plane=%s",
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        router_approximate_cache_policy,
         event_plane,
     )
 
@@ -806,6 +955,7 @@ def test_router_decisions(
         test_kwargs={
             "use_kv_events": use_kv_events,
             "router_predicted_ttl_secs": router_predicted_ttl_secs,
+            "router_approximate_cache_policy": router_approximate_cache_policy,
         },
     )
 
@@ -851,7 +1001,187 @@ def test_router_decisions_router_aic(
     )
 
 
-@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+async def _wait_for_frontend_to_commit_single_pd_role(
+    frontend_port: int,
+    namespace: str,
+    worker_type: str,
+    timeout: float = 30,
+) -> None:
+    readiness_url = f"http://localhost:{frontend_port}/v1/models/{MODEL_NAME}/ready"
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_response: object = None
+    client_timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with session.get(readiness_url) as response:
+                    if response.status == 200:
+                        body = await response.json()
+                        last_response = body
+                        role = (
+                            body.get("namespaces", {})
+                            .get(namespace, {})
+                            .get("worker_types", {})
+                            .get(worker_type, {})
+                        )
+                        if role.get("workers", 0) == 1:
+                            return
+                    else:
+                        last_response = {
+                            "status": response.status,
+                            "body": await response.text(),
+                        }
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                last_response = repr(error)
+            await asyncio.sleep(0.1)
+
+    raise AssertionError(
+        f"Frontend did not commit the standalone {worker_type} WorkerSet within {timeout}s; "
+        f"last response: {last_response}"
+    )
+
+
+async def _wait_for_expected_disagg_worker_ids(
+    frontend_port: int,
+    expected_worker_ids: dict[str, int],
+    timeout: float = 60,
+) -> dict[str, int]:
+    payload = {
+        **TEST_PAYLOAD,
+        "max_tokens": 1,
+        "nvext": {"extra_fields": ["worker_id"]},
+    }
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_worker_ids: dict[str, int | None] = {
+        "prefill_worker_id": None,
+        "decode_worker_id": None,
+    }
+    client_timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        while asyncio.get_running_loop().time() < deadline:
+            worker_ids: dict[str, int | None] = {
+                "prefill_worker_id": None,
+                "decode_worker_id": None,
+            }
+            try:
+                async with session.post(
+                    f"http://localhost:{frontend_port}/v1/chat/completions",
+                    json=payload,
+                ) as response:
+                    if response.status != 200:
+                        await response.read()
+                        await asyncio.sleep(0.25)
+                        continue
+
+                    body = await response.text()
+                    for chunk in parse_sse_json_chunks(body):
+                        attribution = chunk.get("nvext", {}).get("worker_id", {})
+                        for key in worker_ids:
+                            if key in attribution:
+                                worker_ids[key] = attribution[key]
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+
+            last_worker_ids = worker_ids
+            prefill_worker_id = worker_ids["prefill_worker_id"]
+            decode_worker_id = worker_ids["decode_worker_id"]
+            if (
+                prefill_worker_id is not None
+                and decode_worker_id is not None
+                and prefill_worker_id == expected_worker_ids["prefill_worker_id"]
+                and decode_worker_id == expected_worker_ids["decode_worker_id"]
+            ):
+                return {
+                    "prefill_worker_id": prefill_worker_id,
+                    "decode_worker_id": decode_worker_id,
+                }
+            await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"P/D routing did not converge within {timeout}s; expected worker IDs: "
+        f"{expected_worker_ids}; last worker IDs: {last_worker_ids}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("startup_order", "enable_disagg_bootstrap"), DISAGG_STARTUP_CASES
+)
+@pytest.mark.timeout(120)
+def test_mocker_disagg_startup_lifecycle(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    monkeypatch,
+    startup_order,
+    enable_disagg_bootstrap,
+):
+    """A unique P/D topology activates for every meaningful discovery order."""
+    monkeypatch.setenv("DYN_LOG", "info,dynamo_llm::discovery=debug")
+    namespace = f"test-namespace-{generate_random_suffix()}"
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+    frontend = None
+    workers: dict[str, DisaggMockerProcess] = {}
+    expected_worker_ids: dict[str, int] = {}
+
+    with contextlib.ExitStack() as stack:
+        for actor in startup_order:
+            if actor == "frontend":
+                frontend = stack.enter_context(
+                    KVRouterProcess(
+                        request,
+                        BLOCK_SIZE,
+                        frontend_port,
+                        namespace,
+                        "etcd",
+                        request_plane="nats",
+                        min_initial_workers=1,
+                    )
+                )
+            else:
+                worker = stack.enter_context(
+                    DisaggMockerProcess(
+                        request,
+                        namespace=namespace,
+                        worker_type=actor,
+                        mocker_args=mocker_args,
+                        num_mockers=1,
+                        enable_bootstrap=(
+                            enable_disagg_bootstrap and actor == "prefill"
+                        ),
+                    )
+                )
+                workers[actor] = worker
+                expected_worker_ids[actor] = wait_for_disagg_workers(
+                    worker,
+                    store_backend="etcd",
+                    request_plane="nats",
+                    event_plane=None,
+                )[0]
+
+            if frontend is not None and len(workers) == 1:
+                asyncio.run(
+                    _wait_for_frontend_to_commit_single_pd_role(
+                        frontend_port, namespace, next(iter(workers))
+                    )
+                )
+
+        assert frontend is not None
+        expected_attribution = {
+            "prefill_worker_id": expected_worker_ids["prefill"],
+            "decode_worker_id": expected_worker_ids["decode"],
+        }
+        actual_worker_ids = asyncio.run(
+            _wait_for_expected_disagg_worker_ids(frontend_port, expected_attribution)
+        )
+
+    assert actual_worker_ids["prefill_worker_id"] == expected_worker_ids["prefill"]
+    assert actual_worker_ids["decode_worker_id"] == expected_worker_ids["decode"]
+
+
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
@@ -860,7 +1190,6 @@ def test_router_decisions_disagg(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    registration_order,
     enable_disagg_bootstrap,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
@@ -868,14 +1197,13 @@ def test_router_decisions_disagg(
     Tests that progressive requests with overlapping prefixes are routed to the
     same prefill worker due to KV cache reuse.
 
-    Parameterized to test:
-    - registration_order: prefill_first vs decode_first
-    - enable_disagg_bootstrap: without vs with bootstrap rendezvous
+    Parameterized with and without bootstrap rendezvous. Startup lifecycle
+    ordering is covered separately by ``test_mocker_disagg_startup_lifecycle``.
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        f"Starting disaggregated router prefix reuse test "
-        f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
+        "Starting disaggregated router prefix reuse test "
+        f"(bootstrap={enable_disagg_bootstrap})"
     )
 
     mocker_args = {
@@ -896,7 +1224,7 @@ def test_router_decisions_disagg(
         worker_context_factory=lambda namespace: launch_disagg_workers(
             request,
             namespace,
-            registration_order,
+            "prefill_first",
             prefill_mocker_args=mocker_args,
             decode_mocker_args=mocker_args,
             num_prefill_mockers=4,
@@ -1051,7 +1379,6 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 )
 
 
-@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
@@ -1060,14 +1387,11 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    registration_order,
     enable_disagg_bootstrap,
 ):
     """Verify round-robin disagg prefill requests spread KV stores across DP ranks."""
     logger.info(
-        "Starting disaggregated round-robin prefill dp-rank test "
-        "(registration_order=%s, bootstrap=%s)",
-        registration_order,
+        "Starting disaggregated round-robin prefill dp-rank test (bootstrap=%s)",
         enable_disagg_bootstrap,
     )
 
@@ -1099,7 +1423,7 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     with launch_disagg_workers(
         request,
         shared_namespace,
-        registration_order,
+        "prefill_first",
         prefill_mocker_args=prefill_mocker_args,
         decode_mocker_args=decode_mocker_args,
         num_prefill_mockers=1,
@@ -1107,6 +1431,93 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
         enable_disagg_bootstrap=enable_disagg_bootstrap,
     ) as (prefill_workers, decode_workers):
         run_case(prefill_workers, decode_workers)
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_router_modes(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """KV-routed prefill in front of round-robin decode, via per-role MDC config.
+
+    The prefill mockers advertise RouterConfig(RouterMode.KV) in their cards; the
+    decode mockers advertise nothing and inherit the frontend's round-robin. Both
+    hops must then route on their own terms rather than sharing one mode.
+    """
+    logger.info("Starting per-role router mode disagg test (KV prefill, RR decode)")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Only the prefill tier advertises a mode; decode inherits the frontend's.
+        prefill_mocker_args={**base_mocker_args, "router_mode": "kv"},
+        decode_mocker_args=base_mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Session affinity is configured per hop: prefill pins, decode does not.
+
+    Both tiers advertise round-robin; only prefill advertises a TTL. If the two
+    hops shared a session-affinity setting, decode would pin alongside prefill.
+    """
+    logger.info("Starting per-hop session affinity disagg test")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Same mode on both tiers, so affinity is the only difference between them.
+        prefill_mocker_args={
+            **base_mocker_args,
+            "router_mode": "round-robin",
+            "router_session_affinity_ttl_secs": 300,
+        },
+        decode_mocker_args={**base_mocker_args, "router_mode": "round-robin"},
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_session_affinity(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
 
 
 @pytest.mark.timeout(180)
@@ -1272,3 +1683,141 @@ def test_router_per_worker_config(
             cpu_count_file=workers.cpu_count_file,
             gpu_count_file=workers.gpu_count_file,
         )
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_update_model_taints_replaces_worker_routing_constraints(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    request_plane,
+    event_plane,
+    num_system_ports,
+):
+    """Update one worker's taints through HTTP and observe KV routing propagation."""
+    assert event_plane == "zmq"
+    assert num_system_ports == 2
+    worker_a_system_port, worker_b_system_port = dynamo_dynamic_ports.system_ports
+    system_ports = (worker_a_system_port, worker_b_system_port)
+
+    def read_count(path: str) -> int:
+        try:
+            value = Path(path).read_text().strip()
+            return int(value) if value else 0
+        except (OSError, ValueError):
+            return 0
+
+    def constrained_payload(required_taint: str) -> dict[str, Any]:
+        return {
+            **COUNTER_TEST_PAYLOAD,
+            "stream": False,
+            "nvext": {
+                "routing_constraints": {
+                    "required_taints": [required_taint],
+                }
+            },
+        }
+
+    async def run_test(workers: CounterWorkerProcess) -> None:
+        frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        fast_payload = constrained_payload("capacity/fast")
+        slow_payload = constrained_payload("capacity/slow")
+        other_payload = constrained_payload("capacity/other")
+
+        await wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=workers.num_workers,
+            timeout=60,
+            test_payload=fast_payload,
+            engine_workers=workers,
+            store_backend="etcd",
+            request_plane=request_plane,
+        )
+
+        async def post_chat(
+            session: aiohttp.ClientSession,
+            payload: dict[str, Any],
+        ) -> tuple[int, str]:
+            async with session.post(chat_url, json=payload) as response:
+                return response.status, await response.text()
+
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            baseline_a = read_count(workers.cpu_count_file)
+            baseline_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, fast_payload)
+            assert status == 200, body
+            assert read_count(workers.cpu_count_file) == baseline_a + 1
+            assert read_count(workers.gpu_count_file) == baseline_b
+
+            update_url = (
+                f"http://127.0.0.1:{system_ports[0]}" "/engine/update/model_taints"
+            )
+            async with session.post(
+                update_url,
+                json={"taints": ["capacity/slow"]},
+            ) as response:
+                update_body = await response.json(content_type=None)
+                assert response.status == 200, update_body
+            assert update_body == {
+                "status": "ok",
+                "taints": ["capacity/slow"],
+            }
+
+            # The first successful constrained request is the propagation barrier.
+            deadline = asyncio.get_running_loop().time() + 30
+            last_status = None
+            last_body = ""
+            while asyncio.get_running_loop().time() < deadline:
+                last_status, last_body = await post_chat(session, slow_payload)
+                if last_status == 200:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(
+                    "Timed out waiting for capacity/slow routing propagation: "
+                    f"status={last_status} body={last_body}"
+                )
+
+            assert read_count(workers.cpu_count_file) == baseline_a + 2
+            assert read_count(workers.gpu_count_file) == baseline_b
+
+            before_removed_a = read_count(workers.cpu_count_file)
+            before_removed_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, fast_payload)
+            assert status == 500, (
+                "capacity/fast should have been replaced, not retained; "
+                f"status={status} body={body}"
+            )
+            assert read_count(workers.cpu_count_file) == before_removed_a
+            assert read_count(workers.gpu_count_file) == before_removed_b
+
+            before_other_a = read_count(workers.cpu_count_file)
+            before_other_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, other_payload)
+            assert status == 200, body
+            assert read_count(workers.cpu_count_file) == before_other_a
+            assert read_count(workers.gpu_count_file) == before_other_b + 1
+
+    with CounterWorkerProcess(
+        request,
+        request_plane=request_plane,
+        router_mode="kv",
+        initial_taints=(("capacity/fast",), ("capacity/other",)),
+        system_ports=system_ports,
+    ) as workers:
+        with FrontendRouterProcess(
+            request=request,
+            block_size=BLOCK_SIZE,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            namespace=workers.namespace,
+            store_backend="etcd",
+            request_plane=request_plane,
+            router_mode="kv",
+            min_initial_workers=workers.num_workers,
+        ):
+            asyncio.run(run_test(workers))

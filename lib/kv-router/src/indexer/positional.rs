@@ -28,8 +28,8 @@ use std::sync::Arc;
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError, PreBoundEventCounters,
+    SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
@@ -241,6 +241,9 @@ impl SyncIndexer for PositionalIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
+                    "approximate LRU requires ConcurrentRadixTreeCompressed".to_string(),
+                ))),
                 #[cfg(feature = "bench")]
                 WorkerTask::InstallObservation { writer, resp } => {
                     observation.install(writer, resp);
@@ -269,8 +272,11 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker { worker_id, .. } => {
-                    self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
+                    self.remove_worker_blocks_impl(&mut worker_blocks, worker_id);
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id, dp_rank, ..
@@ -350,7 +356,7 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker_blocks_impl(worker_blocks, worker_id);
+                self.remove_worker_dp_rank_impl(worker_blocks, worker_id, worker.dp_rank);
                 Ok(())
             }
         }
@@ -467,16 +473,6 @@ impl PositionalIndexer {
         Ok(())
     }
 
-    /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
-    /// Static version for use in worker threads.
-    fn clear_worker_blocks_impl(
-        &self,
-        worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
-    }
-
     fn remove_worker_dp_rank_impl(
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
@@ -493,14 +489,10 @@ impl PositionalIndexer {
         }
     }
 
-    /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains tracked with empty blocks.
-    /// If `keep_worker` is false, the worker is completely removed.
-    fn remove_or_clear_worker_blocks_impl(
+    fn remove_worker_blocks_impl(
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         worker_id: WorkerId,
-        keep_worker: bool,
     ) {
         let workers: Vec<WorkerWithDpRank> = worker_blocks
             .iter()
@@ -515,11 +507,6 @@ impl PositionalIndexer {
                         let _ = entry.remove(*seq_hash, worker);
                     }
                 }
-            }
-
-            if keep_worker {
-                // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, FxHashMap::default());
             }
         }
     }
@@ -542,7 +529,11 @@ impl PositionalIndexer {
             for (pos, local_hash, seq_hash) in blocks {
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
+                    state_source: None,
                     storage_tier: crate::protocols::StorageTier::Device,
+                    residency_domain: crate::protocols::WireResidencyDomain::explicit(
+                        crate::protocols::ResidencyDomain::Worker,
+                    ),
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {

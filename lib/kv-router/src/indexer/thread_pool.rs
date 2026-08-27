@@ -15,14 +15,16 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::{
+    ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
+    ApproximateLruLease, ApproximateLruRequestId, ApproximateLruStats, ApproximateLruTask,
+    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
+};
 #[cfg(feature = "bench")]
 use super::{
     EventCompletionBuffer, EventCompletionWriter, ObservationError, ObservationSeal,
     ObservedEnqueueReceipt, ThreadPoolObservationPlan, ThreadPoolObservationSnapshot,
-};
-use super::{
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -32,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///
-/// Spawns N OS threads for processing write events (sticky-routed by WorkerId).
+/// Spawns N OS threads for processing write events (sticky-routed by `(WorkerId, dp_rank)`).
 /// Read operations (find_matches) are executed inline on the caller's thread,
 /// avoiding channel overhead and allowing reads to scale with callers.
 ///
@@ -54,17 +56,17 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Shared backend - thread-safe via internal locking.
     backend: Arc<T>,
 
-    /// Maps WorkerId to worker thread index for indexer-lifetime sticky routing.
+    /// Maps `(WorkerId, dp_rank)` to a worker thread for indexer-lifetime sticky routing.
     ///
     /// This is not a live-worker registry: entries intentionally remain for the
     /// indexer's lifetime. Producers read this assignment before enqueueing, so
     /// removing an entry without a generation-aware handoff could let later work
     /// overtake tasks already queued on the old thread.
-    worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
-    /// Monotonic round-robin reservation sequence for new WorkerIds.
+    worker_assignments: Arc<DashMap<WorkerWithDpRank, usize, FxBuildHasher>>,
+    /// Monotonic round-robin reservation sequence for new rank streams.
     ///
-    /// This is not an active-worker count: cold removals also reserve a slot so
-    /// the removal sweep and any subsequent restore share one FIFO.
+    /// This is not an active-worker count: cold rank removals also reserve a slot
+    /// so the removal and any subsequent rank restore share one FIFO.
     worker_assignment_count: Arc<AtomicUsize>,
 
     /// Channels to send tasks to worker threads (one per thread).
@@ -88,8 +90,26 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Synthetic event IDs for approximate store/remove events.
     synthetic_event_id: Arc<AtomicU64>,
 
+    /// Whether approximate routing decisions use request-scoped LRU leases.
+    approximate_lru_enabled: bool,
+
     #[cfg(feature = "bench")]
     observation_active: AtomicBool,
+}
+
+struct ThreadPoolLruSink {
+    sender: flume::Sender<WorkerTask>,
+    fallback_prune_manager: WorkerPruneManager,
+}
+
+impl ApproximateLruCommandSink for ThreadPoolLruSink {
+    fn send(&self, mut task: ApproximateLruTask) -> Result<(), KvRouterError> {
+        task.observe_enqueue_depth(self.sender.len());
+        task.set_fallback_prune_manager(self.fallback_prune_manager.clone());
+        self.sender
+            .send(WorkerTask::ApproximateLru(task))
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
 }
 
 #[cfg(feature = "bench")]
@@ -138,6 +158,10 @@ pub struct ThreadPoolSealedObservation<'a, T: SyncIndexer> {
 }
 
 impl<T: SyncIndexer> ThreadPoolIndexer<T> {
+    pub fn approximate_lru_enabled(&self) -> bool {
+        self.approximate_lru_enabled
+    }
+
     /// Create a new `ThreadPoolIndexer` wrapping the given backend.
     ///
     /// Spawns `num_workers` OS threads, each running a blocking recv loop
@@ -178,7 +202,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> Self {
-        Self::new_with_metrics_and_pruning(backend, num_workers, kv_block_size, metrics, None)
+        Self::new_with_metrics_and_approximate_retention(
+            backend,
+            num_workers,
+            kv_block_size,
+            metrics,
+            None,
+        )
     }
 
     pub fn new_with_pruning(
@@ -197,12 +227,33 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        mut backend: T,
+        backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        Self::new_with_metrics_and_approximate_retention(
+            backend,
+            num_workers,
+            kv_block_size,
+            metrics,
+            prune_config.map(ApproximateRetentionConfig::Ttl),
+        )
+    }
+
+    pub fn new_with_metrics_and_approximate_retention(
+        mut backend: T,
+        num_workers: usize,
+        kv_block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> Self {
+        let (prune_config, approximate_lru_enabled) = match retention {
+            Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
+            Some(ApproximateRetentionConfig::Lru { fallback_ttl }) => (Some(fallback_ttl), true),
+            None => (None, false),
+        };
         assert!(num_workers > 0, "Number of workers must be greater than 0");
         assert!(
             prune_config.is_none() || backend.supports_routing_decision_pruning(),
@@ -277,9 +328,113 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
+            approximate_lru_enabled,
             #[cfg(feature = "bench")]
             observation_active: AtomicBool::new(false),
         }
+    }
+
+    fn approximate_lru_client_for_worker(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Option<ApproximateLruClient> {
+        if !self.approximate_lru_enabled {
+            return None;
+        }
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        Some(ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
+            sender: self.worker_event_channels[thread_idx].clone(),
+            fallback_prune_manager: self
+                .prune_manager
+                .as_ref()
+                .expect("LRU fallback TTL requires a prune manager")
+                .clone(),
+        })))
+    }
+
+    pub fn begin_approximate_lru_request(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        lru_request_id: ApproximateLruRequestId,
+    ) -> Option<ApproximateLruLease> {
+        let client = self.approximate_lru_client_for_worker(worker)?;
+        Some(client.begin_request(worker, incarnation, lru_request_id))
+    }
+
+    pub async fn set_approximate_lru_capacity(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(client) = self.approximate_lru_client_for_worker(worker) else {
+            return Ok(());
+        };
+        client.set_capacity(worker, incarnation, capacity).await
+    }
+
+    pub fn set_approximate_lru_capacity_now(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(client) = self.approximate_lru_client_for_worker(worker) else {
+            return Ok(());
+        };
+        client.set_capacity_now(worker, incarnation, capacity)
+    }
+
+    pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
+        if !self.approximate_lru_enabled {
+            return Ok(ApproximateLruStats::default());
+        }
+        let mut total = ApproximateLruStats::default();
+        for sender in &self.worker_event_channels {
+            let client = ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
+                sender: sender.clone(),
+                fallback_prune_manager: self
+                    .prune_manager
+                    .as_ref()
+                    .expect("LRU fallback TTL requires a prune manager")
+                    .clone(),
+            }));
+            let stats = client.stats().await?;
+            total.ranks += stats.ranks;
+            total.fallback_ranks += stats.fallback_ranks;
+            total.resident_blocks += stats.resident_blocks;
+            total.active_blocks += stats.active_blocks;
+            total.inactive_blocks += stats.inactive_blocks;
+            total.private_blocks += stats.private_blocks;
+            total.leases += stats.leases;
+            total.overcapacity_blocks += stats.overcapacity_blocks;
+            total.requests = total.requests.saturating_add(stats.requests);
+            total.request_messages = total
+                .request_messages
+                .saturating_add(stats.request_messages);
+            total.output_batches = total.output_batches.saturating_add(stats.output_batches);
+            total.fallback_activations = total
+                .fallback_activations
+                .saturating_add(stats.fallback_activations);
+            total.eviction_batches = total
+                .eviction_batches
+                .saturating_add(stats.eviction_batches);
+            total.evicted_blocks = total.evicted_blocks.saturating_add(stats.evicted_blocks);
+            total.mutation_queue_depth += stats.mutation_queue_depth;
+            total.mutation_wait_ns = total
+                .mutation_wait_ns
+                .saturating_add(stats.mutation_wait_ns);
+            total.mutation_wait_samples = total
+                .mutation_wait_samples
+                .saturating_add(stats.mutation_wait_samples);
+        }
+        Ok(total)
     }
 
     /// Get a reference to the underlying backend.
@@ -321,10 +476,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             if !seen.insert(worker_id) {
                 return Err(ObservationError::DuplicateWorker(worker_id));
             }
+            // The current observation corpus models one rank-zero stream per worker.
+            // Production routing below uses the event's actual rank.
+            let worker = WorkerWithDpRank::from_worker_id(worker_id);
             let worker_idx = Self::get_or_assign_thread_idx(
                 &self.worker_assignments,
                 &self.worker_assignment_count,
-                worker_id,
+                worker,
                 self.num_workers,
             );
             expected_events_per_queue[worker_idx] = expected_events_per_queue[worker_idx]
@@ -389,12 +547,12 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         if !self.observation_active.load(AtomicOrdering::Acquire) {
             return Err(ObservationError::ProducerClosed);
         }
-        let worker_id = event.worker_id;
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let worker_idx = self
             .worker_assignments
-            .get(&worker_id)
+            .get(&worker)
             .map(|entry| *entry)
-            .ok_or(ObservationError::UnknownWorker(worker_id))?;
+            .ok_or(ObservationError::UnknownWorker(worker.worker_id))?;
 
         self.worker_event_channels[worker_idx]
             .send(WorkerTask::ObservedEvent {
@@ -450,8 +608,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             .collect()
     }
 
-    /// Enqueue a structural anchor on the same worker queue used by normal
-    /// events for this worker. Branch-sharded routing uses this to preserve
+    /// Enqueue a structural anchor on the same rank queue used by normal
+    /// events for this source. Branch-sharded routing uses this to preserve
     /// Anchor-before-Stored ordering for the dependent suffix on that queue.
     pub(crate) fn enqueue_anchor(
         &self,
@@ -461,7 +619,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker.worker_id,
+            worker,
             self.num_workers,
         );
         self.worker_event_channels[thread_idx]
@@ -471,56 +629,233 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Wait until all previously queued worker tasks have completed.
-    ///
-    /// Used primarily for testing and benchmarking to ensure writes are visible
-    /// before checking results.
-    pub async fn flush(&self) {
-        let mut receivers = Vec::new();
-        for channel in &self.worker_event_channels {
+    fn event_thread_indices(&self, event: &RouterEvent) -> (usize, Option<usize>) {
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let domain = event.resolved_residency_domain();
+        let reset_scope = event.reset_scope();
+        let state_source = event.state_source;
+
+        if domain == Ok(ResidencyDomain::CacheOwner)
+            && let Some(state_source) = state_source
+        {
+            return (self.cache_owner_thread_idx(state_source), None);
+        }
+
+        let worker_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        if reset_scope != Ok(Some(ResetScope::All)) {
+            return (worker_idx, None);
+        }
+        let Some(state_source) = state_source else {
+            return (worker_idx, None);
+        };
+        let cache_idx = self.cache_owner_thread_idx(state_source);
+        (worker_idx, (cache_idx != worker_idx).then_some(cache_idx))
+    }
+
+    fn cache_owner_thread_idx(&self, state_source: crate::identity::CacheOwnerId) -> usize {
+        let owner_key = ResidencyOwner::cache_owner(state_source)
+            .compact_key()
+            .digest();
+        (u64::from_be_bytes(
+            owner_key[..8]
+                .try_into()
+                .expect("residency owner digest is 16 bytes"),
+        ) % self.num_workers as u64) as usize
+    }
+
+    /// Enqueue an event and report whether the worker queue accepted it.
+    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (thread_idx, second_idx) = self.event_thread_indices(&event);
+        if let Some(second_idx) = second_idx {
+            self.worker_event_channels[thread_idx]
+                .send(WorkerTask::Event(event.clone()))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(thread_idx);
+            self.worker_event_channels[second_idx]
+                .send(WorkerTask::Event(event))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(second_idx);
+            return Ok(());
+        }
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Event(event))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
+    /// Apply one event on its worker lane and wait for the backend result.
+    pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (thread_idx, second_idx) = self.event_thread_indices(&event);
+        let enqueue = |idx: usize, event: RouterEvent| {
             let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
+            self.worker_event_channels[idx]
+                .send(WorkerTask::EventWithAck {
+                    event,
+                    resp: resp_tx,
+                })
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(idx);
+            Ok::<_, KvRouterError>(resp_rx)
+        };
+        let receivers = if let Some(second_idx) = second_idx {
+            vec![
+                enqueue(thread_idx, event.clone())?,
+                enqueue(second_idx, event)?,
+            ]
+        } else {
+            vec![enqueue(thread_idx, event)?]
+        };
+        for receiver in receivers {
+            let applied = receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+            if !applied {
+                return Err(KvRouterError::IndexerDroppedRequest);
             }
         }
+        Ok(())
+    }
+
+    /// Wait until every worker queue has completed tasks accepted before this call.
+    ///
+    /// This is a FIFO progress barrier, not an event-result acknowledgement. Ordinary
+    /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            channel
+                .send(WorkerTask::Flush(resp_tx))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
         for receiver in receivers {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+        Ok(())
+    }
+
+    /// Wait until the FIFO lane for `worker` has completed tasks accepted before this call.
+    ///
+    /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
+    /// depends on removal and acknowledgement using that same FIFO lane before activation. This
+    /// proves queue progress only; ordinary event errors are logged by the worker.
+    async fn flush_worker_lane_and_wait(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Flush(resp_tx))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    /// Wait until all previously queued worker tasks have completed.
+    ///
+    /// Used primarily for testing and benchmarking to stop at a stable queue boundary before
+    /// checking results. Individual event-application errors are observable only through logs and
+    /// metrics, not this barrier.
+    pub async fn flush(&self) {
+        if let Err(error) = self.flush_and_wait().await {
+            tracing::error!(%error, "Failed to flush thread-pool indexer");
         }
     }
 
     fn get_or_assign_thread_idx(
-        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignments: &DashMap<WorkerWithDpRank, usize, FxBuildHasher>,
         worker_assignment_count: &AtomicUsize,
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
         num_workers: usize,
     ) -> usize {
-        *worker_assignments.entry(worker_id).or_insert_with(|| {
+        if let Some(thread_idx) = worker_assignments.get(&worker).map(|entry| *entry) {
+            return thread_idx;
+        }
+
+        *worker_assignments.entry(worker).or_insert_with(|| {
             let idx = worker_assignment_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             idx % num_workers
         })
     }
 
-    fn enqueue_worker_removal(&self, worker_id: WorkerId, task: WorkerTask) {
-        // All mutations for one WorkerId use this indexer-lifetime assignment,
-        // so the removal and any subsequent restore share one FIFO.
+    fn enqueue_rank_removal(&self, worker: WorkerWithDpRank, task: WorkerTask) {
+        // All mutations for one rank stream use this indexer-lifetime assignment,
+        // so the removal and any subsequent rank restore share one FIFO.
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker_id,
+            worker,
             self.num_workers,
         );
 
         if let Err(error) = self.worker_event_channels[thread_idx].send(task) {
             tracing::error!(
-                worker_id,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
                 worker_thread_index = thread_idx,
                 ?error,
-                "Failed to send worker removal task"
+                "Failed to send rank removal task"
             );
             return;
         }
 
         self.maybe_enqueue_cleanup(thread_idx);
+    }
+
+    async fn remove_worker_across_lanes_and_wait(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<(), KvRouterError> {
+        let mut lane_receivers = Vec::with_capacity(self.worker_event_channels.len());
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            channel
+                .send(WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree: false,
+                    resp: resp_tx,
+                })
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            lane_receivers.push(resp_rx);
+        }
+        for receiver in lane_receivers {
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+
+        // NOTE: The lifecycle caller stops this worker's source before removal. Broadcasting
+        // keeps all admission bookkeeping off the event hot path; events concurrently admitted
+        // before this barrier completes belong to the retiring source and may be removed.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[0]
+            .send(WorkerTask::RemoveWorker {
+                worker_id,
+                sweep_tree: true,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        self.maybe_enqueue_cleanup(0);
+        Ok(())
     }
 
     fn next_synthetic_event_id(synthetic_event_id: &AtomicU64) -> u64 {
@@ -574,7 +909,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     fn enqueue_prune_removes(
         worker_event_channels: &[flume::Sender<WorkerTask>],
-        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignments: &DashMap<WorkerWithDpRank, usize, FxBuildHasher>,
         worker_assignment_count: &AtomicUsize,
         num_workers: usize,
         synthetic_event_id: &AtomicU64,
@@ -601,7 +936,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let thread_idx = Self::get_or_assign_thread_idx(
                 worker_assignments,
                 worker_assignment_count,
-                worker.worker_id,
+                worker,
                 num_workers,
             );
             if let Err(error) = worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
@@ -617,7 +952,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     fn spawn_prune_pump(
         prune_manager: WorkerPruneManager,
         worker_event_channels: Vec<flume::Sender<WorkerTask>>,
-        worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
+        worker_assignments: Arc<DashMap<WorkerWithDpRank, usize, FxBuildHasher>>,
         worker_assignment_count: Arc<AtomicUsize>,
         num_workers: usize,
         synthetic_event_id: Arc<AtomicU64>,
@@ -686,6 +1021,22 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             return Err(KvRouterError::IndexerDroppedRequest);
         }
 
+        if self.approximate_lru_enabled {
+            return Err(KvRouterError::Unsupported(
+                "approximate LRU routing decisions require an admitted request attempt".to_string(),
+            ));
+        }
+
+        self.record_ttl_fallback_hashes(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    pub async fn record_ttl_fallback_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
         let Some(prune_manager) = &self.prune_manager else {
             // Approximate routing decisions are only recorded when explicitly enabled.
             return Ok(());
@@ -697,7 +1048,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker.worker_id,
+            worker,
             self.num_workers,
         );
 
@@ -715,7 +1066,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         if applied {
             prune_manager.insert_worker_block_entries(worker, prune_entries);
         }
-
         Ok(())
     }
 
@@ -898,27 +1248,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let worker_id = event.worker_id;
-
-        // Get or assign worker thread index using sticky round-robin
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker_id,
-            self.num_workers,
-        );
-
-        // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
-            tracing::error!(
-                "Failed to send event to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-            return;
+        if let Err(error) = self.enqueue_event(event) {
+            tracing::error!(%error, "Failed to enqueue event to thread-pool indexer");
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -926,28 +1258,72 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker(worker_id);
         }
 
-        self.enqueue_worker_removal(
-            worker_id,
-            WorkerTask::RemoveWorker {
-                worker_id,
-                sweep_tree: true,
-            },
-        );
+        if let Err(error) = self.remove_worker_across_lanes_and_wait(worker_id).await {
+            tracing::error!(worker_id, %error, "Failed to remove worker across mutation lanes");
+        }
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        if self.approximate_lru_enabled {
+            if let Err(error) = self
+                .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
+                .expect("LRU client is available when LRU is enabled")
+                .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                .await
+            {
+                tracing::error!(worker_id, dp_rank, %error, "Failed to reset approximate LRU rank");
+            }
+            return;
+        }
+
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
-        self.enqueue_worker_removal(
-            worker_id,
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        self.enqueue_rank_removal(
+            worker,
             WorkerTask::RemoveWorkerDpRank {
                 worker_id,
                 dp_rank,
                 sweep_tree: true,
             },
         );
+    }
+
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        if self.approximate_lru_enabled {
+            return self
+                .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
+                .expect("LRU client is available when LRU is enabled")
+                .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                .await;
+        }
+
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
+
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: true,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        self.flush_worker_lane_and_wait(worker).await
     }
 
     fn shutdown(&self) {
@@ -1100,49 +1476,98 @@ mod tests {
     use super::*;
     use crate::{
         ConcurrentRadixTreeCompressed,
-        test_utils::{assert_score, make_store_event},
+        test_utils::{
+            assert_no_scores, assert_score, make_store_event, make_store_event_with_dp_rank,
+        },
     };
 
     fn assigned_thread(
         indexer: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>,
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
     ) -> Option<usize> {
-        indexer
-            .worker_assignments
-            .get(&worker_id)
-            .map(|entry| *entry)
+        indexer.worker_assignments.get(&worker).map(|entry| *entry)
     }
 
+    #[derive(Clone, Copy)]
     enum ColdRemoval {
         Worker,
         DpRank,
     }
 
-    async fn assert_cold_remove_reserves_sticky_queue(removal: ColdRemoval) {
+    async fn assert_cold_removal_assignment(removal: ColdRemoval) {
         let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
         indexer.apply_event(make_store_event(1, &[1])).await;
-        assert_eq!(assigned_thread(&indexer, 1), Some(0));
+        let first = WorkerWithDpRank::new(1, 0);
+        let removed = WorkerWithDpRank::new(2, 0);
+        assert_eq!(assigned_thread(&indexer, first), Some(0));
 
         match removal {
             ColdRemoval::Worker => indexer.remove_worker(2).await,
             ColdRemoval::DpRank => indexer.remove_worker_dp_rank(2, 0).await,
         }
 
-        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        let expected_before_store = match removal {
+            ColdRemoval::Worker => None,
+            ColdRemoval::DpRank => Some(1),
+        };
+        assert_eq!(assigned_thread(&indexer, removed), expected_before_store);
         indexer.apply_event(make_store_event(2, &[2])).await;
         indexer.flush().await;
-        assert_eq!(assigned_thread(&indexer, 2), Some(1));
-        assert_score(&indexer, &[2], WorkerWithDpRank::new(2, 0), 1).await;
+        assert_eq!(assigned_thread(&indexer, removed), Some(1));
+        assert_score(&indexer, &[2], removed, 1).await;
     }
 
     #[tokio::test]
-    async fn cold_worker_remove_reserves_sticky_queue() {
-        assert_cold_remove_reserves_sticky_queue(ColdRemoval::Worker).await;
+    async fn cold_worker_remove_does_not_reserve_rank_queue() {
+        assert_cold_removal_assignment(ColdRemoval::Worker).await;
     }
 
     #[tokio::test]
     async fn cold_rank_remove_reserves_sticky_queue() {
-        assert_cold_remove_reserves_sticky_queue(ColdRemoval::DpRank).await;
+        assert_cold_removal_assignment(ColdRemoval::DpRank).await;
+    }
+
+    #[tokio::test]
+    async fn sibling_ranks_use_independent_sticky_queues() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let rank0 = WorkerWithDpRank::new(7, 0);
+        let rank1 = WorkerWithDpRank::new(7, 1);
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[10], 0))
+            .await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[20], 1))
+            .await;
+
+        assert_eq!(assigned_thread(&indexer, rank0), Some(0));
+        assert_eq!(assigned_thread(&indexer, rank1), Some(1));
+        indexer.flush().await;
+        assert_score(&indexer, &[10], rank0, 1).await;
+        assert_score(&indexer, &[20], rank1, 1).await;
+    }
+
+    #[tokio::test]
+    async fn whole_worker_remove_barriers_every_rank_lane_before_returning() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let rank1 = WorkerWithDpRank::new(7, 1);
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[10], 0))
+            .await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[20], 1))
+            .await;
+        indexer.remove_worker(7).await;
+
+        assert_no_scores(&indexer, &[10]).await;
+        assert_no_scores(&indexer, &[20]).await;
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[30], 1))
+            .await;
+        indexer.flush().await;
+        assert_score(&indexer, &[30], rank1, 1).await;
     }
 
     #[cfg(feature = "bench")]

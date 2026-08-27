@@ -25,6 +25,9 @@ class DynamoRuntimeConfig(ConfigBase):
 
     namespace: str
     endpoint: Optional[str] = None
+    # Exact endpoint that owns this worker's KV event and recovery state. None
+    # maps KV state to the serving endpoint and does not change request routing.
+    kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
     event_plane: Optional[str] = None
@@ -34,6 +37,7 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     dyn_enable_structural_tag: bool = False
     dyn_structural_tag_scope: str = "auto"
@@ -54,6 +58,19 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_insecure: bool = False
+    tcp_tls_server_name: Optional[str] = None
+    tcp_tls_handshake_timeout_secs: Optional[int] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
+    nats_tls_ca_cert_path: Optional[str] = None
+    nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -87,6 +104,51 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+
+        # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
+        if self.tcp_tls_cert_path:
+            os.environ["DYN_TCP_TLS_CERT_PATH"] = self.tcp_tls_cert_path
+        if self.tcp_tls_key_path:
+            os.environ["DYN_TCP_TLS_KEY_PATH"] = self.tcp_tls_key_path
+        if self.tcp_tls_ca_cert_path:
+            os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = self.tcp_tls_ca_cert_path
+        if self.tcp_tls_insecure:
+            os.environ["DYN_TCP_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("DYN_TCP_TLS_INSECURE", None)
+        if self.tcp_tls_server_name:
+            os.environ["DYN_TCP_TLS_SERVER_NAME"] = self.tcp_tls_server_name
+        if self.tcp_tls_handshake_timeout_secs is not None:
+            if self.tcp_tls_handshake_timeout_secs <= 0:
+                raise ValueError(
+                    f"--tcp-tls-handshake-timeout must be a positive integer, got {self.tcp_tls_handshake_timeout_secs}"
+                )
+            os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
+                self.tcp_tls_handshake_timeout_secs
+            )
+        # TCP mTLS: client identity presented to the server, and the CA the
+        # server uses to verify client certificates.
+        if self.tcp_tls_client_cert_path:
+            os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = self.tcp_tls_client_cert_path
+        if self.tcp_tls_client_key_path:
+            os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = self.tcp_tls_client_key_path
+        if self.tcp_tls_client_ca_cert_path:
+            os.environ[
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+            ] = self.tcp_tls_client_ca_cert_path
+
+        # Propagate NATS TLS CLI flags.
+        if self.nats_tls_ca_cert_path:
+            os.environ["NATS_TLS_CA_CERT_PATH"] = self.nats_tls_ca_cert_path
+        if self.nats_tls_insecure:
+            os.environ["NATS_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("NATS_TLS_INSECURE", None)
+        # NATS mTLS: client identity presented to the NATS server.
+        if self.nats_tls_client_cert_path:
+            os.environ["NATS_TLS_CLIENT_CERT_PATH"] = self.nats_tls_client_cert_path
+        if self.nats_tls_client_key_path:
+            os.environ["NATS_TLS_CLIENT_KEY_PATH"] = self.nats_tls_client_key_path
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -127,6 +189,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT",
             default=None,
             help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate.",
+        )
+        add_argument(
+            g,
+            flag_name="--kv-state-endpoint",
+            env_var="DYN_KV_STATE_ENDPOINT",
+            default=None,
+            help="Endpoint identity that owns this worker's KV event and recovery state. Defaults to the serving endpoint.",
         )
         add_argument(
             g,
@@ -186,6 +255,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
+        add_argument(
+            g,
+            flag_name="--dyn-default-thinking-mode",
+            env_var="DYN_DEFAULT_THINKING_MODE",
+            default=None,
+            choices=["enabled", "disabled"],
+            help="Deployment-level default thinking mode for chat templates. "
+            "Client request thinking, reasoning_effort, chat_template_args, or "
+            "chat_template_kwargs values override this default.",
+        )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
         # Both definitions are needed: this one controls the Rust-native chat
         # template path (oai.rs), while the frontend copy controls the Python
@@ -204,7 +283,9 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
             default=False,
-            help="Enable structural tag guided decoding for tool calls.",
+            help="Enable structural tag guided decoding for tool calls. "
+            "Named Kimi K3 tool_choice requests always activate their required "
+            "XTML structural tag even when this flag is off.",
         )
         add_argument(
             g,
@@ -243,7 +324,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT_TYPES",
             default="chat,completions",
             obsolete_flag="--dyn-endpoint-types",
-            help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Use 'completions' for models without chat templates.",
+            help="Comma-separated list of endpoint types to enable. Options: "
+            "'chat', 'completions', or 'none'. Use 'completions' for models "
+            "without chat templates. Use 'none' for topology-only workers "
+            "fronted by another Dynamo service.",
         )
 
         add_argument(
@@ -323,4 +407,111 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used by this node to verify the TCP peer's certificate.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tcp-tls-insecure",
+            env_var="DYN_TCP_TLS_INSECURE",
+            default=False,
+            help="Disable TCP TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-server-name",
+            env_var="DYN_TCP_TLS_SERVER_NAME",
+            default=None,
+            help="Override TLS SNI server name for TCP connections (useful when connecting by IP).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-handshake-timeout",
+            env_var="DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS",
+            default=None,
+            arg_type=int,
+            dest="tcp_tls_handshake_timeout_secs",
+            help="TLS handshake timeout in seconds (default: 3).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-ca-cert-path",
+            env_var="NATS_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate for verifying the NATS server.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--nats-tls-insecure",
+            env_var="NATS_TLS_INSECURE",
+            default=False,
+            help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
         )

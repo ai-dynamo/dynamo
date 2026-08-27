@@ -14,8 +14,8 @@ on:
         description: 'JSON array of deployment profiles to test'
         type: string
         required: true
-      image_suffix:
-        description: 'Image suffix (e.g. vllm-runtime-cuda13-amd64)'
+      image_tag:
+        description: 'Runtime image tag'
         type: string
         required: true
       namespace:
@@ -48,30 +48,33 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
       - name: Run Dynamo Deploy Test
         id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -80,6 +83,9 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}

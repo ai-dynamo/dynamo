@@ -6,17 +6,17 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use rustc_hash::FxHashMap;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
-
-const MAX_REPLICA_BATCH_EVENTS: usize = 256;
-const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
+use crate::protocols::{
+    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
+    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+};
 
 #[derive(Default)]
 struct ReplicaBatchEffects {
@@ -51,6 +51,15 @@ impl ReplicaBatchEffects {
 }
 
 impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
+    /// Apply one decoded replica-sync batch and flush its deferred effects once.
+    pub fn apply_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
+        let mut effects = ReplicaBatchEffects::default();
+        for event in events {
+            self.apply_replica_event(event, &mut effects);
+        }
+        self.flush_replica_batch_effects(&mut effects);
+    }
+
     /// Spawn a background task that subscribes to replica-sync events from peer routers
     /// and applies them to the local state.
     pub fn start_replica_sync<S: SequenceSubscriber + 'static>(
@@ -157,6 +166,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if router_id == self.router_id {
             return;
         }
+        if !self.replica_sync && !matches!(data, ActiveSequenceEventData::MarkPrefillCompleted) {
+            return;
+        }
 
         // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
         // Peer routers still approximate decay anchoring with local receive time.
@@ -169,20 +181,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
+                if self
+                    .request_index
+                    .try_insert_request(request_id.clone(), event_worker, lora_name)
+                    .is_err()
+                {
+                    return;
+                }
                 if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
                     self.ensure_worker_registered(event_worker);
                 }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&event_worker) else {
+                    self.request_index
+                        .remove_request_if_worker(&request_id, event_worker);
                     tracing::debug!(
                         worker = ?event_worker,
                         "Dropping replica AddRequest for unregistered worker"
                     );
                     return;
                 };
-
-                self.request_index
-                    .set_request(request_id.clone(), event_worker, lora_name);
                 let (expired_request_ids, load) = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
@@ -210,9 +228,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::Free => {
-                let Some(worker) = self.request_index.remove_request(&request_id) else {
+                let Some(worker) = self.request_index.worker_for(&request_id) else {
                     return;
                 };
+                if worker != event_worker {
+                    return;
+                }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&worker) else {
                     return;
@@ -220,13 +241,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
+                    let Some(delta) = seq.free(&request_id, decay_now) else {
+                        return;
+                    };
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
                     load
                 };
                 drop(table);
+                self.request_index
+                    .remove_request_if_worker(&request_id, worker);
                 effects.record_worker_load(worker, load, true);
                 effects.wake_scheduler = true;
                 effects.cleanup_prompt_trie = true;
@@ -235,13 +260,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let Some(worker) = self.request_index.worker_for(&request_id) else {
                     return;
                 };
+                if worker != event_worker {
+                    return;
+                }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&worker) else {
                     return;
                 };
                 let load = {
                     let mut seq = table.slots[idx].sequences.write();
-                    seq.mark_prefill_completed(&request_id, decay_now);
+                    if !seq.mark_prefill_completed(&request_id, decay_now) {
+                        return;
+                    }
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry.replace_worker_load_state(worker, load);
                     load
@@ -255,18 +285,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     fn flush_replica_batch_effects(&self, effects: &mut ReplicaBatchEffects) {
         let decay_now = Instant::now();
-        let mut active_loads = Vec::with_capacity(effects.worker_loads.len());
+        let mut scheduler_loads = Vec::with_capacity(effects.worker_loads.len());
         for (worker, pending) in effects.worker_loads.drain() {
             if pending.publish {
-                active_loads.push(self.observe_worker_load_snapshot(
+                scheduler_loads.push(self.observe_worker_load_snapshot(
                     worker,
                     pending.latest_load,
                     decay_now,
                 ));
             }
         }
-        if !active_loads.is_empty() {
-            self.publisher.publish_load_batch(active_loads);
+        if !scheduler_loads.is_empty() {
+            self.publisher.publish_scheduler_load_batch(scheduler_loads);
         }
 
         if std::mem::take(&mut effects.wake_scheduler) {

@@ -6,7 +6,8 @@ use rustc_hash::FxHashSet;
 
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket};
-use crate::protocols::{ExternalSequenceBlockHash, KvCacheEventError};
+use super::canonical::CanonicalSequenceBlockHash;
+use crate::protocols::KvCacheEventError;
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -27,15 +28,15 @@ impl CuckooInsertionScratch {
     pub(super) fn new(max_kicks: usize) -> Result<Self, KvCacheEventError> {
         let capacity = max_kicks
             .checked_add(1)
-            .ok_or(KvCacheEventError::CapacityExhausted)?;
+            .ok_or(KvCacheEventError::AllocationFailed)?;
         let mut touched = Vec::new();
         let mut dirty_buckets = Vec::new();
         touched
             .try_reserve_exact(capacity)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         dirty_buckets
             .try_reserve_exact(capacity)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         Ok(Self {
             touched,
             dirty_buckets,
@@ -54,7 +55,7 @@ impl CuckooInsertionScratch {
 
 #[cfg(test)]
 pub(super) struct DcWriterState {
-    pub(super) resident: FxHashSet<ExternalSequenceBlockHash>,
+    pub(super) resident: FxHashSet<CanonicalSequenceBlockHash>,
     pub(super) rng: u64,
     pub(super) scratch: CuckooInsertionScratch,
 }
@@ -69,7 +70,7 @@ impl DcWriterState {
         let mut resident = FxHashSet::default();
         resident
             .try_reserve(expected_blocks)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         Ok(Self {
             resident,
             rng,
@@ -96,7 +97,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn insert(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_dirty: impl FnMut(DirtyBucket),
@@ -106,16 +107,20 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Ok(())
     }
 
-    pub(super) fn insert_touched(
+    /// Insert one logical hash and report every physical bucket's value before
+    /// the successful mutation. A bucket written more than once is reported in
+    /// write order, allowing publication-window tracking to retain its first
+    /// pre-mutation image without observing rolled-back insertions.
+    pub(super) fn insert_with_originals(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
-        mut on_touched: impl FnMut(usize),
+        mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
         self.insert_inner(hash, rng, scratch)?;
-        for &bucket in &scratch.dirty_buckets {
-            on_touched(bucket);
+        for &(bucket, before) in &scratch.touched {
+            on_touched(bucket, before);
         }
         scratch.clear();
         Ok(())
@@ -123,13 +128,13 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
 
     fn insert_inner(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
     ) -> Result<(), KvCacheEventError> {
         debug_assert!(self.store.bucket_count().is_power_of_two());
         scratch.clear();
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
 
         if self.insert_into_empty(probe.bucket_a, probe.fingerprint, scratch)
             || self.insert_into_empty(probe.bucket_b, probe.fingerprint, scratch)
@@ -157,6 +162,9 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
             }
         }
 
+        // NOTE: Exhausting this bounded kick search does not prove the table is full. Roll back
+        // every speculative write so the caller can omit only the physical admission while its
+        // exact lineage and ownership stay committed.
         self.rollback(scratch);
         Err(KvCacheEventError::CapacityExhausted)
     }
@@ -164,10 +172,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn remove(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         mut on_dirty: impl FnMut(DirtyBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {
@@ -185,19 +193,19 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Err(KvCacheEventError::IndexerInvariantViolation)
     }
 
-    pub(super) fn remove_touched(
+    pub(super) fn remove_with_original(
         &self,
-        hash: ExternalSequenceBlockHash,
-        mut on_touched: impl FnMut(usize),
+        hash: CanonicalSequenceBlockHash,
+        mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {
                 continue;
             };
             self.store.store_bucket(bucket, before.with_slot(slot, 0));
-            on_touched(bucket);
+            on_touched(bucket, before);
             return Ok(());
         }
 

@@ -39,8 +39,10 @@ def _sanitize_payload_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
-                        image_url = part.get("image_url", {})
-                        if "url" in image_url:
+                        image_url = part.get("image_url")
+                        if isinstance(image_url, dict) and isinstance(
+                            image_url.get("url"), str
+                        ):
                             image_url["url"] = _truncate_base64_url(image_url["url"])
 
     return sanitized

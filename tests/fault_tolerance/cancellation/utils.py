@@ -143,11 +143,41 @@ class CancellableRequest:
         self._active_sockets.clear()
 
         # Also close at the requests level for cleanup
-        if self.response:
+        if self.response is not None:
             self.response.close()
         for adapter in self.session.adapters.values():
             adapter.close()
         self.session.close()
+
+    def raise_for_early_failure(self) -> None:
+        """Raise when a request finishes with an error before reaching a worker."""
+        request_thread = self._request_thread
+        if request_thread is None or request_thread.is_alive():
+            return
+
+        if self.exception is not None:
+            exception = self.exception
+            self.cancel()
+            raise AssertionError(
+                f"Request failed before reaching the worker: {exception}"
+            ) from exception
+
+        if self.response is None:
+            self.cancel()
+            raise AssertionError(
+                "Request finished before reaching the worker without a response"
+            )
+
+        if not 200 <= self.response.status_code < 300:
+            status_code = self.response.status_code
+            response_body = self.response.text.strip()
+            if len(response_body) > 1000:
+                response_body = f"{response_body[:1000]}..."
+            self.cancel()
+            raise AssertionError(
+                "Request failed before reaching the worker: "
+                f"HTTP {status_code}: {response_body}"
+            )
 
     def get_response(self):
         """Get the response or raise exception if there was one"""
@@ -243,7 +273,7 @@ def send_cancellable_request(
         frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
-        max_tokens: Maximum tokens to request for the cancellable request
+        max_tokens: Maximum tokens to generate for the cancellable request
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -561,6 +591,7 @@ def poll_for_pattern(
     max_wait_ms: int = 500,
     poll_interval_ms: int = 5,
     match_type: str = "endswith",  # "contains" or "endswith"
+    cancellable_request: CancellableRequest | None = None,
 ) -> tuple[str, int]:
     """
     Poll process log for a specific pattern.
@@ -572,6 +603,7 @@ def poll_for_pattern(
         max_wait_ms: Maximum time to wait for the pattern in milliseconds
         poll_interval_ms: Interval between polls in milliseconds
         match_type: How to match the pattern - "contains" or "endswith"
+        cancellable_request: Request to check for an early HTTP or transport failure
 
     Returns:
         Tuple of (matched_content, new_log_offset) where matched_content is:
@@ -620,9 +652,15 @@ def poll_for_pattern(
         # Update offset for next poll
         current_offset = len(log_content)
 
+        if cancellable_request is not None:
+            cancellable_request.raise_for_early_failure()
+
         # Wait before next poll
         time.sleep(poll_interval_ms / 1000.0)
         iteration += 1
+
+    if cancellable_request is not None:
+        cancellable_request.raise_for_early_failure()
 
     raise AssertionError(
         f"Failed to find '{pattern}' pattern after {max_iterations} iterations ({max_wait_ms}ms)"

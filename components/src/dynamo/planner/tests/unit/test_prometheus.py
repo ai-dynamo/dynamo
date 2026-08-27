@@ -48,7 +48,12 @@ class _FixedPrefillCapacity:
 
 class _ThroughputScalingHarness(ThroughputScalingMixin):
     def __init__(self, engine_rps: float):
-        self._config = SimpleNamespace(ttft_ms=200.0, min_endpoint=1)
+        self._config = SimpleNamespace(
+            ttft_ms=200.0,
+            min_endpoint=1,
+            prefill_min_endpoint=None,
+            decode_min_endpoint=None,
+        )
         self._prefill_regression = _FixedPrefillCapacity(engine_rps)
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None
@@ -206,6 +211,22 @@ def test_frontend_metric_with_partial_data():
     assert metric.instance is None
     assert metric.job is None
     assert metric.pod is None
+
+
+@patch("dynamo.planner.monitoring.traffic_metrics.PrometheusConnect")
+def test_prometheus_client_configures_request_timeout(mock_prometheus_connect):
+    PrometheusAPIClient(
+        "http://localhost:9090",
+        "test_namespace",
+        request_timeout_seconds=2.5,
+    )
+
+    mock_prometheus_connect.assert_called_once_with(
+        url="http://localhost:9090",
+        disable_ssl=True,
+        retry=0,
+        timeout=2.5,
+    )
 
 
 def test_get_average_metric_none_result():
@@ -477,6 +498,19 @@ def test_spec_decode_accept_length_returns_none_for_invalid_values(value):
 # ---------------------------------------------------------------------------
 
 
+def _mocked_frontend_client(namespace: str) -> PrometheusAPIClient:
+    """Frontend-source client whose Prometheus connection is mocked out.
+
+    No port in the URL: ``prom`` is replaced before any query runs, so nothing
+    is ever dialed and allocating a real port would buy nothing.
+    """
+    client = PrometheusAPIClient(
+        "http://prometheus.invalid", namespace, metrics_source="frontend"
+    )
+    client.prom = MagicMock()
+    return client
+
+
 @pytest.fixture
 def router_client():
     """PrometheusAPIClient configured with metrics_source='router'."""
@@ -562,6 +596,70 @@ class TestPrometheusAPIClientRouterSource:
         call_args = str(client.prom.custom_query.call_args)
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
         assert expected_metric in call_args
+
+    def test_kv_hit_rate_queries_the_worker_namespace_first(self):
+        """An embedded KV router builds its metrics from the worker Component,
+        so its series carry the operator's worker suffix. Querying only the base
+        namespace matched nothing and the planner silently lost the discount."""
+        client = _mocked_frontend_client("myns")
+        client.prom.custom_query.return_value = [{"value": [0, "0.35"]}]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result == 0.35
+        assert client.prom.custom_query.call_count == 1
+        assert 'dynamo_namespace="myns_c76086f3"' in str(
+            client.prom.custom_query.call_args
+        )
+
+    def test_kv_hit_rate_falls_back_to_the_base_namespace_when_empty(self):
+        """A standalone LocalRouter registers under the base namespace and never
+        receives the worker suffix, so an empty first result must fall through
+        rather than be reported as no data."""
+        client = _mocked_frontend_client("myns")
+        client.prom.custom_query.side_effect = [[], [{"value": [0, "0.42"]}]]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result == 0.42
+        assert client.prom.custom_query.call_count == 2
+        queries = [str(call) for call in client.prom.custom_query.call_args_list]
+        assert 'dynamo_namespace="myns_c76086f3"' in queries[0]
+        assert 'dynamo_namespace="myns"' in queries[1]
+
+    def test_kv_hit_rate_does_not_fall_back_on_nan(self):
+        """NaN means the series exist and the window was idle. Falling through
+        there would report a different router's traffic as this one's."""
+        client = _mocked_frontend_client("myns")
+        client.prom.custom_query.side_effect = [
+            [{"value": [0, "NaN"]}],
+            [{"value": [0, "0.99"]}],
+        ]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result is None
+        assert client.prom.custom_query.call_count == 1
+
+    def test_kv_hit_rate_returns_none_on_prometheus_transport_failure(self):
+        """A scrape gap must stay a None, so the caller falls back to no
+        discount rather than treating the outage as real cache behaviour."""
+        client = _mocked_frontend_client("myns")
+        client.prom.custom_query.side_effect = PrometheusApiClientException("boom")
+
+        assert (
+            client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76") is None
+        )
+
+    def test_kv_hit_rate_propagates_a_malformed_response(self):
+        """A response the parser cannot read is a broken query contract, not
+        missing data. Swallowing it would silently suppress the KV discount with
+        nothing but an info line to show for it."""
+        client = _mocked_frontend_client("myns")
+        client.prom.custom_query.return_value = [{"value": [0, "not-a-number"]}]
+
+        with pytest.raises(ValueError):
+            client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76")
 
     def test_get_avg_request_count_uses_router_requests_started_total(
         self, router_client

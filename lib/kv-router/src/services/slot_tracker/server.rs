@@ -14,19 +14,16 @@ use dynamo_tokens::SequenceHash;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
 use crate::services::common::replica_sync::PeerManager;
 use crate::services::common::replica_sync_http;
 
-use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry, TrackerKey};
+use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry};
 
 pub struct AppState {
     pub registry: Arc<SlotTrackerRegistry>,
-}
-
-fn default_routing_group() -> String {
-    "default".to_string()
 }
 
 #[derive(Deserialize)]
@@ -123,7 +120,7 @@ async fn register(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     match state.registry.register(
         key,
         req.worker_id,
@@ -144,7 +141,7 @@ async fn unregister(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     match state.registry.unregister(&key, req.worker_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => registry_error(error),
@@ -170,7 +167,7 @@ async fn add(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
 
     // Lifecycle delivery is intentionally arrival-ordered. Consumers should
     // normally await /add before sending /prefill_complete or /free.
@@ -194,7 +191,7 @@ async fn prefill_complete(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     match state.registry.mark_prefill_completed(&key, &req.request_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => service_error(error),
@@ -209,7 +206,7 @@ async fn free(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     match state.registry.free(&key, &req.request_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => service_error(error),
@@ -235,7 +232,7 @@ async fn potential_loads(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     match state
         .registry
         .potential_loads(&key, &req.sequence_hashes, req.new_isl_tokens)

@@ -49,6 +49,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apitestingfuzzer "k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -179,6 +181,29 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		fuzzBetaDGDROverrides,
+		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
+		// round-trip fuzzer exercises Placement without producing shapes the CRD
+		// schema rejects. State draws from the enum; Score draws either nil or a
+		// value inside the [0, 1] bounds enforced by the CRD.
+		func(p *v1beta1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1beta1.PlacementScoreStateReported,
+				v1beta1.PlacementScoreStatePartial,
+				v1beta1.PlacementScoreStateUnsupported,
+				v1beta1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
+		func(p *v1alpha1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1alpha1.PlacementScoreStateReported,
+				v1alpha1.PlacementScoreStatePartial,
+				v1alpha1.PlacementScoreStateUnsupported,
+				v1alpha1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
@@ -280,6 +305,88 @@ func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Co
 	}
 }
 
+func fuzzBetaDGDROverrides(overrides *v1beta1.OverridesSpec, c randfill.Continue) {
+	// Fill the complete override normally first. This also produces the
+	// ProfilingJob == nil case without special alpha/beta logic.
+	c.FillNoCustom(overrides)
+
+	if overrides.ProfilingJob != nil {
+		fuzzDGDRProfilingJob(overrides.ProfilingJob, c)
+	}
+}
+
+func fuzzDGDRProfilingJob(job *batchv1.JobSpec, c randfill.Continue) {
+	fuzzDGDRProfilingPodTemplate(&job.Template, c)
+}
+
+func fuzzDGDRProfilingPodTemplate(template *corev1.PodTemplateSpec, c randfill.Continue) {
+	fuzzDGDRProfilingPodSpec(&template.Spec, c)
+}
+
+func fuzzDGDRProfilingPodSpec(podSpec *corev1.PodSpec, c randfill.Continue) {
+	names := fuzzDGDRProfilingContainerNames(c)
+	if names == nil {
+		podSpec.Containers = nil
+		return
+	}
+
+	podSpec.Containers = make([]corev1.Container, len(names))
+	for i, name := range names {
+		c.Fill(&podSpec.Containers[i])
+		podSpec.Containers[i].Name = name
+	}
+}
+
+const (
+	fuzzDGDRProfilerContainerName     = "profiler"
+	fuzzDGDROutputCopierContainerName = "output-copier"
+)
+
+func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
+	switch c.Intn(10) {
+	case 0:
+		return nil
+	case 1:
+		return []string{}
+	}
+
+	extraNames := func() []string {
+		names := make([]string, 1+c.Intn(3))
+		for i := range names {
+			names[i] = fmt.Sprintf("container-%d", i)
+		}
+		return names
+	}
+
+	var names []string
+	switch c.Intn(7) {
+	case 0:
+		names = []string{fuzzDGDRProfilerContainerName}
+	case 1:
+		names = []string{fuzzDGDROutputCopierContainerName}
+	case 2:
+		names = extraNames()
+	case 3:
+		names = []string{fuzzDGDRProfilerContainerName, fuzzDGDROutputCopierContainerName}
+	case 4:
+		names = append([]string{fuzzDGDROutputCopierContainerName}, extraNames()...)
+	case 5:
+		names = append([]string{fuzzDGDRProfilerContainerName}, extraNames()...)
+	default:
+		names = append(
+			[]string{fuzzDGDRProfilerContainerName, fuzzDGDROutputCopierContainerName},
+			extraNames()...,
+		)
+	}
+
+	for i := len(names) - 1; i > 0; i-- {
+		j := c.Intn(i + 1)
+		names[i], names[j] = names[j], names[i]
+	}
+
+	return names
+}
+
 func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
 
@@ -306,6 +413,17 @@ func newRoundTripFiller(seed int64) *randfill.Filler {
 
 func oneOf[T any](c randfill.Continue, values ...T) T {
 	return values[c.Intn(len(values))]
+}
+
+// oneOfPtr returns nil roughly half the time; otherwise a pointer to one of
+// values. Useful for optional API fields that must either be unset or draw
+// from a constrained value set.
+func oneOfPtr[T any](c randfill.Continue, values ...T) *T {
+	if c.Bool() {
+		return nil
+	}
+	v := oneOf(c, values...)
+	return &v
 }
 
 func fuzzJSONValue(c randfill.Continue, depth int) any {
