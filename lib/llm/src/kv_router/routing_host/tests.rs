@@ -14,7 +14,9 @@ use dynamo_kv_router::{
     DefaultWorkerSelector, WorkerSelectionPolicy,
     config::KvRouterConfig,
     protocols::RoutingConstraints,
-    scheduling::{ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier},
+    scheduling::{
+        ClassifyError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    },
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -793,6 +795,90 @@ impl RequestClassifier for RecordingClassifier {
             self.observations.send(observation).unwrap();
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("classifier rejected request")]
+struct ClassifierRejected;
+
+#[test]
+fn classification_failures_are_not_affinity_retryable() {
+    let failures = [
+        KvSchedulerError::RequestClassifierPanicked("panic".to_string()),
+        KvSchedulerError::RequestClassifierFailed(
+            Box::new(ClassifierRejected) as Box<ClassifyError>
+        ),
+        KvSchedulerError::RequestClassifierReplacedRequest,
+        KvSchedulerError::DuplicateClassificationRequestId("request".to_string()),
+        KvSchedulerError::InvalidClassificationMetadata("metadata".to_string()),
+    ];
+
+    for failure in failures {
+        let error = anyhow::Error::from(failure);
+        assert!(classification_failure(&error).is_some());
+    }
+    assert!(classification_failure(&anyhow::Error::from(KvSchedulerError::NoEndpoints)).is_none());
+}
+
+struct RejectingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<Option<(bool, String)>>,
+}
+
+impl RequestClassifier for RejectingClassifier {
+    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifyError>) })
+    }
+
+    fn on_event(&mut self, event: ClassifyEvent<'_>) {
+        if let ClassifyEvent::Aborted { error, .. } = event {
+            self.observations
+                .send(error.map(|error| {
+                    (
+                        error.downcast_ref::<ClassifierRejected>().is_some(),
+                        error.to_string(),
+                    )
+                }))
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_failure_aborts_once_with_original_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RejectingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-failure-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    assert!(
+        router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(Some((true, "classifier rejected request".to_string())))
+    );
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
 }
 
 #[tokio::test]

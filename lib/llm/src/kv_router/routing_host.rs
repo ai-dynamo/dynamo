@@ -10,6 +10,7 @@ use std::{
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{ClassifyError, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -61,6 +62,28 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+fn request_classifier_error(error: &Error) -> Option<&ClassifyError> {
+    let KvSchedulerError::RequestClassifierFailed(source) = classification_failure(error)? else {
+        return None;
+    };
+    Some(source.as_ref())
+}
+
+fn classification_failure(error: &Error) -> Option<&KvSchedulerError> {
+    error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<KvSchedulerError>()?;
+        matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(_)
+                | KvSchedulerError::RequestClassifierFailed(_)
+                | KvSchedulerError::RequestClassifierReplacedRequest
+                | KvSchedulerError::DuplicateClassificationRequestId(_)
+                | KvSchedulerError::InvalidClassificationMetadata(_)
+        )
+        .then_some(error)
+    })
 }
 
 fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
@@ -510,6 +533,7 @@ where
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
+            Err(error) if classification_failure(&error).is_some() => Err(error),
             Err(_)
                 if explicit.is_none()
                     && target.is_some_and(|target| {

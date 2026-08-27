@@ -71,7 +71,9 @@ where
             Ok(selection) => selection,
             Err(error) => {
                 if let Some(mut lifecycle) = request_lifecycle.take() {
-                    if crate::migration::is_migratable(error.as_ref())
+                    if let Some(classifier_error) = request_classifier_error(&error) {
+                        lifecycle.abort(Some(classifier_error));
+                    } else if crate::migration::is_migratable(error.as_ref())
                         && let Some(state) = request.migration_state.as_ref()
                     {
                         lifecycle.prepare_retry();
