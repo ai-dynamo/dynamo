@@ -244,7 +244,7 @@ jobs:
   docs-website-composition:
     name: Docs Website Composition Check
     needs: changed-files
-    if: needs.changed-files.outputs.docs == 'true'
+    if: needs.changed-files.outputs.docs == 'true' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
