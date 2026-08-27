@@ -16,11 +16,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> classification only; source and proto files also match rust
+#   sidecar  -> unified sidecar image build plus unit and integration tests
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   examples, ignore
 
 all:
   - '**'
@@ -113,6 +113,10 @@ ignore:
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
   - '.github/labeler.yml'
+  # Sidecar documentation is not part of the Fern site and does not affect the
+  # sidecar image or tests.
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
@@ -285,6 +289,9 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  - '!lib/sidecar/**/*.md'
+  - '!lib/sidecar/**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'

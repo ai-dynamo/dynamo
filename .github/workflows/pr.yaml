@@ -32,6 +32,7 @@ jobs:
       snapshot_sglang: ${{ steps.changes.outputs.snapshot_sglang }}
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
+      sidecar: ${{ steps.changes.outputs.sidecar }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -335,6 +337,18 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+# ============================================================================
+# Sidecar
+# ============================================================================
+
+  sidecar-build:
+    name: Sidecar build and tests
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar == 'true'
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1936,6 +1950,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr

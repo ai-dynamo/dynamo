@@ -167,6 +167,16 @@ jobs:
         run: make -C deploy/helm/charts/power-agent lint test
 
   # ============================================================================
+  # SIDECAR BUILD AND TESTS
+  # ============================================================================
+  sidecar-build:
+    name: Sidecar build and tests
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # ============================================================================
   # BUILD JOBS
   # ============================================================================
 
@@ -1524,7 +1534,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, sidecar-build, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

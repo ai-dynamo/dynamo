@@ -8,23 +8,55 @@
 # Build from the repository root:
 #   docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.3.0 .
 
+# Use NVIDIA's public, signed, multi-architecture Ubuntu base for both build
+# and runtime stages. The sidecars are CPU-only and need no framework or CUDA
+# runtime image.
+ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
+
 # ---- common builder ---------------------------------------------------------
-FROM rust:1.96.1-bookworm AS builder-base
+FROM ${BASE_IMAGE} AS builder-base
+
+ARG TARGETARCH
 
 # Superset of the build dependencies required by all sidecar crates:
 # aws-lc-sys/ring need cmake and a C toolchain (plus perl); bindgen needs
 # libclang; tonic-build (build.rs) needs protoc, and libprotobuf-dev supplies
 # the well-known protos the engine .proto files import (vllm_grpc.proto pulls
-# in google/protobuf/struct.proto). gcc, make, and git come with the rust image.
+# in google/protobuf/struct.proto); utoipa-swagger-ui downloads its pinned web
+# asset through the system curl binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
         cmake \
         clang \
+        curl \
+        git \
         libclang-dev \
         protobuf-compiler \
         libprotobuf-dev \
         perl \
         pkg-config \
+        wget \
     && rm -rf /var/lib/apt/lists/*
+
+# NGC does not publish a Rust toolchain image. Install the same pinned Rust
+# release used by the workspace through the pinned rustup installer.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH} \
+    RUST_VERSION=1.96.1
+
+RUN case "${TARGETARCH}" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
+        *) echo "Unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && wget --tries=3 --waitretry=5 \
+        "https://static.rust-lang.org/rustup/archive/1.28.1/${RUST_TARGET}/rustup-init" \
+    && chmod +x rustup-init \
+    && ./rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "${RUST_VERSION}" --default-host "${RUST_TARGET}" \
+    && rm rustup-init
 
 WORKDIR /src
 
@@ -82,7 +114,7 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
 
 # ---- runtime ----------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 # ca-certificates supports tokenizer downloads and TLS connections to Dynamo
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
@@ -91,6 +123,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
+    && userdel ubuntu \
     && useradd --create-home --uid 1000 --gid 0 dynamo
 
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
