@@ -3629,20 +3629,16 @@ impl OpenAIPreprocessor {
             return Ok(ToolProcessingRoute::PassThrough);
         }
 
-        let parser_name = effective_tool_call_parser.as_deref();
-        let use_parsers_v2 = tool_parser_v2::enabled()
-            && parser_name.is_some_and(tool_parser_v2::supports_family)
+        if let Some(parser_name) = effective_tool_call_parser.as_deref()
+            && tool_parser_v2::enabled()
+            && tool_parser_v2::supports_family(parser_name)
             && !uses_tool_call_structural_tag
             && matches!(
                 request.inner.tool_choice.as_ref(),
                 None | Some(ChatCompletionToolChoiceOption::Auto)
-            );
-        if use_parsers_v2 {
-            Ok(ToolProcessingRoute::ParserV2(
-                parser_name
-                    .expect("parser-v2 routing requires a parser name")
-                    .to_string(),
-            ))
+            )
+        {
+            Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()))
         } else {
             Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
         }
