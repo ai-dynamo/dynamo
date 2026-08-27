@@ -56,11 +56,11 @@ Framework maturity is evidence-based, not a statement that any OpenAI-compatible
 | Framework | Start here | Maturity | What the label means |
 |---|---|---|---|
 | verl | [Integrate with verl](verl.md) | Experimental | A public recipe exists and includes smoke, training, routing, and weight-update paths. The Dynamo guide remains experimental until the pinned path is independently reproduced and reviewed. |
+| NeMo RL | [Integrate with NeMo RL](nemo-rl.md) | Experimental | A merged managed-Slurm/vLLM adapter pins its Dynamo environment and has dedicated GPU functional evidence. The path remains narrow and lacks an independent Dynamo-docs reproduction. |
 | SLIME | [Review SLIME integration status](slime.md) | Integration in progress | Public prototype PRs demonstrate the intended streaming and discovery contracts, but the accepted upstream path is not settled. |
 | Prime-RL | [Review Prime-RL integration status](prime-rl.md) | Integration in progress | Discovery, recipes, and sidecar work remain in open PRs. The page documents architecture and graduation gates, not a supported launch procedure. |
-| NeMo RL | [Compatibility status](integration-reference.md#framework-compatibility) | Design research | NeMo RL exposes compatible generation and lifecycle concepts, but this documentation set has no validated public Dynamo adapter or recipe. |
 
-See the [authoritative framework compatibility table](integration-reference.md#framework-compatibility) for pinned evidence, backend and topology constraints, validation dates, and ownership. Frameworks such as Miles, ProRL, OpenRLHF, and SkyRL remain candidates until a maintained public integration passes the same evidence gate.
+See the [authoritative framework compatibility table](integration-reference.md#framework-compatibility) for pinned evidence, backend and topology constraints, validation dates, and ownership. OpenRLHF, Miles, SkyRL, and Polar remain matrix-only candidates until a maintained public Dynamo integration passes the same evidence gate. ProRL V2 is an OpenRLHF training recipe rather than a separate framework.
 
 ## Choose a Generation Contract
 
@@ -69,7 +69,7 @@ See the [authoritative framework compatibility table](integration-reference.md#f
 | Native SGLang token-input streaming | SGLang-compatible `POST /generate`; see [Choose a request interface](integration-reference.md#choose-a-request-interface). |
 | Cross-backend token-input generation | OpenAI-compatible `/v1/completions` with integer token arrays or `nvext.token_data`. |
 | Completion token IDs and prompt/completion log probabilities | Request the named `nvext` response fields and verify backend support in the [backend compatibility table](integration-reference.md#backend-compatibility). |
-| Worker discovery and direct lifecycle control | Use the dedicated vLLM discovery listener and each worker's system URL; do not send mutating calls through the inference frontend. |
+| Worker discovery and direct lifecycle control | Check discovery protocol version `1`, select workers by stable endpoint identity, and use each worker's system URL; optional model and transfer metadata cannot be assumed. |
 | Large SGLang rollout metadata | Use the opt-in `nvext.metadata_upload` path on a trusted control-plane request. |
 
 The [RL integration and compatibility reference](integration-reference.md) defines token authority, streaming, cancellation, discovery, administration, retry, security, and conformance requirements once for every framework.
@@ -98,7 +98,7 @@ No framework path in this documentation set is labeled supported yet. This is de
 
 - Dynamo does not decide whether a trajectory is valid, accepted, on-policy, or fresh enough for training.
 - The current request schema does not expose a stable typed RL context containing framework, rollout ID, policy version, trainer step, or maximum policy lag. Use documented session IDs and explicitly allowlisted application headers for correlation; do not assume Dynamo routes on those values.
-- Worker discovery and system-server routes are administrative interfaces without a separate authentication layer. Keep them on a trusted orchestrator network and expose only required backend methods.
+- Worker discovery, optional backend admin URLs, and system-server routes are administrative interfaces without a separate authentication layer. Keep them on a trusted orchestrator network, validate controller-routable URLs, and expose only required backend methods.
 - A successful HTTP request does not prove a complete RL sample. The framework must verify terminal state, token/logprob alignment, masks where applicable, and its own duplicate-sample policy.
 - DynoSim and request replay reproduce the serving workload, not the trainer, reward computation, policy transitions, or model-dependent branch decisions.
 - ModelExpress accelerates model loading and fleet distribution. It is not the default live-policy refresh mechanism for the framework integrations documented here.

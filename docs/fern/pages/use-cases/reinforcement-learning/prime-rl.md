@@ -14,9 +14,12 @@ subtitle: Track the Dynamo sidecar integration and its release and validation ga
 | [Discovery integration PR #3176 at `828ddc7`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3176) | Open | Resolve Dynamo rollout engines and separate frontend inference from direct engine administration. |
 | [Training recipes PR #3180 at `2f67c72`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180) | Open | Example configurations for external Dynamo/vLLM rollout serving. |
 | [Combined sidecar PR #3181 at `b17ceea`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3181) | Open draft | Assemble generation, discovery, and external weight-update behavior in one integration branch. |
-| [Prime-RL main documentation](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/docs) | Released project docs | Framework-owned trainer and orchestration behavior outside the Dynamo adapter. |
+| [Dynamo discovery protocol PR #13606 at `5bc908ad`](https://github.com/ai-dynamo/dynamo/pull/13606) | Merged | Version the worker list and define optional `world_size` and `admin_base_url` transfer metadata without changing existing Python-backed producers. |
+| [Dynamo vLLM sidecar metadata PR #13607 at `3231b991`](https://github.com/ai-dynamo/dynamo/pull/13607) | Open | Publish the sidecar's computed inference world size and optional controller-routable vLLM HTTP compatibility endpoint. |
+| [vLLM world-size PR #53204 at merge `9dba2c9b`](https://github.com/vllm-project/vllm/pull/53204) | Merged | Expose the authoritative per-engine world size over gRPC so consumers include TP, PP, and prefill-context parallelism rather than reconstructing an incomplete count. |
+| [Prime-RL documentation at `95734aa1`](https://github.com/PrimeIntellect-ai/prime-rl/tree/95734aa1dd3de26afee31e99b7b63b86ad8f4a2e/docs) | Project documentation snapshot | Framework-owned trainer and orchestration behavior outside the Dynamo adapter. |
 
-The evidence owner is the Prime-RL integration contributor set together with Dynamo RL maintainers. A release audit must recheck whether these PRs merged, were superseded, or changed config/API shape before this page's status changes.
+The upstream vLLM prerequisite is merged, but the Dynamo producer remains open and is not part of the reviewed `5bc908ad` runtime. The evidence owner is the Prime-RL integration contributor set together with Dynamo RL maintainers. A release audit must recheck whether these PRs merged, were superseded, or changed config/API shape before this page's status changes.
 
 ## Intended Architecture
 
@@ -27,7 +30,7 @@ flowchart LR
     R --> V1["Dynamo vLLM engine"]
     R --> V2["Dynamo vLLM engine"]
     P -->|"GET /v1/rl/workers"| D["Dynamo discovery listener"]
-    D -->|"system URLs and route lists"| P
+    D -->|"protocol, URLs, topology, and routes"| P
     P -->|"targeted group and update operations"| V1
     P -->|"targeted group and update operations"| V2
     T["trainer ranks"] -.->|"external NCCL or NIXL transfer"| V1
@@ -57,7 +60,9 @@ Send all rollout inference through the Dynamo frontend using the exact token/log
 
 ### Worker discovery
 
-The vLLM discovery listener returns `system_url`, model identity, and advertised route names. Prime-RL should refresh discovery before each control phase, require the complete capability set, and detect membership changes before committing a target worker set. It must not send update calls to the frontend or assume that one discovery response is durable.
+The discovery listener returns protocol version `1`, stable Dynamo endpoint identity, advertised route names, and capability-dependent direct metadata. `system_url` targets Dynamo `/engine/<route>` calls. Optional `admin_base_url` identifies a backend HTTP compatibility surface and is valid only with optional positive `world_size`; neither field is a fleet transaction or transfer-backend declaration. Model identity can be omitted when registration is missing or ambiguous.
+
+Prime-RL should reject an unknown protocol version, scope and refresh discovery before each control phase, require the complete capability set for the selected path, and detect identity or world-size changes before committing a target worker set. It must not send update calls to the frontend, derive a missing URL, interpret `world_size` as the number of discovered workers, reconstruct it as only TP × PP when prefill-context or data parallelism is present, or assume that one discovery response is durable. Because the reviewed vLLM sidecar producer is not merged, a public recipe must pin the producer it relies on instead of requiring optional transfer metadata from every current vLLM worker.
 
 ### Weight update control
 
@@ -81,7 +86,7 @@ A public Prime-RL recipe should record all of the following in one place:
 ## Validation Sequence After Merge
 
 1. Launch the pinned Dynamo frontend, discovery listener, and at least two RL-enabled vLLM engines.
-2. Confirm the frontend model list and discovery worker count match the intended deployment.
+2. Confirm discovery protocol version `1`, endpoint identities, selected worker count, required routes, and any producer-supplied world size match the intended deployment; define selection independently when `model` is omitted.
 3. Send a known token-input generation request and verify token/logprob alignment.
 4. Ask Prime-RL to discover workers and prove it calls only the returned direct system URLs for administration.
 5. Initialize the selected distributed group using the exact trainer and rollout rank mapping.

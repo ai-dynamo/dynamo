@@ -51,6 +51,18 @@ Record at least completed requests, generated tokens, request errors, time to fi
 
 Round-robin is a comparison baseline, not a recommendation for every RL workload. It can duplicate a shared prefix across workers, but it also reveals whether a more complex strategy is paying for itself.
 
+## Map the Router Setting to the Framework
+
+The framework must configure the same frontend that actually receives rollout traffic. Do not launch a second frontend only to copy a generic CLI example.
+
+| Framework path | Router setting | Important boundary |
+|---|---|---|
+| verl native Dynamo variant | `actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode` with `thunderagent.enabled=false` | The recipe-owned frontend translates this value into Dynamo routing. When ThunderAgent is enabled, it owns the internal scheduling decision and the same comparison no longer isolates native Dynamo routing. |
+| NeMo RL managed backend | `policy.generation.dynamo_cfg.frontend_args.router_mode` | NeMo RL launches its own frontend and forwards the validated value. The pinned smoke uses `kv`; create a `round-robin` control by changing this field, not by starting an external frontend. |
+| SLIME and Prime-RL status paths | Integration-specific prototype configuration | Their accepted upstream routing contracts are unresolved. Do not publish a launch or performance recommendation from the status pages. |
+
+NeMo RL also exposes `router_reset_states` under the same `frontend_args` object. Treat it as startup state handling, not policy-update cache invalidation: NeMo RL separately pauses and clears every worker after a refit. The current merged NeMo RL adapter does not forward rollout session IDs, so session-affinity experiments require adapter work and fresh validation rather than only setting a frontend TTL.
+
 ## Route for Prefix Reuse
 
 Enable KV-aware routing on the frontend:

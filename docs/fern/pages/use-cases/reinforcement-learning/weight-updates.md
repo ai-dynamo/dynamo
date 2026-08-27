@@ -19,13 +19,14 @@ Kubernetes is not required for the live-update paths in this guide. Deployment-l
 | Fleet model rollout | Deploy a new model/checkpoint as a new serving revision | Deployment-level readiness, rollout, and rollback | Kubernetes/operator and loading stack |
 | Live RL policy refresh | Trainer produces a new policy during a running job | Correct target worker set, update barrier or bounded lag, cache validity, version evidence, post-update generation | Direct backend controls plus framework-owned orchestration |
 
-[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) accelerates startup and fleet distribution through storage, P2P NIXL/RDMA, and optional ModelStreamer paths. It can help stage model data, but it is not the current hot-refit mechanism used by the verl recipe, and this page does not claim it implements an atomic RL policy update.
+[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) accelerates startup and fleet distribution through storage, P2P NIXL/RDMA, and optional ModelStreamer paths. It can help stage model data, but it is not the current hot-refit mechanism used by the verl or NeMo RL guides, and this page does not claim it implements an atomic RL policy update.
 
 ## Choose the Actual Update Path
 
 | Integration or backend | Transfer/apply path | Discovery/control path | Current boundary |
 |---|---|---|---|
 | verl recipe | Colocated CUDA IPC coordinated by recipe-owned Ray/ZMQ control | Recipe actors, not public Dynamo worker discovery | Current public recipe path; trainer/rollout GPU layouts must satisfy the recipe's rank mapping. |
+| NeMo RL managed backend | Packed checkpoint-format tensors through NeMo RL's NCCL collective sender | Fixed Ray-managed worker membership and immutable per-engine system URLs, not public frontend discovery | Pinned `ai-dynamo[vllm]==1.3.0.post1`, vLLM `0.23.0`, BF16, non-colocated, Slurm-managed path only. |
 | Dynamo vLLM from shared disk | `update_weights_from_disk` direct worker route | `/v1/rl/workers`, then each `system_url` | Per-worker pause/update/cache reset/version; no fleet transaction. |
 | Dynamo vLLM distributed | Group lifecycle plus `update_weights_from_distributed` | `/v1/rl/workers`, then each `system_url` | Backend RPC/body and rank mapping are integration-specific; group initialization has a watchdog. |
 | Dynamo SGLang | Fixed `/engine/control/update_weights_from_*` routes or startup-allowlisted SGLang methods | Integration must know or discover each SGLang system URL; not `/v1/rl/workers` today | Request/response schemas come from the pinned SGLang version. |
@@ -70,7 +71,9 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
   --enable-rl
 ```
 
-Discover workers at `GET http://localhost:8001/v1/rl/workers`. For each selected worker, require `pause_generation`, `update_weights_from_disk`, `get_weight_version`, and `resume_generation` in its `routes` list and use its returned `system_url`.
+Discover workers at `GET http://localhost:8001/v1/rl/workers`. Require protocol version `1`. For each selected worker, require `pause_generation`, `update_weights_from_disk`, `get_weight_version`, and `resume_generation` in its `routes` list and use its returned `system_url`.
+
+The same descriptor can optionally contain `world_size` and `admin_base_url`. Those fields describe producer-supplied transfer topology and a backend HTTP compatibility endpoint; they neither replace `system_url` for the routes below nor identify NCCL versus NIXL. Existing Python-backed workers do not automatically publish them at the reviewed source pin, so an integration must either make them optional or pin a producer that supplies them.
 
 The following example updates one worker and checks both HTTP failure and the JSON status. It intentionally resumes only after the update and version checks pass; if a command fails, the worker remains paused and must be repaired, replaced, or explicitly recovered before it can serve again:
 
@@ -126,6 +129,8 @@ An integration that receives weights over a distributed transport can use these 
 
 Route bodies are integration-specific and are forwarded to the selected engine RPC after Dynamo removes its reserved control keys. The integration must pin and test the exact body for its vLLM version; do not copy an NCCL or NIXL schema from another framework solely because the route name matches.
 
+If discovery supplies `world_size`, validate it against the framework's intended inference-rank mapping before group initialization. Treat a change as topology drift and fail the update barrier. If discovery supplies `admin_base_url`, use it only for the pinned backend compatibility API that requires direct HTTP; do not append Dynamo `/engine/<route>` paths there. The protocol intentionally does not publish a transfer-backend name, collective rank map, or trainer world size.
+
 The group initialization route defaults to a 30-second watchdog. If initialization does not complete, Dynamo cancels the task and terminates the worker because the engine core can remain blocked. Set `DYN_RL_INIT_WEIGHTS_TIMEOUT_S` on the worker when the validated rendezvous legitimately requires more time, and treat the timeout as worker failure rather than retrying against an unknown group state.
 
 `update_weights_from_distributed` normally requires a paused worker and resets prefix cache. It accepts `allow_unpaused` and `reset_prefix_cache` control keys, but unpaused update with cache reset is rejected. An unpaused update without cache reset can mix generation with weight mutation and retain old-policy cache state; do not use it for an RL integration unless the backend and framework explicitly prove safe atomic semantics.
@@ -172,6 +177,26 @@ For this integration:
 - treat the upstream benchmark topology and results as recipe-specific evidence
 
 See [Integrate with verl](verl.md#verify-the-policy-update) for the framework validation sequence.
+
+## NeMo RL Managed NCCL Refit
+
+The pinned [NeMo RL managed backend](nemo-rl.md) creates a fixed vLLM fleet and records each engine's direct system URL before initializing one trainer-plus-inference NCCL world. If engine world size is `E`, engine `i` begins at rank `training_world_size + i × E`. NeMo RL and its pinned vLLM environment both enforce a peer protocol with two 1-GiB packed transfer buffers; those constants are recomputed rather than negotiated.
+
+The framework lifecycle is:
+
+1. Gate or drain generation under the NeMo RL training barrier.
+2. Revalidate every worker process, GPU reservation, instance identity, and system URL against the fixed membership captured during setup.
+3. Serialize checkpoint-format tensor names, dtypes, and shapes.
+4. Send `start_weight_update`, `update_weights`, and `finish_weight_update` through each worker's `update_weights_from_distributed` engine route.
+5. In a separate cache phase, send `pause_generation` with `mode: wait` and `clear_cache: true` to every fixed worker.
+6. Resume only the workers whose pause-and-clear call succeeded, then fail the cache barrier if any pause or resume failed.
+7. Admit new generation only after NeMo RL has collected every update result and completed its cache policy.
+
+The per-engine update call sets `reset_prefix_cache: false` because cache invalidation is a separate framework step. Do not collapse those operations in a rewritten example: the GRPO cache mode determines when invalidation runs, and the dedicated functional test requires one successful cache invalidation for every refit.
+
+Membership validation prevents a dead or replaced engine from silently joining with initial weights, but the path is not elastic and does not expose a fleet-wide version transaction or rollback. On one failed future, keep new rollout admission gated, preserve all per-engine results, and either terminate the fixed-fleet run or execute a separately validated full-fleet recovery. A surviving subset is not a valid success condition.
+
+See [Integrate with NeMo RL](nemo-rl.md#verify-the-policy-refit) for its exact pins, rank geometry, functional evidence, and graduation gates.
 
 ## Version Semantics
 

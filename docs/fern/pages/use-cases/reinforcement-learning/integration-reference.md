@@ -18,7 +18,7 @@ flowchart TB
     R --> W1["worker request endpoint"]
     R --> W2["worker request endpoint"]
     A -->|"read-only discovery"| D["RL discovery listener"]
-    D -.->|"system_url and route descriptors"| A
+    D -.->|"protocol, URLs, topology, and route descriptors"| A
     A -->|"targeted lifecycle or weight operation"| S1["worker 1 system server"]
     A -->|"targeted lifecycle or weight operation"| S2["worker 2 system server"]
 ```
@@ -26,7 +26,7 @@ flowchart TB
 | Plane | Send here | Use it for | Do not use it for |
 |---|---|---|---|
 | Request plane | Dynamo frontend, normally port `8000` | Token-native generation, streaming, cancellation, routing, and model-facing responses | Fleet-wide mutating administration |
-| Discovery plane | Dedicated frontend RL listener, normally port `8001` | Read current vLLM worker descriptors, direct system URLs, and advertised capabilities | Proxying engine calls or assuming a worker remains available after discovery |
+| Discovery plane | Dedicated frontend RL listener, normally port `8001` | Read current RL worker descriptors, direct control URLs, optional transfer topology, and advertised capabilities | Proxying engine calls, inferring missing metadata, or assuming a worker remains available after discovery |
 | Administration plane | The selected worker's `system_url` | Pause/resume, weight operations, health checks, and backend-specific controls | Untrusted client traffic or implicit broadcast |
 
 > [!WARNING]
@@ -53,7 +53,7 @@ The unit of progress is a proven boundary, not the number of Dynamo components e
 | Native SGLang token-input streaming | `POST /generate` or `PUT /generate` | `8000` | Preserves supported SGLang request fields and returns SGLang streaming objects as server-sent events. |
 | Cross-backend completions | `POST /v1/completions` | `8000` | Accepts token arrays through `prompt` or `nvext.token_data` and can return selected named `nvext` fields. |
 | Cross-backend chat | `POST /v1/chat/completions` | `8000` | Uses normal messages or bypasses frontend tokenization with `nvext.token_data`. |
-| vLLM worker discovery | `GET /v1/rl/workers` | `8001` | Returns live RL-enabled vLLM workers, request-plane descriptors, system URLs, model identity, and route names. |
+| RL worker discovery | `GET /v1/rl/workers` | `8001` | Returns protocol version `1` and live RL endpoint descriptors. Model, direct URLs, and transfer topology are capability-dependent and can be omitted. |
 | One worker administration call | `POST <system_url>/engine/<route>` | Worker-specific | Calls one selected worker directly with a backend-specific JSON body and result. |
 
 Use SGLang `/generate` when the framework already speaks SGLang's token-native streaming schema. Use an OpenAI-compatible route when the adapter needs one request envelope across backends or needs NVIDIA request extensions. TensorRT-LLM does not expose a dedicated engine-native RL generation route through Dynamo.
@@ -175,7 +175,21 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
 curl http://localhost:8001/v1/rl/workers
 ```
 
-For every operation, the adapter should use the returned `system_url` and treat `routes` as the worker's live capability list. Do not construct system URLs from request-plane addresses, assume every worker has the same optional routes, or cache discovery indefinitely. A worker descriptor can contain an error and an empty route list if its capability probe fails.
+The response is versioned independently of the generation API. Check `protocol_version` before interpreting worker fields; the reviewed release emits integer version `1` and does not negotiate another version.
+
+| Field | Contract in protocol version `1` |
+|---|---|
+| `namespace`, `component`, `endpoint`, `instance_id`, `transport`, `request_plane_url` | Required Dynamo identity for the live RL endpoint. Use the tuple, not list position, to compare membership snapshots. |
+| `routes` | Required list of advertised Dynamo engine-route names. It can be empty when the worker probe fails. |
+| `system_url` | Optional direct Dynamo system-server base URL. Use it for the advertised `/engine/<route>` calls; never derive it from `request_plane_url`. |
+| `model` | Optional model identity. Dynamo omits it when model metadata is unavailable or when one worker advertises multiple distinct base models. |
+| `world_size` | Optional positive producer-declared inference or transfer world size. It is not the number of worker descriptors or a fleet-atomicity guarantee. |
+| `admin_base_url` | Optional backend HTTP or HTTPS compatibility endpoint. It is valid only with `world_size` and is distinct from the Dynamo `system_url`. |
+| `error` | Optional probe error. A failed descriptor remains visible with empty routes and without direct URLs so the controller can fail closed on the intended membership. |
+
+For every Dynamo engine operation, use the returned `system_url` and treat `routes` as that worker's live capability list. Use `admin_base_url` only when the pinned backend integration defines the compatibility operation that belongs there, validate it as a trusted HTTP or HTTPS control endpoint, and never substitute it for `system_url`. Do not assume every worker has the same optional routes or metadata, and do not cache discovery indefinitely.
+
+The shared Rust worker contract can publish `world_size` and `admin_base_url`, but the reviewed Python-backed workers remain unchanged unless they explicitly opt into that endpoint. At this source pin, the [vLLM sidecar producer PR #13607](https://github.com/ai-dynamo/dynamo/pull/13607) is still open. Therefore the fields are part of protocol version `1`, not evidence that every current vLLM worker supplies transfer metadata. Scope discovery with `DYN_RL_COMPONENTS` (or the single-component `DYN_RL_COMPONENT`) when a deployment contains unrelated RL endpoints, and define how the framework selects a worker when `model` is absent.
 
 The discovery endpoint is intentionally read-only. It does not implement a mutating `/v1/rl/engine` or `/v1/rl/engines` proxy, which prevents accidental frontend fan-out. The framework or its control service must select the target worker set and call each system URL directly.
 
@@ -229,17 +243,30 @@ This table is the single framework-status source for the RL documentation. “Ev
 | Framework | Integration artifact and pin | Generation and routing | Weight path | Topology | Status | Evidence checked and validation | Freshness owner |
 |---|---|---|---|---|---|---|---|
 | verl | [verl-recipe main at `461b830c`](https://github.com/verl-project/verl-recipe/tree/461b830cfee4f5a67c21edc300c24373230babc7/dynamo), requiring [verl core `d82d2777`](https://github.com/verl-project/verl/tree/d82d2777b5dc3e96a8a45168d02660312707ab98); Dynamo recipe content last changed at [`52cdedf7`](https://github.com/verl-project/verl-recipe/commit/52cdedf7e0cfbc3b7d518faefcb2035b12f689f4) | Shared Dynamo frontend; native Dynamo routing when ThunderAgent is disabled, or a separately versioned ThunderAgent scheduler when enabled | verl colocated CUDA IPC through recipe-owned control components; not ModelExpress | Colocated trainer and Dynamo vLLM workers; one or multiple nodes described upstream | Experimental | 2026-08-27; public recipe contains smoke/training and benchmark evidence, but pins only verl core rather than a complete Dynamo runtime image and has not been independently reproduced from this Dynamo guide | verl recipe maintainers and Dynamo RL maintainers |
+| NeMo RL | [NeMo RL main at `6ae03578`](https://github.com/NVIDIA-NeMo/RL/tree/6ae035784fe40fd9c9e31d27fffa4a403243a0bd); managed integration merged in [PR #3391 at `85e02cca`](https://github.com/NVIDIA-NeMo/RL/commit/85e02cca39968ec5997cc0833bef419895f566f7); runtime pins `ai-dynamo[vllm]==1.3.0.post1` from [`d14d9290`](https://github.com/ai-dynamo/dynamo/commit/d14d9290c7a616db2225f459f8a66d8c1bc63fda) | Driver-owned frontend and fixed Ray-managed vLLM fleet; configured native Dynamo router, with `kv` in the smoke recipe | NeMo RL NCCL collective sender to fixed per-engine system URLs; separate pause, cache-clear, and resume barrier; not ModelExpress | Managed Slurm/Ray only; non-colocated; every TP × PP engine fits on one node; vLLM/BF16 only | Experimental | 2026-08-27; dedicated two-GPU functional check passed on the merge PR and a four-step three-node run is recorded upstream, but no independent Dynamo-docs reproduction or elastic recovery path is recorded | NeMo RL generation maintainers and Dynamo RL maintainers |
 | SLIME | Closed streaming prototype [PR #2 at `4d39b5a`](https://github.com/Aphoh/slime/pull/2) plus open discovery [PR #3 at `06d397f`](https://github.com/Aphoh/slime/pull/3) | Intended shared SGLang-compatible `/generate` endpoint; accepted upstream discovery contract unresolved | Prototype used backend-specific distributed update control | External rollout serving; exact supported topology unresolved | Integration in progress | 2026-08-27; no merged, released, independently validated integration | SLIME integration contributors and Dynamo RL maintainers |
 | Prime-RL | Open discovery [PR #3176 at `828ddc7`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3176), open recipes [PR #3180 at `2f67c72`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180), draft sidecar [PR #3181 at `b17ceea`](https://github.com/PrimeIntellect-ai/prime-rl/pull/3181) | Intended frontend inference plus per-engine discovery and control | Proposed external NCCL/NIXL paths | External Dynamo/vLLM sidecar recipes; final release contract unresolved | Integration in progress | 2026-08-27; prerequisite PR sequence remains open and no released independent reproduction is recorded | Prime-RL integration contributors and Dynamo RL maintainers |
-| NeMo RL | [NeMo RL main at `6ae03578`](https://github.com/NVIDIA-NeMo/RL/tree/6ae035784fe40fd9c9e31d27fffa4a403243a0bd) and its [generation design](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/docs/design-docs/generation.md) | Public token-native generation lifecycle exists, but no validated public Dynamo adapter was established | Framework has backend lifecycle and weight concepts; no documented Dynamo path | Candidate vLLM/SGLang integration | Design research | 2026-08-27; reviewed generation contract only, with no public Dynamo adapter or recipe | NeMo RL and Dynamo RL maintainers after an adapter exists |
 
-OpenRLHF, Miles, ProRL, SkyRL, and other frameworks do not receive a dedicated guide solely because they can call an OpenAI-compatible endpoint. Graduation requires a maintained adapter or recipe, a pinned generation smoke, a complete training iteration, token/logprob verification, a weight refresh, post-update generation, recovery evidence, and a named owner.
+### Framework candidates without Dynamo guides
+
+This discovery record prevents adjacent projects or shared components from being mistaken for integrations. It is not a support matrix for the frameworks themselves.
+
+| Candidate | Reviewed primary source | Current Dynamo boundary | Documentation decision |
+|---|---|---|---|
+| OpenRLHF | [OpenRLHF at `3c3be623`](https://github.com/OpenRLHF/OpenRLHF/tree/3c3be6234e0cb353e76bb8019947db9dfe99fca7); its [ProRL V2 launch script](https://github.com/OpenRLHF/OpenRLHF/blob/3c3be6234e0cb353e76bb8019947db9dfe99fca7/examples/scripts/train_prorlv2_math_hybrid_engine.sh) is an OpenRLHF training recipe | No Dynamo-specific adapter or recipe appears in the reviewed snapshot | Matrix only. Do not create a separate ProRL V2 framework page. |
+| Miles | [Miles at `778227d6`](https://github.com/fleet-ai/miles-fleet/tree/778227d6d7cf7b581d1eb07910c873516b6baca9) | Miles owns an SGLang rollout/router and Megatron or FSDP training stack; no Dynamo-specific adapter or recipe appears in the reviewed snapshot | Matrix only until a public adapter preserves Miles token, routing, update, and recovery contracts. |
+| SkyRL | [SkyRL at `59d4daed`](https://github.com/NovaSky-AI/SkyRL/tree/59d4daedee24c7b1a79d857bbf322a6d195c3792) and merged [ThunderAgent PR #1645](https://github.com/NovaSky-AI/SkyRL/pull/1645) | The recipe launches direct SkyRL vLLM servers and uses an embedded or external ThunderAgent router; ThunderAgent reuse does not make it a Dynamo deployment | Matrix only until SkyRL publishes and validates a Dynamo-owned serving path. |
+| Polar, formerly ProRL-Agent-Server | [Polar at `6a1ead6b`](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server/tree/6a1ead6bfac054fce6c1e62d1a77b330d96c58db) | Polar is a rollout service with SGLang/vLLM and a SLIME bridge; no Dynamo adapter appears in the reviewed snapshot | Matrix only. Keep Polar distinct from the OpenRLHF ProRL V2 training method. |
+
+A candidate does not receive a dedicated guide solely because it can call an OpenAI-compatible endpoint or uses a component that Dynamo also integrates. Graduation requires a maintained Dynamo adapter or recipe, a pinned generation smoke, a complete training iteration, token/logprob verification, a weight refresh, post-update generation, recovery evidence, and a named owner.
 
 For verl, choose the native-router or ThunderAgent variant before constructing the environment. The reviewed recipe config enables ThunderAgent by default, the validation smoke disables it explicitly, and the recipe publishes a separate exact Dynamo source requirement for ThunderAgent. Its installer pins and installs core verl only; it does not establish one complete Dynamo/vLLM container for either path. See [Integrate with verl](verl.md#choose-one-recipe-variant) for the resulting version and validation boundary.
 
+For NeMo RL, use the isolated `ai-dynamo[vllm]==1.3.0.post1` environment supplied by the pinned NeMo RL snapshot. Its managed path is not compatible-by-default with the backend versions on current Dynamo `main`. See [Integrate with NeMo RL](nemo-rl.md) for the exact build, Slurm, token, refit, routing, telemetry, and failure boundaries.
+
 ## Backend Compatibility
 
-This matrix describes the Dynamo interfaces on `main` at [`b9203b2c`](https://github.com/ai-dynamo/dynamo/tree/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1). It is not a framework-level support claim.
+This matrix describes the Dynamo interfaces on `main` at [`5bc908ad`](https://github.com/ai-dynamo/dynamo/tree/5bc908ad4fe129aab80341edd4ace164cba3d351). It is not a framework-level support claim.
 
 | Capability | vLLM | SGLang | TensorRT-LLM |
 |---|---|---|---|
@@ -249,17 +276,17 @@ This matrix describes the Dynamo interfaces on `main` at [`b9203b2c`](https://gi
 | Completion token IDs | Named `nvext` field supported | Native output IDs and named `nvext` field supported | Named `nvext` field supported through the shared response path |
 | Prompt log probabilities | Supported | Supported with topology limitations; validate aggregated versus P/D behavior | Handler plumbing exists on the reviewed main pin; no dedicated RL E2E coverage is recorded here |
 | Native SGLang metadata upload | Not applicable | Supported with RL-enabled worker and fsspec dependencies | Not applicable |
-| `/v1/rl/workers` | Supported for RL-enabled workers | Not currently registered | Not currently registered |
+| `/v1/rl/workers` | Supported for RL-enabled workers; protocol version `1` always returns endpoint identity and routes, while model, direct URLs, and transfer metadata are optional | Not currently registered | Not currently registered |
 | Fixed Dynamo RL administration routes | vLLM pause/resume, version, disk/distributed update, and group lifecycle routes | SGLang `/engine/control/*` weight routes; additional methods require an explicit allowlist | No common RL administration contract documented here |
-| Dedicated RL TITO E2E evidence on Dynamo main | [vLLM test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_token_in_token_out.py) | [SGLang in-process test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_token_in_token_out.py); the sidecar proxy has source-level tests but no separate RL GPU E2E recorded here | No dedicated test in that file |
+| Dedicated RL TITO E2E evidence on Dynamo main | [vLLM test](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/tests/rl/test_token_in_token_out.py) | [SGLang in-process test](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/tests/rl/test_token_in_token_out.py); the sidecar proxy has source-level tests but no separate RL GPU E2E recorded here | No dedicated test in that file |
 | Evidence last checked | 2026-08-27 | 2026-08-27 | 2026-08-27 |
 | Freshness owner | Dynamo vLLM and RL maintainers | Dynamo SGLang and RL maintainers | Dynamo TensorRT-LLM and RL maintainers |
 
 `/inference/v1/generate` is disabled by default and registers when `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` is truthy. The current handler rejects `stream: true`; do not substitute it for the streaming adapter contract or present it as a shared backend route.
 
-The vLLM discovery and administration lifecycle is covered by the [RL worker discovery E2E test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_worker_discovery.py). The [SGLang sidecar native-HTTP implementation](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/lib/sidecar/sglang/src/native_http.rs) defines the discovery, health, request-rewrite, streaming, cancellation, and error boundary described above. Backend-native metadata and raw `engine_data` remain backend-specific even where named token fields are normalized.
+The vLLM discovery and administration lifecycle is covered by the [RL worker discovery E2E test](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/tests/rl/test_worker_discovery.py). The versioned response, optional transfer metadata, and model-ambiguity behavior are defined and unit-tested in the [RL discovery implementation](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/lib/rl/src/lib.rs). The [SGLang sidecar native-HTTP implementation](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/lib/sidecar/sglang/src/native_http.rs) defines the discovery, health, request-rewrite, streaming, cancellation, and error boundary described above. Backend-native metadata and raw `engine_data` remain backend-specific even where named token fields are normalized.
 
-The package pins come from [`pyproject.toml` at the reviewed Dynamo commit](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/pyproject.toml). Runtime images can add architecture-specific dependencies and constraints, so every validation run must also preserve the exact image digest rather than treating the Python package pin as the complete environment.
+The package pins come from [`pyproject.toml` at the reviewed Dynamo commit](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/pyproject.toml). Runtime images can add architecture-specific dependencies and constraints, so every validation run must also preserve the exact image digest rather than treating the Python package pin as the complete environment.
 
 ## Topology and Feature Qualification
 

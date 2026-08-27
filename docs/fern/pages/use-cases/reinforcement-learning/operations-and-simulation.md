@@ -77,6 +77,21 @@ export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST=x-rl-rollout-id,x-rl-attempt-i
 
 If a framework cannot map rollout identity to Dynamo session identity and does not use chat completions, preserve the join in the framework ledger and distributed logs rather than claiming a request-trace header join that the selected interface does not emit.
 
+### NeMo RL current telemetry boundary
+
+The pinned NeMo RL managed adapter uses two interfaces, but neither currently supplies a framework-to-Dynamo request identity:
+
+| NeMo RL path | Current request behavior | Correlation consequence |
+|---|---|---|
+| Direct GRPO | Sends token arrays to `/v1/completions` through the framework's internal HTTP client | The request has no forwarded rollout/session header, and completions do not produce `request_payload` trace records. Keep rollout and attempt identity in the NeMo RL ledger. |
+| NeMo Gym | A local token wrapper forwards `/v1/chat/completions` after rendering `nvext.token_data` and requesting `nvext.engine_data` | The wrapper forwards `Authorization` but no stable rollout, session, or request ID. Chat payload tracing can capture the request body, but it cannot produce a lossless framework join without adapter work. |
+
+Do not infer the join from request order, model name, prompt tokens, or wall-clock proximity. A proposed NeMo RL change to forward rollout session IDs remains unmerged as of the documented validation date and is not part of the [`6ae03578` contract](https://github.com/NVIDIA-NeMo/RL/tree/6ae035784fe40fd9c9e31d27fffa4a403243a0bd).
+
+NeMo RL separately polls every fixed worker's direct `/metrics` endpoint. The pinned [`metrics.py`](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo/metrics.py) stores per-worker timelines under `generation_metrics/*` and derives framework aliases for inflight batches, pending samples, KV-cache usage, and generation tokens when their source metrics exist. Use those timelines to explain queue, cache, and balance behavior; worker ordinal is not rollout identity.
+
+For policy refresh, preserve NeMo RL's trainer step, fixed worker list, every update future, refit start/end, cache invalidation result, and post-update sample in the framework ledger. The dedicated functional test looks for a policy-generation refit and requires one successful cache invalidation per refit, but its log strings are test assertions rather than standardized Dynamo trace events. See [Integrate with NeMo RL](nemo-rl.md#route-and-observe-the-run) for its exact telemetry and graduation boundary.
+
 ## Build the Join
 
 Use `request_id` as the join key between the two Dynamo record types:
@@ -251,7 +266,7 @@ First confirm request, token, session, and cache-sharing totals. Then change one
 
 ### Live replay
 
-Live replay converts the content-free graph to synthetic requests and sends them on the recorded schedule. The current agent replay guide documents the active AIPerf conversion path, including any branch/version qualification that still applies. Follow [Agent Trace Replay](../agents/agent-simulation.mdx) and the upstream [AIPerf trace replay guide](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) rather than copying a stale converter command into an RL recipe.
+Live replay converts the content-free graph to synthetic requests and sends them on the recorded schedule. The current agent replay guide documents the active AIPerf conversion path, including any branch/version qualification that still applies. Follow [Agent Trace Replay](../agents/agent-simulation.mdx) and the upstream [AIPerf trace replay guide at `bc359bf8`](https://github.com/ai-dynamo/aiperf/blob/bc359bf8fdd0e5552f6e53922a1dfb0a10e1ac7a/docs/benchmark-modes/trace-replay.md) rather than copying a stale converter command into an RL recipe.
 
 Use the same model/tokenizer, block size, worker topology, initial cache state, and schedule when measuring fidelity. Synthetic prompts preserve complete-block sharing, not original semantics. If a changed model response would choose a different tool, environment action, or branch, capture another live framework run.
 

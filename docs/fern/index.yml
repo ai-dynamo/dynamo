@@ -720,6 +720,8 @@ navigation:
             path: pages/use-cases/reinforcement-learning/integration-reference.md
           - page: Integrate with verl
             path: pages/use-cases/reinforcement-learning/verl.md
+          - page: Integrate with NeMo RL
+            path: pages/use-cases/reinforcement-learning/nemo-rl.md
           - page: SLIME Integration Status
             path: pages/use-cases/reinforcement-learning/slime.md
           - page: Prime-RL Integration Status
