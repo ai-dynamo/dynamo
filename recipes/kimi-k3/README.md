@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kimi-K3 Recipes
 
-Recipes for [Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3) on Dynamo + vLLM, targeting GB300 and GB200.
+Recipes for [Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3) on Dynamo + vLLM, targeting H200, GB300, and GB200.
 
 K3 is a hybrid-attention MoE model: 93 layers of Kimi Delta Attention (KDA, linear attention with a
 short convolution state) with full MLA attention on 24 of them (every fourth layer), 896 routed
@@ -13,11 +13,14 @@ experts (16 active per token) plus 2 shared experts, a vision tower for image in
 max positions. Routed-expert weights are MXFP4-packed (`compressed-tensors`, group size 32);
 attention, shared experts, `lm_head`, and the vision tower stay BF16.
 
-Every profile spans multiple 4-GPU nodes over MNNVL — **TP8 across two nodes on GB300, TP16 across four on GB200** — so the tensor-parallel group crosses the node boundary on NVLink, which is why every worker pod set claims a DRA `ComputeDomain` channel.
+The GB300 and GB200 profiles span multiple 4-GPU nodes over MNNVL: TP8 across two nodes on GB300
+and TP16 across four nodes on GB200. Their tensor-parallel groups cross node boundaries over NVLink,
+so each worker pod set claims a DRA `ComputeDomain` channel. The H200 profile uses four 8-GPU
+nodes with TP8 inside each node and PP4 across nodes over RDMA.
 
 ## Configurations
 
-Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
+Dynamo + vLLM deployment profiles for the agentic workload:
 
 |                          | [GB300 aggregated agentic](vllm/agg-gb300-agentic/deploy.yaml) | [GB300 disaggregated agentic](vllm/disagg-gb300-agentic/deploy.yaml) | [GB200 aggregated agentic](vllm/agg-gb200-agentic/deploy.yaml) | [GB200 disaggregated agentic](vllm/disagg-gb200-agentic/deploy.yaml) |
 | ------------------------ | ------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------- |
@@ -39,25 +42,33 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
 | **KV transfer**          | N/A                                               | NIXL (`NixlConnector`, `kv_both`) over MNNVL; UCX left at defaults | N/A                                          | NIXL (`NixlConnector`, `kv_both`) over RDMA; `UCX_TLS=^cuda_ipc` |
 | **Context length**       | 1,048,576 (explicit `--max-model-len`)            | 1,048,576 (model default)                                      | 1,048,576 (model default)                         | 1,048,576 (model default)                                      |
 
+The [H200 aggregated agentic profile](vllm/agg-h200-agentic/deploy.yaml) uses one 32-GPU worker
+across four H200 nodes. It runs TP8/PP4 with BF16 KV cache, `TRITON_MLA`, standard safetensors
+loading, CUDA graphs up to 8192 tokens, 8192 batched tokens, 256 sequences, and KV-aware routing.
+It uses the Dynamo `1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35` vLLM runtime image and
+does not enable speculative decoding.
+
 
 ## Supported features
 
 - Modalities: Text and image (`--enable-multimodal`; K3 ships a vision tower)
 - Reasoning (`kimi_k3` reasoning parser, engine and frontend side)
 - Tool calling (`kimi_k3` tool-call parser)
-- KV-aware routing and prefix caching (both profiles)
+- KV-aware routing and prefix caching
 - Disaggregated serving
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
-2. **DRA / ComputeDomain controller** for the cross-node NVLink channel:
+2. **DRA / ComputeDomain controller** for the GB300 and GB200 cross-node NVLink channels:
    ```bash
    kubectl get crd | grep computedomain
    ```
-   Each manifest creates its own `ComputeDomain` and the workers claim its channel. Names vary by profile — check the `metadata.name` fields in each `deploy.yaml`.
+   Each GB300 and GB200 manifest creates its own `ComputeDomain`, and the workers claim its channel.
+   The H200 TP8/PP4 profile does not require a `ComputeDomain`.
 3. **Hugging Face token** with access to `moonshotai/Kimi-K3`. The workers read the weights from the
    `model-cache` PVC — see [Download the model](#3-download-the-model).
+4. **Container registry pull secret** named `acr-token-secret` with access to the runtime image.
 
 ## Cluster assumptions
 
@@ -65,9 +76,9 @@ These manifests are written against specific cluster shapes per SKU, with a Read
 
 | Assumption | Where | Shipped value |
 | ---------- | ----- | ------------- |
-| GPU nodes carry a product label | `nodeAffinity` on every worker | `NVIDIA-GB300` (GB300) / `NVIDIA-GB200` (GB200) |
-| Pool taint | `tolerations` | none (GB300) / `kubernetes.io/arch=arm64:NoSchedule` (GB200) |
-| GPUs per node × nodes per TP group | `resources` and `multinode.nodeCount` | 4 GPUs × 2 nodes = TP8 (GB300) / 4 GPUs × 4 nodes = TP16 (GB200) |
+| GPU nodes carry a product label | `nodeSelector` or `nodeAffinity` on every worker | `NVIDIA-H200` (H200) / `NVIDIA-GB300` (GB300) / `NVIDIA-GB200` (GB200) |
+| Pool taint | `tolerations` | `team=kimi-k3:NoSchedule` and `nvidia.com/gpu=true:NoSchedule` (H200) / none (GB300) / `kubernetes.io/arch=arm64:NoSchedule` (GB200) |
+| GPUs per node × nodes per parallel group | `resources` and `multinode.nodeCount` | 8 GPUs × 4 nodes = TP8/PP4 (H200) / 4 GPUs × 2 nodes = TP8 (GB300) / 4 GPUs × 4 nodes = TP16 (GB200) |
 | A ReadWriteMany storage class exists for the weights | `model-cache/model-cache.yaml` | `your-storage-class-name` placeholder |
 
 ### Reading the values off your cluster
@@ -77,7 +88,7 @@ These manifests are written against specific cluster shapes per SKU, with a Read
 kubectl get nodes -o custom-columns='NODE:.metadata.name,PRODUCT:.metadata.labels.nvidia\.com/gpu\.product'
 
 # Set this to whatever the command above reports, then reuse it below.
-export GPU_PRODUCT=NVIDIA-GB300   # NVIDIA-GB200 on a GB200 cluster
+export GPU_PRODUCT=NVIDIA-H200   # NVIDIA-GB300 or NVIDIA-GB200 on those clusters
 
 # Allocatable GPUs per node, then any taints as key=value:effect.
 kubectl get nodes -l nvidia.com/gpu.product=${GPU_PRODUCT} \
@@ -93,7 +104,11 @@ If the product label differs from the shipped value, update the `nodeAffinity` `
 
 ### Tainted GPU pools
 
-The GB300 manifests ship with no tolerations, which assumes an unreserved GPU pool. The GB200 manifests include a `kubernetes.io/arch=arm64:NoSchedule` toleration for the arm64 node pool. If your GPU pool carries additional taints, add matching tolerations to **every** pod template in the `deploy.yaml` you are using.
+The GB300 manifests ship with no tolerations, which assumes an unreserved GPU pool. The GB200
+manifests tolerate the `kubernetes.io/arch=arm64:NoSchedule` taint. The H200 manifest tolerates the
+`team=kimi-k3:NoSchedule` and `nvidia.com/gpu=true:NoSchedule` taints used by its validated cluster;
+remove or replace them when your H200 pool uses different taints. If your GPU pool carries
+additional taints, add matching tolerations to every pod template in the `deploy.yaml` you use.
 
 ```yaml
 # In each podTemplate.spec
@@ -146,10 +161,10 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache.
 
-**This flow applies to the GB300 profiles.** Their worker pods mount the PVC at `/model-cache` with
-`HF_HOME=/model-cache` and pass the repo id (`moonshotai/Kimi-K3`) to `--model`, so the weights
-resolve straight out of the cache. The frontend does not mount the PVC — see
-[Configuration notes](#configuration-notes).
+**This flow applies to the H200 and GB300 profiles.** The H200 pods mount the PVC at `/hf-cache`,
+and the GB300 workers mount it at `/model-cache`. Both pass the repo ID (`moonshotai/Kimi-K3`) to
+`--model`, so the weights resolve from the Hugging Face cache on the PVC. See
+[Configuration notes](#configuration-notes) for the profile-specific paths.
 
 **The GB200 profiles do not use the PVC.** They mount the host path
 `/mnt/stateful_partition/kube-ephemeral-ssd/models` at `/models` and serve
@@ -174,11 +189,15 @@ PVC flow: replace the `models` `hostPath` volume with `claimName: model-cache` m
 ### 4. Deploy the DGD
 
 ```bash
-SKU=gb300 # or gb200
+SKU=h200  # or gb300 / gb200
 MODE=agg  # or disagg
 kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 
-DGD=kimi-k3-${MODE}
+if [ "${SKU}" = h200 ]; then
+  DGD=kimi-k3-agg-h200-agentic
+else
+  DGD=kimi-k3-${MODE}
+fi
 kubectl wait --for=condition=Ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD} \
   -n ${NAMESPACE} --timeout=7200s
@@ -263,10 +282,14 @@ naming San Francisco, and `finish_reason` is `tool_calls`.
 
 Non-obvious knobs, all already set in the manifests:
 
-- **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
-  `HF_HOME=/model-cache`, and the workers pass the repo id (`MODEL_ID=moonshotai/Kimi-K3`) to
-  `--model`, so vLLM loads the checkpoint out of the PVC's Hugging Face cache instead of
-  downloading it. `envFrom: hf-token-secret` on the workers covers the hub lookup at startup.
+- **H200 TP8/PP4.** The H200 profile keeps each TP8 group within one node and pipelines the model
+  across four nodes. It uses standard safetensors loading, BF16 KV cache, NCCL over RDMA, and
+  7200-second GPU and CPU distributed timeouts. Symmetric-memory, FlashInfer AllReduce, MNNVL, and
+  NVLS are disabled. Speculative decoding is not enabled.
+- **Model resolution.** H200 pods mount the `model-cache` PVC at `/hf-cache` and point
+  `HF_HUB_CACHE` at `/hf-cache/huggingface/hub`. GB300 workers mount the same claim at
+  `/model-cache` and set `HF_HOME=/model-cache`. Both pass the repo ID (`moonshotai/Kimi-K3`) to
+  `--model`, so vLLM resolves the checkpoint from the PVC instead of downloading it.
 - **MNNVL all-reduce.** The aggregated profiles (GB300 and GB200) and the GB300 disaggregated profile use `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Do not enable the NCCL symmetric-memory knobs alongside it — `VLLM_USE_NCCL_SYMM_MEM=0` is required because symmetric memory breaks CUDA-graph capture on this build. The GB200 disaggregated profile uses NCCL directly (MNNVL + NVLS) for all-reduce.
 - **Pod networking.** DGD pods use CNI networking, so `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`
   are pinned to `eth0`.
