@@ -1771,6 +1771,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        structural_tag::validate_runtime_config(&runtime_config)?;
         let token_budget = match runtime_config
             .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
         {
@@ -3847,11 +3848,9 @@ impl OpenAIPreprocessor {
         });
 
         // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
-        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
-        // instead of the jail, which is never built for them on this path.
-        // tool_choice=required/named and structural-tag still use the jail's
-        // Immediate mode, since those rely on guided-decoded JSON rather than the
-        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        // stream native tool-call markup through their v2 parser instead of the
+        // jail. Structural tags produce that same native markup for every tool
+        // choice; without structural tags only auto/default output takes this path.
         use crate::protocols::openai::chat_completions::tool_parser_v2;
 
         // Guided JSON does NOT go to the jail. We installed the grammar that produced
@@ -3865,11 +3864,11 @@ impl OpenAIPreprocessor {
         let parser_name = effective_tool_call_parser.as_deref();
         let use_parsers_v2 = tool_parser_v2::enabled()
             && parser_name.is_some_and(tool_parser_v2::supports_family)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
-            );
+            && (uses_tool_call_structural_tag
+                || matches!(
+                    request.inner.tool_choice.as_ref(),
+                    None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+                ));
 
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =

@@ -601,6 +601,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for audio
         validate::validate_presence_penalty(self.inner.presence_penalty)?;
         validate::validate_response_format(&self.inner.response_format)?;
+        validate::validate_response_format_conflicts(&self.inner.response_format, &self.common)?;
         // none for seed
         validate::validate_service_tier(&self.inner.service_tier)?;
         validate::validate_stop(&self.inner.stop)?;

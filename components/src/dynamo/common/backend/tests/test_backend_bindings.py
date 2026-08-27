@@ -214,9 +214,14 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.dyn_default_thinking_mode = "disabled"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
-    runtime_cfg.dyn_enable_structural_tag = True
-    runtime_cfg.dyn_structural_tag_scope = "always"
-    runtime_cfg.dyn_structural_tag_schema = "strict"
+    runtime_cfg.structural_tag = {
+        "scope": "always",
+        "schema": "strict",
+        "allow_tool_calls_with_structured_output": True,
+        "exclude_special_tokens": False,
+        "reasoning_boundary": "structural_tag",
+        "tool_arguments_any_order": False,
+    }
     # MagicMock auto-attrs would be rejected as a foreign type by the
     # strict coercer; pin them to None.
     runtime_cfg.disaggregation_mode = None
@@ -229,9 +234,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.default_thinking_mode == "disabled"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
-    assert config.structural_tag_mode == "on"
-    assert config.structural_tag_scope == "always"
-    assert config.structural_tag_schema == "strict"
+    assert config.structural_tag == runtime_cfg.structural_tag
 
 
 @pytest.mark.unified
@@ -252,9 +255,7 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.use_kv_events is False
     assert cfg.custom_jinja_template is None
     assert cfg.default_thinking_mode is None
-    assert cfg.structural_tag_mode == "off"
-    assert cfg.structural_tag_scope == "auto"
-    assert cfg.structural_tag_schema == "auto"
+    assert cfg.structural_tag is None
 
 
 @pytest.mark.unified

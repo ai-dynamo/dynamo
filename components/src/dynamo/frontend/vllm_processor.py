@@ -97,10 +97,13 @@ def _runtime_config_structural_tag_options(
     runtime_config = mdc.runtime_config()
     if not isinstance(runtime_config, dict):
         return "off", "auto", "auto"
+    structural_tag = runtime_config.get("structural_tag")
+    if not isinstance(structural_tag, dict):
+        return "off", "auto", "auto"
     return (
-        runtime_config.get("structural_tag_mode", "off"),
-        runtime_config.get("structural_tag_scope", "auto"),
-        runtime_config.get("structural_tag_schema", "auto"),
+        "on",
+        structural_tag.get("scope", "auto"),
+        structural_tag.get("schema", "auto"),
     )
 
 

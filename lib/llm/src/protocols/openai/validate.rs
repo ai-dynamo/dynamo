@@ -7,7 +7,10 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
-use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+use super::{
+    common_ext::CommonExt,
+    tools::{ToolChoiceError, validate_openai_tool_choice},
+};
 
 //
 // Hyperparameter Contraints
@@ -221,6 +224,34 @@ pub fn validate_response_format(
             Ok(())
         }
     }
+}
+
+/// Reject multiple independent constraints on assistant output.
+pub fn validate_response_format_conflicts(
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
+    common: &CommonExt,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ResponseFormat;
+
+    let has_response_format_constraint = response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, ResponseFormat::Text));
+    let has_explicit_guided_decoding = common.guided_json.is_some()
+        || common.guided_regex.is_some()
+        || common
+            .guided_choice
+            .as_ref()
+            .is_some_and(|choices| !choices.is_empty())
+        || common.guided_grammar.is_some();
+
+    if has_response_format_constraint && has_explicit_guided_decoding {
+        anyhow::bail!(
+            "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+             `guided_choice`, or `guided_grammar`"
+        );
+    }
+
+    Ok(())
 }
 
 /// Validates the temperature parameter
@@ -879,6 +910,61 @@ mod tests {
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    fn explicit_guided_decoding_options() -> Vec<CommonExt> {
+        vec![
+            CommonExt {
+                guided_json: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_choice: Some(vec!["yes".to_string(), "no".to_string()]),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_grammar: Some("root ::= 'yes'".to_string()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn structured_response_format_rejects_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+
+        for common in explicit_guided_decoding_options() {
+            let error = validate_response_format_conflicts(&response_format, &common).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+                 `guided_choice`, or `guided_grammar`"
+            );
+        }
+    }
+
+    #[test]
+    fn text_response_format_allows_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::Text);
+
+        for common in explicit_guided_decoding_options() {
+            validate_response_format_conflicts(&response_format, &common).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_guided_choice_does_not_conflict_with_response_format() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+        let common = CommonExt {
+            guided_choice: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        validate_response_format_conflicts(&response_format, &common).unwrap();
     }
 
     #[test]
