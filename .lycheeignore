@@ -59,3 +59,9 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# The DeepSeek-V4-Pro-0813 recipe is introduced by the same PR as its docs links,
+# so the main-branch URLs return 404 until merge. Remove these entries after merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813$
+^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf$
+^https://github\.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf/README\.md$
