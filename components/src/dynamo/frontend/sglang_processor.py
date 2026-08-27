@@ -598,6 +598,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            allow_parallel_tool_calls=request.get("parallel_tool_calls") is not False,
             prompt_token_ids=pre.prompt_token_ids,
         )
 
@@ -656,6 +657,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            allow_parallel_tool_calls=request.get("parallel_tool_calls") is not False,
             prompt_token_ids=preproc_result.prompt_token_ids,
         )
 
