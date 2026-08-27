@@ -24,6 +24,15 @@ Treat the pinned NeMo RL snapshot as the implementation and launch source of tru
 
 The NeMo RL pin matters independently of this Dynamo documentation branch. Do not replace `1.3.0.post1` with current Dynamo `main` or a newer wheel without revalidating the response fields, CLI arguments, vLLM backport, packed-transfer constants, and complete training iteration.
 
+Two upstream changes can alter this page's ownership and correlation contract, but neither belongs to the reviewed snapshot:
+
+| Tracked proposal | Current evidence and revalidation trigger |
+|---|---|
+| [NeMo RL session-ID PR #3856 at `2af6e1b`](https://github.com/NVIDIA-NeMo/RL/pull/3856) | Open draft. It proposes one stable session UUID per direct trajectory attempt, preserves NeMo Gym's session UUID, and forwards `X-Dynamo-Session-ID` only to Dynamo. Its PR record reports focused CPU tests but no functional or GPU test. If it merges, revalidate direct retries, sibling and full-trajectory retries, Gym forwarding, trace capture, and the distinction between correlation and opt-in session affinity before closing the identity gap. |
+| [NeMo RL token-ownership PR #3763 at `d3a007e`](https://github.com/NVIDIA-NeMo/RL/pull/3763) plus [NeMo Gym PR #1784 at `acc3c35c`](https://github.com/NVIDIA-NeMo/Gym/pull/1784) | Both remain open. The paired change proposes moving native Dynamo response-token validation and training-bundle construction from NeMo RL's wrapper into NeMo Gym while preserving the wire fields. If it merges, advance both coupled pins together and revalidate direct GRPO and Gym token IDs, logprobs, masks, metadata stripping, and the functional test before changing the ownership table. |
+
+Do not apply either proposal to the commands below or cite it as current capability. Recheck its final merge commit, coupled dependency pin, tests, and user-visible configuration at every release audit.
+
 ## Implemented Shape in This Integration
 
 | Dimension | Validated boundary |
@@ -138,7 +147,7 @@ policy:
 
 NeMo RL divides vLLM settings into translated, moved, unsupported, managed, and inapplicable classes. A setting inherited from another backend can therefore warn, fail with the Dynamo replacement, or be intentionally ignored. Treat those messages as configuration evidence; do not assume every `vllm_cfg` field reaches `dynamo.vllm`.
 
-The managed frontend supports `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, and `device-aware-weighted` values through `dynamo_cfg.frontend_args.router_mode`. Start with a round-robin control before claiming a benefit from `kv`. The current merged adapter does not forward a NeMo RL rollout session ID to Dynamo, so do not claim session-affinity behavior or a framework-to-request identity join from this configuration.
+The managed frontend supports `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, and `device-aware-weighted` values through `dynamo_cfg.frontend_args.router_mode`. Start with a round-robin control before claiming a benefit from `kv`. The current merged adapter does not forward a NeMo RL rollout session ID to Dynamo, so do not claim session-affinity behavior or a framework-to-request identity join from this configuration. The tracked session-ID proposal above does not change this boundary until its final coupled implementation merges and passes the required validation.
 
 ## Run the Two-GPU Training Smoke
 
