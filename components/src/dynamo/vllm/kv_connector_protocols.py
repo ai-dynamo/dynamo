@@ -110,8 +110,12 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
 
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
-# Push reverses who moves the blocks, but that is negotiated worker-to-worker
-# over NIXL; the params either leg declares are identical to pull mode.
+# Push shares pull's protocol class because the parts *this layer* controls
+# coincide: seed ``do_remote_decode`` on the prefill leg, which both connectors
+# read the same way to identify the producer, and pass the engine's response
+# through untouched on the decode leg. The params vLLM itself generates do
+# differ -- push adds ``pp_size`` and overwrites ``remote_block_ids``, pull adds
+# ``remote_blocks_expiry_time`` -- but nothing here inspects them.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     PUSH_CONNECTOR_NAME: NixlConnectorProtocol,
