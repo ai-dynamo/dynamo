@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,8 +11,6 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-#[cfg(test)]
-pub(in crate::replay) use dynamo_kv_router::config::RouterQueuePolicy;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -25,122 +24,129 @@ use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
     SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
-use serde::Serialize;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
-use crate::replay::offline::core::{
-    Placement, PlacementDecision, PlacementEffects, PlacementPolicy, PlannerCacheSample,
-    WorkerTopology,
-};
+use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
-    replay_worker_config, replay_workers_with_configs,
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
+    replay_slots, replay_worker_config, replay_workers_with_configs,
 };
-use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
-
-mod composition_agg;
-pub(in crate::replay) use composition_agg::AggRuntime;
-mod composition_disagg;
-pub(in crate::replay) use composition_disagg::DisaggRuntime;
-#[cfg(test)]
-pub(in crate::replay::offline) use composition_disagg::{
-    derive_decode_router_config, derive_prefill_router_config,
+use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisimulate_core::replay::{
+    Placement, PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy,
+    ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CanonicalReplayRouterMode {
-    RoundRobin,
-    KvRouter,
+mod composition;
+pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
+
+#[derive(Clone, Copy)]
+enum KvEventSummary {
+    Stored {
+        parent_hash: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        start_position: Option<u32>,
+        count: usize,
+        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+    },
+    Removed {
+        count: usize,
+        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+    },
+    Cleared,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct CanonicalRouterMetadata {
-    pub mode: CanonicalReplayRouterMode,
-    pub config: Option<KvRouterConfig>,
-}
-
-pub(in crate::replay) fn validate_canonical_router_config(config: &KvRouterConfig) -> Result<()> {
-    for (field, value) in [
-        ("overlap_score_credit", Some(config.overlap_score_credit)),
-        (
-            "overlap_score_credit_decay",
-            Some(config.overlap_score_credit_decay),
-        ),
-        ("prefill_load_scale", Some(config.prefill_load_scale)),
-        (
-            "decode_active_request_weight",
-            Some(config.decode_active_request_weight),
-        ),
-        ("host_cache_hit_weight", Some(config.host_cache_hit_weight)),
-        ("disk_cache_hit_weight", Some(config.disk_cache_hit_weight)),
-        ("router_temperature", Some(config.router_temperature)),
-        ("router_ttl_secs", Some(config.router_ttl_secs)),
-        ("router_queue_threshold", config.router_queue_threshold),
-        (
-            "shared_cache_multiplier",
-            Some(config.shared_cache_multiplier),
-        ),
-        (
-            "router_predicted_ttl_secs",
-            config.router_predicted_ttl_secs,
-        ),
-        (
-            "conditional_disagg_eff_isl_ratio_threshold",
-            Some(config.conditional_disagg_eff_isl_ratio_threshold),
-        ),
-        (
-            "conditional_disagg_prefill_busy_threshold",
-            config.conditional_disagg_prefill_busy_threshold,
-        ),
-        (
-            "conditional_disagg_decode_busy_threshold",
-            config.conditional_disagg_decode_busy_threshold,
-        ),
-    ] {
-        if let Some(value) = value {
-            anyhow::ensure!(
-                value.is_finite(),
-                "canonical replay rejects non-finite number at /metadata/router/config/{field}"
-            );
+impl KvEventSummary {
+    fn from_data(data: &dynamo_kv_router::protocols::KvCacheEventData) -> Self {
+        match data {
+            dynamo_kv_router::protocols::KvCacheEventData::Stored(stored) => Self::Stored {
+                parent_hash: stored.parent_hash,
+                start_position: stored.start_position,
+                count: stored.blocks.len(),
+                first: stored.blocks.first().map(|block| block.block_hash),
+                last: stored.blocks.last().map(|block| block.block_hash),
+            },
+            dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => Self::Removed {
+                count: removed.block_hashes.len(),
+                first: removed.block_hashes.first().copied(),
+                last: removed.block_hashes.last().copied(),
+            },
+            dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
         }
     }
-    Ok(())
 }
 
-pub fn canonical_router_metadata(
-    mode: ReplayRouterMode,
-    config: Option<&KvRouterConfig>,
-) -> Result<CanonicalRouterMetadata> {
-    if let Some(config) = config {
-        validate_canonical_router_config(config)?;
-        anyhow::ensure!(
-            config.router_tracking_key_file.is_none(),
-            "canonical replay does not support router_tracking_key_file"
-        );
-        anyhow::ensure!(
-            config.router_policy_config.is_none(),
-            "canonical replay does not support router_policy_config"
-        );
+impl fmt::Display for KvEventSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stored {
+                parent_hash,
+                start_position,
+                count,
+                first,
+                last,
+            } => write!(
+                formatter,
+                "stored parent={parent_hash:?} start={start_position:?} count={count} first={first:?} last={last:?}"
+            ),
+            Self::Removed { count, first, last } => write!(
+                formatter,
+                "removed count={count} first={first:?} last={last:?}"
+            ),
+            Self::Cleared => formatter.write_str("cleared"),
+        }
     }
-    let (mode, config) = match mode {
-        ReplayRouterMode::RoundRobin => (CanonicalReplayRouterMode::RoundRobin, None),
-        ReplayRouterMode::KvRouter => (
-            CanonicalReplayRouterMode::KvRouter,
-            Some(config.cloned().unwrap_or_default()),
-        ),
-    };
-    Ok(CanonicalRouterMetadata { mode, config })
+}
+
+/// Serializable descriptor for the Dynamo-owned KV-router replay provider.
+///
+/// Keeping this value with the adapter prevents the neutral offline entrypoint
+/// from naming or depending on the concrete Router crate.
+pub(in crate::replay) fn provider_spec() -> ProviderSpec {
+    ProviderSpec {
+        provider: "dynamo_kv_router".to_string(),
+        config: serde_json::Value::Null,
+    }
+}
+
+/// Dynamo-owned metadata used by KV-aware placement. AISimulate only defines
+/// the neutral admission-metadata contract and never imports Router types.
+#[derive(Debug, Default)]
+pub(in crate::replay) struct KvReplayMetadata {
+    hashes: Option<ReplayRequestHashes>,
+    max_output_tokens_override: Option<usize>,
+}
+
+impl ReplayAdmissionMetadata for KvReplayMetadata {
+    fn from_hashes(hashes: Option<ReplayRequestHashes>) -> Self {
+        Self {
+            hashes,
+            max_output_tokens_override: None,
+        }
+    }
+
+    fn for_prefill(mut self) -> Self {
+        self.max_output_tokens_override = Some(1);
+        self
+    }
+
+    fn max_output_tokens_override(&self) -> Option<usize> {
+        self.max_output_tokens_override
+    }
+
+    fn into_hashes(self) -> Option<ReplayRequestHashes> {
+        self.hashes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,20 +341,26 @@ pub(in crate::replay) struct KvRouterPlacement {
 }
 
 impl KvRouterPlacement {
-    pub(in crate::replay) fn new(
+    pub(in crate::replay) fn new_with_selector_seed(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
+        selector_seed: Option<u64>,
     ) -> Result<Self> {
-        Ok(Self {
-            router: OfflineReplayRouter::new(
+        let router = match selector_seed {
+            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
                 args,
                 router_config,
                 prefill_load_estimator,
                 num_workers,
+                Some(seed),
             )?,
-        })
+            None => {
+                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
+            }
+        };
+        Ok(Self { router })
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -357,7 +369,7 @@ impl KvRouterPlacement {
             scheduler_id: admission.worker_idx,
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
-            planner_cache_sample: Some(PlannerCacheSample {
+            cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
@@ -370,17 +382,12 @@ impl KvRouterPlacement {
             .map(|admission| self.placement(admission))
             .collect()
     }
-
-    #[cfg(test)]
-    pub(in crate::replay::offline) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
-        self.router.debug_snapshot(now_ms)
-    }
 }
 
 trait PlacementRequestView {
     fn metadata(&self) -> &DirectRequest;
     fn input_length(&self) -> usize;
-    fn prompt_tokens(&self) -> Cow<'_, [u32]>;
+    fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>>;
 }
 
 impl PlacementRequestView for DirectRequest {
@@ -392,8 +399,13 @@ impl PlacementRequestView for DirectRequest {
         self.tokens.len()
     }
 
-    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
-        Cow::Borrowed(&self.tokens)
+    fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>> {
+        if !self.prompt_tokens_are_placement_safe() {
+            return Err(anyhow!(
+                "Dynamo KV Router placement requires authored prompt token IDs or replay hashes; length-only execution tokens are not valid KV identities"
+            ));
+        }
+        Ok(Cow::Borrowed(&self.tokens))
     }
 }
 
@@ -406,10 +418,15 @@ impl PlacementRequestView for ReplayRequestPayload {
         self.input_length()
     }
 
-    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
+    fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>> {
+        if !self.metadata().prompt_tokens_are_placement_safe() {
+            return Err(anyhow!(
+                "Dynamo KV Router placement requires authored prompt token IDs or replay hashes; length-only execution tokens are not valid KV identities"
+            ));
+        }
         match self.materialized_tokens() {
-            Some(tokens) => Cow::Borrowed(tokens),
-            None => Cow::Owned(ReplayRequestPayload::prompt_tokens(self)),
+            Some(tokens) => Ok(Cow::Borrowed(tokens)),
+            None => Ok(Cow::Owned(ReplayRequestPayload::prompt_tokens(self))),
         }
     }
 }
@@ -509,12 +526,28 @@ impl OfflineReplayRouter {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
+        Self::new_with_selector_seed(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_selector_seed(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        selector_seed: Option<u64>,
+    ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector(&config);
+        let selector = replay_selector_with_seed(&config, selector_seed)?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -635,7 +668,15 @@ impl OfflineReplayRouter {
 
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
         for event in events {
-            self.indexer.apply_event(event)?;
+            let worker_id = event.worker_id;
+            let event_id = event.event.event_id;
+            let dp_rank = event.event.dp_rank;
+            let summary = KvEventSummary::from_data(&event.event.data);
+            self.indexer.apply_event(event).with_context(|| {
+                format!(
+                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
+                )
+            })?;
         }
         Ok(RouterEffects::default())
     }
@@ -809,9 +850,11 @@ impl OfflineReplayRouter {
         let (priority_jump, strict_priority) = request.router_priorities();
         let (overlaps, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
-                let overlaps = self
-                    .indexer
-                    .find_matches_for_hashes(replay_hashes.local_block_hashes);
+                let overlaps =
+                    self.indexer
+                        .find_matches_for_hashes(crate::loadgen::local_block_hashes(
+                            replay_hashes.local_block_hashes,
+                        ));
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
                 } else if self.config.router_assume_kv_reuse
@@ -822,7 +865,7 @@ impl OfflineReplayRouter {
                     self.config
                         .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 } else {
-                    let tokens = request_view.prompt_tokens();
+                    let tokens = request_view.prompt_tokens_for_placement()?;
                     self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
@@ -835,7 +878,7 @@ impl OfflineReplayRouter {
                 (overlaps, token_seq)
             }
             None => {
-                let tokens = request_view.prompt_tokens();
+                let tokens = request_view.prompt_tokens_for_placement()?;
                 let overlaps = self.indexer.find_matches_for_request(&tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
@@ -883,12 +926,14 @@ impl OfflineReplayRouter {
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
-        let selection = self.selector.select_worker(
-            &self.workers_with_configs,
-            &scheduling_request,
-            eligibility,
-            self.block_size,
-        )?;
+        let selection = self
+            .selector
+            .select_worker(WorkerSelectionInput::configured(
+                &self.workers_with_configs,
+                &scheduling_request,
+                eligibility,
+                self.block_size,
+            ))?;
         let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let dp_rank = usize::try_from(selection.worker.dp_rank)
@@ -1043,12 +1088,14 @@ mod tests {
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
+    use serde_json::Value;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
+    use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
@@ -1122,11 +1169,38 @@ mod tests {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
+            preferred_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
             policy_class: None,
+            replay_context: None,
         }
+    }
+
+    #[test]
+    fn length_only_execution_tokens_are_rejected_without_replay_hashes() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let mut request = request(1, 7);
+        request.replay_context = Some(ReplayRequestContext {
+            authored_id: "length-only".into(),
+            session_id: None,
+            turn_index: None,
+            metadata: Value::Null,
+            prompt_token_source: ReplayPromptTokenSource::LengthOnlySynthetic,
+        });
+
+        let error =
+            match router.build_pending_request(&request, request.max_output_tokens, None, None) {
+                Ok(_) => panic!("length-only request unexpectedly reached KV placement"),
+                Err(error) => error,
+            };
+        assert!(
+            error
+                .to_string()
+                .contains("requires authored prompt token IDs or replay hashes"),
+            "{error}"
+        );
     }
 
     fn store_event(
@@ -1330,7 +1404,7 @@ mod tests {
                 0,
                 1,
                 1,
-                hashes.local_block_hashes[0].0,
+                hashes.local_block_hashes[0],
                 StorageTier::Device,
             )])
             .unwrap();
@@ -1469,7 +1543,7 @@ models:
             .on_kv_events(vec![store_event(
                 0,
                 1,
-                cached_hashes.local_block_hashes[0].0,
+                cached_hashes.local_block_hashes[0],
                 StorageTier::Device,
             )])
             .unwrap();
@@ -1561,7 +1635,7 @@ policy_classes:
             .on_kv_events(vec![store_event(
                 1,
                 1,
-                target_hashes.local_block_hashes[0].0,
+                target_hashes.local_block_hashes[0],
                 StorageTier::Device,
             )])
             .unwrap();
@@ -1745,7 +1819,7 @@ policy_classes:
             .on_kv_events(vec![store_event(
                 0,
                 1,
-                hashes.local_block_hashes[0].0,
+                hashes.local_block_hashes[0],
                 StorageTier::Device,
             )])
             .unwrap();

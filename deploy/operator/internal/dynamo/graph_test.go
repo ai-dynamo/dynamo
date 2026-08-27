@@ -30,12 +30,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -6067,6 +6067,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		name             string
 		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
 		backendFramework BackendFramework
+		wantCommand      []string
+		wantArgs         []string
 		wantEnvVars      map[string]string
 		wantErr          bool
 	}{
@@ -6076,6 +6078,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			},
 			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
@@ -6092,8 +6096,29 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				},
 			},
 			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": "3000",
+			},
+		},
+		{
+			name: "frontend with materialized appended args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.frontend", "--router-mode", "kv"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend", "--router-mode", "kv"},
+			wantEnvVars: map[string]string{
+				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
 	}
@@ -6125,15 +6150,13 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			}
 
 			// Check command and args
-			wantCommand := []string{"python3"}
-			wantArgs := []string{"-m", "dynamo.frontend"}
-			if !reflect.DeepEqual(podSpec.Containers[0].Command, wantCommand) {
+			if !reflect.DeepEqual(podSpec.Containers[0].Command, tt.wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
-					podSpec.Containers[0].Command, wantCommand)
+					podSpec.Containers[0].Command, tt.wantCommand)
 			}
-			if !reflect.DeepEqual(podSpec.Containers[0].Args, wantArgs) {
+			if !reflect.DeepEqual(podSpec.Containers[0].Args, tt.wantArgs) {
 				t.Errorf("GenerateBasePodSpec() args = %v, want %v",
-					podSpec.Containers[0].Args, wantArgs)
+					podSpec.Containers[0].Args, tt.wantArgs)
 			}
 
 			// Check environment variables

@@ -82,6 +82,9 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
@@ -93,6 +96,27 @@ def should_prefetch_model(config: Config) -> bool:
     if os.path.exists(config.model):
         return False
     return not uses_modelexpress_load_format(config)
+
+
+def publish_vllm_structural_tag_reasoning_policy(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether the vLLM tool tag must exclude reasoning.
+
+    vLLM delays its tool grammar only when reasoning constraints are disabled
+    *and* its engine-side reasoning parser can detect the end of reasoning. In
+    that case, the frontend tag must not model the reasoning block again.
+
+    Otherwise, keep the frontend's compatibility behavior so its response
+    parser can close the prompt-injected reasoning block before parsing tools.
+    """
+    structured_outputs_config = vllm_config.structured_outputs_config
+    enable_in_reasoning = structured_outputs_config.enable_in_reasoning
+    has_reasoning_parser = bool(structured_outputs_config.reasoning_parser)
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(has_reasoning_parser and not enable_in_reasoning),
+    )
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -713,14 +737,28 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
+    state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
     enable_router_hint_support(
-        runtime_config, config.engine_args, worker_type, dp_range
+        runtime_config,
+        config.engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    tower_connector_lora_enabled = bool(
+        vllm_config.lora_config
+        and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
+    )
     if publish_engine_generate_capability(
-        runtime_config, model_input, model_type, worker_type
+        runtime_config,
+        model_input,
+        model_type,
+        worker_type,
+        tower_connector_lora_enabled,
     ):
         logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
@@ -753,7 +791,7 @@ async def register_vllm_model(
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
-    if state_agent_settings(config) is not None:
+    if state_agent_enabled:
         runtime_config.kv_event_source_mode = "state_agent_v2"
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
@@ -793,8 +831,7 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
+    # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )

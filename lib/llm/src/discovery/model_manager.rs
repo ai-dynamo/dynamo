@@ -15,12 +15,12 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerSelector,
+    selector::{WorkerInputs, WorkerSelector},
 };
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -464,7 +464,7 @@ impl ModelManager {
     /// reservation first-come and symmetric across namespaces. A later deployment
     /// re-using a name fails loudly rather than silently displacing the owner.
     ///
-    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// Holds `Self::reservation_lock` across the reserved-name check and the
     /// insert so the claim is atomic against a concurrent `register_alias` for
     /// the same name (a name can never end up both a live primary and an alias).
     /// The lock is always taken before any map access, so it never inverts with a
@@ -536,7 +536,7 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// Holds `Self::reservation_lock` across the live-primary probe and the
     /// entry insert so the claim is atomic against a concurrent `add_worker_set`
     /// for the same name. Within that section the `models` guard is dropped before
     /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
@@ -1342,6 +1342,21 @@ impl ModelManager {
             .get_generate_engine_for_capability(capability)
     }
 
+    /// Select a Generate engine and its routing metadata from one worker set
+    /// that advertises `capability`.
+    pub(crate) fn get_generate_engine_for_capability_with_routing(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability_with_routing(capability)
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -1956,37 +1971,55 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        // Build shared cache client based on shared_cache_type.
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
-            .as_ref()
-            .map(|c| c.shared_cache_type)
-            .unwrap_or_default()
+        // A selector that does not consume cache input must not create a shared-cache client or
+        // subscribe to its updates.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
         {
-            dynamo_kv_router::SharedCacheType::None => None,
-            dynamo_kv_router::SharedCacheType::Hicache => {
-                let worker_component_name = &endpoint.id().component;
-                tracing::info!(
-                    worker_component = worker_component_name,
-                    "Using HiCache shared KV cache"
-                );
-                Some(Box::new(
-                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
-                ))
+            match kv_router_config
+                .as_ref()
+                .map(|c| c.shared_cache_type)
+                .unwrap_or_default()
+            {
+                dynamo_kv_router::SharedCacheType::None => None,
+                dynamo_kv_router::SharedCacheType::Hicache => {
+                    let worker_component_name = &endpoint.id().component;
+                    tracing::info!(
+                        worker_component = worker_component_name,
+                        "Using HiCache shared KV cache"
+                    );
+                    Some(Box::new(
+                        self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                    ))
+                }
             }
+        } else {
+            None
         };
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let kv_source_membership =
-            if kv_event_source_requirement.should_subscribe(&effective_kv_router_config) {
-                Some(
-                    self.get_or_create_kv_source_membership_watch(endpoint)
-                        .await?,
-                )
-            } else {
-                None
-            };
+        let cache_required = selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
+            || effective_kv_router_config.serve_indexer
+            || matches!(
+                kv_event_source_requirement,
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                    | KvEventSourceRequirement::Unknown
+            );
+        let kv_source_membership = if cache_required
+            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
+        {
+            Some(
+                self.get_or_create_kv_source_membership_watch(endpoint)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
@@ -3287,7 +3320,6 @@ mod tests {
             None,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
-            false,
             None,
         );
         let encoder = crate::kv_router::EncoderRouter::new(

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# uv dependency overrides for the frontend image.
+#
+# requirements.common.txt already floors pillow at 12.3.0, but the frontend
+# does not stop there: the last build step installs benchmarks/, which depends
+# on aiperf==0.10.0, and aiperf declares pillow~=12.2.0. That constraint pins
+# the patch series, so it forbids 12.3.0 and the re-resolve walks the image
+# back under the floor. The shipped 1.4.1 frontend carries pillow 12.2.0 for
+# exactly this reason.
+#
+# An override applies to the whole resolve, so it holds across the later
+# install steps in a way a requirements floor does not.
+#
+# The upper bound is required, not decorative: a uv override REPLACES every
+# other constraint on the package, so nothing else caps this at the 12.x
+# series once the override is in force. Drop this entry once aiperf widens its
+# own constraint.
+pillow>=12.3.0,<13

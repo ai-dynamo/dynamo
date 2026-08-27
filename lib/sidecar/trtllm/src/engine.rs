@@ -87,7 +87,7 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        let endpoint = GrpcEndpoint::parse(&args.trtllm_endpoint, "--trtllm-endpoint")?;
+        let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let model = ConfiguredModel {
             source: args.model_path,
@@ -111,6 +111,7 @@ impl TrtllmSidecarEngine {
             enable_kv_routing: false,
             disaggregation_mode: DisaggregationMode::Aggregated,
             route_to_encoder: false,
+            enable_rl: args.sidecar.common.enable_rl,
             ..Default::default()
         };
         Ok((engine, config))

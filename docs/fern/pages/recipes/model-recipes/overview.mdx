@@ -37,7 +37,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>17 model families</h3>
+      <h3>16 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
@@ -108,11 +108,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
-      <div><h3>Nemotron-3.5-Lightning</h3><p>NVIDIA</p></div>
+      <div><h3>Nemotron 3.5 Lightning</h3><p>NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">30B hybrid Mamba/Attention/MoE recipe matrix for H100, H200, B200, and GB200, with vLLM MTP/DFlash/DSpark targets, DSpark KV-routing aggregate variants on H100/H200/B200, and experimental TensorRT-LLM MTP/no-spec aggregates.</p>
-    <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 262K context</span></div>
-  <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron-3.5-Lightning recipe">Open recipe</a>
+    <p className="dynamo-model-summary">30B hybrid Mamba/Attention/MoE recipe matrix for H100, H200, B200, and GB200, with NVFP4 and BF16 variants, vLLM MTP/DFlash/DSpark targets, DSpark with KV-routing, and experimental TensorRT-LLM MTP/no-spec.</p>
+    <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 1M context</span></div>
+  <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron 3.5 Lightning recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
@@ -159,15 +159,6 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>4–28x B200/H200</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-flash.mdx" aria-label="Open the DeepSeek-V4-Flash recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="disaggregated kv-routing expert-parallel" data-workload="long-context-reuse">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div><h3>DeepSeek V3.2 NVFP4</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
-    </div>
-    <p className="dynamo-model-summary">32x GB200 TensorRT-LLM recipe with P/D split, KV-aware routing, and WideEP for long-context coding traces.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>32x GB200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
-  <a className="dynamo-card-link" href="deepseek-v3-2-nvfp4.mdx" aria-label="Open the DeepSeek V3.2 NVFP4 recipe">Open recipe</a>
-  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="openai" data-runtime="trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="static-generation long-output agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/openai.webp" alt="" />
@@ -212,15 +203,6 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">FP8 recipe set spanning TensorRT-LLM aggregate, TensorRT-LLM P/D, and vLLM P/D targets.</p>
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>2-8x GPU</span><span>Static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="qwen3-32b-fp8.mdx" aria-label="Open the Qwen3-32B FP8 recipe">Open recipe</a>
-  </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="meta" data-runtime="vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/meta-llama.webp" alt="" />
-      <div><h3>Llama-3.3-70B FP8</h3><p>Meta / Red Hat</p></div>
-    </div>
-    <p className="dynamo-model-summary">Llama FP8 topology recipe set for 8K input / 1K output traffic on H100/H200.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Long output / static ISL-OSL</span><span>Related benchmark</span></div>
-  <a className="dynamo-card-link" href="llama-3-3-70b-fp8.mdx" aria-label="Open the Llama-3.3-70B FP8 recipe">Open recipe</a>
   </div>
 </div>
 

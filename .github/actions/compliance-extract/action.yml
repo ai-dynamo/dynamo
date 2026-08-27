@@ -158,6 +158,14 @@ runs:
             echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
           fi
         fi
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
+        fi
         # Forward the freshly-built ECR EPP image the build used, so the epp
         # stage (pre_frontend COPY --from=epp) cache-hits instead of resolving
         # the rendered default upstream staging tag, which gets GC'd. Empty for
@@ -361,6 +369,14 @@ runs:
           else
             echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
           fi
+        fi
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
         fi
         # Same EPP image forwarding as the compliance_artifact extract: this
         # target also descends pre_frontend -> epp, so without it the epp stage

@@ -147,6 +147,15 @@ runs:
           fi
         fi
 
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
+        fi
+
         TARGET_ARG=""
         if [ -n "${{ inputs.build_target }}" ]; then
           TARGET_ARG="--target ${{ inputs.build_target }}"
@@ -329,7 +338,7 @@ runs:
 
     # Upload comprehensive build metrics as artifact
     - name: Upload Comprehensive Build Metrics
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
       if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
