@@ -62,8 +62,10 @@ curl localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-No published TensorRT-LLM sidecar image is available yet. Follow the
+No published sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes-quick-start)
-to build the CPU-only sidecar image and pair it with a stock upstream
-TensorRT-LLM image. The source tree includes an
+to build `dynamo-sidecar`, which contains all three engine-specific sidecar
+executables. The TensorRT-LLM manifest runs `dynamo-trtllm-sidecar` as the
+container command and pairs it with a stock upstream TensorRT-LLM image. The
+source tree includes an
 [aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).

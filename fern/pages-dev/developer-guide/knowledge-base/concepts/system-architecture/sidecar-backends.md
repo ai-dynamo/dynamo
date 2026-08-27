@@ -56,6 +56,28 @@ event integration with Dynamo's discovery and event planes.
 | Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding |
 | Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
+## Container Packaging
+
+The sidecar Dockerfile builds all three engine-specific sidecar executables into
+one CPU-only image. Deployments select an engine by setting the container
+`command`:
+
+| Engine | Container command |
+|---|---|
+| vLLM | `dynamo-vllm-sidecar` |
+| SGLang | `dynamo-sglang-sidecar` |
+| TensorRT-LLM | `dynamo-trtllm-sidecar` |
+
+The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
+`sglang`, and `trtllm` onto those executables. It is a convenience for ad-hoc
+`docker run`; the deployment manifests override it with `command`. The inference
+engine remains in a separate GPU container, so the sidecar image does not
+include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
+dependencies.
+
+No published sidecar image is available yet. Build the sidecar image from the
+[sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
+
 ## Current Readiness
 
 | Backend | Local launcher | Kubernetes example |
@@ -69,5 +91,5 @@ This table describes validated launch topologies, not feature parity with the
 in-process backends.
 
 See the
-[sidecar source and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
+[sidecar Dockerfile, source, and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
 for implementation details.
