@@ -12,6 +12,7 @@ import os
 import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
@@ -177,29 +178,49 @@ def _single_transfer_modality(mm_features: list[Any]) -> str | None:
     return next(iter(modalities))
 
 
+@dataclass(frozen=True)
+class _ReasoningParserMetadata:
+    """Keep engine scheduling hints separate from response parser state."""
+
+    engine_reasoning_ended: bool | None
+    response_reasoning_ended: bool | None
+    parser_kwargs: dict[str, Any] | None
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
-) -> tuple[bool | None, dict[str, Any] | None]:
+) -> _ReasoningParserMetadata:
     if reasoning_parser_class is None:
-        return None, None
+        return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
     if chat_template_kwargs.get("enable_thinking") is False:
-        return True, parser_kwargs
-    if not getattr(request_for_sampling, "include_reasoning", True):
-        return True, parser_kwargs
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
-        return True, parser_kwargs
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
 
     reasoning_parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
     )
-    return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
+    response_reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
+    # include_reasoning controls response projection, not whether the model may
+    # emit reasoning tags. The engine still needs its vLLM scheduling hint, while
+    # the response parser must remain active until the generated tags are parsed.
+    engine_reasoning_ended = (
+        True
+        if not getattr(request_for_sampling, "include_reasoning", True)
+        else response_reasoning_ended
+    )
+    return _ReasoningParserMetadata(
+        engine_reasoning_ended,
+        response_reasoning_ended,
+        parser_kwargs,
+    )
 
 
 def _inject_routing_metadata(
@@ -334,6 +355,7 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict | None, list, bool]:
         """Extract MM routing info and prepare mm_kwargs transfer.
 
@@ -360,10 +382,19 @@ class VllmProcessor:
             return None, cleanup_items, nixl_transferred
 
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-            )
+            if mm_processor_kwargs:
+                # vLLM rehashes supplied UUIDs when processor kwargs are
+                # present. Fall back to text-prefix routing so the router and
+                # worker cannot publish different cache keys.
+                logger.debug(
+                    "[mm-routing] Exact MM routing disabled because "
+                    "mm_processor_kwargs is non-empty"
+                )
+            else:
+                mm_routing_info = build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
             (
                 mm_hashes_list,
                 mm_placeholders_list,
@@ -372,11 +403,15 @@ class VllmProcessor:
             ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            # Forward hashes only when this frontend built the matching exact
+            # routing sequence. Their presence is the worker's request-time
+            # readiness signal; transfer-only metadata is deliberately separate.
+            if mm_routing_info is not None:
+                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                dynamo_preproc["extra_args"][
+                    "mm_hashes_by_modality"
+                ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_hashes_by_modality"
-            ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"][
                 "mm_placeholders_by_modality"
             ] = mm_placeholders_by_modality
@@ -603,7 +638,7 @@ class VllmProcessor:
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
         # tokenizer metadata for EOS ids when constructing the router payload.
 
-        reasoning_ended, reasoning_parser_kwargs = _build_reasoning_parser_metadata(
+        reasoning_metadata = _build_reasoning_parser_metadata(
             self.reasoning_parser_class,
             self.tokenizer,
             chat_template_kwargs,
@@ -646,10 +681,12 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
-        if reasoning_ended is not None:
-            dynamo_preproc["reasoning_ended"] = reasoning_ended
-        if reasoning_parser_kwargs is not None:
-            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if reasoning_metadata.engine_reasoning_ended is not None:
+            dynamo_preproc[
+                "reasoning_ended"
+            ] = reasoning_metadata.engine_reasoning_ended
+        if reasoning_metadata.parser_kwargs is not None:
+            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_metadata.parser_kwargs
 
         # Attach user cache identities before building routing metadata. Opaque
         # UUIDs deliberately suppress multimodal exact routing and frontend
@@ -664,7 +701,11 @@ class VllmProcessor:
                 mm_routing_info,
                 cleanup_items,
                 nixl_transferred,
-            ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+            ) = await self._prepare_mm_routing(
+                vllm_preproc,
+                dynamo_preproc,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+            )
 
             # Forward multimodal URLs so the backend handler can load the media.
             # Only skip when ALL features were transferred — a partial transfer
@@ -704,7 +745,9 @@ class VllmProcessor:
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
-                    reasoning_ended=reasoning_ended,
+                    response_reasoning_ended=(
+                        reasoning_metadata.response_reasoning_ended
+                    ),
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback

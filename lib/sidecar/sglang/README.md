@@ -1,7 +1,7 @@
 # SGLang sidecar
 
 > [!WARNING]
-> **Experimental.** These deployment examples and the standalone sidecar image
+> **Experimental.** These deployment examples and the sidecar image
 > are experimental and not yet packaged for distribution (the launcher module
 > ships inside `ai-dynamo-runtime`). The manifests, flags, and behavior may change
 > without notice.
@@ -18,13 +18,15 @@ Build and run it directly from the Dynamo workspace:
 ```bash
 cargo build --release -p dynamo-sglang-sidecar
 ./target/release/dynamo-sglang-sidecar \
-    --sglang-endpoint http://127.0.0.1:30001
+    --grpc-endpoint http://127.0.0.1:30001
 ```
 
-There is no published image yet; the "Deploy on Kubernetes" section below builds
-a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
+There is no published image yet; see
+[Build the image](../README.md#build-the-image), which produces one image
+containing all three sidecar executables. Official packaging is deferred to a
+follow-up.
 
-Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
@@ -42,6 +44,7 @@ SGLang can load the Python entry point and supply the gRPC endpoint arguments:
 python3 -m sglang.launch_server \
     <args> \
     --grpc-port 30001 \
+    --incremental-streaming-output \
     --sidecar dynamo.sglang.sidecar
 ```
 
@@ -56,13 +59,15 @@ same unified worker lifecycle as the standalone executable.
 that colocates the sidecar with an SGLang engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and vLLM sidecars.
+There is no published sidecar image yet, so build and push the image from
+`lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
+executables; these manifests run `dynamo-sglang-sidecar` as the container
+command.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there, and Dynamo's `sglang-runtime` pins an
-> older SGLang without it. `deploy/agg.yaml` uses `lmsysorg/sglang:v0.5.16`.
+> server (`--grpc-port`) landed there. The deployment examples use
+> `lmsysorg/sglang:v0.5.17`, matching Dynamo main's SGLang pin.
 
 ### Prerequisites
 
@@ -76,14 +81,17 @@ There is no published sidecar image yet, so you build and push your own from
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
+Build and push the image to a registry your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/sglang/Dockerfile \
-  -t <your-registry>/dynamo-sglang-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
+
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. These manifests set the container `command` to
+`dynamo-sglang-sidecar`.
 
 ### 2. Point the manifest at your image
 

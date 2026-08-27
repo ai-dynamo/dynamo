@@ -14,7 +14,9 @@ use dynamo_kv_router::{
     indexer::{
         KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
     },
-    protocols::{ResidencyProjection, ResidencyProjectionError, WorkerWithDpRank},
+    protocols::{
+        ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata, WorkerWithDpRank,
+    },
 };
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};
@@ -83,18 +85,14 @@ pub struct KvStateAttachmentIntent {
     pub raw_topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_token_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KvStateHostControlRequest {
     Status,
-    SetCacheReadable {
-        cache_owner_id: CacheOwnerId,
-        producer_instance: Box<Instance>,
-        intent_incarnation: u64,
-        readable: bool,
-    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +135,8 @@ pub struct KvStateSourceAdvertisement {
     pub protocol_version: KvStateProtocolVersion,
     pub event_topic: String,
     pub recovery_control_target: Instance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,7 +152,6 @@ pub struct KvStateAttachmentAdvertisement {
     pub ingress_protocol: KvStateIngressProtocol,
     pub raw_zmq_endpoint: String,
     pub raw_topic: String,
-    pub cache_readable: bool,
     pub ready_at_outbound_cursor: u64,
 }
 
@@ -264,7 +263,7 @@ pub fn resolve_kv_state_projection(
         };
     };
 
-    if !live_workers.contains(&attachment.worker) || !attachment.cache_readable {
+    if !live_workers.contains(&attachment.worker) {
         return KvStateProjectionResolution::Unavailable;
     }
 
@@ -286,7 +285,6 @@ pub fn resolve_kv_state_projection(
             current.generation != attachment.attachment_generation
                 || current.worker != attachment.worker
                 || !current.ready
-                || !current.cache_readable
                 || current.ready_at_outbound_cursor != attachment.ready_at_outbound_cursor
         })
     {
@@ -386,6 +384,7 @@ mod tests {
             protocol_version: KvStateProtocolVersion::V2,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: endpoint(),
+            router_hint_source: None,
         };
         let attachment = KvStateAttachmentAdvertisement {
             cache_owner_id,
@@ -399,7 +398,6 @@ mod tests {
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             raw_zmq_endpoint: "tcp://framework".to_string(),
             raw_topic: "kv-events-v2".to_string(),
-            cache_readable: true,
             ready_at_outbound_cursor: 9,
         };
         let status = KvStateAgentStatus {
@@ -408,7 +406,6 @@ mod tests {
                 generation: 7,
                 worker,
                 ready: true,
-                cache_readable: true,
                 ready_at_outbound_cursor: 9,
             }),
             cache_owner_ready: true,

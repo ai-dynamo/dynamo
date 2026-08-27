@@ -12,6 +12,12 @@ from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
 )
+from dynamo.sglang.protocol import (
+    PreprocessedRequest,
+    SamplingOptions,
+    SglangMultimodalRequest,
+    StopConditions,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -25,6 +31,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
+from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
 
 pytestmark = [
     pytest.mark.unit,
@@ -215,6 +222,7 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
         server_args=SimpleNamespace(served_model_name="test-model"),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
+    handler._first_token_source = None
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
@@ -569,6 +577,9 @@ class _Context:
     def is_stopped(self):
         return False
 
+    def notify_first_token(self):
+        pass
+
 
 def test_build_sampling_params_passes_n_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
@@ -635,6 +646,74 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     assert sampling_params["json_schema"] == (
         '{"type": "object", "properties": {"city": {"type": "string"}}}'
     )
+
+
+def test_build_sampling_params_maps_min_tokens_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 64,
+                "ignore_eos": True,
+            },
+        }
+    )
+
+    assert sampling_params["min_new_tokens"] == 64
+    assert sampling_params["max_new_tokens"] == 64
+    assert sampling_params["ignore_eos"] is True
+
+
+def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {"max_tokens": 64, "min_tokens": 16}
+    )
+
+    assert sampling_params["min_new_tokens"] == 16
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8}}
+    )
+
+    assert "min_new_tokens" not in sampling_params
+
+
+def test_build_sampling_params_forwards_explicit_zero_min_tokens():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8, "min_tokens": 0}}
+    )
+
+    assert sampling_params["min_new_tokens"] == 0
+
+
+def test_multimodal_build_sampling_params_maps_min_tokens():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(
+                max_tokens=64, min_tokens=64, ignore_eos=True
+            ),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(request)
+
+    assert sampling_params["min_new_tokens"] == 64
+    assert sampling_params["max_new_tokens"] == 64
+    assert sampling_params["ignore_eos"] is True
 
 
 @pytest.mark.parametrize(
@@ -1228,6 +1307,37 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
         "llo",
         "od",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_notifies_for_empty_decoded_token():
+    handler = _new_decode_handler()
+
+    class Context(_Context):
+        def __init__(self):
+            self.notifications = 0
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    async def token_stream():
+        yield {
+            "output_ids": [101],
+            "text": "",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+        assert context.notifications == 1
+        yield {
+            "output_ids": [102],
+            "text": "a",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+
+    await _collect(handler._process_text_stream(token_stream(), context))
+
+    assert context.notifications == 1
 
 
 @pytest.mark.asyncio

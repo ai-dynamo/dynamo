@@ -13,7 +13,7 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
-from dynamo.sglang.args import Config
+from dynamo.sglang.args import Config, _diffusion_generator_kwargs
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -141,18 +141,8 @@ async def init_image_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url
@@ -228,18 +218,8 @@ async def init_video_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for video generation workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url

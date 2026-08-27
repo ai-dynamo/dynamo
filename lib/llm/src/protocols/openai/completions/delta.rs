@@ -9,7 +9,7 @@ use crate::{
         common::{self, extensions::NvExtProvider, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            delta_common::{self, DeltaGeneratorOptions},
+            delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
         },
     },
     types::TokenIdType,
@@ -37,38 +37,28 @@ impl NvCreateCompletionRequest {
 }
 
 pub struct DeltaGenerator {
-    id: String,
-    object: String,
-    created: u32,
-    model: String,
-    system_fingerprint: Option<String>,
-    usage: dynamo_protocols::types::CompletionUsage,
-    options: DeltaGeneratorOptions,
-    tracker: Arc<RequestTracker>,
+    state: DeltaGeneratorState,
 }
 
 impl DeltaGenerator {
     pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
-        let (now, usage, tracker) = delta_common::initial_state();
         Self {
-            id: format!("cmpl-{request_id}"),
-            object: "text_completion".to_string(),
-            created: now,
-            model,
-            system_fingerprint: None,
-            usage,
-            options,
-            tracker,
+            state: DeltaGeneratorState::new(
+                format!("cmpl-{request_id}"),
+                "text_completion".to_string(),
+                model,
+                options,
+            ),
         }
     }
 
     /// Returns the request tracker. Tracking is always enabled. For sharing with PreprocessedRequest.
     pub fn tracker(&self) -> Arc<RequestTracker> {
-        self.tracker.clone()
+        self.state.tracker()
     }
 
     pub fn update_isl(&mut self, isl: u32) {
-        self.usage.prompt_tokens = isl;
+        self.state.update_isl(isl);
     }
 
     pub fn create_logprobs(
@@ -78,7 +68,7 @@ impl DeltaGenerator {
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_protocols::types::Logprobs> {
-        if !self.options.enable_logprobs || logprobs.is_none() {
+        if !self.state.options().enable_logprobs || logprobs.is_none() {
             return None;
         }
 
@@ -93,7 +83,7 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
-        let return_as_ids = self.options.return_tokens_as_token_ids;
+        let return_as_ids = self.state.options().return_tokens_as_token_ids;
         let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
             toks.iter()
                 .zip(tok_lps.iter())
@@ -138,18 +128,18 @@ impl DeltaGenerator {
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
         let inner = dynamo_protocols::types::CreateCompletionResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
+            id: self.state.id().to_string(),
+            object: self.state.object().to_string(),
+            created: self.state.created(),
+            model: self.state.model().to_string(),
+            system_fingerprint: self.state.system_fingerprint().cloned(),
             choices: vec![dynamo_protocols::types::Choice {
                 text: text.unwrap_or_default(),
                 index,
                 finish_reason,
                 logprobs,
             }],
-            usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+            usage: if self.state.is_usage_enabled() && self.state.is_continuous_usage_enabled() {
                 Some(self.get_usage())
             } else {
                 None
@@ -168,11 +158,11 @@ impl DeltaGenerator {
         let usage = self.get_usage();
 
         let inner = dynamo_protocols::types::CreateCompletionResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
+            id: self.state.id().to_string(),
+            object: self.state.object().to_string(),
+            created: self.state.created(),
+            model: self.state.model().to_string(),
+            system_fingerprint: self.state.system_fingerprint().cloned(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
         };
@@ -182,18 +172,16 @@ impl DeltaGenerator {
 
     /// Check if usage tracking is enabled
     pub fn is_usage_enabled(&self) -> bool {
-        self.options.enable_usage
+        self.state.is_usage_enabled()
     }
 
     /// Check if continuous usage tracking is enabled
     pub fn is_continuous_usage_enabled(&self) -> bool {
-        self.options.continuous_usage_stats
+        self.state.is_continuous_usage_enabled()
     }
 
     pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
-        let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
-        usage
+        self.state.get_usage()
     }
 }
 
@@ -202,41 +190,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         &mut self,
         delta: common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateCompletionResponse> {
-        // Aggregate token usage even if usage tracking is disabled for metrics tracking
-        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
-        // but this will not be an issue until context lengths exceed 4_294_967_295.
-        let token_length: u32 = delta
-            .token_ids
-            .len()
-            .try_into()
-            .expect("token_ids length exceeds u32::MAX");
-
-        self.usage.completion_tokens += token_length;
-
-        // If backend provides completion_usage, use it to update usage stats
-        // This is critical for prompt embeddings where prompt_tokens comes from
-        // the embedding sequence length computed by the worker
-        if let Some(completion_usage) = delta.completion_usage.as_ref() {
-            // Update prompt_tokens from worker if provided (e.g., for embeddings)
-            self.usage.prompt_tokens = completion_usage.prompt_tokens;
-
-            // Propagate completion token details if provided
-            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
-                self.usage.completion_tokens_details = Some(completion_details.clone());
-            }
-
-            // Propagate prompt token details if provided
-            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
-                self.usage.prompt_tokens_details = Some(prompt_details.clone());
-            }
-        }
+        self.state.update_usage_from_backend_output(&delta);
 
         // Keep token IDs available for optional nvext emission only when requested.
-        let completion_token_ids_for_nvext = if self.options.response_fields.completion_token_ids {
-            Some(delta.token_ids.clone())
-        } else {
-            None
-        };
+        let completion_token_ids_for_nvext =
+            if self.state.options().response_fields.completion_token_ids {
+                Some(delta.token_ids.clone())
+            } else {
+                None
+            };
         let logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
@@ -244,7 +206,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             delta.top_logprobs,
         );
 
-        let finish_reason = delta.finish_reason.map(Into::into);
+        // Backend errors are response errors, not successful OpenAI stop reasons.
+        // Keep completions aligned with the chat-completions delta generator.
+        let finish_reason = match delta.finish_reason {
+            Some(common::FinishReason::Error(err_msg)) => {
+                self.state.tracker_ref().record_finish();
+                return Err(anyhow::anyhow!(err_msg));
+            }
+            Some(reason) => Some(reason.into()),
+            None => None,
+        };
         let stop_reason = delta.stop_reason.clone();
 
         // create choice
@@ -254,7 +225,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
         if finish_reason.is_some() {
-            self.tracker.record_finish();
+            self.state.tracker_ref().record_finish();
         }
 
         // Build the nvext response payload via the shared gating helper on
@@ -263,8 +234,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // rules stay in one place.
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
-        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
-            Some(&self.tracker),
+        if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
+            Some(self.state.tracker_ref()),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
@@ -298,7 +269,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
     }
 
     fn get_isl(&self) -> Option<u32> {
-        Some(self.usage.prompt_tokens)
+        Some(self.state.get_isl())
     }
 
     fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
@@ -318,7 +289,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
     }
 
     fn tracker(&self) -> Option<Arc<RequestTracker>> {
-        Some(self.tracker.clone())
+        Some(self.state.tracker())
     }
 }
 
@@ -375,6 +346,18 @@ mod tests {
             encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_response_identity_matches_completion_protocol() {
+        let request = create_test_request();
+        let generator = request.response_generator("request-id".to_string());
+
+        let response = generator.create_choice(0, None, None, None);
+
+        assert_eq!(response.inner.id, "cmpl-request-id");
+        assert_eq!(response.inner.object, "text_completion");
+        assert_eq!(response.inner.model, "test-model");
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateCompletionRequest {
@@ -436,6 +419,24 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_backend_error_is_not_converted_to_stop() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-error".to_string());
+        let mut output = final_backend_output();
+        output.finish_reason = Some(common::FinishReason::Error(
+            "invalid prompt embeddings".to_string(),
+        ));
+        assert!(generator.tracker().total_time_ms().is_none());
+
+        let error = generator
+            .choice_from_postprocessor(output)
+            .expect_err("backend error must fail the response");
+
+        assert_eq!(error.to_string(), "invalid prompt embeddings");
+        assert!(generator.tracker().total_time_ms().is_some());
     }
 
     #[test]
