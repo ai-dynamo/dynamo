@@ -192,9 +192,8 @@ spec:
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45 \
                     --enable-multimodal \
-                    --limit-mm-per-prompt '{"image":0,"video":0}' \
+                    --limit-mm-per-prompt '{"image":1,"video":0}' \
                     --mm-encoder-tp-mode data \
-                    --skip-mm-profiling \
                     --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq"}' \
                     --no-disable-hybrid-kv-cache-manager \
                     --compilation-config '{"cudagraph_mm_encoder":true}' \
@@ -338,9 +337,8 @@ spec:
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45 \
                     --enable-multimodal \
-                    --limit-mm-per-prompt '{"image":0,"video":0}' \
+                    --limit-mm-per-prompt '{"image":1,"video":0}' \
                     --mm-encoder-tp-mode data \
-                    --skip-mm-profiling \
                     --no-disable-hybrid-kv-cache-manager \
                     --disaggregation-mode decode \
                     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
