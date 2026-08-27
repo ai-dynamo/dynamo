@@ -8,6 +8,11 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+    # Documentation changes are validated before merge and do not affect images or GPU tests.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '**.rst'
   workflow_dispatch:
     inputs:
       framework:
