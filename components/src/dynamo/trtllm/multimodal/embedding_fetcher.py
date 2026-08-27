@@ -21,6 +21,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
+from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ async def _fetch_embeddings_with_cache(
     # Overrides change the embeddings for a URL, so they are part of cache
     # identity; without them the hash is unchanged, so existing entries stay valid.
     mm_kwargs = (
-        request.get("mm_processor_kwargs") if isinstance(request, dict) else None
+        resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
     )
     if not isinstance(mm_kwargs, dict):
         mm_kwargs = None

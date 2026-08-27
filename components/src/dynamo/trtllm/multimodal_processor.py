@@ -147,34 +147,8 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
 
-    def _known_processor_kwargs(
-        self, mm_kwargs: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """The subset of mm_kwargs the HF image processor declares valid.
-
-        Unknown keys are dropped: sizing reaches the HF processor's
-        _get_num_multimodal_tokens(), which on some models (Gemma-4) merges
-        kwargs into class-level defaults in place, breaking later requests.
-        """
-        if not mm_kwargs:
-            return {}
-        try:
-            image_processor = getattr(
-                getattr(self.input_processor, "processor", None),
-                "image_processor",
-                None,
-            )
-            valid = getattr(image_processor, "valid_kwargs", None)
-            names = set(getattr(valid, "__annotations__", None) or {})
-        except Exception:
-            names = set()
-        return {k: v for k, v in mm_kwargs.items() if k in names}
-
     def _expanded_prompt_len(
-        self,
-        token_ids: List[int],
-        images: Optional[List[Any]],
-        mm_kwargs: Optional[Dict[str, Any]] = None,
+        self, token_ids: List[int], images: Optional[List[Any]]
     ) -> Optional[int]:
         """Post-expansion prompt length: text tokens plus per-image tokens, with
         image placeholders in token_ids replaced by their expanded token counts.
@@ -188,13 +162,8 @@ class MultimodalRequestProcessor:
             mm_ids = self.input_processor.get_mm_token_ids()
             mm_id_set = set(mm_ids.tolist()) if mm_ids is not None else set()
             num_placeholders = sum(1 for t in token_ids if t in mm_id_set)
-            sizing_kwargs = self._known_processor_kwargs(mm_kwargs)
             image_tokens = sum(
-                int(
-                    self.input_processor.get_num_tokens_per_image(
-                        image=img, **sizing_kwargs
-                    )
-                )
+                int(self.input_processor.get_num_tokens_per_image(image=img))
                 for img in images
             )
             return len(token_ids) - num_placeholders + image_tokens
@@ -659,10 +628,17 @@ class MultimodalRequestProcessor:
         # Post-expansion prompt length, so an omitted max_tokens can be sized
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
-        expanded_len = self._expanded_prompt_len(
-            token_ids,
-            mm_data.get("image") if mm_data else None,
-            processed_inputs.get("mm_processor_kwargs"),
+        # Skipped when the request overrides the processor: the sizing
+        # calculator is not override-aware (Qwen2-VL ignores the kwargs while
+        # counting) and is not guaranteed non-mutating (Gemma-4 writes them
+        # into class-level defaults). Falling back to the engine default beats
+        # a stale or leaked estimate.
+        expanded_len = (
+            None
+            if processed_inputs.get("mm_processor_kwargs")
+            else self._expanded_prompt_len(
+                token_ids, mm_data.get("image") if mm_data else None
+            )
         )
         if expanded_len is not None:
             processed_inputs["expanded_prompt_len"] = expanded_len

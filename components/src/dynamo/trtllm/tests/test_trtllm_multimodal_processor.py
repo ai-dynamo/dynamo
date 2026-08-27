@@ -417,28 +417,26 @@ async def test_mm_processor_kwargs_non_object_is_rejected() -> None:
     assert excinfo.value.status == 400
 
 
-def test_expanded_prompt_len_drops_unknown_processor_kwargs() -> None:
-    """Sizing forwards only kwargs the processor declares valid."""
+@pytest.mark.asyncio
+async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
+    """Overridden requests get no sizing hint: the calculator is neither
+    override-aware nor guaranteed non-mutating."""
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
         max_file_size_mb=10,
         tokenizer=MagicMock(),
     )
-
-    class _ValidKwargs:
-        __annotations__ = {"max_pixels": int}
-
     ip = MagicMock()
-    ip.processor.image_processor.valid_kwargs = _ValidKwargs
     ip.get_mm_token_ids.return_value = None
     ip.get_num_tokens_per_image.return_value = 4
     processor.input_processor = ip
 
-    processor._expanded_prompt_len(
-        [1, 2, 3], ["img"], {"max_pixels": 1024, "bogus_key": 1}
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], "mm_processor_kwargs": {"max_pixels": 1024}},
+        embeddings=None,
+        ep_disaggregated_params=None,
     )
 
-    _, kwargs = ip.get_num_tokens_per_image.call_args
-    assert kwargs["max_pixels"] == 1024
-    assert "bogus_key" not in kwargs
+    assert "expanded_prompt_len" not in processed
+    ip.get_num_tokens_per_image.assert_not_called()
