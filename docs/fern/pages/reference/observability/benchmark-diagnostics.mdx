@@ -2,38 +2,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Capture Benchmark Diagnostics
-subtitle: Collect request traces, metrics, and structured logs for a Dynamo benchmark
+subtitle: Collect the request, metric, and log evidence needed to explain a Dynamo benchmark
 ---
 
-Capture this diagnostic bundle for every benchmark that needs performance analysis or support. The same bundle works for local, SLURM, and Kubernetes deployments. It contains request-level behavior, time-series system state, and the router decisions that connect the two.
+A throughput regression, high Time To First Token (TTFT), or unexpected cache result is a symptom, not an explanation. To determine whether the cause is worker selection, queueing, KV reuse, engine saturation, or the workload itself, NVIDIA Dynamo maintainers need to correlate individual requests with component state and routing events from the same time window.
 
-## Diagnostic Bundle
+The evidence applies to local, SLURM, bare-metal, and Kubernetes deployments. Use the collection support in `srt-slurm` workflows when it is available. The Kubernetes sections below show how to collect the same evidence when no benchmark collector is already doing so.
 
-Keep the benchmark configuration and these artifacts in one run directory. Use a unique `run_id` for every repetition.
+## What We Need
 
-```text
-<run_id>/
-├── benchmark/                 # Load-generator configuration and results
-├── deployment/                # Applied deployment manifest, image digests, and pod descriptions
-├── request-traces/            # One rotating JSONL.GZ sequence per frontend
-├── metrics/
-│   └── final.parquet          # Tachometer output, when used
-└── logs/                      # Timestamped JSONL stdout, one file per Pod
-```
+Capture these signals while reproducing the benchmark. Keep them in any storage location that fits your environment; the folder layout does not matter. Preserve the Pod name and timestamp for every record so the artifacts can be joined later.
+
+| Evidence | Capture | What it answers |
+| --- | --- | --- |
+| Benchmark context | Benchmark command or configuration, result, start and end time in UTC, model, and image identifiers | Can we reproduce the workload and align the evidence with the measured regression? |
+| Request traces | `DYN_REQUEST_TRACE=1` on every frontend | Which worker served each request? How much KV overlap was available? Where did queueing, TTFT, or Inter-Token Latency (ITL) increase? |
+| Metrics | Samples from every frontend and worker `metrics` endpoint | Was a component saturated, building a queue, losing cache capacity, or failing while the requests slowed down? |
+| Structured logs | JSONL `INFO` logs from every frontend and routing component | What configuration, warnings, retries, or errors occurred during the affected interval? |
+| Router debug logs | Short, low-rate JSONL `DEBUG` capture when worker selection is the question | How was each candidate worker scored, and why did the router choose one? |
+| Deployment snapshot | Applied DynamoGraphDeployment (DGD), `kubectl get pods -o yaml`, and relevant image digests | What replicas, ports, images, and placement were present during the run? |
 
 Do not capture request payloads unless the investigation requires them. The default `request_end` trace record captures request metadata without prompts or generated text.
 
-| Signal | Required baseline | Use it to answer |
-| --- | --- | --- |
-| Request trace | `DYN_REQUEST_TRACE=1` on every frontend | Which worker served a request, KV reuse, queueing, Time To First Token (TTFT), and Inter-Token Latency (ITL) |
-| Metrics | Prometheus or Tachometer | Whether latency corresponds to saturation, queue growth, GPU state, or a routing trend |
-| Logs | JSONL at `INFO` on frontends and routers | What changed during the run and whether Dynamo reported failures or retries |
+## Capture Request Traces and Structured Logs
 
-Use router `DEBUG` logs only for a short, lower-rate reproduction. They record candidate scoring and selection detail, but their volume grows with request rate and worker count.
-
-## Enable Request Traces and Structured Logs
-
-Mount a scratch volume in every frontend Pod, then add the following environment variables to the frontend component in the existing `DynamoGraphDeployment` (DGD). Copy the trace directory after the benchmark and before deleting or replacing the Pod.
+Enable traces before the benchmark begins because Dynamo records them only while the frontend handles requests. The following DGD fragment writes request traces to a Pod-local volume and emits structured JSONL logs to standard output. If your cluster already collects logs, retain that JSONL output through the existing collector instead of adding another log pipeline.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -69,25 +62,25 @@ spec:
                   mountPath: /var/lib/dynamo-benchmark
 ```
 
-Set the same logging variables on an EPP or other router component when it routes traffic independently of the frontend. Set `DYN_LOG=debug` on the routing component only while reproducing a routing decision. `DYN_LOG` controls Dynamo logging; configure backend-engine logging separately. See [Logging Reference](logging.mdx) for the supported log fields and filters.
+Set the same logging variables on an EPP or other router component when it routes traffic independently of the frontend. Start with `DYN_LOG=info`. To investigate a worker-selection decision, temporarily set `DYN_LOG=debug` on the routing component and lower the request rate; candidate scoring can generate substantial log volume at high request rates or with many workers. `DYN_LOG` controls Dynamo logging, not backend-engine logging. See [Logging Reference](logging.mdx) for the supported fields and filters.
 
 <Warning>
-The `emptyDir` in this example survives container restarts but not Pod deletion. Copy its contents before cleanup. Use a PVC or object-store trace sink when the deployment can be removed before collection.
+The `emptyDir` in this example survives container restarts but not Pod deletion. Copy its contents before cleanup. Use a PVC or object-store trace sink when Pods might be removed before collection.
 </Warning>
 
-## Collect Metrics on Kubernetes with Tachometer
+## Capture Metrics
 
-Use Prometheus when it is already part of the cluster. For a bounded benchmark without a metrics backend, deploy the following Tachometer collector. Its explicit endpoint list shows exactly which frontend and worker metrics it captures.
+Scrape every frontend and worker for the whole benchmark window. Use the cluster's Prometheus deployment when it already stores these metrics. For a one-off capture without a metrics backend, run Tachometer alongside the benchmark. The collector below scrapes one frontend and one worker every five seconds, labels the samples by component, and writes a Parquet file to an existing PVC.
 
-Before applying the manifest, set the Tachometer image, an existing output PersistentVolumeClaim (PVC), a run ID, and the host name or Pod IP for every frontend and worker. Copy and edit a frontend or worker `[[endpoints]]` block for each additional Pod. The sample uses `8000` for frontend metrics and `9090` for worker metrics; update an endpoint URL if your deployment overrides either port. The Tachometer image is not bundled with Dynamo.
+Before applying it, replace the image with a Tachometer image that contains `/tachometer-scraper`, set the output PVC, and set a reachable hostname or Pod IP for each endpoint. Copy and edit a frontend or worker `[[endpoints]]` block for every additional Pod. The defaults are frontend port `8000` and worker port `9090`; change the URLs if the DGD overrides either port. The Tachometer image is not bundled with Dynamo.
 
 <Steps>
-<Step title="Save and edit the collector manifest">
+<Step title="Create the collector manifest">
 
-Create `tachometer-benchmark-capture.yaml` with the following manifest. Replace the image, existing PVC, run ID, and endpoint host placeholders before applying it.
+Save the following as `tachometer-benchmark-capture.yaml` after replacing the image, PVC, and endpoint host placeholders.
 
 ```yaml
-# Replace the image, PVC, run ID, and every endpoint host before applying.
+# Replace the image, PVC, and every endpoint host before applying.
 # Copy and edit a frontend or worker endpoint block for each additional Pod.
 apiVersion: v1
 kind: ConfigMap
@@ -95,7 +88,7 @@ metadata:
   name: tachometer-benchmark-config
 data:
   tachometer.toml: |
-    storage = "file:///data/REPLACE_WITH_RUN_ID"
+    storage = "file:///data/tachometer"
     rows_per_parquet = 1000000
     save_interval_secs = 5
 
@@ -106,7 +99,6 @@ data:
     filter = "frontend"
     [endpoints.node_metadata]
     component = "frontend"
-    run_id = "REPLACE_WITH_RUN_ID"
 
     [[endpoints]]
     name = "worker-0"
@@ -115,7 +107,6 @@ data:
     filter = "backend"
     [endpoints.node_metadata]
     component = "worker"
-    run_id = "REPLACE_WITH_RUN_ID"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -159,46 +150,43 @@ spec:
 </Step>
 <Step title="Start the collector">
 
-Apply the manifest in the DGD namespace after the DGD reaches its planned replica count.
+After the DGD reaches its planned replica count, apply the manifest in the DGD namespace.
 
 ```bash
 kubectl apply --namespace <namespace> --filename tachometer-benchmark-capture.yaml
 ```
 
 </Step>
-<Step title="Verify the metrics targets">
+<Step title="Verify the targets">
 
-Wait for the collector to start and check that it can scrape each configured endpoint.
+Check the collector logs before starting the load generator. Resolve endpoint failures before the benchmark; a missing worker makes the time-series evidence incomplete.
 
 ```bash
 kubectl logs --namespace <namespace> deployment/tachometer-benchmark --container tachometer
 ```
 
 </Step>
-<Step title="Stop the collector and retrieve metrics">
+<Step title="Stop the collector">
 
-After the benchmark, delete the collector Deployment. Kubernetes sends `SIGTERM`; Tachometer compacts the samples into `final.parquet` under the configured run ID on the output PVC. Retrieve that file with the normal procedure for your storage class.
+After the benchmark, delete the collector Deployment. Kubernetes sends `SIGTERM`, allowing Tachometer to compact its samples into `final.parquet` on the output PVC. Retrieve `/data/tachometer/final.parquet` with the normal procedure for your storage class.
 
 ```bash
 kubectl delete --namespace <namespace> deployment/tachometer-benchmark
 ```
 
-The output path is `/data/<run-id>/final.parquet` in the collector and `<run-id>/final.parquet` on the PVC.
-
 </Step>
 </Steps>
 
-Update the collector endpoint list after any scale-up, scale-down, or rolling replacement.
+Update the endpoint list after any scale-up, scale-down, or rolling replacement. A collector with a stale Pod IP can look healthy while omitting the worker that handled the slow requests.
 
-## Save Kubernetes Logs and Request Traces
+## Retrieve Traces, Logs, and Deployment Context
 
-After the benchmark, but before cleanup, collect the structured logs and request-trace directories from every DGD Pod. The commands retain the Pod name, container name, and timestamp in each log line.
+Collect the trace files, structured logs, and deployment snapshot before deleting the DGD. The following commands use one local directory, but only the raw files, timestamps, and Pod names matter. If a cluster log collector already retains the JSONL output, export the matching frontend and router log interval from that system instead.
 
 ```bash
-RUN_ID=<run-id>
 NAMESPACE=<namespace>
 DGD_NAME=<dgd-name>
-ARTIFACT_DIR="${RUN_ID}"
+ARTIFACT_DIR=benchmark-diagnostics
 
 mkdir -p "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/request-traces" "${ARTIFACT_DIR}/deployment"
 
@@ -225,11 +213,13 @@ kubectl get pods --namespace "${NAMESPACE}" \
   > "${ARTIFACT_DIR}/deployment/pods.yaml"
 ```
 
-If a Pod restarted, also collect its previous container logs with `kubectl logs --previous` before the replacement logs expire.
+If a Pod restarted, collect its previous container logs with `kubectl logs --previous` before the replacement logs expire. Record the benchmark's UTC start and end time even when the exact symptom has no single request ID; that interval is enough to join traces, logs, and metrics.
 
-## Share the Bundle
+## Ask for Help With the Evidence
 
-Include the benchmark command, load-generator result, model and image identifiers, DGD manifest, and the complete run directory when requesting help. State the suspected symptom and the run interval in UTC. This lets an investigation join a slow request with its worker, router decision, and metrics sample without reconstructing the deployment.
+When asking for help, include the benchmark workload and result, the UTC interval, the applied DGD and image identifiers, request traces from every frontend, metrics from every frontend and worker, and JSONL `INFO` logs from every frontend and router. Add short router `DEBUG` logs when the question is why a worker was selected. State the symptom you observed, such as increased p99 TTFT, a cache-hit regression, a worker imbalance, or an unexpected error rate.
+
+Do not reorganize or summarize the raw data before sharing it. The ability to match a request trace to the corresponding Pod logs and metrics sample is more useful than a prescribed archive layout.
 
 ## Related
 
