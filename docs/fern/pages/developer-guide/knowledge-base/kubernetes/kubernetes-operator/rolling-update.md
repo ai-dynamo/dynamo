@@ -7,7 +7,7 @@ subtitle: Updates DGD worker images, resources, and arguments with managed rolli
 
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
 
-The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates** with namespace isolation, while Grove and LWS-backed deployments use their native update mechanisms.
+The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates**, while Grove and LWS-backed deployments use their native update mechanisms. Dynamo isolates Grove worker generations with hash-suffixed runtime namespaces even though Grove owns the rollout lifecycle.
 
 ## Example
 
@@ -123,48 +123,33 @@ Monitor rolling update progress:
 kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.rollingUpdate}'
 ```
 
-## Default Behavior (Grove and LWS)
+## Native Updates (Grove and LWS)
 
 For DGDs backed by **Grove** (PodCliques, PodCliqueSets) or **LWS** (LeaderWorkerSets), the operator does not manage rolling updates directly. Instead, these deployments rely on the native rolling update mechanisms of their underlying resources.
 
 ### What Happens
 
-- A modification to the pod spec of a service triggers the rolling update behavior of the backing resource. In the example above, the modification to the pod spec of the decode worker triggers the rolling update of just the decode worker.
+- A modification to a pod spec triggers the rolling update behavior of the backing resource.
 - For Grove, PodCliques (PCLQ) and PodCliqueScalingGroups use a static rolling update strategy of `maxUnavailable: 1` and `maxSurge: 0`. LWS follows the same `maxUnavailable: 1` and `maxSurge: 0` strategy.
-- **Old and new workers operate within the same Dynamo namespace.** This means old and new workers can discover each other through service discovery.
+- Grove assigns one worker-spec hash to all worker components. A changed worker spec therefore moves prefill, decode, and other worker components to the new generation namespace together. New DGDs use hash suffixes from their first generation; existing DGDs adopt them on their next worker-generation change.
+- LWS also uses the DGD worker hash in worker runtime namespaces, while its underlying LeaderWorkerSets retain their native update behavior.
 
-The following diagram illustrates the rolling update of the decode worker in a Grove PodCliqueSet (PCS). Only the decode PodClique is updated — the frontend and prefill PodCliques are unaffected:
+The frontend stays on the base namespace prefix and discovers every ready worker generation. It can share incoming traffic across old and new generations while prefill/decode communication remains inside one generation:
 
+```mermaid
+flowchart LR
+    C[Client traffic] --> F[Frontend<br/>base namespace prefix]
+    F -->|weighted by worker count| O[Old WorkerSet<br/>namespace-hash-a]
+    F -->|weighted by worker count| N[New WorkerSet<br/>namespace-hash-b]
+    O --> OP[Old prefill]
+    O --> OD[Old decode]
+    N --> NP[New prefill]
+    N --> ND[New decode]
+    OP --> OD
+    NP --> ND
 ```
-┌─ PodCliqueSet: vllm-disagg ───────────────────────────────────────────────────────┐
-│                                                                                    │
-│  ┌─ PCLQ: Frontend ──────┐  ┌─ PCLQ: VllmPrefillWorker ─┐                        │
-│  │                        │  │                            │                        │
-│  │  ┌──────────────────┐  │  │  ┌──────────────────────┐  │                        │
-│  │  │ Pod (v1) ✓       │  │  │  │ Pod (v1) ✓           │  │   No changes —        │
-│  │  └──────────────────┘  │  │  └──────────────────────┘  │   not rolling          │
-│  │                        │  │                            │                        │
-│  └────────────────────────┘  └────────────────────────────┘                        │
-│                                                                                    │
-│  ┌─ PCLQ: VllmDecodeWorker ──────────────────────────────────────────────────────┐ │
-│  │                                                                                │ │
-│  │  maxUnavailable: 1, maxSurge: 0                                                │ │
-│  │                                                                                │ │
-│  │  ┌──────────────────────┐  ┌──────────────────────┐                            │ │
-│  │  │ Pod (v2) ✓ NEW       │  │ Pod (v1) Terminating │  ← rolling one at a time   │ │
-│  │  └──────────────────────┘  └──────────────────────┘                            │ │
-│  │                                                                                │ │
-│  └────────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                    │
-│                        ┌──────────────────────────────────┐                        │
-│                        │  Dynamo Namespace: vllm-disagg   │                        │
-│                        │                                  │                        │
-│                        │  All v1 and v2 pods registered   │                        │
-│                        │  and discoverable by each other  │                        │
-│                        └──────────────────────────────────┘                        │
-│                                                                                    │
-└────────────────────────────────────────────────────────────────────────────────────┘
-```
+
+The frontend routes only to complete, ready generation namespaces. See [Mixed-Version Compatibility](../../../../reference/general/compatibility.mdx#mixed-version-compatibility) for the supported frontend/worker version window and WorkerSet selection behavior.
 
 ### Grove Update Strategy Annotation
 
@@ -198,17 +183,13 @@ kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disag
 kubectl delete pod -n dynamo <old-pod-name>
 ```
 
-Use `OnDelete` for updates that require manual coordination, such as incompatible worker versions or maintenance windows. Because old and new workers still share the same Dynamo namespace, `OnDelete` gives you control over when pods are replaced but does not provide namespace isolation.
+Use `OnDelete` for updates that require manual coordination, such as maintenance windows. Dynamo still assigns different runtime namespaces to old and new Grove worker generations; `OnDelete` controls when Grove replaces the pods.
 
 ### Implications for Disaggregated Deployments
 
-Because old and new workers share the same Dynamo namespace, they are grouped together by the router. In a disaggregated setup, this can lead to cross-generation communication — for example, the router might send a request from a newly deployed prefill worker to an old decode worker (or vice versa). If the old and new versions are incompatible, this can result in errors.
+The shared worker hash keeps prefill and decode workers from the same generation in one runtime namespace. This prevents direct worker-to-worker discovery across old and new generations. The frontend can still discover both namespaces and route requests across ready WorkerSets.
 
-> [!WARNING]
-> For Grove and LWS deployments with disaggregated prefill/decode workers, be aware that during a rolling update, new workers may communicate with old workers. Ensure that your worker versions are backward-compatible, or consider using Deployment-backed DGDs which provide namespace isolation during updates.
-
-> [!NOTE]
-> Managed rolling updates with namespace isolation are planned for Grove and LWS-backed deployments in a future release. See [Future Work](#future-work) for details.
+Grove and LWS still own their respective pod replacement mechanics. The hash suffix provides runtime discovery isolation; it does not add the operator-managed rollout phases, surge controls, or status tracking described in the next section.
 
 ## Managed Rolling Updates (Deployments)
 
@@ -392,21 +373,20 @@ This provides a holistic view of the deployment's health during the transition.
 
 ## Comparison
 
-| Aspect | Grove / LWS | Deployments (Managed) |
-|--------|-------------|----------------------|
-| Update mechanism | Native resource rolling update | Operator-managed with DCD lifecycle |
-| Namespace isolation | No — old and new share the same namespace | Yes — hash-based namespace separation |
-| Cross-generation discovery | Possible — old and new workers can see each other | Prevented — new workers only discover new workers |
-| Update strategy | Grove uses its native strategy. `nvidia.com/grove-update-strategy: OnDelete` can require manual pod deletion. | `RollingUpdate` or component-scoped `Recreate` |
-| maxSurge / maxUnavailable | Determined by the native Grove or LWS strategy | Configurable per component when using `RollingUpdate` |
-| Status tracking | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
-| Multinode support | Yes | No (single-node only) |
+| Aspect | Grove | LWS | Deployments (Managed) |
+|--------|-------|-----|----------------------|
+| Update mechanism | Native Grove rollout | Native LWS rollout | Operator-managed with DCD lifecycle |
+| Worker-generation namespace | Shared hash suffix across all worker components | Shared hash suffix across all worker components | Hash-based separation |
+| Direct cross-generation worker discovery | Prevented by namespace | Prevented by namespace | Prevented by namespace |
+| Update strategy | Grove native strategy; `OnDelete` can require manual pod deletion | LWS native strategy | `RollingUpdate` or component-scoped `Recreate` |
+| maxSurge / maxUnavailable | Determined by Grove | Determined by LWS | Configurable per component when using `RollingUpdate` |
+| Status tracking | Native resource status | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
+| Multinode support | Yes | Yes | No (single-node only) |
 
 ## Future Work
 
 The following enhancements are planned for future releases:
 
-- **Managed rolling updates for Grove and LWS** — Extending managed rolling updates with namespace isolation to Grove and LWS-backed deployments, providing the same cross-generation discovery protection that Deployment-backed DGDs have today.
-- **Coordinated worker updates** — Currently, prefill and decode workers are updated independently, which can result in an imbalance between old and new sets during the transition. Future releases will coordinate the rollout across worker types.
+- **Managed rollout lifecycle for Grove and LWS** — Extending DGD-level rollout progress and policy controls to workloads that currently use their native update mechanisms.
 - **Partitioned rollouts** — The ability to roll out updates to a percentage of workers (e.g., 30%), pause, observe metrics, and then continue. This enables canary-style deployments for safer rollouts.
 - **DGD-level rolling update configuration** — The ability to configure `maxSurge` and `maxUnavailable` at the DGD API level, regardless of the backing resource type.

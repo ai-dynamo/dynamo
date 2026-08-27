@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Compatibility
-subtitle: Hardware, platform, and feature support for Dynamo backends
+subtitle: Hardware, platform, feature, and mixed-version support for Dynamo
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
@@ -20,6 +20,22 @@ The card above covers one release at a time. To compare CUDA toolkit and minimum
 <Note>
 See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — [Local Installation](../../cli/installation/install-dynamo.mdx) for host OS and architecture requirements, and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds. For backend-specific runtime workarounds — including the local `docker run --network host` hang first reported on Amazon Linux 2023 — see [TensorRT-LLM Known Issues](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md).
 </Note>
+
+## Mixed-Version Compatibility
+
+Dynamo supports mixed-version operation between frontends and workers across an N-2 window: the current release and the two immediately previous release lines. Any frontend and worker combination within that window is supported in both age directions. For example, a current frontend can serve workers from either previous release, and a frontend from either previous release can serve current workers.
+
+A single frontend can discover worker generations from multiple supported releases for the same logical deployment. N-3 and older combinations are unsupported unless a narrower exception is explicitly documented. An explicitly enabled feature may also reject a mixed-version combination when its semantics cannot be represented safely by the other version.
+
+This guarantee covers the frontend-to-worker discovery metadata and wire protocols owned by Dynamo. It does not establish a compatibility window for direct worker-to-worker protocols, such as prefill-to-decode communication.
+
+### Rolling Update Behavior
+
+During a rolling update, worker spec changes create generation-specific Dynamo namespaces. The frontend watches the deployment's base namespace prefix, so it can discover overlapping generations without allowing direct worker-to-worker communication across those generations. In a disaggregated deployment, prefill and decode workers in the same generation share one namespace and remain isolated from other generations.
+
+The frontend excludes incomplete or unready namespaces from routing. When multiple ready WorkerSets are available, it selects a WorkerSet at random with weight proportional to its worker count, then applies the configured routing policy within that WorkerSet.
+
+Worker count is a capacity approximation, not a measurement of end-to-end serving capacity. Selection between WorkerSets also does not provide request stickiness. See [Rolling Updates](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/rolling-update.md) for behavior by workload type.
 
 ## Feature Support
 
