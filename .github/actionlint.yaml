@@ -10,3 +10,7 @@ paths:
   .github/actions/**/action.{yml,yaml}:
     ignore:
       - '^specifying action "\$/\.github/actions/[^"]+" in invalid format because ref is missing\.'
+
+self-hosted-runner:
+  labels:
+    - prod-builder-v3
