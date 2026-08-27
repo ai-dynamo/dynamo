@@ -13,7 +13,7 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -54,12 +54,18 @@ struct DiscoveredKvEventSource {
 
 impl SglangSidecarEngine {
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = match argv {
-            Some(args) => <Args as clap::Parser>::try_parse_from(args)
-                .map_err(|err| client::invalid_arg(err.to_string()))?,
-            None => <Args as clap::Parser>::parse(),
-        };
+        match argv {
+            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
+            None => Self::from_parsed(<Args as clap::Parser>::parse()),
+        }
+    }
 
+    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::from_parsed(args).map_err(Into::into)
+    }
+
+    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",

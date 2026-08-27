@@ -1989,6 +1989,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
+ "dynamo-sidecar-common",
  "dynamo-worker-selection-policy-catalog",
  "futures",
  "once_cell",
