@@ -26,6 +26,7 @@ Kubernetes is not required for the live-update paths in this guide. Deployment-l
 | Integration or backend | Transfer/apply path | Discovery/control path | Current boundary |
 |---|---|---|---|
 | verl recipe | Colocated CUDA IPC coordinated by recipe-owned Ray/ZMQ control | Recipe actors, not public Dynamo worker discovery | Current public recipe path; trainer/rollout GPU layouts must satisfy the recipe's rank mapping. |
+| verl NIXL proposal | Optional checkpoint-engine path in [open, blocked verl-recipe PR #136 at `0956843`](https://github.com/verl-project/verl-recipe/pull/136) | Proposed recipe-owned checkpoint-engine actors and transport configuration | Not part of the reviewed recipe pin. Its recorded single- and multi-node smokes are branch-level upstream evidence; pin the final core-verl dependency, container, fabric backend, and merge commit before claiming support. |
 | NeMo RL managed backend | Packed checkpoint-format tensors through NeMo RL's NCCL collective sender | Fixed Ray-managed worker membership and immutable per-engine system URLs, not public frontend discovery | Pinned `ai-dynamo[vllm]==1.3.0.post1`, vLLM `0.23.0`, BF16, non-colocated, Slurm-managed path only. |
 | Dynamo vLLM from shared disk | `update_weights_from_disk` direct worker route | `/v1/rl/workers`, then each `system_url` | Per-worker pause/update/cache reset/version; no fleet transaction. |
 | Dynamo vLLM distributed | Group lifecycle plus `update_weights_from_distributed` | `/v1/rl/workers`, then each `system_url` | Backend RPC/body and rank mapping are integration-specific; group initialization has a watchdog. |
@@ -167,6 +168,8 @@ SGLang workers do not currently register with the vLLM `/v1/rl/workers` discover
 ## verl Colocated CUDA IPC
 
 The public [verl-recipe Dynamo backend](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/README.md) keeps trainer and rollout workers colocated and time-multiplexed. Generation uses the shared Dynamo frontend, but sleep/wake and `update_weights` use recipe-owned Ray actors and a ZMQ bridge into CUDA IPC receivers.
+
+The tracked NIXL proposal does not change this reviewed contract. If it merges, treat naive CUDA IPC and NIXL as separate validation paths: record the checkpoint-engine/core-verl pin, actor-to-GPU mapping, container privileges and devices, NIXL backend, fabric, transfer verification, sleep/wake behavior, cache state, and failure recovery for each path rather than extending CUDA-IPC evidence to NIXL.
 
 For this integration:
 

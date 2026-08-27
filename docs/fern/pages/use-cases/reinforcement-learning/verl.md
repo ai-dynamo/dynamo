@@ -17,6 +17,7 @@ subtitle: Run the public verl-recipe Dynamo rollout backend and understand its o
 | Core `recipe` gitlink at that pin | [`e7f889574b8301cc0f0fc1d57c6d67f31ffeb689`](https://github.com/verl-project/verl-recipe/commit/e7f889574b8301cc0f0fc1d57c6d67f31ffeb689), which predates the Dynamo recipe and must be replaced in the nested checkout by the reviewed recipe snapshot |
 | Recipe backend | Dynamo vLLM rollout workers behind one shared frontend |
 | Weight path | verl colocated CUDA IPC through recipe-owned Ray/ZMQ control; not ModelExpress |
+| Tracked weight-path proposal | [verl-recipe PR #136 at `0956843`](https://github.com/verl-project/verl-recipe/pull/136), open and blocked; proposes an optional NIXL checkpoint-engine backend while retaining the current naive CUDA-IPC path |
 | Source review | 2026-08-27 by Dynamo RL documentation maintainers |
 | Independent clean-room run | Not recorded in this page; required before supported status |
 
@@ -54,6 +55,8 @@ The recipe launches one Ray actor per node to supervise subprocesses. The actor 
 ## Choose One Recipe Variant
 
 The reviewed `dynamo_trainer.yaml` enables ThunderAgent by default. That default is a separate execution path from the native Dynamo router used by the validation-only smoke and the baseline workflow in this guide.
+
+The open NIXL proposal's PR record reports three-step single-node and two-node/eight-GPU-per-node GRPO smokes plus fabric-specific transfer measurements. Those are branch-level upstream observations, not current recipe capability, an independent reproduction, or a general performance claim. Do not use its checkpoint-engine flags or helper scripts with the pinned commands below unless the final change merges, the required core-verl dependency is pinned, and the complete selected transport and fabric are revalidated.
 
 | Variant | Required setting | Routing owner | Dynamo version rule |
 |---|---|---|---|
