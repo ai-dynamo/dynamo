@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 64
+DECODE_MAX_MODEL_LEN = 1024
+DECODE_MAX_TOKENS = 64
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
 # Last-resort ceiling; individual operations have their own bounded waits.
@@ -169,6 +171,44 @@ MIGRATION_CASES = [
     ),
 ]
 
+# Decode migration must be streaming so the fault can be injected after
+# generation starts. Retain one case for every migration-policy outcome while
+# balancing shutdown lifecycle, API, and request-plane transport.
+DECODE_MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        "nats",
+        id="migration_enabled-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        "tcp",
+        id="max_seq_len_exceeded-worker-failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful-shutdown-chat-stream-tcp",
+    ),
+]
+
 MIGRATION_PARAMETERS = pytest.mark.parametrize(
     (
         "migration_limit",
@@ -179,6 +219,18 @@ MIGRATION_PARAMETERS = pytest.mark.parametrize(
         "request_plane",
     ),
     MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+DECODE_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "request_plane",
+    ),
+    DECODE_MIGRATION_CASES,
     indirect=["request_plane"],
 )
 
@@ -556,9 +608,11 @@ def test_request_migration_sglang_kv_transfer(
                     )
 
 
-@pytest.mark.timeout(230)  # 3x average
-@pytest.mark.nightly
-@legacy_migration_parameters
+@pytest.mark.timeout(150)  # >3x the measured 40-44s local runtime
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(8.0)  # measured NVML peak with three workers
+@pytest.mark.requested_sglang_kv_tokens(1024)
+@DECODE_MIGRATION_PARAMETERS
 def test_request_migration_sglang_decode(
     request,
     runtime_services_dynamic_ports,
@@ -568,25 +622,21 @@ def test_request_migration_sglang_decode(
     migration_max_seq_len,
     immediate_kill,
     request_api,
-    stream,
     tmp_path,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
 
-    Setup: 1 prefill worker + 2 decode workers
+    Setup: 1 prefill worker + 2 decode workers.
+    The request is streamed so the test can inject a fault after decode starts.
 
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
         request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+    This target is always streaming; unary responses finish before a decode
+    fault can be injected and are already covered by aggregate migration.
     """
-    if not stream:
-        pytest.skip(
-            "Decode test requires streaming to wait for response before stopping worker"
-        )
-
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
         request,
@@ -595,45 +645,54 @@ def test_request_migration_sglang_decode(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently.
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
             tmp_path,
             disagg_mode="prefill",
-        ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
-
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            disagg_mode="decode",
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            disagg_mode="decode",
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
+            wait_for_endpoint_instances(
                 frontend.frontend_port,
-                tmp_path,
-                disagg_mode="decode",
-            ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+                {("prefill", "generate"): 1, ("backend", "generate"): 2},
+            )
 
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    tmp_path,
-                    disagg_mode="decode",
-                ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="New Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        wait_for_new_response_before_stop=True,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="New Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=True,
+                max_tokens=DECODE_MAX_TOKENS,
+                wait_for_new_response_before_stop=True,
+                expected_ongoing_request_count=1,
+                graceful_shutdown_endpoint=("backend", "generate"),
+                wait_for_worker_health_shutdown=True,
+            )
