@@ -24,7 +24,7 @@ Treat the pinned NeMo RL snapshot as the implementation and launch source of tru
 
 The NeMo RL pin matters independently of this Dynamo documentation branch. Do not replace `1.3.0.post1` with current Dynamo `main` or a newer wheel without revalidating the response fields, CLI arguments, vLLM backport, packed-transfer constants, and complete training iteration.
 
-## Supported Shape in This Integration
+## Implemented Shape in This Integration
 
 | Dimension | Validated boundary |
 |---|---|
@@ -175,7 +175,7 @@ The upstream functional check uses the same recipe with `Qwen/Qwen3-0.6B` model 
 uv run --no-sync bash tests/functional/grpo_dynamo.sh
 ```
 
-Run that command only inside the purpose-built Dynamo image on its expected two-GPU host. A successful command proves the assertions in the pinned script; it does not prove a different model, topology, Dynamo release, or Slurm environment.
+Run that command only inside the purpose-built Dynamo image on an allocation that exposes at least the two GPUs requested by the pinned configuration and satisfies the full-node `ray.sub` rule above. A successful command proves the assertions in the pinned script; it does not prove a different model, topology, Dynamo release, or Slurm environment.
 
 ## Verify the Token Contract
 

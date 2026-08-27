@@ -13,6 +13,7 @@ subtitle: Find the task-specific RL integration, optimization, and operations gu
 |---|---|
 | Implement an RL framework adapter or check an exact framework/backend combination | [RL integration and compatibility reference](integration-reference.md) |
 | Run the public verl recipe | [Integrate with verl](verl.md) |
+| Run the managed NeMo RL backend | [Integrate with NeMo RL](nemo-rl.md) |
 | Track or review the SLIME integration | [SLIME integration status](slime.md) |
 | Track or review the Prime-RL integration | [Prime-RL integration status](prime-rl.md) |
 | Select and tune rollout routing | [Route RL rollouts](routing.md) |
