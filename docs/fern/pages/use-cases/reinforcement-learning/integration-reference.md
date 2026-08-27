@@ -139,6 +139,8 @@ An adapter should maintain explicit per-request state rather than treating the f
 
 Dynamo propagates client disconnect cancellation to supported workers. SGLang aggregated and decode paths support cancellation; cancellation during remote prefill in a disaggregated SGLang deployment is not currently supported. See [Request Cancellation](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md) for the general lifecycle.
 
+[Open issue #8549](https://github.com/ai-dynamo/dynamo/issues/8549) records backend failures whose bare `finish_reason: "error"` cannot be decoded by the frontend's structured error variant and surface as HTTP 500. A recent reproducer reaches the vLLM token path through a structured-output failure, and the original report covered SGLang. Until the protocol is normalized and the fix is pinned, treat an HTTP 500 as a failed attempt, preserve the framework attempt ID plus worker/frontend logs, and never reinterpret an empty or partial body as a successful terminal sample.
+
 Do not retry a timed-out generation blindly and count both results. Sampling can be nondeterministic, and the first attempt may have completed after the client stopped waiting. The framework should own attempt IDs, duplicate suppression, and whether a failed sample is rescheduled.
 
 ## Request and Return Metadata Deliberately
@@ -283,6 +285,8 @@ This matrix describes the Dynamo interfaces on `main` at [`5bc908ad`](https://gi
 | Dedicated RL TITO E2E evidence on Dynamo main | [vLLM test](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/tests/rl/test_token_in_token_out.py) | [SGLang in-process test](https://github.com/ai-dynamo/dynamo/blob/5bc908ad4fe129aab80341edd4ace164cba3d351/tests/rl/test_token_in_token_out.py); the sidecar proxy has source-level tests but no separate RL GPU E2E recorded here | No dedicated test in that file |
 | Evidence last checked | 2026-08-27 | 2026-08-27 | 2026-08-27 |
 | Freshness owner | Dynamo vLLM and RL maintainers | Dynamo SGLang and RL maintainers | Dynamo TensorRT-LLM and RL maintainers |
+
+The merged RL TITO E2E validates SGLang's native `/generate` output IDs and aligned logprobs. It does not prove every OpenAI chat/completions logprob topology. [Open issue #8548](https://github.com/ai-dynamo/dynamo/issues/8548) records incomplete SGLang chat/completions token-logprob propagation on packaged Dynamo `0.9.1` with SGLang `0.5.8`; current `main` has newer plumbing, but the issue remains open. Independently validate the exact chat processor, aggregated or P/D topology, package set, request controls, output IDs, and positional logprob alignment before claiming that path.
 
 `/inference/v1/generate` is disabled by default and registers when `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` is truthy. The current handler rejects `stream: true`; do not substitute it for the streaming adapter contract or present it as a shared backend route.
 

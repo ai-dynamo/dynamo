@@ -51,6 +51,8 @@ Record at least completed requests, generated tokens, request errors, time to fi
 
 Round-robin is a comparison baseline, not a recommendation for every RL workload. It can duplicate a shared prefix across workers, but it also reveals whether a more complex strategy is paying for itself.
 
+Current `main` includes the shared routing-policy refactor from [Dynamo PR #12880](https://github.com/ai-dynamo/dynamo/pull/12880), whose focused checks distributed 1,024 round-robin selections exactly across both four- and 256-worker sets. [Open issue #8551](https://github.com/ai-dynamo/dynamo/issues/8551) nevertheless records real SGLang deployments on older Dynamo `0.9.1` and `1.0.0` packages concentrating traffic on only a subset of registered backends; maintainers noted #12880 as the likely fix, but the field issue remains open pending validation. Before accepting a round-robin baseline on the pinned stack, compare discovered versus eligible worker identity, prove every intended worker receives traffic, and invalidate the run if the effective set is narrower.
+
 ## Map the Router Setting to the Framework
 
 The framework must configure the same frontend that actually receives rollout traffic. Do not launch a second frontend only to copy a generic CLI example.
