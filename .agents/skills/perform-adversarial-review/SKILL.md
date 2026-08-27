@@ -17,6 +17,11 @@ metadata:
 
 # Perform Adversarial Review
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Try to falsify a proposed optimization experiment before it consumes GPU time. Review the proposal; do not generate a
 second one, edit its draft, deploy it, or run AIPerf.
 
@@ -39,7 +44,10 @@ Require:
 - `EXP_ROOT/analysis/search-calibration.md` (and, for a stop-request, the submitted ledger SHA256 cited in
   `knowledge-consult.md`); and
 - `EXP_ROOT/analysis/hypothesis-backlog.jsonl` and `EXP_ROOT/analysis/challenger-reviews.jsonl` when present; and
-- `EXP_ROOT/manifest.yaml` (session start time, for stop-request budget arithmetic).
+- `EXP_ROOT/manifest.yaml` (session start time, for stop-request budget arithmetic); and
+- for a stop-request: the three Finalize paths under `EXP_ROOT/final/` (`recommended_config.md`,
+  `reproduced_commands.sh`, `known_limitations.md`), derived from the submitted `EXP_ROOT`, whose on-disk
+  existence the validation gate verifies.
 
 Review only a consultation whose decision is `proposed` and whose draft materialization completed successfully. For
 `no-proposal` or `blocked` that carries no stop-request, return without writing a candidate verdict. For a
@@ -53,14 +61,21 @@ returning.
    `EXP_ROOT/analysis/search-calibration.md`. On mismatch, reject: the ledger moved after submission.
 2. Validate completeness and evidence class against the ledger, not the consult file (which carries only the
    delta): every lever family carries a terminal disposition (`tested`, `ruled-out`, `not-applicable`, or `deferred` — an answered ask resolves its family into one of these; `untested-promising` and `reopened-by-new-evidence` are non-terminal); every `ruled-out` row cites a measurement, a sourced hard constraint, a confirmed incompatibility,
-   or an explicit operator decision; no family with medium-or-higher recorded expected upside remains merely
-   `deferred` while more than half of any granted budget remains (reject and return that family as the required
-   follow-up); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
-   `Correctness status:` line (require that path as an input for stop-request validation).
+   or an explicit operator decision; every `deferred` row is terminal on a recorded ground - upside below the primary series' measured minimum
+   detectable effect (read from `series_noise_floor` and `minimum_detectable_effect` in the current
+   `performance_analysis.json`, the authoritative source per `run-artifacts.md`), or a cited cost-estimate-vs-remaining-budget arithmetic (reject when an above-MDE deferred
+   family lacks that arithmetic, or when its estimate fits the remaining budget; return that family as the
+   required follow-up); for a throughput-class objective the recommendation
+   carries saturation evidence or a recorded budget/operator reason in `known_limitations.md` ("still rising at
+   the top of the measured grid" is not terminal); and all three Finalize files EXIST ON DISK at `EXP_ROOT/final/` — `recommended_config.md` (carrying its
+   required `Correctness status:` line), `reproduced_commands.sh`, and `known_limitations.md` — verified by
+   path, not by the submitter's claim (require those paths as inputs for stop-request validation; a
+   recommendation that exists only in conversation is a blocking objection).
 3. Verify the stop-request delta cites derived budget consumption (wall clock from `manifest.yaml` session start;
-   failed-deploy count from the deployment ledgers; GPU-hours from summed `benchmark_execution.json` durations
-   times deployed GPU count) and that the cited sources support the arithmetic, whenever any granted budget is
-   non-null.
+   failed-deploy count from the deployment ledgers; GPU-hours from GPU allocation time, per deployment ledger
+   `allocated_at`-to-`torn_down_at` span — or to now, for a live deployment — times its `gpus_requested`,
+   summed across deployments) and that the cited sources
+   support the arithmetic, whenever any granted budget is non-null.
 4. Append the verdict to `EXP_ROOT/analysis/challenger-reviews.jsonl` as for any review, binding it to the
    submitted ledger SHA256, and state in it that this is procedural validation, not independent adversarial
    assurance. A validated stop-request returns to the PARENT with state `STOP_REQUESTED` for operator grant; it is
@@ -118,10 +133,18 @@ Attack the proposal from these directions:
   statistics or surprising gains treated cautiously?
 - **Redundancy**: Has the same semantic configuration already been tested, rejected, or left inconclusive under the
   same workload? If so, is there specific new evidence that makes this attempt different?
+- **Frontier**: When the proposal selects or rejects a topology/config family, is the judgment made at each
+  family's own SLO frontier per `tuning-hierarchy.md`? Reject a family selection argued from a single shared
+  operating point when the families' frontiers differ or the winner's frontier is unmeasured. A candidate whose
+  stated purpose is to MEASURE a family's not-yet-measured frontier is exploratory and admissible; what this
+  gate rejects is an adoption or rejection CLAIM resting on a frontier that has not been measured.
 - **Priority**: Compared with the existing backlog, does this candidate have competitive information value, likely
   impact on the primary objective, reversibility, GPU cost, and risk at the target operating region?
 - **Attribution**: Does the complete diff express one independently testable knob? For a coupled bundle, is every field
   required for one mechanism or supported by prior interaction evidence, with an ablation where needed?
+- **Provenance**: When `deployment.origin` is `recipe-confirmed` or `agent-authored`, reject any framing of the
+  baseline as a production reference; iteration 0 characterizes an unvalidated starting point, and topology
+  families inherited from it are open questions, not settled decisions.
 - **Mechanism**: Does the proposed lever address a plausible reducible gap at the target operating region, or merely
   move work that evidence suggests is already bounded? Are internal causes still labeled as hypotheses?
 - **Evaluation**: Is the expected effect tied to the primary objective or failed SLO? Does the proposal state what the

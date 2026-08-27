@@ -91,7 +91,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-trtllm-sidecar \
-    --trtllm-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
+    --grpc-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
     --model-path "$MODEL" \
     --context-length "$TRTLLM_CONTEXT_LENGTH" &
 

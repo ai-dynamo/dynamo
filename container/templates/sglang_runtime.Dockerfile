@@ -271,7 +271,8 @@ ENV IMAGEIO_FFMPEG_EXE=
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified.
+# modified. The same script registers NIXL's C API directory with the runtime
+# linker so the Rust bindings can dlopen it.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat

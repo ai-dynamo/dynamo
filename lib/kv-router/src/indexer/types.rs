@@ -467,7 +467,7 @@ impl MatchDetails {
             .iter()
             .filter_map(|(worker, blocks)| {
                 let blocks = usize::try_from(*blocks).ok()?;
-                (blocks > 0 && blocks <= block_hashes.len()).then_some((*worker, blocks))
+                (blocks > 0 && blocks <= block_hashes.len()).then_some(((*worker).into(), blocks))
             })
             .collect();
         if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
@@ -483,6 +483,7 @@ impl MatchDetails {
         self.router_hint_root_candidates = Some(RouterHintRootCandidates {
             block_hashes,
             owner_prefix_blocks,
+            routing_snapshot: None,
         });
     }
 }
@@ -603,6 +604,7 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    ApproximateLru(super::ApproximateLruTask),
     #[cfg(feature = "bench")]
     InstallObservation {
         writer: EventCompletionWriter,

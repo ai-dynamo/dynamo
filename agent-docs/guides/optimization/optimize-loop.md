@@ -33,9 +33,16 @@ rules:
 
 # Optimize Loop
 
-Use this workflow for an end-to-end Dynamo configuration optimization job. The user supplies the baseline DGD;
-`user-interviewer` captures it and hands it directly to `recipe-deployer`. There is no recipe-discovery or
-recipe-selection step in this workflow.
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+Use this workflow for an end-to-end Dynamo configuration optimization job. The baseline DGD comes from the
+interview's baseline-source ladder (`agents/user-interviewer/AGENTS.md`): supplied by the user, or a recipe or
+authored draft the user explicitly confirmed. `user-interviewer` captures the confirmed baseline and hands it
+directly to `recipe-deployer`. Selection and authoring happen only at interview time with user confirmation; the
+LOOP itself has no recipe-discovery or recipe-selection step.
 
 When using Codex multi-agent mode, dispatch registered roles through `.codex/config.toml`. Each launcher must read and
 follow its corresponding `agents/<role>/AGENTS.md` contract.
@@ -58,7 +65,8 @@ answers; do not advance the workflow meanwhile.
 
 ## 2. Validate The Baseline Handoff
 
-Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256, and
+Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256,
+`deployment.origin` (with `origin_source` for non-user origins), and
 zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
 not contradict the user workload. Do not edit, replace, or select an alternative DGD.
 
@@ -69,11 +77,11 @@ Give the exact assigned DGD path and SHA256, `user_workload.yaml` path and SHA25
 `user_provided_dgd.yaml`. No role selects or substitutes a baseline. When the user's DGD cannot run on the target as
 provided — it targets different hardware, checkpoints, or fabric — the deployer records the blocking
 incompatibilities in the deployment ledger and returns them; end the engagement with a report that states each
-incompatibility and its evidence, and invite the user to start a new engagement with a target-compatible DGD (a
-changed user DGD starts a new experiment, per `synthesize-user-workload`). Do not select a substitute, do not
-rewrite the captured baseline, and do not park the run waiting for a new manifest. Greenfield engagements — no user
-deployment at all — are likewise not supported by this workflow yet: say so at the interview, point the user at
-`recipes/README.md` to pick a starting recipe, and invite them to return with it as their baseline.
+incompatibility and its evidence, and invite the user to start a new engagement - with a target-compatible DGD of
+their own, or through the baseline-source ladder (rungs 2-3), which may use the incompatibility report as input
+evidence (a changed baseline starts a new experiment, per `synthesize-user-workload`). Do not select a substitute, do not
+rewrite the captured baseline, and do not park the run waiting for a new manifest. (A greenfield user without any
+DGD is handled at the interview by the baseline-source ladder, never here.)
 Later iterations use the exact challenger-approved draft. The deployer creates:
 
 ```text
@@ -87,7 +95,9 @@ semantics to hide a deployment failure.
 ## 4. Configure, Run, And Analyze The Benchmark
 
 Give the successful `DEPLOY_ROOT`, exact `user_workload.yaml` path and SHA256, and current performance question and
-target operating region to `perf-analyzer`. For iteration 0, use a baseline-characterization question. For later
+target operating region to `perf-analyzer`. For iteration 0, use a baseline-characterization question. When `deployment.origin` is not `user`, iteration 0
+is pure characterization: the baseline has no production history, so no result may be framed as an improvement or
+regression against it beyond the same-series comparisons the benchmark rules already govern. For later
 iterations, use the question approved with the candidate.
 
 - Select or create the benchmark series that best answers the question. Reuse a plan only when it remains fit; write
@@ -175,10 +185,28 @@ outcomes for `no-proposal` are exactly one of:
   check was impossible) is recorded in `recommended_config.md` — the stop-request references the
   draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
   constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
-  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
-  more than half of any granted budget remains, `deferred` is not a terminal state for a family whose recorded
-  expected upside is medium or higher: test it, ask about it, or rule it out with qualifying evidence before
-  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
+  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`.
+  `deferred` is terminal for a family on exactly one of two recorded grounds: (a) its expected upside is below
+  the primary series' measured minimum detectable effect (noise-floor deferral — terminal on that evidence
+  alone), or (b) its ledger row records WHY its next cheapest informative experiment does not fit the remaining
+  budget: estimate that experiment's cost from this engagement's own observed costs (deploy time, benchmark
+  duration, GPU allocation), compare it against the remaining budget, and cite both numbers in the row. When
+  the estimate fits and the recorded expected upside clears the minimum detectable effect, test the family, ask
+  about it, or rule it out with qualifying evidence before requesting a stop; a fixed fraction of budget spent
+  or remaining is never by itself a reason to defer.
+  For a throughput-class objective, the recommendation additionally requires SATURATION EVIDENCE: the top of
+  the measured operating-point curve must be flat within the series' measured noise floor, or the stop-request
+  must record the explicit reason (budget arithmetic or an operator decision) in `known_limitations.md`. An
+  objective still rising at the top of the measured grid leaves the operating-point family non-terminal:
+  extend the grid before requesting a stop (within the workload's declared envelope; a user-pinned concurrency
+  list makes extension an operator ask, per `concurrency-grid.md`).
+  These judgments require the primary objective series' measured noise floor and minimum detectable effect:
+  when no pilot repetition has produced them by stop-request or recommendation time, running that pilot (n>=3
+  on the decision-point configuration) is PRE-AUTHORIZED and required — it is part of finishing, not a new
+  candidate family. When the remaining budget cannot cover the pilot, `BUDGET_STOP` wins:
+  record the missing noise floor and the resulting unquantified-delta risk in
+  `known_limitations.md` and stop, rather than overrunning the budget or submitting a
+  recommendation the challenger must reject. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
   ledger path and the SHA256 of the submitted ledger state alongside the consultation; the challenger's verdict
   binds to that SHA256.
 
@@ -190,8 +218,11 @@ Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), th
 (`BUDGET_STOP`), access is lost and cannot be restored, or iteration 0 ends with the section-3 incompatibility
 report (the baseline cannot run on the target; this is a valid engagement end, not a premature stop). Never stop because a report exists. Derive budget
 consumption from existing artifacts — wall clock from `manifest.yaml`'s session start; failed deploys from
-deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed
-GPU count — check the totals against the contract's `budgets:`
+deployment ledgers' failed-attempt records; GPU-hours from GPU ALLOCATION time: for each deployment ledger, the
+span from its recorded `allocated_at` (first GPU pod scheduled — a Pending pod holds no GPUs) to its recorded
+`torn_down_at` (or to now, for a live deployment) times the ledger's `gpus_requested`, summed across
+deployments. Benchmark-duration-only accounting undercounts real spend by excluding weight-load and hold time
+and must not be used — check the totals against the contract's `budgets:`
 at every iteration boundary, and cite them in every stop-request delta. A `null` budget leaves that limit
 ungated.
 
