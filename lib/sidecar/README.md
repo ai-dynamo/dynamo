@@ -58,5 +58,7 @@ docker run --rm <your-registry>/dynamo-sidecar:1.3.0 sglang --help
 docker run --rm <your-registry>/dynamo-sidecar:1.3.0 trtllm --help
 ```
 
-Invoked without an engine name it prints that usage and exits `2`, so a
-container that sets `command` but forgets `args` fails loudly.
+Plain `docker run` with no arguments uses the image `CMD` of `--help`, prints
+usage, and exits `0`. Under Kubernetes, a container that overrides `command`
+but omits `args` reaches the entrypoint with no engine name; it prints usage to
+standard error and exits `2`, so the misconfiguration fails loudly.

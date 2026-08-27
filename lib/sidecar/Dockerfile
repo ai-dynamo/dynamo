@@ -28,7 +28,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 
-COPY . .
+# Cargo resolves every sidecar through the root workspace and their shared
+# local crates. Copy the workspace inputs once instead of maintaining a
+# duplicated transitive dependency list for each engine.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY lib/ lib/
+COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
+COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -79,12 +86,12 @@ FROM debian:bookworm-slim AS runtime
 
 # ca-certificates supports tokenizer downloads and TLS connections to Dynamo
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
-# needed in this image. The sidecar user is created with a home directory
+# needed in this image. The dynamo user is created with a home directory
 # because the Hugging Face tokenizer cache lives there.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --user-group sidecar
+    && useradd --create-home --uid 1000 --user-group dynamo
 
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/

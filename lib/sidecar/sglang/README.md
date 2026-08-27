@@ -81,9 +81,17 @@ command.
 
 ### 1. Build and push the sidecar image
 
-Follow [Build the image](../README.md#build-the-image) and push the result to
-a registry your cluster can pull from. These manifests set the container
-`command` to `dynamo-sglang-sidecar`.
+Build and push the image to a registry your cluster can pull from:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+```
+
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. These manifests set the container `command` to
+`dynamo-sglang-sidecar`.
 
 ### 2. Point the manifest at your image
 

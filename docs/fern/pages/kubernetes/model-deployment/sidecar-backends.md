@@ -47,6 +47,14 @@ through discovery, then send requests directly to the engine. The sidecar stays
 off the request path and uses the engine's native gRPC service for metadata and
 event integration with Dynamo's discovery and event planes.
 
+## Target Responsibilities
+
+| Layer | Responsibility |
+|---|---|
+| Dynamo frontend and router | OpenAI-compatible API, preprocessing, routing, and direct native gRPC requests to the engine |
+| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding |
+| Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
+
 ## Container Packaging
 
 The sidecar Dockerfile builds all three engine-specific sidecar executables into
@@ -64,18 +72,11 @@ The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
 include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
-dependencies.
+dependencies. The image runs as numeric user ID `1000` and declares port `9090`
+for Dynamo system endpoints, so Kubernetes can enforce `runAsNonRoot`.
 
-No published sidecar image is available yet. Build `dynamo-sidecar` from the
+No published sidecar image is available yet. Build the sidecar image from the
 [sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
-
-## Target Responsibilities
-
-| Layer | Responsibility |
-|---|---|
-| Dynamo frontend and router | OpenAI-compatible API, preprocessing, routing, and direct native gRPC requests to the engine |
-| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding |
-| Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Current Readiness
 

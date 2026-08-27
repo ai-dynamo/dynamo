@@ -75,9 +75,17 @@ as the container command.
 
 ### 1. Build and push the sidecar image
 
-Follow [Build the image](../README.md#build-the-image) and push the result to
-a registry your cluster can pull from. This manifest sets the container
-`command` to `dynamo-trtllm-sidecar`.
+Build and push the image to a registry your cluster can pull from:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+```
+
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. This manifest sets the container `command` to
+`dynamo-trtllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -142,5 +150,5 @@ all the gain.
 
 There is no published sidecar image yet. The image contains the vLLM,
 SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
-official packaging is available, build and push `dynamo-sidecar` as described in
-[Build the image](../README.md#build-the-image).
+official packaging is available, build and push the sidecar image as described
+in [Build the image](../README.md#build-the-image).
