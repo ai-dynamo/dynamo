@@ -60,7 +60,7 @@ dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
 dynamo-tokenizers = { version = "=1.8.0" }
-dynamo-renderer = { version = "=5.0.0" }
+dynamo-renderer = { version = "=5.1.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
@@ -69,12 +69,12 @@ dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
 dynamo-protocols = { version = "=5.3.1" }
-dynamo-parsers = { version = "8.0.0" }
+dynamo-parsers = { version = "8.1.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "0.3.1" }
+dynamo-parsers-v2 = { version = "0.3.2" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.5.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.5.0" }
 fastokens = { version = "0.2.0" }
@@ -90,7 +90,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.5.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.5.0" }
 
 # velo
-velo = { version = "0.1.0" }
+velo = { version = "0.4.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -150,7 +150,7 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-tokio = { version = "=1.48.0", features = ["full"] }
+tokio = { version = "=1.52.4", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 tower-http = { version = "0.6", features = ["trace"] }
@@ -158,7 +158,7 @@ axum = { version = "=0.8.4", features = ["macros", "ws"] }
 axum-core = { version = "0.5.2" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
-mio = { version = "=1.1.1" }
+mio = { version = "=1.2.2" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",

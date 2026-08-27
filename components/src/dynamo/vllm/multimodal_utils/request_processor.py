@@ -50,14 +50,25 @@ AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
 
 
-def pad_mm_hashes_to_64(
+def mark_forwarded_mm_hashes_for_routing(
     mm_hashes: Sequence[str | None],
 ) -> list[str | None]:
-    """Pad frontend hashes to vLLM's 64-character UUID representation."""
-    return [
-        value.ljust(64, "0") if isinstance(value, str) and len(value) < 64 else value
-        for value in mm_hashes
-    ]
+    """Encode frontend-approved hashes as vLLM routing UUID markers."""
+    marked_hashes: list[str | None] = []
+    for value in mm_hashes:
+        if value is None:
+            marked_hashes.append(None)
+            continue
+
+        prefix = value[:16]
+        if len(prefix) != 16 or any(
+            char not in "0123456789abcdefABCDEF" for char in prefix
+        ):
+            raise ValueError(
+                "forwarded multimodal routing hashes must start with 16 hex characters"
+            )
+        marked_hashes.append(prefix + "0" * 48)
+    return marked_hashes
 
 
 def _normalize_forwarded_mm_modality(
@@ -86,7 +97,7 @@ def _build_forwarded_mm_uuids(
                 use_unified_vision_chunk,
             )
             mm_uuids.setdefault(modality_key, []).extend(
-                pad_mm_hashes_to_64(list(hashes))
+                mark_forwarded_mm_hashes_for_routing(list(hashes))
             )
         if mm_uuids:
             return mm_uuids
@@ -97,8 +108,8 @@ def _build_forwarded_mm_uuids(
             "image",
             use_unified_vision_chunk,
         )
-        padded_hashes = pad_mm_hashes_to_64(list(forwarded_hashes))
-        return {modality_key: padded_hashes}
+        marked_hashes = mark_forwarded_mm_hashes_for_routing(list(forwarded_hashes))
+        return {modality_key: marked_hashes}
 
     return None
 
@@ -651,16 +662,14 @@ class VllmMultimodalRequestProcessor:
                 metadata.modality,
                 self.use_unified_vision_chunk,
             )
-            mm_hashes = (
-                _get_modality_extra_values(
-                    extra_args,
-                    "mm_hashes_by_modality",
-                    "mm_hashes",
-                    metadata.modality,
-                    backend_modality,
-                )
-                or metadata.mm_hashes
+            forwarded_mm_hashes = _get_modality_extra_values(
+                extra_args,
+                "mm_hashes_by_modality",
+                "mm_hashes",
+                metadata.modality,
+                backend_modality,
             )
+            mm_hashes = forwarded_mm_hashes or metadata.mm_hashes
             mm_placeholders = _get_modality_extra_values(
                 extra_args,
                 "mm_placeholders_by_modality",
@@ -704,11 +713,16 @@ class VllmMultimodalRequestProcessor:
                 )
                 return None
 
-            # These are vLLM's final feature hashes. When the request supplies
-            # an opaque UUID, vLLM derives this identity from the UUID together
-            # with mm_processor_kwargs. Any rewriting (including zero-padding)
-            # would create a different worker-cache key.
-            feature_hashes = list(mm_hashes)
+            # Explicitly forwarded hashes mean the frontend built exact routing.
+            # Mark those hashes so KV-event normalization is enabled. Transport
+            # metadata alone is only a vLLM cache identity and must stay native;
+            # otherwise worker-side processing could enable MM routing after the
+            # frontend fell back to text-only routing.
+            feature_hashes = (
+                mark_forwarded_mm_hashes_for_routing(list(forwarded_mm_hashes))
+                if forwarded_mm_hashes
+                else list(mm_hashes)
+            )
             mm_hashes_dict = {backend_modality: feature_hashes}
             mm_kwargs_dict = {backend_modality: kwargs_items}
             engine_input = {
