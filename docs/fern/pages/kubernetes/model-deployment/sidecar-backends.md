@@ -72,8 +72,9 @@ The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
 include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
-dependencies. The image runs as numeric user ID `1000` and declares port `9090`
-for Dynamo system endpoints, so Kubernetes can enforce `runAsNonRoot`.
+dependencies. The image runs as the non-root `dynamo` user with numeric user ID
+`1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
+enforce `runAsNonRoot`.
 
 No published sidecar image is available yet. Build the sidecar image from the
 [sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
