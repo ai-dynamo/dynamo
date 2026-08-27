@@ -52,7 +52,9 @@ For a side-by-side demo, start one launcher on each of two matching H100 nodes, 
 ./examples/custom_encoder/benchmark/run_qwen2_5_vl_demo_aiperf.sh dynamo-vllm
 ```
 
-The demo runner verifies the H100 model, memory, power limit, maximum SM clock, visible-device count, and workload hash before it starts. It discovers the served model ID through `/v1/models`, displays a terminal-friendly progress UI, and writes each side to a timestamped artifact directory. Set `DYN_DEMO_CONVERSATIONS`, `DYN_DEMO_CONCURRENCY`, or `DYN_DEMO_UI` to override the default 1000 requests, concurrency 64, or `simple` UI.
+The demo runner verifies the H100 model, memory, power limit, maximum SM clock, visible-device count, and workload hash before it starts. It discovers the served model ID through `/v1/models`, displays the live AIPerf dashboard with metrics refreshed every five seconds, and writes each side to a timestamped artifact directory. Set `DYN_DEMO_CONVERSATIONS`, `DYN_DEMO_CONCURRENCY`, `DYN_DEMO_UI`, or `DYN_DEMO_STATS_INTERVAL` to override the default 1000 requests, concurrency 64, `dashboard` UI, or five-second metrics refresh.
+
+For a recording-ready terminal, start an interactive Bash shell with the side selected and this directory's `demo_shell_rc.sh` as its rcfile. The shell displays a labeled prompt and provides `demo-aiperf` as the only command needed to start that side's run.
 
 Use the launchers directly for a smoke test:
 

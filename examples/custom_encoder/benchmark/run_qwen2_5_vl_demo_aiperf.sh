@@ -28,7 +28,8 @@ EXPECTED_INPUT_SHA256="743e859f895ee0e22df2476f74e5d3fa4d48db059273f5fe517634f31
 URL="${DYN_DEMO_URL:-http://127.0.0.1:8000}"
 CONCURRENCY="${DYN_DEMO_CONCURRENCY:-64}"
 CONVERSATIONS="${DYN_DEMO_CONVERSATIONS:-1000}"
-UI="${DYN_DEMO_UI:-simple}"
+UI="${DYN_DEMO_UI:-dashboard}"
+STATS_INTERVAL="${DYN_DEMO_STATS_INTERVAL:-5}"
 RUN_ID="${DYN_DEMO_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_DIR="${DYN_DEMO_OUTPUT_DIR:-/dynamo-tmp/logs/$(date +%m-%d)/qwen25-custom-encoder-live-demo/$ARM-$RUN_ID}"
 ZMQ_PREFIX="/tmp/aiperf-qwen25-demo-$ARM-$$"
@@ -82,6 +83,7 @@ printf 'Load:        closed-loop concurrency %s\n' "$CONCURRENCY"
 printf 'Artifacts:   %s\n\n' "$OUTPUT_DIR"
 
 TIMEFORMAT='Full AIPerf process wall time: %3R seconds'
+export AIPERF_UI_REALTIME_METRICS_INTERVAL="$STATS_INTERVAL"
 time aiperf profile \
     --model "$served_model" \
     --url "$URL" \
