@@ -47,10 +47,6 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
-  agent-skills:
-    display-name: Agent Skills
-    icon: robot
-    slug: agent-skills
   observability:
     display-name: Observability
     icon: chart-line
@@ -872,11 +868,6 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
-  - tab: agent-skills
-    layout:
-      - page: Overview
-        path: pages/agent-skills/overview.mdx
-
   # ==================== Observability ====================
   - tab: observability
     layout:
@@ -1000,6 +991,11 @@ navigation:
         icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
+
+      - page: Agent Skills
+        icon: robot
+        path: pages/reference/general/agent-skills.mdx
+        slug: agent-skills
 
       - page: Examples
         icon: file-code

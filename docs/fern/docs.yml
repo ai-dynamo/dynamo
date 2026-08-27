@@ -47,6 +47,12 @@ versions:
     path: ./index.yml
 
 redirects:
+  # Agent Skills moved from a standalone tab into Reference.
+  - source: "/dynamo/dev/agent-skills"
+    destination: "/dynamo/dev/reference/agent-skills"
+  - source: "/dynamo/dev/agent-skills/overview"
+    destination: "/dynamo/dev/reference/agent-skills"
+
   # Recipe slug renamed to include -fp8 suffix to match HF model ID.
   - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
     destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
