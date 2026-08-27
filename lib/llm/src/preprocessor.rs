@@ -958,7 +958,7 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
-fn attach_agent_context_from_context(
+pub(crate) fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
 ) {
@@ -3980,13 +3980,39 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
+        let trace_observer = crate::request_trace::RequestEndTraceObserver::from_legacy_parts(
+            generator.tracker(),
+            trace_tokens_enabled,
+            trace_finish_reason_metadata,
+        );
+        Self::transform_postprocessor_stream_with_observer(
+            stream,
+            generator,
+            context,
+            emit_payload_usage_chunk,
+            trace_observer,
+            mm_counts,
+        )
+    }
+
+    fn transform_postprocessor_stream_with_observer<S, Resp>(
+        stream: S,
+        generator: Box<dyn DeltaGeneratorExt<Resp>>,
+        context: Arc<dyn AsyncEngineContext>,
+        emit_payload_usage_chunk: bool,
+        trace_observer: Option<crate::request_trace::RequestEndTraceObserver>,
+        mm_counts: MultimodalCounts,
+    ) -> impl Stream<Item = Annotated<Resp>> + Send
+    where
+        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+    {
         Self::transform_postprocessor_stream_with_image_tokens(
             stream,
             generator,
             context,
             emit_payload_usage_chunk,
-            trace_tokens_enabled,
-            trace_finish_reason_metadata,
+            trace_observer,
             mm_counts,
             None,
         )
@@ -3998,8 +4024,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         emit_payload_usage_chunk: bool,
-        trace_tokens_enabled: bool,
-        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+        trace_observer: Option<crate::request_trace::RequestEndTraceObserver>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
@@ -4047,8 +4072,7 @@ impl OpenAIPreprocessor {
             pending_client_usage: Option<Annotated<Resp>>,
             finished: bool,
             emit_payload_usage_chunk: bool,
-            trace_tokens_enabled: bool,
-            trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+            trace_observer: Option<crate::request_trace::RequestEndTraceObserver>,
             mm_counts: MultimodalCounts,
             image_tokens: Option<usize>,
         }
@@ -4066,8 +4090,7 @@ impl OpenAIPreprocessor {
             pending_client_usage: None,
             finished: false,
             emit_payload_usage_chunk,
-            trace_tokens_enabled,
-            trace_finish_reason_metadata,
+            trace_observer,
             mm_counts,
             image_tokens,
         };
@@ -4131,19 +4154,24 @@ impl OpenAIPreprocessor {
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
-                        crate::request_trace::record_backend_finish_reason_metadata(
-                            inner.trace_finish_reason_metadata.as_ref(),
-                            backend_output.index,
-                            backend_output.finish_reason.as_ref(),
-                            backend_output.stop_reason.as_ref(),
-                        );
-
                         (chunk_tokens, isl)
                     } else {
                         (0, None)
                     };
 
                     let current_osl = inner.cumulative_output_tokens;
+                    if let (Some(observer), Some(backend_output)) =
+                        (inner.trace_observer.as_ref(), response.data.as_ref())
+                    {
+                        observer.observe_backend_chunk(
+                            backend_output.index,
+                            backend_output.finish_reason.as_ref(),
+                            backend_output.stop_reason.as_ref(),
+                            isl,
+                            current_osl,
+                            None,
+                        );
+                    }
 
                     let mut response = response.map_data(|data| {
                         inner
@@ -4173,15 +4201,6 @@ impl OpenAIPreprocessor {
                         inner.mm_counts,
                         inner.image_tokens,
                     );
-                    if inner.trace_tokens_enabled {
-                        crate::request_trace::record_llm_metric_tokens(
-                            tracker,
-                            isl,
-                            current_osl,
-                            None,
-                        );
-                    }
-
                     attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
@@ -4220,9 +4239,8 @@ impl OpenAIPreprocessor {
                             inner.mm_counts,
                             inner.image_tokens,
                         );
-                        if inner.trace_tokens_enabled {
-                            crate::request_trace::record_llm_metric_tokens(
-                                tracker,
+                        if let Some(observer) = inner.trace_observer.as_ref() {
+                            observer.observe_token_usage(
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,
                                 cached_tokens,
@@ -5941,9 +5959,7 @@ impl
             &context,
             self.kv_cache_block_size,
         );
-        let trace_tokens_enabled = trace_state.is_some();
-        let trace_finish_reason_metadata =
-            crate::request_trace::finish_reason_metadata_handle(&trace_state);
+        let trace_observer = crate::request_trace::request_end_trace_observer(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -5980,8 +5996,7 @@ impl
             response_generator,
             context.clone(),
             payload_handle.is_some(),
-            trace_tokens_enabled,
-            trace_finish_reason_metadata,
+            trace_observer,
             mm_counts,
             image_tokens,
         );
@@ -6132,9 +6147,7 @@ impl
             &context,
             self.kv_cache_block_size,
         );
-        let trace_tokens_enabled = trace_state.is_some();
-        let trace_finish_reason_metadata =
-            crate::request_trace::finish_reason_metadata_handle(&trace_state);
+        let trace_observer = crate::request_trace::request_end_trace_observer(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -6166,13 +6179,12 @@ impl
 
         // transform the postprocessor stream. Legacy `/v1/completions` is
         // text-only, so multimodal counts are always zero here.
-        let stream = Self::transform_postprocessor_stream(
+        let stream = Self::transform_postprocessor_stream_with_observer(
             response_stream,
             response_generator,
             context.clone(),
             false,
-            trace_tokens_enabled,
-            trace_finish_reason_metadata,
+            trace_observer,
             MultimodalCounts::default(),
         );
 

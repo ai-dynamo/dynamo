@@ -320,11 +320,15 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_native_generate_stream_forwards_only_opaque_response():
+async def test_native_generate_stream_preserves_opaque_response_and_common_fields():
     native_response = {
         "output_ids": [101],
         "meta_info": {
             "id": "request-1",
+            "finish_reason": {"type": "stop", "matched": "END"},
+            "prompt_tokens": 2,
+            "completion_tokens": 1,
+            "cached_tokens": 1,
             "output_token_logprobs": [(-0.1, 101, "a")],
         },
     }
@@ -345,7 +349,19 @@ async def test_native_generate_stream_forwards_only_opaque_response():
     )
 
     assert chunks == [
-        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+        {
+            "token_ids": [101],
+            "index": 0,
+            "finish_reason": "stop",
+            "stop_reason": "END",
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "total_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 1},
+            },
+            "engine_data": {"sglang_response": native_response},
+        }
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
 

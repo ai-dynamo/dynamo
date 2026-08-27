@@ -95,6 +95,22 @@ impl std::fmt::Display for FinishReason {
     }
 }
 
+impl FinishReason {
+    /// Apply the finish-reason normalization used by chat completions.
+    pub(crate) fn into_openai_chat_finish_reason(
+        self,
+    ) -> anyhow::Result<dynamo_protocols::types::FinishReason> {
+        match self {
+            Self::EoS | Self::Stop | Self::Cancelled => {
+                Ok(dynamo_protocols::types::FinishReason::Stop)
+            }
+            Self::Length => Ok(dynamo_protocols::types::FinishReason::Length),
+            Self::ContentFilter => Ok(dynamo_protocols::types::FinishReason::ContentFilter),
+            Self::Error(message) => Err(anyhow::anyhow!(message)),
+        }
+    }
+}
+
 impl std::str::FromStr for FinishReason {
     type Err = anyhow::Error;
 
@@ -925,6 +941,29 @@ mod tests {
                 "{rendered} did not round trip"
             );
         }
+    }
+
+    #[test]
+    fn test_finish_reason_uses_chat_completion_normalization() {
+        use dynamo_protocols::types::FinishReason as OpenAIFinishReason;
+
+        for (backend, expected) in [
+            (FinishReason::EoS, OpenAIFinishReason::Stop),
+            (FinishReason::Stop, OpenAIFinishReason::Stop),
+            (FinishReason::Cancelled, OpenAIFinishReason::Stop),
+            (FinishReason::Length, OpenAIFinishReason::Length),
+            (
+                FinishReason::ContentFilter,
+                OpenAIFinishReason::ContentFilter,
+            ),
+        ] {
+            assert_eq!(backend.into_openai_chat_finish_reason().unwrap(), expected);
+        }
+        assert!(
+            FinishReason::Error("boom".to_string())
+                .into_openai_chat_finish_reason()
+                .is_err()
+        );
     }
 
     #[test]

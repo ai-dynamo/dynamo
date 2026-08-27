@@ -49,6 +49,31 @@ impl SharedFinishReasonMetadata {
         self.state.lock()
     }
 
+    pub(super) fn record_choice_finish_reason(
+        &self,
+        choice_index: u32,
+        finish_reason: dynamo_protocols::types::FinishReason,
+    ) {
+        self.lock()
+            .record_choice_finish_reason(choice_index, finish_reason);
+    }
+
+    pub(super) fn record_tool_call(
+        &self,
+        choice_index: u32,
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) {
+        self.lock()
+            .record_tool_call_chunk(choice_index, tool_call_index, id, name);
+    }
+
+    /// Apply chat-completions tool finish semantics after tool metadata is observed.
+    pub(super) fn reconcile_tool_call_finish_reason(&self, choice_index: u32) {
+        self.lock().reconcile_tool_call_finish_reason(choice_index);
+    }
+
     #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn record_tool_call_chunk_for_bench(
@@ -99,6 +124,22 @@ impl FinishReasonMetadataState {
         self.metadata.finish_reason = Some(finish_reason);
         self.metadata
             .record_choice_finish_reason(choice_index, finish_reason);
+    }
+
+    fn reconcile_tool_call_finish_reason(&mut self, choice_index: u32) {
+        use dynamo_protocols::types::FinishReason;
+
+        if !self
+            .metadata
+            .tool_calls
+            .iter()
+            .any(|tool_call| tool_call.choice_index == choice_index)
+        {
+            return;
+        }
+        if matches!(self.metadata.finish_reason, None | Some(FinishReason::Stop)) {
+            self.record_choice_finish_reason(choice_index, FinishReason::ToolCalls);
+        }
     }
 
     fn record_tool_call_chunk(
@@ -298,18 +339,18 @@ pub(crate) fn record_chat_finish_reason_metadata(
             metadata.record_choice_finish_reason(choice.index, *finish_reason);
         }
 
-        let Some(tool_calls) = choice.delta.tool_calls.as_ref() else {
-            continue;
-        };
-        for tool_call in tool_calls {
-            let function = tool_call.function.as_ref();
-            metadata.record_tool_call_chunk(
-                choice.index,
-                tool_call.index,
-                tool_call.id.as_deref(),
-                function.and_then(|function| function.name.as_deref()),
-            );
+        if let Some(tool_calls) = choice.delta.tool_calls.as_ref() {
+            for tool_call in tool_calls {
+                let function = tool_call.function.as_ref();
+                metadata.record_tool_call_chunk(
+                    choice.index,
+                    tool_call.index,
+                    tool_call.id.as_deref(),
+                    function.and_then(|function| function.name.as_deref()),
+                );
+            }
         }
+        metadata.reconcile_tool_call_finish_reason(choice.index);
     }
 }
 
@@ -808,5 +849,41 @@ mod tests {
             metadata.choices[0].finish_reason,
             Some(FinishReason::Length)
         );
+    }
+
+    #[test]
+    fn tool_call_finish_reconciliation_matches_chat_semantics() {
+        for (initial, expected) in [
+            (None, FinishReason::ToolCalls),
+            (Some(FinishReason::Stop), FinishReason::ToolCalls),
+            (Some(FinishReason::Length), FinishReason::Length),
+            (
+                Some(FinishReason::ContentFilter),
+                FinishReason::ContentFilter,
+            ),
+        ] {
+            let metadata = SharedFinishReasonMetadata::default();
+            if let Some(initial) = initial {
+                metadata.record_choice_finish_reason(0, initial);
+            }
+            metadata.record_tool_call(0, 0, Some("call-1"), Some("web_search"));
+            metadata.reconcile_tool_call_finish_reason(0);
+
+            let state = AgentContextTraceState {
+                agent_context: AgentContext::builder()
+                    .session_id("tool-finish".to_string())
+                    .build()
+                    .unwrap(),
+                request_model: "test-model".to_string(),
+                request_tracker: None,
+                x_request_id: None,
+                finish_reason_metadata: metadata,
+            };
+            let (_, request) = request_metrics_from_agent_state(state, "request".to_string());
+            assert_eq!(
+                request.finish_reason_metadata.unwrap().finish_reason,
+                Some(expected)
+            );
+        }
     }
 }
