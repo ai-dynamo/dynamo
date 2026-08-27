@@ -3,13 +3,26 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
+# Contract:
+# - Keep the prefill and decode ConfigMaps before the native nvidia.com/v1alpha1
+#   DGD. Each service defines its runtime through extraPodSpec.mainContainer.
+# - Keep backendFramework trtllm aligned with the runtime image and
+#   python3 -m dynamo.trtllm command.
+# - Keep the Frontend (frontend), PrefillWorker (worker/prefill), and
+#   DecodeWorker (worker/decode) service keys and roles.
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments; each worker's ENGINE_ARGS, ConfigMap, volume, mount, and
+#   --extra-engine-args path form a coordinated prefill/decode pair.
+# - Keep cache_transceiver_config compatible across both engine ConfigMaps;
+#   transfer selection has no worker environment hook in this template.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
 # TensorRT-LLM transfer selection has no environment-variable override;
 # configure cache_transceiver_config in the engine ConfigMaps.
-# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: remove either ConfigMap only with its worker's engine-config volume,
-# /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value, and --extra-engine-args flag.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
 # Optional prefill ConfigMap: when removed, also remove PrefillWorker's prefill-engine-config
 # volume, matching /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value,
 # and --extra-engine-args flag.

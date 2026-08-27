@@ -3,11 +3,23 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
-# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: remove the ConfigMap only with the Worker's engine-config volume,
-# /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value, and --extra-engine-args flag.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Contract:
+# - Keep the ConfigMap before the native nvidia.com/v1alpha1 DGD; each service
+#   defines its runtime through extraPodSpec.mainContainer.
+# - Keep backendFramework trtllm aligned with the runtime image and
+#   python3 -m dynamo.trtllm command.
+# - Keep the Frontend (frontend) and Worker (worker) service keys and roles.
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments; keep ENGINE_ARGS, the ConfigMap name, volume, mount, and
+#   --extra-engine-args path as one coordinated bundle.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/gpt-oss-120b/trtllm/agg/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+# The 60-minute worker startup budget is a template default; validate it for
+# the selected model, image, and hardware.
 # Optional TensorRT-LLM ConfigMap: when removed, also remove the Worker's engine-config
 # volume, matching /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value,
 # and --extra-engine-args flag.

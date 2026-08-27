@@ -4,14 +4,28 @@
 # Hugging Face access: offline. Runtime pods use the pre-populated model cache.
 # To enable online access, add hf-token-secret through envFrom.secretRef and
 # remove HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE.
+# Contract:
+# - Keep the resource.nvidia.com/v1beta1 ComputeDomain and ConfigMap before the
+#   native nvidia.com/v1beta1 DGD. Each component podTemplate contains a runtime container named main.
+# - Keep backendFramework sglang aligned with the runtime image and
+#   python3 -m dynamo.sglang command.
+# - Keep components ordered as Frontend (frontend), then Worker (worker).
+# - Keep the ComputeDomain channel, pod resourceClaims, and container
+#   resources.claims names synchronized.
+# - Keep the ConfigMap name, engine-config volume and mount, --config path,
+#   MODEL_NAME, SERVED_MODEL_NAME, and their command arguments synchronized.
+# - model-cache is a canonical default Kubernetes object name and patch anchor.
+#   The named namespace-local PVC must exist with pre-populated data unless a
+#   cluster Kustomization replaces the reference; change all coupled references
+#   together. Offline mode requires both offline variables and no hf-token-secret reference.
+# Derived from: recipes/qwen3.8-2.4t-a95b-fp8/sglang/agg-gb300-chat/deploy.yaml.
+# Validation status: static catalog validation only; verify DRA allocation,
+# admission, readiness, and runtime behavior on the target cluster.
 # IPC_LOCK is needed only when the selected image or transport locks memory;
 # remove it otherwise.
+# The source recipe did not size /dev/shm.
 # Worker sharedMemorySize is 200Gi for this example. Validate the value for the
 # selected model, parallelism, and hardware before deployment.
-# Edit guide: change all resource names, model variables, image, replicas, node count, GPU count, and runtime configuration.
-# External references: model-cache is a logical reference that must stay consistent.
-# Optional resources: ComputeDomain/DRA and ConfigMap documents require the paired removals described below.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
 # Optional ComputeDomain: when removed, also remove the Worker's resourceClaims entry,
 # resources.claims entry, and matching resourceClaimTemplateName reference.
 apiVersion: resource.nvidia.com/v1beta1
@@ -189,3 +203,4 @@ spec:
             - name: engine-config
               configMap:
                 name: qwen38-sglang-engine-config
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

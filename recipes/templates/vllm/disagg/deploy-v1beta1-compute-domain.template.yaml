@@ -1,0 +1,296 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hugging Face access: online. Workers read credentials from the
+# hf-token-secret Secret.
+# Contract:
+# - Keep the resource.nvidia.com/v1beta1 ComputeDomain before the
+#   nvidia.com/v1beta1 DGD. Each podTemplate has a runtime container named main.
+# - Keep backendFramework vllm aligned with the image, command, and arguments.
+# - Keep the canonical Frontend, PrefillWorker, DecodeWorker component order.
+# - Keep the ComputeDomain channel, pod resourceClaims, and container
+#   resources.claims names synchronized on both workers.
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their arguments,
+#   and keep the prefill/decode transfer settings compatible.
+# - model-cache and hf-token-secret are canonical default object names and
+#   patch anchors. Direct application requires same-named objects in the target
+#   namespace; a Kustomization may replace all corresponding references.
+# - KV_TRANSFER_CONFIG is the first worker environment entry. Override its
+#   value without removing the hook or its portable default.
+# Derived from: recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml.
+# Validation status: the alpha configuration passed render and server-side
+# dry-run checks. This beta translation has static catalog validation only;
+# verify beta admission, readiness, and runtime behavior on the target cluster.
+# Prerequisites: a DRA driver and ComputeDomain controller must be installed,
+# and the cluster must realize the declared claims. Intended performance
+# requires an MNNVL-capable interconnect.
+# Optional ComputeDomain: when removed, also remove both workers' resourceClaims
+# entries, resources.claims entries, and matching resourceClaimTemplateName references.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: dsv4-pro-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      sharedMemorySize: 40Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+              workingDir: /workspace/examples/backends/vllm
+              command: [python3]
+              args: [-m, dynamo.frontend]
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: PrefillWorker
+      type: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+              workingDir: /workspace/examples/backends/vllm
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  python3 -m dynamo.vllm \
+                    --model "${MODEL_NAME}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --trust-remote-code \
+                    --kv-cache-dtype fp8 \
+                    --block-size 256 \
+                    --tensor-parallel-size 1 \
+                    --pipeline-parallel-size 1 \
+                    --data-parallel-size 8 \
+                    --data-parallel-rpc-port 29500 \
+                    --disaggregation-mode prefill \
+                    --enable-expert-parallel \
+                    --enforce-eager \
+                    --max-model-len 9280 \
+                    --max-num-seqs 16 \
+                    --max-num-batched-tokens 32768 \
+                    --no-enable-prefix-caching \
+                    --no-enable-flashinfer-autotune \
+                    --no-async-scheduling \
+                    --gpu-memory-utilization 0.8 \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --enable-sleep-mode \
+                    --numa-bind \
+                    --offload-group-size 3 \
+                    --offload-num-in-group 1 \
+                    --offload-prefetch-step 2 \
+                    --tokenizer-mode deepseek_v4 \
+                    --dyn-reasoning-parser deepseek_v4 \
+                    --dyn-tool-call-parser deepseek_v4 \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}"
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: MODEL_NAME
+                  value: deepseek-ai/DeepSeek-V4-Pro
+                - name: SERVED_MODEL_NAME
+                  value: deepseek-ai/DeepSeek-V4-Pro
+                - name: HF_HOME
+                  value: /opt/models
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "5400"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
+                - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+                  value: "1024"
+                - name: VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+                  value: "2048"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_STORE_TIMEOUT
+                  value: "7200"
+                - name: NVIDIA_GDRCOPY
+                  value: "1"
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: "y"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 90
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+                claims:
+                  - name: compute-domain-channel
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: DecodeWorker
+      type: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+              workingDir: /workspace/examples/backends/vllm
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  python3 -m dynamo.vllm \
+                    --model "${MODEL_NAME}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --trust-remote-code \
+                    --kv-cache-dtype fp8 \
+                    --block-size 256 \
+                    --tensor-parallel-size 1 \
+                    --pipeline-parallel-size 1 \
+                    --data-parallel-size 8 \
+                    --data-parallel-rpc-port 29500 \
+                    --disaggregation-mode decode \
+                    --enable-expert-parallel \
+                    --max-model-len 9280 \
+                    --max-num-seqs 128 \
+                    --max-cudagraph-capture-size 128 \
+                    --max-num-batched-tokens 128 \
+                    --no-enable-prefix-caching \
+                    --no-enable-flashinfer-autotune \
+                    --gpu-memory-utilization 0.9 \
+                    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","mode":0}' \
+                    --stream-interval 50 \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --enable-sleep-mode \
+                    --tokenizer-mode deepseek_v4 \
+                    --dyn-reasoning-parser deepseek_v4 \
+                    --dyn-tool-call-parser deepseek_v4 \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}"
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: MODEL_NAME
+                  value: deepseek-ai/DeepSeek-V4-Pro
+                - name: SERVED_MODEL_NAME
+                  value: deepseek-ai/DeepSeek-V4-Pro
+                - name: HF_HOME
+                  value: /opt/models
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "5400"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_STORE_TIMEOUT
+                  value: "7200"
+                - name: NVIDIA_GDRCOPY
+                  value: "1"
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: "y"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 90
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+                claims:
+                  - name: compute-domain-channel
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

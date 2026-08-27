@@ -4,10 +4,22 @@
 # Hugging Face access: offline. Runtime pods use the pre-populated model cache.
 # To enable online access, add hf-token-secret through envFrom.secretRef and
 # remove HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE.
-# Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
-# External references: model-cache is a logical reference that must stay consistent.
-# Optional resources: none; this is a DGD-only example.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Contract:
+# - Use the native nvidia.com/v1beta1 spec.components shape; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework sglang aligned with the runtime image and
+#   python3 -m dynamo.sglang command.
+# - Keep components ordered as Frontend (frontend), then Worker (worker).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command arguments.
+# - model-cache is a canonical default Kubernetes object name and patch anchor.
+#   The named namespace-local PVC must exist with pre-populated data unless a
+#   cluster Kustomization replaces the reference; change all coupled references
+#   together. Offline mode requires both offline variables and no hf-token-secret reference.
+# Derived from: recipes/inkling/sglang/agg-b200/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+# The 60-minute worker startup budget is a template default; validate it for
+# the selected model, image, and hardware.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -145,3 +157,4 @@ spec:
             - name: flashinfer-cache
               emptyDir:
                 sizeLimit: 32Gi
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

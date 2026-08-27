@@ -3,15 +3,27 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
+# Contract:
+# - Keep the prefill and decode ConfigMaps before the native nvidia.com/v1beta1
+#   DGD. Each component podTemplate contains a runtime container named main.
+# - Keep backendFramework trtllm aligned with the runtime image and
+#   python3 -m dynamo.trtllm command.
+# - Keep components ordered as Frontend (frontend), PrefillWorker (prefill),
+#   then DecodeWorker (decode).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments; each worker's ENGINE_ARGS, ConfigMap, volume, mount, and
+#   --extra-engine-args path form a coordinated prefill/decode pair.
+# - Keep cache_transceiver_config compatible across both engine ConfigMaps;
+#   transfer selection has no worker environment hook in this template.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml.
+# Validation status: this template follows the v1alpha1 runtime and ConfigMap
+# settings in v1beta1 component shape and has static catalog validation only;
+# it requires qualification on the target cluster.
 # TensorRT-LLM transfer selection has no environment-variable override;
 # configure cache_transceiver_config in the engine ConfigMaps.
-# This example follows the v1alpha1 TensorRT-LLM disaggregated template in the
-# v1beta1 component shape. It has not been qualified on a live cluster.
-# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: remove either ConfigMap only with its worker's engine-config volume,
-# /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value, and --extra-engine-args flag.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
 # Optional prefill ConfigMap: when removed, also remove PrefillWorker's prefill-engine-config
 # volume, matching /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value,
 # and --extra-engine-args flag.
@@ -214,3 +226,4 @@ spec:
             - name: decode-engine-config
               configMap:
                 name: nemotron-super-trtllm-decode-config
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

@@ -3,11 +3,23 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
-# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: remove the ConfigMap only with the Worker's trtllm-config volume,
-# /config mount, configMap.name reference, and --extra-engine-args /config/agg.yaml flag.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# This template keeps online Hugging Face access as the portable default even
+# though the source recipe used a pre-populated local cache in offline mode.
+# Contract:
+# - Keep the ConfigMap before the native nvidia.com/v1beta1 DGD; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework trtllm aligned with the runtime image and
+#   python3 -m dynamo.trtllm command.
+# - Keep components ordered as Frontend (frontend), then Worker (worker).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments; keep the ConfigMap name, volume, mount, and
+#   --extra-engine-args path as one coordinated bundle.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/nemotron-3.5-lightning/trtllm/agg-b200-bf16/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
 # Optional TensorRT-LLM ConfigMap: when removed, also remove the Worker's trtllm-config
 # volume, matching /config volume mount, configMap.name reference, and --extra-engine-args flag.
 apiVersion: v1
@@ -159,3 +171,4 @@ spec:
             - name: trtllm-config
               configMap:
                 name: nemotron-lightning-trtllm-aggregate-config
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

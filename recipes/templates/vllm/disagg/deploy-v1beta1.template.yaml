@@ -3,10 +3,23 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
-# Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: none; this is a DGD-only example.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Contract:
+# - Use the native nvidia.com/v1beta1 spec.components shape; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework vllm aligned with the runtime image and
+#   python3 -m dynamo.vllm command.
+# - Keep components ordered as Frontend (frontend), PrefillWorker (prefill),
+#   then DecodeWorker (decode).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments, and keep the prefill/decode transfer settings compatible.
+# - KV_TRANSFER_CONFIG remains the first worker environment entry; change its
+#   value on both workers without removing the hook.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -111,7 +124,6 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-
     - name: DecodeWorker
       type: decode
       replicas: 6
@@ -187,3 +199,4 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

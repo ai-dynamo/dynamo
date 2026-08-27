@@ -3,10 +3,21 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
-# Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: none; this is a DGD-only example.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Contract:
+# - Use the native nvidia.com/v1alpha1 spec.services shape; each service
+#   defines its runtime through extraPodSpec.mainContainer.
+# - Keep backendFramework sglang aligned with the runtime image and
+#   python3 -m dynamo.sglang command.
+# - Keep the Frontend (frontend) and Worker (worker) service keys and roles.
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command arguments.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/nemotron-3-super-fp8/sglang/agg/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+# The 60-minute worker startup budget is a template default; validate it for
+# the selected model, image, and hardware.
 # Compatibility note: requires Dynamo 1.0+ with SGLang 0.5.9 or newer.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment

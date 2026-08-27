@@ -3,12 +3,25 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
+# Contract:
+# - Keep the ConfigMap before the native nvidia.com/v1beta1 DGD; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework sglang aligned with the runtime image and
+#   python3 -m dynamo.sglang command.
+# - Keep components ordered as Frontend (frontend), PrefillWorker (prefill),
+#   then DecodeWorker (decode).
+# - Keep each ConfigMap section, its worker's --config path, MODEL_NAME,
+#   SERVED_MODEL_NAME, and the matching command arguments synchronized.
+# - SGLANG_DISAGGREGATION_NIXL_BACKEND remains the first worker environment
+#   entry; change it on both workers so the transfer pair remains compatible.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
 # To change the transfer backend, set SGLANG_DISAGGREGATION_NIXL_BACKEND on
 # both workers.
-# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: remove the ConfigMap only with both workers' sglang-config volumes, mounts, and --config arguments.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
 # Optional ConfigMap: when removed, also remove both workers' sglang-config volumes,
 # matching volume mounts, and --config arguments; this example has no configMapKeyRef.
 apiVersion: v1
@@ -194,7 +207,6 @@ spec:
             - name: sglang-config
               configMap:
                 name: glm52-sglang-disaggregated-config
-
     - name: DecodeWorker
       type: decode
       replicas: 1
@@ -265,3 +277,4 @@ spec:
             - name: sglang-config
               configMap:
                 name: glm52-sglang-disaggregated-config
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

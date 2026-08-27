@@ -3,10 +3,23 @@
 #
 # Hugging Face access: online. Workers read credentials from the
 # hf-token-secret Secret.
-# Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
-# External references: model-cache and hf-token-secret are logical references that must stay consistent.
-# Optional resources: none; this is a DGD-only example.
-# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# This template keeps online Hugging Face access as the portable default even
+# though the source recipe used a pre-populated local cache in offline mode.
+# Contract:
+# - Use the native nvidia.com/v1beta1 spec.components shape; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework vllm aligned with the runtime image and
+#   python3 -m dynamo.vllm command.
+# - Keep components ordered as Frontend (frontend), then Worker (worker).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command arguments.
+# - model-cache and hf-token-secret are canonical default Kubernetes object
+#   names and patch anchors. Each named namespace-local object must exist unless
+#   a cluster Kustomization replaces the reference; change all coupled references together.
+# Derived from: recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+# Worker sharedMemorySize 64Gi and the 60-minute startup budget are template
+# defaults; validate both for the selected model, image, and hardware.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -43,7 +56,6 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
-
     - name: Worker
       type: worker
       replicas: 1
@@ -107,3 +119,4 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.
