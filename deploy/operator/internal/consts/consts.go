@@ -76,9 +76,9 @@ const (
 	KubeLabelDynamoComponentType    = "nvidia.com/dynamo-component-type"
 	KubeLabelDynamoSubComponentType = "nvidia.com/dynamo-sub-component-type"
 	KubeLabelDynamoComponentClass   = "nvidia.com/dynamo-component-class"
-	// KubeLabelDynamoWorkloadRole distinguishes the leader and worker Pod templates of a multi-node component.
-	// DGDSA uses the leader value so its scale selector has one representative Pod per logical component replica.
-	KubeLabelDynamoWorkloadRole     = "role"
+	// KubeLabelDynamoWorkloadRole identifies a Pod's role within its logical component replica.
+	// DGDSA combines it with provider labels to select one representative Pod per replica.
+	KubeLabelDynamoWorkloadRole     = "nvidia.com/dynamo-workload-role"
 	KubeLabelDynamoBaseModel        = "nvidia.com/dynamo-base-model"
 	KubeLabelDynamoBaseModelHash    = "nvidia.com/dynamo-base-model-hash"
 	KubeAnnotationDynamoBaseModel   = "nvidia.com/dynamo-base-model"

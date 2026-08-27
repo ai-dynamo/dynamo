@@ -8647,10 +8647,12 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 		_, hasEnabled := clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled]
 		if strings.Contains(clique.Name, "gms") {
 			sawGMS = true
+			assert.Equal(t, string(RoleGMS), clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole])
 			assert.False(t, hasBackend, "GMS clique %q must not carry KubeLabelDynamoDiscoveryBackend", clique.Name)
 			assert.False(t, hasEnabled, "GMS clique %q must not carry KubeLabelDynamoDiscoveryEnabled", clique.Name)
 		} else {
 			sawEngine = true
+			assert.Equal(t, string(RoleMain), clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole])
 			assert.True(t, hasBackend, "engine clique %q must carry KubeLabelDynamoDiscoveryBackend (#8067 contract)", clique.Name)
 			assert.True(t, hasEnabled, "engine clique %q must carry KubeLabelDynamoDiscoveryEnabled (#8067 contract)", clique.Name)
 		}
@@ -9065,7 +9067,7 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 func TestGenerateGrovePodCliqueSetMultinodeRoleLabels(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Render a Grove-backed multi-node component")
+	t.Log("Render a Grove-backed multi-node component with a user-owned role label")
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
@@ -9077,6 +9079,9 @@ func TestGenerateGrovePodCliqueSetMultinodeRoleLabels(t *testing.T) {
 					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
 					Resources: &v1alpha1.Resources{
 						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+						Labels: map[string]string{"role": "custom"},
 					},
 				},
 			},
@@ -9091,9 +9096,10 @@ func TestGenerateGrovePodCliqueSetMultinodeRoleLabels(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	t.Log("Verify each PodClique carries the provider-independent workload role")
+	t.Log("Verify each PodClique carries an operator role without replacing the user role")
 	roles := make(map[string]string, len(got.Spec.Template.Cliques))
 	for _, clique := range got.Spec.Template.Cliques {
+		assert.Equal(t, "custom", clique.Labels["role"])
 		roles[clique.Name] = clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole]
 	}
 	assert.Equal(t, map[string]string{
@@ -9144,6 +9150,7 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 	require.Len(t, got.Spec.Template.Cliques, 1)
 	clique := got.Spec.Template.Cliques[0]
 	assert.Equal(t, "worker", clique.Name)
+	assert.Equal(t, string(RoleMain), clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole])
 	assert.EqualValues(t, 1, clique.Spec.Replicas, "engine PCLQ must hold exactly one pod per PCSG replica")
 	require.NotNil(t, clique.Spec.MinAvailable)
 	assert.EqualValues(t, 1, *clique.Spec.MinAvailable)

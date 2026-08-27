@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -139,7 +140,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 5. Update adapter status
 	adapter.Status.Replicas = adapter.Spec.Replicas
-	adapter.Status.Selector = r.buildPodSelector(dgd.Name, component)
+	adapter.Status.Selector = r.buildPodSelector(dgd, component)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
 		logger.Error(err, "Failed to update adapter status")
@@ -151,21 +152,30 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 // buildPodSelector constructs a replica-aligned label selector for the Pods managed by this component.
 func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(
-	dgdName string,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	// Select the component's Pods on every workload provider.
 	podLabels := labels.Set{
-		consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 		consts.KubeLabelDynamoComponent:           component.ComponentName,
 	}
 
-	// A multi-node replica expands into one leader and one or more worker Pods.
-	// HPA Pods metrics require one selected Pod per logical replica; otherwise
-	// worker Pods without engine metrics are treated as missing at the target
-	// value and block scale-down.
-	if component.IsMultinode() {
-		podLabels[consts.KubeLabelDynamoWorkloadRole] = string(dynamo.RoleLeader)
+	// LWS expands a multi-node replica into one leader and multiple workers.
+	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] != consts.WorkloadProviderGrove && component.IsMultinode() {
+		podLabels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
+	}
+
+	// Grove scaling groups can also include GMS Pods and failover shadows.
+	// Select pod index zero from the primary engine role so one physical Pod
+	// represents each logical component replica for HPA Pods metrics.
+	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == consts.WorkloadProviderGrove && component.UsesPCSG() {
+		role := dynamo.RoleMain
+		if component.IsMultinode() {
+			role = dynamo.RoleLeader
+		}
+		podLabels[consts.KubeLabelDynamoWorkloadRole] = string(role)
+		podLabels[grovecommon.LabelPodCliquePodIndex] = "0"
 	}
 
 	return labels.SelectorFromSet(podLabels).String()
@@ -192,14 +202,19 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 					if !okOld || !okNew {
 						return false
 					}
-					// Trigger if components changed.
-					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components)
+					// Trigger if components or their workload provider changed.
+					return scalingAdapterDGDChanged(oldDGD, newDGD)
 				},
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
 		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
+}
+
+func scalingAdapterDGDChanged(oldDGD, newDGD *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components) ||
+		oldDGD.Annotations[consts.KubeAnnotationWorkloadProvider] != newDGD.Annotations[consts.KubeAnnotationWorkloadProvider]
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests.

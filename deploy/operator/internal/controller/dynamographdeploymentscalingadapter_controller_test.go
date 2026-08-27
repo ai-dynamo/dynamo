@@ -23,6 +23,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -331,13 +332,41 @@ func TestDynamoGraphDeploymentScalingAdapterReconcilerBuildPodSelector(t *testin
 	t.Parallel()
 
 	tests := map[string]struct {
-		multinode *v1beta1.MultinodeSpec
-		wantRole  string
+		provider       string
+		multinode      *v1beta1.MultinodeSpec
+		experimental   *v1beta1.ExperimentalSpec
+		wantRole       string
+		wantLegacyRole string
+		wantPodIndex   bool
 	}{
 		"single-node selects the component": {},
-		"multi-node selects one leader per logical replica": {
-			multinode: &v1beta1.MultinodeSpec{NodeCount: 4},
-			wantRole:  "leader",
+		"LWS multi-node selects the leader": {
+			provider:       consts.WorkloadProviderComponent,
+			multinode:      &v1beta1.MultinodeSpec{NodeCount: 4},
+			wantLegacyRole: "leader",
+		},
+		"Grove multi-node selects the primary leader": {
+			provider:     consts.WorkloadProviderGrove,
+			multinode:    &v1beta1.MultinodeSpec{NodeCount: 4},
+			wantRole:     "leader",
+			wantPodIndex: true,
+		},
+		"Grove single-node GMS selects the primary engine": {
+			provider: consts.WorkloadProviderGrove,
+			experimental: &v1beta1.ExperimentalSpec{
+				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+				Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod, NumShadows: 1},
+			},
+			wantRole:     "main",
+			wantPodIndex: true,
+		},
+		"Grove forced scaling group selects its only Pod": {
+			provider: consts.WorkloadProviderGrove,
+			experimental: &v1beta1.ExperimentalSpec{
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+			},
+			wantRole:     "main",
+			wantPodIndex: true,
 		},
 	}
 
@@ -346,24 +375,60 @@ func TestDynamoGraphDeploymentScalingAdapterReconcilerBuildPodSelector(t *testin
 			t.Parallel()
 
 			t.Log("Build the scale selector for the component topology")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-dgd",
+					Annotations: map[string]string{
+						consts.KubeAnnotationWorkloadProvider: tt.provider,
+					},
+				},
+			}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker",
 				Multinode:     tt.multinode,
+				Experimental:  tt.experimental,
 			}
-			got := (&DynamoGraphDeploymentScalingAdapterReconciler{}).buildPodSelector("test-dgd", component)
+			got := (&DynamoGraphDeploymentScalingAdapterReconciler{}).buildPodSelector(dgd, component)
 
 			t.Log("Verify the selector stays replica-aligned")
 			wantLabels := labels.Set{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 				consts.KubeLabelDynamoComponent:           "worker",
 			}
+			if tt.wantLegacyRole != "" {
+				wantLabels[dcdWorkloadRoleLabel] = tt.wantLegacyRole
+			}
 			if tt.wantRole != "" {
 				wantLabels[consts.KubeLabelDynamoWorkloadRole] = tt.wantRole
+			}
+			if tt.wantPodIndex {
+				wantLabels[grovecommon.LabelPodCliquePodIndex] = "0"
 			}
 			if want := labels.SelectorFromSet(wantLabels).String(); got != want {
 				t.Fatalf("buildPodSelector() = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestScalingAdapterDGDChanged(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Construct equivalent DGDs with independently mutable provider metadata")
+	oldDGD := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+		}},
+	}
+	newDGD := oldDGD.DeepCopy()
+	if scalingAdapterDGDChanged(oldDGD, newDGD) {
+		t.Fatal("equivalent DGDs should not trigger adapter reconciliation")
+	}
+
+	t.Log("Verify provider materialization triggers selector reconciliation")
+	newDGD.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderGrove
+	if !scalingAdapterDGDChanged(oldDGD, newDGD) {
+		t.Fatal("workload provider change should trigger adapter reconciliation")
 	}
 }
 
