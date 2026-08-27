@@ -86,6 +86,13 @@ pub mod lifecycle_tracing {
     /// the OpenTelemetry tracing layer only.
     pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
 
+    /// Versioned lifecycle capability profile. Defaults to `generic.v1`.
+    pub const DYN_LIFECYCLE_TRACE_PROFILE: &str = "DYN_LIFECYCLE_TRACE_PROFILE";
+
+    /// Lifecycle detail mode. `core` is the default; `investigation` is
+    /// reserved for bounded future detail fields.
+    pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
+
     /// Backend disaggregation role, shared with backend-common's CLI
     /// configuration. It selects the worker response-streaming timing span.
     pub const DYN_DISAGGREGATION_MODE: &str = "DYN_DISAGGREGATION_MODE";
