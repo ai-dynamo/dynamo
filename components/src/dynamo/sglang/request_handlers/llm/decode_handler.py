@@ -774,6 +774,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pending_log_probs_per_choice: dict[int, list[Any]] = {}
         pending_top_logprobs_per_choice: dict[int, list[Any]] = {}
         completion_tokens_per_choice: dict[int, int] = {}
+        reasoning_tokens_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -901,6 +902,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
+                    reasoning_tokens = meta_info.get("reasoning_tokens")
+                    # SGLang reports this in terminal meta_info; retain each choice's
+                    # value because usage is emitted as choices finish independently.
+                    if reasoning_tokens is not None:
+                        reasoning_tokens_per_choice[output_idx] = reasoning_tokens
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
@@ -914,6 +920,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "completion_tokens": request_completion_tokens,
                             "total_tokens": input_tokens + request_completion_tokens,
                         }
+                        if reasoning_tokens_per_choice:
+                            completion_usage["completion_tokens_details"] = {
+                                "reasoning_tokens": sum(
+                                    reasoning_tokens_per_choice.values()
+                                )
+                            }
                         if prefill_prompt_tokens_details is not None:
                             completion_usage[
                                 "prompt_tokens_details"

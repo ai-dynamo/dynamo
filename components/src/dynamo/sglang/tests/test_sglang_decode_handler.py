@@ -470,6 +470,116 @@ async def test_native_generate_stream_forwards_only_opaque_response():
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
 
 
+@pytest.mark.asyncio
+async def test_token_stream_usage_includes_reasoning_tokens():
+    """SGLang reports reasoning tokens at the top level of meta_info; the OpenAI
+    usage contract expects them under usage.completion_tokens_details."""
+
+    async def stream_source():
+        yield {
+            "output_ids": [101],
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+        yield {
+            "output_ids": [102],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "cached_tokens": 4,
+                "reasoning_tokens": 3,
+            },
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(handler._process_token_stream(stream_source(), _Context()))
+
+    usage = chunks[-1]["completion_usage"]
+    assert usage["prompt_tokens"] == 11
+    assert usage["completion_tokens"] == 7
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 4}
+    assert usage["completion_tokens_details"] == {"reasoning_tokens": 3}
+
+
+@pytest.mark.asyncio
+async def test_token_stream_usage_omits_reasoning_details_when_unreported():
+    async def stream_source():
+        yield {
+            "output_ids": [102],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+            },
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(handler._process_token_stream(stream_source(), _Context()))
+
+    usage = chunks[-1]["completion_usage"]
+    assert "completion_tokens_details" not in usage
+    assert "prompt_tokens_details" not in usage
+
+
+@pytest.mark.asyncio
+async def test_token_stream_usage_sums_reasoning_tokens_per_choice():
+    async def stream_source():
+        yield {
+            "index": 0,
+            "output_ids": [],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "reasoning_tokens": 0,
+            },
+        }
+        yield {
+            "index": 1,
+            "output_ids": [],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "reasoning_tokens": 2,
+            },
+        }
+        yield {
+            "index": 2,
+            "output_ids": [],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+            },
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(handler._process_token_stream(stream_source(), _Context()))
+
+    assert chunks[0]["completion_usage"]["completion_tokens"] == 2
+    assert chunks[0]["completion_usage"]["completion_tokens_details"] == {
+        "reasoning_tokens": 0
+    }
+    assert chunks[1]["completion_usage"] == {
+        "prompt_tokens": 5,
+        "completion_tokens": 5,
+        "total_tokens": 10,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
+    assert chunks[2]["completion_usage"] == {
+        "prompt_tokens": 5,
+        "completion_tokens": 9,
+        "total_tokens": 14,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
+
+
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
     handler = _new_decode_handler()
     handler._max_input_token_id = maximum_input_token_id
