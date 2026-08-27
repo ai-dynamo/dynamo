@@ -95,6 +95,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
             "tp_size": 4,
             "block_size": 64,
             "max_num_batched_tokens": 4096,
+            "max_num_sequences": 1,
             "gpu_memory_utilization": 0.8,
             "mem_fraction_static": None,
             "free_gpu_memory_fraction": None,

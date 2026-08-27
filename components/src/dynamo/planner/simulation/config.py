@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -146,10 +146,12 @@ class PresetControl(BaseModel):
         return self
 
 
-IntDomain = PositiveInt | Choices[PositiveInt] | IntegerRange
-NonNegativeIntDomain = NonNegativeInt | Choices[NonNegativeInt] | IntegerRange
-FloatDomain = PositiveFloat | Choices[PositiveFloat] | NumericRange
-OptionalIntDomain = PositiveInt | Choices[PositiveInt | None] | IntegerRange
+IntDomain: TypeAlias = PositiveInt | Choices[PositiveInt] | IntegerRange
+NonNegativeIntDomain: TypeAlias = (
+    NonNegativeInt | Choices[NonNegativeInt] | IntegerRange
+)
+FloatDomain: TypeAlias = PositiveFloat | Choices[PositiveFloat] | NumericRange
+OptionalIntDomain: TypeAlias = PositiveInt | Choices[PositiveInt | None] | IntegerRange
 
 
 class PlannerRecommendationConfig(BaseModel):
@@ -229,12 +231,13 @@ class PlannerRecommendationConfig(BaseModel):
                     f"knobs {conflicts}"
                 )
             if isinstance(control.preset, list):
-                mapping_model = {
+                mapping_models: dict[str, type[BaseModel]] = {
                     "scaling_policy": ScalingPolicyMapping,
                     "fpm_sampling": FpmSamplingMapping,
                     "load_sensitivity": LoadSensitivityMapping,
                     "load_predictor": LoadPredictorMapping,
-                }[group]
+                }
+                mapping_model = mapping_models[group]
                 for entry in control.preset:
                     if isinstance(entry, dict):
                         mapping_model.model_validate(entry)

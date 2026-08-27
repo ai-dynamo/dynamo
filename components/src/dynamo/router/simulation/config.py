@@ -247,31 +247,44 @@ class RouterSearchSpace(BaseModel):
 
     @model_validator(mode="after")
     def _validate_choices(self) -> RouterSearchSpace:
-        for name, values, allowed in (
+        string_domains: tuple[
+            tuple[str, list[str], frozenset[str]],
+            ...,
+        ] = (
             ("mode", self.mode, MODES),
             ("prefill_load_model_type", self.prefill_load_model_type, LOAD_MODELS),
-        ):
-            if not values:
+        )
+        for name, string_values, allowed in string_domains:
+            if not string_values:
                 raise ValueError(f"{name} must list at least one choice")
-            invalid = [value for value in values if value not in allowed]
-            if invalid:
+            string_invalid = [value for value in string_values if value not in allowed]
+            if string_invalid:
                 raise ValueError(
-                    f"{name} has invalid choices {invalid}; allowed: {sorted(allowed)}"
+                    f"{name} has invalid choices {string_invalid}; "
+                    f"allowed: {sorted(allowed)}"
                 )
-        for name, values, legacy_allowed in (
+        numeric_domains: tuple[
+            tuple[str, list[float], frozenset[float]],
+            ...,
+        ] = (
             ("overlap_score_credit", self.overlap_score_credit, OVERLAP_SCORE_CREDITS),
             ("prefill_load_scale", self.prefill_load_scale, PREFILL_LOAD_SCALES),
             ("temperature", self.temperature, TEMPERATURES),
-        ):
-            if not values:
+        )
+        for name, numeric_values, legacy_allowed in numeric_domains:
+            if not numeric_values:
                 raise ValueError(f"{name} must list at least one choice")
-            invalid = (
-                [value for value in values if not math.isfinite(value) or value < 0.0]
+            numeric_invalid = (
+                [
+                    value
+                    for value in numeric_values
+                    if not math.isfinite(value) or value < 0.0
+                ]
                 if self.public_schema
-                else [value for value in values if value not in legacy_allowed]
+                else [value for value in numeric_values if value not in legacy_allowed]
             )
-            if invalid:
-                raise ValueError(f"{name} has invalid choices {invalid}")
+            if numeric_invalid:
+                raise ValueError(f"{name} has invalid choices {numeric_invalid}")
         if "kv_router" not in self.mode:
             return self
         admission_pins = {

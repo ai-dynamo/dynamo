@@ -305,6 +305,8 @@ filterwarnings = [
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
     # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
     "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
+    # pandas 2.3 emits this from the bundled compatibility report path on fillna.
+    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aiconfigurator.cli.report_and_save",
 ]
 
 

@@ -137,7 +137,7 @@ class _Turn(RealtimeTurn):
         self.request_id = f"rt_{uuid.uuid4().hex}"
         self.input_rate = input_rate
         self.model_sample_rate = model_sample_rate
-        self.pending_audio = np.empty(0, dtype=np.float32)
+        self.pending_audio: np.ndarray = np.empty(0, dtype=np.float32)
         self.received_samples = 0
         self.audio: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 

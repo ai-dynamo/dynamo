@@ -10,7 +10,7 @@ import itertools
 import json
 import math
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from enum import Enum
@@ -530,22 +530,28 @@ class PlannerSearchSpace(BaseModel):
                 )
         if self.planner_target not in (None, "throughput", "latency", "sla", "load"):
             raise ValueError("planner.target must be throughput, latency, sla, or load")
-        domains = (
+        domains: tuple[
+            tuple[str, Sequence[int | None] | None, int],
+            ...,
+        ] = (
             ("min_workers", self.public_min_workers, 0),
             ("prefill_min_workers", self.public_prefill_min_workers, 1),
             ("decode_min_workers", self.public_decode_min_workers, 1),
         )
-        for name, values, minimum in domains:
-            if values is None:
+        for name, worker_values, minimum in domains:
+            if worker_values is None:
                 continue
-            if not values:
+            if not worker_values:
                 raise ValueError(f"planner.{name} choices cannot be empty")
-            invalid = [
-                value for value in values if value is not None and value < minimum
+            worker_invalid = [
+                value
+                for value in worker_values
+                if value is not None and value < minimum
             ]
-            if invalid:
+            if worker_invalid:
                 raise ValueError(
-                    f"planner.{name} choices must be >= {minimum}; got {invalid}"
+                    f"planner.{name} choices must be >= {minimum}; "
+                    f"got {worker_invalid}"
                 )
         return self
 
