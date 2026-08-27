@@ -168,9 +168,25 @@ order, so expiry only ever removes a prefix of the queue and never inspects the 
 The gate owns exactly one timer for the oldest live deadline, re-armed whenever the head changes,
 rather than a periodic sweep or a timer per queued request. Every path that hands a freed slot to a
 queued request also re-checks the head deadline first, so a slot released before that timer fires is
-still never given to a request the delay budget has already given up on. Queue order among requests
-that have not expired is unchanged. This is transport-independent: the same gate, timer and expiry
-result apply over TCP and NATS.
+still never given to a request the delay budget has already given up on. This is
+transport-independent: the same gate, timer and expiry result apply over TCP and NATS.
+
+Which queued request the freed capacity then goes to is the other half of the policy. Rejection is
+always from the front of the queue; selection is not. An admission that rejected nothing takes the
+oldest queued request, exactly as before; one that rejected at least one request takes the newest
+instead, that being the request with the most of its delay budget left. That applies to one
+admission only: the next starts at the front again, however many requests the rejection removed, so
+there is no lasting LIFO order and no backlog of owed back admissions. A rejection by the gate's
+timer and one while handing over freed capacity count the same way, and a refusal that reached no
+request — its caller had already gone — counts for nothing. Selecting from the back needs no second
+deadline check, because the due prefix is removed immediately before every admission and one
+process-wide delay budget makes deadlines nondecreasing along the queue.
+
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` turns the back selection off. It accepts
+`1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively, and is environment-only with no
+command-line flag. Unset, empty and unrecognized values leave it enabled, and an unrecognized one is
+logged. Turning it off changes selection alone: the queue delay, the deadlines and which requests are
+rejected are all unaffected.
 
 ### Where The Capacity Hint Comes From
 

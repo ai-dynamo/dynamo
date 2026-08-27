@@ -49,6 +49,20 @@
 //! [`ErrorType::WorkerOverloaded`] naming the queue delay — an overload, not a
 //! cancellation and not a backend fault.
 //!
+//! Which request the freed capacity then goes to is the other half of the
+//! policy. Rejection is always from the front; selection is not. An admission
+//! that rejected nothing takes the oldest request, as it always has; one
+//! preceded by a rejection takes the *newest* instead, that being the request
+//! with the most of its delay budget left. One round only: the admission after
+//! it starts at the front again, however many requests the rejection removed.
+//! Only a refusal that reached a request counts — one whose ticket had already
+//! gone away is an absent request, not a rejected one. Selecting from the back
+//! needs no deadline check of its own, since the due prefix is removed
+//! immediately beforehand and the uniform budget makes deadlines nondecreasing
+//! along the FIFO, so a live front implies a live back.
+//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY`] turns the back selection
+//! off and leaves the delay, the expiry and the front rejection untouched.
+//!
 //! # Where the hint comes from
 //!
 //! The implemented rule is exactly this: **the first usable capacity report from
@@ -103,6 +117,12 @@ const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 /// before it is no longer worth admitting. Environment-only: there is no flag.
 const DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS: &str = "DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS";
 
+/// Turns the back selection that follows a rejection on or off. It does not
+/// enable or disable the queue delay itself, which is always in force.
+/// Environment-only: there is no flag.
+const DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY: &str =
+    "DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY";
+
 /// Final fallback concurrent-request limit. This is the limit itself, not a
 /// `max_num_seqs` stand-in: the 3/2 factor is never applied to it.
 const DEFAULT_CONCURRENCY_LIMIT: usize = 10_000;
@@ -112,6 +132,9 @@ const DEFAULT_QUEUE_CAPACITY: usize = 40_000;
 
 /// Default maximum queue residence before a queued request is given up on.
 const DEFAULT_QUEUE_DELAY: Duration = Duration::from_millis(5_000);
+
+/// The back selection is on unless an operator deliberately turns it off.
+const DEFAULT_CONTROLLED_DELAY: bool = true;
 
 /// The message a shed request is refused with.
 const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
@@ -185,6 +208,30 @@ fn resolve_queue_delay(env_override_ms: Option<usize>) -> Duration {
         Some(ms) => Duration::from_millis(ms),
         None => DEFAULT_QUEUE_DELAY,
     }
+}
+
+/// Resolve the back-selection switch from an already-read raw value. Pure, so
+/// the vocabulary and the default are testable without touching the process
+/// environment.
+///
+/// The vocabulary is the canonical Dynamo one, parsed by its single owner so
+/// `on` and `yes` cannot mean something here that they do not mean elsewhere.
+/// Unset and declared-empty are not choices, so only an unrecognized value is
+/// warned about; all three keep [`DEFAULT_CONTROLLED_DELAY`].
+fn resolve_controlled_delay(raw: Option<&str>) -> bool {
+    let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) else {
+        return DEFAULT_CONTROLLED_DELAY;
+    };
+    crate::config::parse_bool(raw).unwrap_or_else(|_| {
+        tracing::warn!(
+            env = DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
+            value = %raw,
+            default = DEFAULT_CONTROLLED_DELAY,
+            "Ignoring invalid backend admission controlled-delay switch; expected \
+             one of: true/false, 1/0, on/off, yes/no"
+        );
+        DEFAULT_CONTROLLED_DELAY
+    })
 }
 
 /// Parse a positive `usize` from `name`. Unset, unparseable, zero, or negative
@@ -288,6 +335,12 @@ struct GateState {
     queue_capacity: usize,
     /// Fixed maximum queue residence, applied to every entry at enqueue.
     queue_delay: Duration,
+    /// Whether a rejection re-points the next admission at the back. Read once;
+    /// the queue delay it layers on top of is always in force.
+    controlled_delay: bool,
+    /// Set by a rejection and cleared by the admission that follows it, so
+    /// however many there were they buy exactly one admission from the back.
+    admit_from_back: bool,
     /// Slots held by admitted requests. May briefly exceed `limit` after a
     /// shrink; a shrink never revokes a permit that is already held.
     active: usize,
@@ -356,6 +409,41 @@ impl GateState {
         expired
     }
 
+    /// Tell each drained entry it expired, and send the next admission to the
+    /// back if any of those refusals reached a request.
+    ///
+    /// A ticket that has already gone away drops the outcome: that request left
+    /// of its own accord, so it is absent rather than rejected and must not buy
+    /// an admission from the back.
+    fn reject_expired(&mut self, expired: Vec<Waiter>) {
+        let mut rejected = false;
+        for waiter in expired {
+            rejected |= waiter.tx.send(Handoff::Expired).is_ok();
+        }
+        self.admit_from_back |= self.controlled_delay && rejected;
+    }
+
+    /// Take the next candidate from whichever end the selection points at. The
+    /// due prefix is drained immediately before this on every path, so a
+    /// surviving front entry is live and the uniform budget puts the back's
+    /// deadline no earlier — taking from the back needs no deadline test.
+    fn take_next_waiter(&mut self) -> Option<Waiter> {
+        if self.admit_from_back {
+            self.waiters.pop_back()
+        } else {
+            self.waiters.pop_front()
+        }
+    }
+
+    /// Account one request taking a slot, and restart at the front: however many
+    /// rejections preceded it, they buy this one admission. A request admitted
+    /// directly into an emptied queue spends it too — it is the newest request
+    /// the gate has, which is what the back selection asks for.
+    fn take_slot(&mut self) {
+        self.active += 1;
+        self.admit_from_back = false;
+    }
+
     /// Reject every entry due at `now`, freeing its queue capacity immediately,
     /// and report how many left the FIFO.
     ///
@@ -364,10 +452,7 @@ impl GateState {
     fn expire_due(&mut self, now: Instant) -> usize {
         let expired = self.with_head_watch(|state| state.drain_expired(now));
         let count = expired.len();
-        for waiter in expired {
-            // A ticket that already went away simply drops the outcome.
-            let _ = waiter.tx.send(Handoff::Expired);
-        }
+        self.reject_expired(expired);
         count
     }
 
@@ -411,21 +496,23 @@ impl GateState {
     /// this loop skips past departed waiters ahead of it. The one gate timer
     /// makes expiry prompt; this makes it correct when a slot frees up first, or
     /// before the timer has been scheduled at all.
+    ///
+    /// Each pass rejects and then selects, so a rejection this loop performs
+    /// itself sends that same pass to the back and the pass after it is back at
+    /// the front.
     fn wake_waiters(&mut self) {
         self.with_head_watch(|state| {
             loop {
-                for waiter in state.drain_expired(Instant::now()) {
-                    // A ticket that already went away simply drops the outcome.
-                    let _ = waiter.tx.send(Handoff::Expired);
-                }
+                let expired = state.drain_expired(Instant::now());
+                state.reject_expired(expired);
                 if state.active >= state.limit {
                     return;
                 }
-                let Some(waiter) = state.waiters.pop_front() else {
+                let Some(waiter) = state.take_next_waiter() else {
                     return;
                 };
                 if waiter.tx.send(Handoff::Slot).is_ok() {
-                    state.active += 1;
+                    state.take_slot();
                 }
                 // Otherwise the waiter is gone; popping it already reclaimed its
                 // queue slot, so continue to the next one.
@@ -502,18 +589,15 @@ async fn drive_expiry(state: Weak<Mutex<GateState>>, mut head_changed: watch::Re
             }
         }
 
-        let expired = {
+        {
             let Some(state) = state.upgrade() else {
                 return;
             };
-            let mut state = state.lock();
-            state.with_head_watch(|state| state.drain_expired(Instant::now()))
-        };
-        // Delivered with the state unlocked; the next loop pass re-reads the
-        // head and re-arms.
-        for waiter in expired {
-            let _ = waiter.tx.send(Handoff::Expired);
+            // Rejecting and arming the back selection under one lock is what
+            // keeps the timer's rejection indistinguishable from a handoff's.
+            state.lock().expire_due(Instant::now());
         }
+        // The next loop pass re-reads the head and re-arms the same timer.
     }
 }
 
@@ -535,13 +619,19 @@ impl BackendAdmissionGate {
         let queue_capacity =
             positive_env(DYN_DYNAMO_REQUEST_QUEUE_LIMIT).unwrap_or(DEFAULT_QUEUE_CAPACITY);
         let queue_delay = resolve_queue_delay(positive_env(DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS));
-        let gate = Self::new(env_override, queue_capacity, queue_delay);
+        let controlled_delay = resolve_controlled_delay(
+            std::env::var(DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY)
+                .ok()
+                .as_deref(),
+        );
+        let gate = Self::new(env_override, queue_capacity, queue_delay, controlled_delay);
         tracing::debug!(
             limit = gate.limit(),
             queue_capacity,
             // The gate's own value, so a delay it rejected as unrepresentable is
             // reported as the default it fell back to.
             queue_delay_ms = gate.queue_delay().as_millis(),
+            controlled_delay,
             has_env_override = env_override.is_some(),
             "Backend admission gate created"
         );
@@ -554,7 +644,12 @@ impl BackendAdmissionGate {
     /// No task is spawned here: [`global`] and standalone gates are both
     /// constructed outside a Tokio runtime, so the expiry driver starts on the
     /// first queued admission instead.
-    fn new(env_override: Option<usize>, queue_capacity: usize, queue_delay: Duration) -> Arc<Self> {
+    fn new(
+        env_override: Option<usize>,
+        queue_capacity: usize,
+        queue_delay: Duration,
+        controlled_delay: bool,
+    ) -> Arc<Self> {
         let limit = resolve_concurrency_limit(env_override, None);
         // Checked once here rather than per request: a delay the monotonic clock
         // cannot represent has no usable deadline, so fall back to the default.
@@ -580,6 +675,8 @@ impl BackendAdmissionGate {
                 limit,
                 queue_capacity,
                 queue_delay,
+                controlled_delay,
+                admit_from_back: false,
                 active: 0,
                 waiters: VecDeque::new(),
                 next_ticket: 0,
@@ -696,7 +793,7 @@ impl BackendAdmissionGate {
             // can never bypass an older one. A directly admitted request never
             // carries a queue deadline.
             if state.active < state.limit && state.waiters.is_empty() {
-                state.active += 1;
+                state.take_slot();
                 // The only `active` change outside `with_head_watch`.
                 state.publish_occupancy();
                 Decision::Granted
@@ -940,19 +1037,20 @@ mod tests {
     use std::time::Duration;
 
     /// A gate whose queue delay is far longer than any test that is not about
-    /// expiry, so those tests see the pre-Controlled-Delay behaviour exactly.
+    /// expiry, so those tests see the pre-Controlled-Delay behaviour exactly:
+    /// nothing is ever due, so nothing arms the back selection either.
     fn gate(limit: usize, queue: usize) -> Arc<BackendAdmissionGate> {
         gate_with_delay(limit, queue, Duration::from_secs(3_600))
     }
 
     fn gate_with_delay(limit: usize, queue: usize, delay: Duration) -> Arc<BackendAdmissionGate> {
-        BackendAdmissionGate::new(Some(limit), queue, delay)
+        BackendAdmissionGate::new(Some(limit), queue, delay, DEFAULT_CONTROLLED_DELAY)
     }
 
     /// A gate with no environment override, so its limit comes from a hint or
     /// the fallback.
     fn hint_sized_gate(queue: usize) -> Arc<BackendAdmissionGate> {
-        BackendAdmissionGate::new(None, queue, Duration::from_secs(3_600))
+        BackendAdmissionGate::new(None, queue, Duration::from_secs(3_600), true)
     }
 
     /// The scheduling tests drive [`BackendAdmissionGate::acquire`] directly:
@@ -1378,10 +1476,34 @@ mod tests {
             let delay = resolve_queue_delay(override_ms);
             assert_eq!(delay, expected, "override {override_ms:?}");
             assert_eq!(
-                BackendAdmissionGate::new(Some(1), 1, delay).queue_delay(),
+                BackendAdmissionGate::new(Some(1), 1, delay, true).queue_delay(),
                 expected,
                 "the resolved delay must reach the gate"
             );
+        }
+    }
+
+    /// The switch speaks the canonical Dynamo boolean vocabulary, and every way
+    /// of not making a choice — unset, declared empty, or a spelling outside it
+    /// — keeps the enabled default.
+    #[test]
+    fn the_back_selection_switch_defaults_on_and_reads_the_canonical_vocabulary() {
+        const { assert!(DEFAULT_CONTROLLED_DELAY) };
+        for (raw, expected) in [
+            (None, true),
+            (Some(""), true),
+            (Some("   "), true),
+            (Some("enabled"), true),
+            (Some("1"), true),
+            (Some("TRUE"), true),
+            (Some("On"), true),
+            (Some(" yes "), true),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("OFF"), false),
+            (Some("no"), false),
+        ] {
+            assert_eq!(resolve_controlled_delay(raw), expected, "{raw:?}");
         }
     }
 
@@ -1390,7 +1512,7 @@ mod tests {
         // Enqueue stamps `now + delay`, so an unbounded override must degrade
         // rather than panic there.
         assert_eq!(
-            BackendAdmissionGate::new(Some(1), 1, Duration::MAX).queue_delay(),
+            BackendAdmissionGate::new(Some(1), 1, Duration::MAX, true).queue_delay(),
             DEFAULT_QUEUE_DELAY
         );
     }
@@ -1485,7 +1607,7 @@ mod tests {
             )
         }
 
-        let gate = BackendAdmissionGate::new(None, 8, Duration::from_millis(50));
+        let gate = BackendAdmissionGate::new(None, 8, Duration::from_millis(50), true);
         gate.set_limit_for_test(1);
         let held = permit(gate.acquire(None).await);
 
@@ -1581,6 +1703,136 @@ mod tests {
         drop(held);
         assert_eq!(gate.active(), 0);
         assert_eq!(gate.queued(), 0);
+    }
+
+    ///////////////////// CONTROLLED DELAY: SELECTION /////////////////////
+
+    /// A queue entry with an exact deadline, pushed directly so no expiry driver
+    /// is involved and the FIFO can be built one entry at a time. `due` is
+    /// already past its deadline; `live` is nowhere near its own.
+    fn due(gate: &Arc<BackendAdmissionGate>) -> oneshot::Receiver<Handoff> {
+        gate.push_waiter_for_test(Instant::now() - Duration::from_millis(1))
+    }
+
+    fn live(gate: &Arc<BackendAdmissionGate>) -> oneshot::Receiver<Handoff> {
+        gate.push_waiter_for_test(Instant::now() + Duration::from_secs(60))
+    }
+
+    /// What the gate has told a queued entry so far.
+    fn granted(rx: &mut oneshot::Receiver<Handoff>) -> bool {
+        matches!(rx.try_recv(), Ok(Handoff::Slot))
+    }
+
+    fn rejected(rx: &mut oneshot::Receiver<Handoff>) -> bool {
+        matches!(rx.try_recv(), Ok(Handoff::Expired))
+    }
+
+    fn still_queued(rx: &mut oneshot::Receiver<Handoff>) -> bool {
+        matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+    }
+
+    /// Rejections buy one admission from the back and no more: two of them do
+    /// not owe two, a departed newest request is passed over rather than ending
+    /// the search, and the admission after it is oldest first again. Ordinary
+    /// oldest-first service with nothing rejected is covered by the FIFO test
+    /// above.
+    #[tokio::test]
+    async fn rejections_buy_exactly_one_admission_from_the_back() {
+        let gate = gate_with_delay(1, 8, Duration::from_millis(50));
+        let held = permit(gate.acquire(None).await);
+        let (mut stale, mut also_stale) = (due(&gate), due(&gate));
+        let (mut oldest, mut middle, mut newest) = (live(&gate), live(&gate), live(&gate));
+        // Behind them all, and gone before the handoff reaches it.
+        drop(live(&gate));
+
+        // Releasing the permit rejects the due prefix and selects, in one pass.
+        drop(held);
+        assert!(rejected(&mut stale) && rejected(&mut also_stale));
+        assert!(
+            granted(&mut newest),
+            "a rejection sends that admission to the newest eligible request"
+        );
+        assert!(
+            still_queued(&mut oldest),
+            "the front keeps its place; it is passed over, not rejected"
+        );
+
+        // Rejects nothing, so it must not inherit a LIFO order or a second back
+        // admission from the two rejections above.
+        gate.set_limit_for_test(2);
+        assert!(
+            granted(&mut oldest),
+            "the admission after the back one restarts at the front"
+        );
+        assert!(still_queued(&mut middle));
+        assert_eq!((gate.active(), gate.queued()), (2, 1));
+    }
+
+    /// A queued request that went away is absent, not rejected: draining it must
+    /// not buy an admission from the back.
+    #[tokio::test]
+    async fn a_departed_entry_leaving_on_its_deadline_is_not_a_rejection() {
+        let gate = gate_with_delay(1, 8, Duration::from_millis(50));
+        let held = permit(gate.acquire(None).await);
+        drop(due(&gate));
+        let (mut oldest, mut newest) = (live(&gate), live(&gate));
+
+        drop(held);
+        assert!(
+            granted(&mut oldest),
+            "an expiry no request received must leave the admission at the front"
+        );
+        assert!(still_queued(&mut newest));
+    }
+
+    /// The switch governs selection alone: rejection, the queue delay and the
+    /// order of everything else are exactly as they are without it.
+    #[tokio::test]
+    async fn the_switch_off_rejects_from_the_front_and_admits_from_the_front() {
+        let gate = BackendAdmissionGate::new(Some(1), 8, Duration::from_millis(50), false);
+        let held = permit(gate.acquire(None).await);
+        let (mut stale, mut oldest, mut newest) = (due(&gate), live(&gate), live(&gate));
+
+        drop(held);
+        assert!(rejected(&mut stale), "the same request is still rejected");
+        assert!(
+            granted(&mut oldest),
+            "with the back selection off the freed slot goes to the front"
+        );
+        assert!(still_queued(&mut newest));
+        assert_eq!((gate.active(), gate.queued()), (1, 1));
+    }
+
+    /// The gate's own timer arms the same one-round selection a handoff does.
+    /// Nothing frees a slot until this test does, so the timer is the only thing
+    /// that can resolve the first waiter.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_rejection_sends_the_next_admission_to_the_back() {
+        let gate = gate_with_delay(1, 8, Duration::from_millis(400));
+        let held = permit(gate.acquire(None).await);
+
+        let doomed = spawn_queued_admit(&gate).await;
+        // Far enough behind the doomed request that its rejection lands while
+        // these two are still comfortably live.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let oldest = spawn_queued_admit(&gate).await;
+        let newest = spawn_queued_admit(&gate).await;
+
+        assert!(is_expired(&doomed.await.expect("waiter completes")));
+        assert_eq!(gate.queued(), 2, "only the due request left the queue");
+
+        drop(held);
+        let admitted = tokio::time::timeout(Duration::from_millis(50), newest)
+            .await
+            .expect("the newest queued request must inherit the freed slot")
+            .expect("waiter completes");
+        assert!(
+            !oldest.is_finished(),
+            "the older request keeps its place rather than being served or rejected"
+        );
+        drop(permit(admitted));
+        oldest.abort();
+        let _ = oldest.await;
     }
 
     ///////////////////// CONTROLLED DELAY: ONE TIMER /////////////////////

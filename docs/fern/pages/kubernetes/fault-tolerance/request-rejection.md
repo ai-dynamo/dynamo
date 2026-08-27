@@ -147,6 +147,13 @@ a full queue refuses one. Set it lower when a stale queued request is worth less
 it holds, and higher when clients would rather wait. It does not limit how long an admitted request
 may run.
 
+After the worker has rejected a queued request that way, the next slot it frees goes to the newest
+queued request rather than the oldest, and the slot after that goes to the oldest again — so a worker
+recovering from a backlog does not work through requests whose queue delay is nearly spent. Set
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `0` on the **worker** component to serve the
+oldest queued request in every case. The queue delay, the deadlines and which requests are rejected
+are the same either way.
+
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)
 for the queue implementation.

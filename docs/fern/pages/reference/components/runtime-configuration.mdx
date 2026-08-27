@@ -277,6 +277,18 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   removed from the queue at once and refused exactly as a full queue refuses one.
 </ParamField>
 
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY" type="boolean" default="true">
+  Advanced switch for which queued request the worker admits after it has rejected one. Enabled, a
+  freed slot that followed a rejection goes to the newest queued request — the one with the most of
+  its queue delay left — and the admission after that goes to the oldest again. Disabled, a freed
+  slot always goes to the oldest queued request.
+
+  Accepts `1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively. Environment-only:
+  there is no command-line flag. An unset, empty or unrecognized value leaves it enabled. This
+  governs selection only: it does not enable or disable the queue delay, change which requests are
+  rejected, or change what a rejected request is refused with.
+</ParamField>
+
 ## Related pages
 
 <CardGroup cols={2}>
