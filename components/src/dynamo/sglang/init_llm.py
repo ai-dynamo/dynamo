@@ -76,6 +76,8 @@ async def init_decode(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
+    server_args = config.use_resolved_server_args(engine)
+
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
 
@@ -232,6 +234,8 @@ async def init_prefill(
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
+
+    server_args = config.use_resolved_server_args(engine)
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)

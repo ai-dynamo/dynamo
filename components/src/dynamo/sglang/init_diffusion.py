@@ -63,6 +63,7 @@ async def init_llm_diffusion(
     set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine)
 
     shutdown_endpoints[:] = [generate_endpoint]
 

@@ -34,7 +34,7 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import ensure_sglang_tensor_image_size
+from dynamo.sglang._compat import ensure_sglang_tensor_image_size, resolved_server_args
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -76,6 +76,11 @@ class Config:
             return DisaggregationMode.DECODE
         else:
             return DisaggregationMode.AGGREGATED
+
+    def use_resolved_server_args(self, engine: Any) -> Any:
+        """Switch post-engine Dynamo code to SGLang's resolved configuration."""
+        self.server_args = resolved_server_args(engine.server_args)
+        return self.server_args
 
 
 def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:

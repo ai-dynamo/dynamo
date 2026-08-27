@@ -134,6 +134,21 @@ def test_override_server_args_supports_legacy_xpu_pin():
     assert server_args.load_format == "legacy-loader"
 
 
+def test_config_uses_resolved_server_args_after_engine_init():
+    raw_server_args = SimpleNamespace(page_size=None, disaggregation_mode="null")
+    resolved_server_args = SimpleNamespace(page_size=64, disaggregation_mode="null")
+    raw_server_args._resolved = lambda: resolved_server_args
+    config = sglang_args.Config(raw_server_args, SimpleNamespace())
+
+    runtime_server_args = config.use_resolved_server_args(
+        SimpleNamespace(server_args=raw_server_args)
+    )
+
+    assert raw_server_args.page_size is None
+    assert runtime_server_args is resolved_server_args
+    assert config.server_args.page_size == 64
+
+
 @pytest.fixture(autouse=True)
 def _cpu_engine_when_no_accelerator(monkeypatch):
     """Honor the file's gpu_0 contract on hosts with no accelerator.

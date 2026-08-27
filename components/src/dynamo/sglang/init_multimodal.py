@@ -145,6 +145,7 @@ async def init_multimodal_worker(
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -215,6 +216,7 @@ async def init_multimodal_prefill_worker(
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"

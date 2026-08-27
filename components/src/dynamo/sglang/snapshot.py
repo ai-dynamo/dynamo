@@ -16,7 +16,7 @@ from dynamo.common.snapshot.lifecycle import (
     SnapshotConfig,
     configure_snapshot_capture_env,
 )
-from dynamo.sglang._compat import override_server_args
+from dynamo.sglang._compat import override_server_args, resolved_server_args
 
 from .pause import SGLangEnginePauseController
 
@@ -161,7 +161,8 @@ async def prepare_snapshot_engine(
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (snapshot mode)"
     )
-    await warmup_engine(engine, server_args)
+    runtime_server_args = resolved_server_args(engine.server_args)
+    await warmup_engine(engine, runtime_server_args)
 
     gc.collect()
 

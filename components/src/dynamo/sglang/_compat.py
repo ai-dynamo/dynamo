@@ -107,6 +107,17 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
         setattr(server_args, name, value)
 
 
+def resolved_server_args(server_args: Any) -> Any:
+    """Return SGLang's effective configuration for one initialized engine.
+
+    SGLang #36255 keeps ``ServerArgs`` as raw operator input. Older supported
+    releases and Dynamo's non-LLM argument stubs retain effective values on
+    the object itself.
+    """
+    resolve = getattr(server_args, "_resolved", None)
+    return resolve() if callable(resolve) else server_args
+
+
 @lru_cache(maxsize=32)
 def _get_async_generate_supported_kwarg_names(
     async_generate: Any,
