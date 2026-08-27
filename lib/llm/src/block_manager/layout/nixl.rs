@@ -365,6 +365,8 @@ mod tests {
 
         let mut layout = FullyContiguous::allocate(config, &SystemAllocator).unwrap();
         let agent = NixlAgent::new("test").unwrap();
+        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
+        agent.create_backend("UCX", &ucx_params).unwrap();
 
         tracing::info!("Registering layout");
         layout.nixl_register(&agent, None).unwrap();

@@ -116,6 +116,8 @@ mod nixl_tests {
     fn test_nixl_registration() {
         let pinned = PinnedStorage::new(2048).unwrap();
         let agent = NixlAgent::new("test_agent").unwrap();
+        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
+        agent.create_backend("UCX", &ucx_params).unwrap();
         let registered = register_with_nixl(pinned, &agent, None).unwrap();
         assert_eq!(registered.agent_name(), "test_agent");
     }
