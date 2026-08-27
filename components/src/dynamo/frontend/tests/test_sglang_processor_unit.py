@@ -3360,8 +3360,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] is None
         assert [
-            entry["token"]
-            for entry in chunks[0]["choices"][0]["logprobs"]["content"]
+            entry["token"] for entry in chunks[0]["choices"][0]["logprobs"]["content"]
         ] == ["A"]
         assert "usage" not in chunks[0]
         assert chunks[1]["choices"][0]["delta"] == {}
