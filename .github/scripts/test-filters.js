@@ -105,9 +105,9 @@ const testCases = [
     desc: 'recipe generator test triggers recipe check without core'
   },
   {
-    file: 'tests/docs/nested/__ci_filter_probe__',
-    expect: { core: false, examples: true },
-    desc: 'any tests/docs descendant triggers recipe check without core'
+    file: 'docs/tests/nested/__ci_filter_probe__',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',

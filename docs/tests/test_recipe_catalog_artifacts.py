@@ -9,12 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-
-from tests.docs.recipe_catalog_test_utils import (
-    CATALOG,
-    VALIDATOR_PATH,
-    load_catalog_validator,
-)
+from recipe_catalog_test_utils import CATALOG, VALIDATOR_PATH, load_catalog_validator
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 

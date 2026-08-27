@@ -91,7 +91,7 @@ examples:
   - 'scripts/kustomize-matrix.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
-  - 'tests/docs/**'
+  - 'docs/tests/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
@@ -185,7 +185,6 @@ core:
   - '!lib/sidecar/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
-  - '!tests/docs/**'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
