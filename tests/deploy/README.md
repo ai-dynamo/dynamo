@@ -38,6 +38,22 @@ and DGD pods. Teardown stops DGDR reconciliation first and then waits for child
 resources to disappear. CI also runs the suite in a per-run namespace and
 deletes that namespace unconditionally.
 
+`test_deploy_efa.py` and `test_deploy_efa_sglang.py` are the EFA lanes: each
+deploys a 1P1D stack from `efa/` on an EFA-capable cluster (p5/H100) and proves
+the prefill/decode KV transfer rode NIXL -> LIBFABRIC -> EFA rather than falling
+back to UCX. They share their flow and assertions through `efa_utils.py`; what
+differs per framework -- how LIBFABRIC is pinned, which worker initiates the
+transfer, and therefore which NIXL and EFA adapter counters move -- lives in an
+`EfaFrameworkProfile` in each test file. They are excluded from the
+auto-discovered matrix and selected by the `framework_with_efa` marker:
+
+```bash
+python -m pytest tests/deploy/test_deploy_efa_sglang.py \
+  -m framework_with_efa \
+  --image=registry.example/sglang-runtime:tag-efa \
+  --namespace=efa-test -v -s
+```
+
 The Go package at `deploy/operator/test/e2e` is a deprecated, manual Kind smoke
 test for the legacy Kustomize installation path. New operator deployment tests
 belong here.

@@ -641,11 +641,17 @@ jobs:
   # ============================================================================
   # EFA DEPLOY TEST
   # ============================================================================
-  # The only job here that runs against real EFA hardware. Everything else
-  # validates the -efa images statically; this one deploys a 1P1D vLLM stack on
-  # aws-dev-02 (p5 / H100, 32 EFA devices per node) and proves the prefill->decode
-  # KV transfer rode NIXL -> LIBFABRIC -> EFA instead of silently falling back to
-  # UCX.
+  # The only jobs here that run against real EFA hardware. Everything else
+  # validates the -efa images statically; these deploy a 1P1D stack on aws-dev-02
+  # (p5 / H100, 32 EFA devices per node) -- vLLM first, then SGLang -- and prove
+  # the prefill->decode KV transfer rode NIXL -> LIBFABRIC -> EFA instead of
+  # silently falling back to UCX.
+  #
+  # The two framework tests share one vCluster and run one after the other rather
+  # than together, to keep peak GPU use on the shared CI pool at one 1P1D stack.
+  # SGLang is gated on the vLLM job having *finished*, not on it having passed
+  # (`!cancelled()` rather than `success()`), so a vLLM regression does not also
+  # delete the SGLang result.
   #
   # It cannot reuse shared-deploy-test.yml: that workflow hardcodes its runner,
   # timeout, ACR image reference and `-m framework_only` selector, and forwards no
@@ -670,7 +676,7 @@ jobs:
   #     nscleanup/ttl label for dynamo-deploy-test, so a leaked vCluster holds p5
   #     GPUs and EFA interfaces on a shared cluster with no automated reaper.
   efa-deploy-operator:
-    name: vLLM EFA Deploy Operator
+    name: EFA Deploy Operator
     needs: [compute-release-mode, operator-build, resolve-source-sha]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     runs-on: prod-deploy-tester-v1
@@ -754,10 +760,63 @@ jobs:
           image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.vllm-efa-build.outputs.target_tag_plain }}-nightly
           platform_arch: amd64
 
+  efa-deploy-test-sglang:
+    name: SGLang EFA Deploy Test
+    needs: [compute-release-mode, operator-build, resolve-source-sha, sglang-efa-build, efa-deploy-operator, efa-deploy-test-vllm]
+    # Runs after the vLLM test whatever that test concluded, so the two never hold
+    # GPUs on the shared CI pool at the same time, but a vLLM failure still leaves
+    # SGLang measured. Cancellation stops the lane; failure does not.
+    #
+    # `!cancelled()` replaces the default "every need succeeded" rule, so the two
+    # needs this job genuinely cannot run without -- the vCluster and the image --
+    # have to be spelled out again. Only efa-deploy-test-vllm is allowed to fail.
+    if: ${{ !cancelled() && needs.compute-release-mode.outputs.run_tests == 'true' && needs.efa-deploy-operator.result == 'success' && needs.sglang-efa-build.result == 'success' }}
+    runs-on: prod-deploy-tester-v1
+    # Same reasoning as the vLLM job. Bring-up is dominated by the cold image
+    # pull rather than by engine startup (measured on aws-dev-02: ~10 min to all
+    # pods ready cold, ~1.5 min once the image is on the nodes), which the test's
+    # own 900s readiness wait covers.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
+
+      - name: Run EFA deploy test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: sglang
+          test_name: sglang_efa
+          test_file: tests/deploy/test_deploy_efa_sglang.py
+          extra_pytest_args: -m framework_with_efa
+          # Straight from ECR, as for vLLM above.
+          image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-efa-build.outputs.target_tag_plain }}-nightly
+          platform_arch: amd64
+
   efa-deploy-cleanup:
-    name: vLLM EFA Deploy Cleanup
+    name: EFA Deploy Cleanup
     if: always()
-    needs: [efa-deploy-operator, efa-deploy-test-vllm]
+    needs: [efa-deploy-operator, efa-deploy-test-vllm, efa-deploy-test-sglang]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
