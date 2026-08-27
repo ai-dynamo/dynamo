@@ -181,7 +181,7 @@ class DiffusionFormatter:
     """Formats diffusion output (images/video frames) for the frontend.
 
     Handles both image and video — routes by request_type since vllm-omni
-    reports final_output_type="image" for all diffusion outputs.
+    may report either image/video output type (including plural aliases).
     """
 
     def __init__(
@@ -1464,7 +1464,9 @@ class OutputFormatter:
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),
             "image": diffusion_formatter,
+            "images": diffusion_formatter,
             "video": diffusion_formatter,
+            "videos": diffusion_formatter,
             "audio": AudioFormatter(model_name, media_fs, media_http_url),
         }
 
