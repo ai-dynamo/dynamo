@@ -365,7 +365,13 @@ mod tests {
 
         let mut layout = FullyContiguous::allocate(config, &SystemAllocator).unwrap();
         let agent = NixlAgent::new("test").unwrap();
-        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
+        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap_or_else(|e| {
+            let available: Vec<String> = agent
+                .get_available_plugins()
+                .map(|p| p.iter().filter_map(Result::ok).map(String::from).collect())
+                .unwrap_or_default();
+            panic!("UCX plugin unavailable ({e}); NIXL reports {available:?}");
+        });
         agent.create_backend("UCX", &ucx_params).unwrap();
 
         tracing::info!("Registering layout");

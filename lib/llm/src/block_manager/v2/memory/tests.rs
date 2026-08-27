@@ -116,7 +116,13 @@ mod nixl_tests {
     fn test_nixl_registration() {
         let pinned = PinnedStorage::new(2048).unwrap();
         let agent = NixlAgent::new("test_agent").unwrap();
-        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
+        let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap_or_else(|e| {
+            let available: Vec<String> = agent
+                .get_available_plugins()
+                .map(|p| p.iter().filter_map(Result::ok).map(String::from).collect())
+                .unwrap_or_default();
+            panic!("UCX plugin unavailable ({e}); NIXL reports {available:?}");
+        });
         agent.create_backend("UCX", &ucx_params).unwrap();
         let registered = register_with_nixl(pinned, &agent, None).unwrap();
         assert_eq!(registered.agent_name(), "test_agent");
