@@ -119,6 +119,17 @@ IMAGE_REF_TOKENS = {
 GA_REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 PLACEHOLDER_REGISTRY = "my-registry"
 
+# Hand-maintained docs data listing MANY releases at once: the current GA rows,
+# per-model dev lines (`tag: "1.4.0-inkling-dev.1"`, `releaseLine: "v1.4.0"`) and
+# dated nightlies (`version: "1.4.0.dev20260803"`) all carry the same version
+# literal, and each row repeats it in a `label:` beside the `clipboard:`.
+# rewrite_image_refs only understands `<reg>/<img>:<tag>`, so on a re-cut it moved
+# 7 clipboards and left every label behind -- publishing a page whose copy button
+# contradicts its own label, while the historical entries are ones that must never
+# move at all. Telling those apart needs a TS parse, not a regex, so the file is
+# skipped wholesale and the release owner is warned to update it by hand.
+IMAGE_REF_SKIP = frozenset({"docs/fern/components/releases.data.ts"})
+
 # .devN is a PRE-release (sorts before X.Y.Z) -> SemVer '-devN'; .postN is a
 # post-release -> SemVer build metadata '+postN'. Both keep PEP 440 form for Python.
 SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(dev\d+|post\d+))?$")
@@ -409,11 +420,18 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
     ]
 
     files_changed = refs = 0
+    skipped_stale = []
     for path in _tracked_files(root):
         try:
             text = original = path.read_text()
         except (UnicodeDecodeError, OSError):
             continue  # binary or unreadable — nothing to substitute
+        if path.relative_to(root).as_posix() in IMAGE_REF_SKIP:
+            # All-or-nothing: a partial rewrite here is worse than none (see
+            # IMAGE_REF_SKIP). Record it so the operator gets a loud warning.
+            if any(t in text for t in old_literals if t != "my-tag"):
+                skipped_stale.append(path.relative_to(root).as_posix())
+            continue
         # Fast path — must test every literal the regex can match, including the
         # PEP 440 spelling of the old version and the untagged placeholder registry.
         if not any(t in text for t in old_literals) and PLACEHOLDER_REGISTRY not in text:
@@ -427,6 +445,11 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
 
     print(f"rewrite_image_refs: {refs} reference(s) in {files_changed} file(s) -> "
           f"{GA_REGISTRY}/<image>:{new_version} for {images}", file=sys.stderr)
+
+    for rel in skipped_stale:
+        print(f"::warning::{rel} still references {old_version} and was left untouched "
+              f"on purpose (it lists dev-line and nightly releases that must not move). "
+              f"Update the current-release rows to {new_version} by hand.", file=sys.stderr)
 
     # Advisory only: a re-cut of a branch that previously shipped a wider selection
     # legitimately still carries those older refs, so warn rather than fail.

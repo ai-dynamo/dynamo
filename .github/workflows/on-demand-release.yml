@@ -369,8 +369,21 @@ jobs:
               | sh -s -- -y --profile minimal --default-toolchain stable
             source "${HOME}/.cargo/env"
           fi
-          # Keep Cargo.lock in sync so post-merge `cargo test --locked` passes.
-          cargo update --workspace
+          # Keep EVERY Cargo.lock in sync so post-merge `cargo test --locked` and the
+          # pre-merge `cargo metadata --locked` matrix both pass. lib/bindings/python,
+          # lib/bindings/kvbm and lib/runtime/examples are SEPARATE cargo workspaces
+          # with their own lock files, so a root-only `cargo update --workspace` leaves
+          # their workspace-crate pins on the PREVIOUS version. That is what shipped in
+          # the 1.4.1 cut (9f6c6be7): three stale locks, and the clippy matrix — which
+          # runs `cargo metadata --locked` in each of those dirs — failed on all three.
+          # Discovered from git, not hardcoded, so a newly added nested workspace cannot
+          # silently regress the next release.
+          git ls-files | grep -E '(^|/)Cargo\.lock$' | sort | while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            manifest="${manifest#./}"
+            echo "Syncing ${lock}"
+            cargo update --workspace --manifest-path "${manifest}"
+          done
 
           APP_USER_ID=$(curl -fsSL --retry 3 \
             -H "Authorization: Bearer ${GH_TOKEN}" \
