@@ -29,7 +29,7 @@ Keep high-cardinality identifiers such as job, rollout, sample, attempt, request
 | Source | Current useful fields or signals | RL boundary |
 |---|---|---|
 | Request trace `request_end` | Request ID, receive time, output tokens, input/output lengths, sequence hashes, KV block size, and optional timing/KV/worker data | No stable typed framework, rollout, sample, trainer-step, or policy-version fields |
-| Request trace `request_payload` | Request ID, endpoint, model, optional request/response payload, and explicitly allowlisted HTTP headers | Payloads and captured headers are unredacted; capture only approved data |
+| Request trace `request_payload` | OpenAI chat-completion request ID, endpoint, model, optional request/response payload, and explicitly allowlisted HTTP headers | Not emitted for completions or native `/generate`; payloads and captured headers are unredacted |
 | Dynamo session context | Session ID, parent session ID, final marker, compaction, KV hints, and input trigger where supplied | Session identity is not an RL rollout schema and does not enable affinity by itself |
 | Frontend/router metrics | Request, queue, routing overhead, cache and per-worker signals | Aggregate behavior; do not add rollout IDs as labels |
 | Backend metrics/logs | Engine queue/batch/cache/generation state and backend errors | Names and availability differ across vLLM, SGLang, and versions |
@@ -49,7 +49,9 @@ X-Dynamo-Parent-Session-ID: rollout-run42-parent2
 
 The session ID groups requests and can support replay relationships. Supplying it does not enable session affinity unless the frontend is configured for affinity, and it does not cause Dynamo to validate a policy version.
 
-For framework fields that are not typed by Dynamo, use an application-owned run ledger. If a direct trace join is needed, send non-secret application headers and explicitly allowlist them for `request_payload` capture:
+For cross-component logs and distributed traces, also send a stable `x-request-id`; Dynamo propagates it as correlation metadata. It is not the internal Dynamo request ID and does not carry framework semantics by itself.
+
+For framework fields that are not typed by Dynamo, use an application-owned run ledger. On the OpenAI chat-completion path, a direct request-trace join can use non-secret application headers explicitly allowlisted for `request_payload` capture:
 
 ```bash
 export DYN_REQUEST_TRACE=1
@@ -64,6 +66,16 @@ export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST=x-rl-rollout-id,x-rl-attempt-i
 > [!WARNING]
 > Allowlisted header values and request/response payloads are unredacted. Never capture authorization, cookies, credentials, private prompts, reward secrets, or user data without an approved retention and access policy. Prefer opaque IDs that join to a protected framework ledger.
 
+### Choose the Correlation Path by Interface
+
+| Request interface | Current correlation path | Limitation |
+|---|---|---|
+| OpenAI chat completions | Allowlisted opaque framework headers in `request_payload`, joined to `request_end` by Dynamo request ID | Captures request/response payload records and therefore requires strict data handling. |
+| OpenAI completions | `X-Dynamo-Session-ID` when its semantics match, plus `x-request-id` in logs and distributed traces | The current payload recorder does not emit `request_payload` rows for completions, so arbitrary application headers are not available in the request trace. |
+| Native SGLang `/generate` or experimental vLLM `/inference/v1/generate` | `X-Dynamo-Session-ID` when its semantics match, plus `x-request-id` in logs and distributed traces | The current payload recorder does not emit `request_payload` rows for native generate interfaces. |
+
+If a framework cannot map rollout identity to Dynamo session identity and does not use chat completions, preserve the join in the framework ledger and distributed logs rather than claiming a request-trace header join that the selected interface does not emit.
+
 ## Build the Join
 
 Use `request_id` as the join key between the two Dynamo record types:
@@ -71,7 +83,7 @@ Use `request_id` as the join key between the two Dynamo record types:
 - `request_end.request.request_id`
 - `request_payload.payload.request_id`
 
-Then join the captured application rollout/attempt header to the framework run ledger. A conceptual query has this shape:
+For the OpenAI chat-completion path above, join the captured application rollout/attempt header to the framework run ledger. A conceptual query has this shape:
 
 ```sql
 SELECT
@@ -99,7 +111,7 @@ Field extraction syntax depends on the trace store. Validate the join with count
 4. Session and per-session turn counts match the framework ledger.
 5. Target policy identity comes from the framework/update ledger, not an inferred request timestamp.
 
-A missing join can indicate that the framework reached a different frontend, tracing started late, headers were not allowlisted, payload capture was disabled, the process did not flush, or an attempt never emitted a terminal record.
+A missing join can indicate that the framework reached a different frontend, tracing started late, headers were not allowlisted, payload capture was disabled, the selected interface does not emit payload records, the process did not flush, or an attempt never emitted a terminal record.
 
 ### Summarize the Join Before Diagnosing
 
@@ -299,18 +311,18 @@ The combined operations section must include:
 
 After all cross-cutting sections are backed by artifacts, mark each section passed only after a reviewer checks completeness, arithmetic, source provenance, and conclusion boundaries. Keep the completed report out of the repository when its artifacts contain customer data, prompts, credentials, or restricted logs; store it in an approved durable location.
 
-## Prioritized Product Gaps and Closed-Loop Decision
+## Current Gaps and Closed-Loop Boundary
 
-These are issue-ready proposals, not committed roadmap items or assigned owners. Each proposal still needs a named DRI, accepted vehicle, source links, dependencies, acceptance evidence, and an expiration trigger before it becomes program work:
+The following contracts do not exist as stable Dynamo RL interfaces today. They are design inputs, not committed roadmap items, issue priorities, or assigned owners:
 
-| Gap | Priority | Vehicle | Contract needed | Documentation boundary until accepted |
-|---|---|---|---|---|
-| DYN-RL-GAP-001: typed RL correlation and freshness context | P0 | DEP | Additive mixed-version-safe framework/job/rollout/sample/request-role/policy/trainer-step/lag context and enforcement semantics | Keep RL identity application-owned; opaque headers are correlation conventions, not router fields. |
-| DYN-RL-GAP-002: served policy-content identity | P0 | DEP | Immutable served-policy identity or attestation joined to each completion without full-weight hashing on the request path | Treat version text as caller-supplied correlation and require update, cache, numerical/output, and post-update proof. |
-| DYN-RL-GAP-003: standard weight-update lifecycle events | P0 | Implementation issue | Backend-neutral gate/pause/transfer/cache/verify/fail/rollback/resume/warm-up events with bounded identifiers and safe errors | Preserve per-worker lifecycle timing in the framework/control ledger; never infer it from traffic gaps. |
-| DYN-RL-GAP-004: RL lifecycle replay event contract | P1 | Implementation issue | Optional framework-owned phase, transition, update-window, sample-terminal, and acceptance events with deterministic lowering | Replay the request plane only; do not claim trainer, reward, acceptance, or policy-transition reproduction. |
-| DYN-RL-GAP-005: closed-loop simulator ownership and package | P2 | DEP after gaps 001–004 | Package/DRI decision, semantic ownership, deterministic artifact, security model, fidelity metrics, and live calibration | Keep closed-loop simulation outside the shipped RL docs surface. |
+| Current gap | Contract needed before documenting it as shipped | Documentation boundary today |
+|---|---|---|
+| Typed RL correlation and freshness context | Additive mixed-version-safe framework, job, rollout, sample, request-role, policy, trainer-step, and lag semantics | Keep RL identity application-owned; opaque headers are correlation conventions, not router fields. |
+| Served policy-content identity | Immutable served-policy identity or attestation joined to each completion without full-weight hashing on the request path | Treat version text as caller-supplied correlation and require update, cache, numerical/output, and post-update proof. |
+| Standard weight-update lifecycle events | Backend-neutral gate, pause, transfer, cache, verify, fail, rollback, resume, and warm-up events with bounded identifiers and safe errors | Preserve per-worker lifecycle timing in the framework/control ledger; never infer it from traffic gaps. |
+| RL lifecycle replay events | Optional framework-owned phase, transition, update-window, sample-terminal, and acceptance events with deterministic lowering | Replay the request plane only; do not claim trainer, reward, acceptance, or policy-transition reproduction. |
+| Closed-loop simulator ownership and package | A package/DRI decision, semantic ownership, deterministic artifact, security model, fidelity metrics, and live calibration after the four contracts above | Keep closed-loop simulation outside the shipped RL docs surface. |
 
-The current recommendation is **request plane now; closed loop as a follow-on DEP**. Capture, live replay, and DynoSim request-plane workflows remain in scope. Do not preassign the future package to DynoSim, AI simulation, or a new project before the DEP resolves semantic ownership and all four prerequisite contracts have implementation evidence.
+The current documentation recommendation is **request plane now; closed loop only after an accepted design defines the missing contracts and ownership**. Capture, live replay, and DynoSim request-plane workflows remain in scope. Do not present DynoSim, AI simulation, or a new package as the closed-loop owner before that decision exists.
 
 Until the gaps close, keep framework semantics in the framework ledger, use current Dynamo trace/header capabilities for correlation, require current weight lifecycle evidence, and limit replay/simulation claims to the serving request plane.

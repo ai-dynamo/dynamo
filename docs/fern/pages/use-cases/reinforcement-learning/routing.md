@@ -176,11 +176,11 @@ Use a matched experiment record:
 
 When publishing a result, state the causal mechanism. For example: “the variant reduced repeated prefill work because sibling requests reused a predicted prefix placement,” not “KV routing was X% faster” without cache and workload evidence.
 
-## Record the Cross-Cutting Program Evidence
+## Record Evidence for a Routing Claim
 
 Before the experiment, record immutable pins, named owners, the headline metric's numerator, denominator, and freshness rule, complete workload shape, fixed controls, and the full router configuration for the baseline and variant. Preserve at least three measured repetitions per variant plus immutable links for the raw requests, configuration, and computed metrics. Label a routing claim as a live measurement only after those artifacts demonstrate the declared mechanism.
 
-Do not publish a recommendation based on a single configuration, fewer than three repetitions, a missing or nonnumeric headline metric, multiple or absent baselines, unmatched controls, missing mechanism evidence, or simulation alone. Review the routing result together with the required weight paths and the [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report) so the claim refers to one pinned program rather than unrelated demonstrations.
+Do not publish a recommendation based on a single configuration, fewer than three repetitions, a missing or nonnumeric headline metric, multiple or absent baselines, unmatched controls, missing mechanism evidence, or simulation alone. When a routing result supports a broader RL deployment recommendation, review it together with the claimed weight paths and the [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report) so the conclusion refers to one pinned program rather than unrelated demonstrations.
 
 ## Diagnose Common Routing Failures
 

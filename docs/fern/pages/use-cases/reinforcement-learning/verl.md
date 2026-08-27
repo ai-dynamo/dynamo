@@ -7,7 +7,7 @@ subtitle: Run the public verl-recipe Dynamo rollout backend and understand its o
 
 **Experimental.** verl-recipe contains a first-class async Dynamo rollout backend, but this Dynamo page is not labeled supported until a clean environment independently completes the validation checklist below. Treat the pinned upstream recipe as the implementation source of truth and this page as the Dynamo-side architecture, workflow, and verification guide.
 
-## Validated Artifact and Current Gate
+## Reviewed Artifact and Current Gate
 
 | Item | Pin or status |
 |---|---|
@@ -16,7 +16,7 @@ subtitle: Run the public verl-recipe Dynamo rollout backend and understand its o
 | Canonical verl core pin | Read [`dynamo/REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/REQUIRED_VERL.txt); at review time it selected `d82d2777b5dc3e96a8a45168d02660312707ab98` |
 | Recipe backend | Dynamo vLLM rollout workers behind one shared frontend |
 | Weight path | verl colocated CUDA IPC through recipe-owned Ray/ZMQ control; not ModelExpress |
-| Evidence check | 2026-08-27 by Dynamo RL documentation maintainers |
+| Source review | 2026-08-27 by Dynamo RL documentation maintainers |
 | Independent clean-room run | Not recorded in this page; required before supported status |
 
 The upstream recipe also documents a ThunderAgent extension that requires a specific Dynamo source commit. Treat that as a separate pinned experimental variant; do not assume the Dynamo version used by another recipe path satisfies its lifecycle requirements.
@@ -76,7 +76,7 @@ Use the upstream `REQUIRED_VERL.txt` rather than guessing a compatible verl rele
 
 The reviewed recipe snapshot pins the core verl commit, but it does not pin a complete Dynamo runtime image, a native-path Dynamo commit, the CUDA/driver pair, or the resulting vLLM dependency set. Its `install_verl.sh` installs verl only; the clone and installer commands below are therefore not a complete environment bootstrap. Before using them, choose one variant, start from a clean Linux GPU environment, pin a Dynamo source commit, and install its vLLM backend using [Building from Source](../../developer-guide/advanced-customizations/building-from-source.md). Ensure `etcd` and `nats-server` are installed separately.
 
-Do not assume that a stable verl image or the latest Dynamo vLLM image satisfies both projects merely because each works independently. Resolve the combined environment, preserve its immutable image digest and package inventory, and require the host preflight below to match the record before treating the smoke as evidence. The missing upstream end-to-end image pin is one reason this page remains experimental.
+Do not assume that a stable verl image or the latest Dynamo vLLM image satisfies both projects merely because each works independently. Resolve the combined environment, preserve its immutable image digest and package inventory, and require the host inventory below to match the validation report before treating the smoke as evidence. The missing upstream end-to-end image pin is one reason this page remains experimental.
 
 From a clean parent directory, clone the reviewed recipe snapshot and ask its installer to create the matching editable verl checkout:
 
@@ -99,7 +99,7 @@ Run subsequent commands from the resulting `verl` checkout, where the compatible
 
 ## Prepare the Validation Run
 
-Before allocating GPUs, create a validation report in your approved artifact store. Record the planned environment, topology, owners, artifact destinations, and each gate as `not run`. As commands run, preserve exact commands and immutable software, model, image, dataset, and hardware pins; link artifacts for each gate; and retain failures rather than deleting them.
+Before allocating GPUs, create a validation report in a durable location appropriate for the data. Record the planned environment, topology, owners, artifact destinations, and each gate as `not run`. As commands run, preserve exact commands and immutable software, model, image, dataset, and hardware pins; link artifacts for each gate; and retain failures rather than deleting them.
 
 ## Verify the GPU Host Before the Run
 
@@ -266,7 +266,7 @@ This page can move from experimental to supported only when an independently rev
 - successful validation-only smoke and one complete training iteration
 - exact token ID and logprob verification
 - a successful policy update and post-update generation
-- matched routing evidence with causal metrics
+- the documented routing configuration and request-distribution evidence; any routing performance claim must also include a matched experiment and causal metrics
 - one request failure, worker failure, and update failure recovery
 - framework-to-Dynamo trace correlation
 - an upstream recipe maintainer and Dynamo RL maintainer as freshness owners
@@ -275,7 +275,7 @@ Until that record exists, the public recipe is usable experimental evidence, not
 
 ## Complete an Independent Clean-Room Review
 
-After the framework-specific and cross-cutting validation checklists are complete, assign a reviewer who did not author the integration or its evidence to execute this guide from a fresh workspace. The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have immutable artifacts, and every blocking or major finding is resolved. Preserve the reviewed guide commit, framework and Dynamo pins, image digest, model revision, hardware description, reviewer identity, findings, waivers, and final decision in the approved artifact store.
+After the framework-specific and cross-cutting validation checklists are complete, assign a reviewer who did not author the integration or its evidence to execute this guide from a fresh workspace. The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have immutable artifacts, and every blocking or major finding is resolved. Preserve the reviewed guide commit, framework and Dynamo pins, image digest, model revision, hardware description, reviewer identity, findings, waivers, and final decision in a durable access-controlled location appropriate for the data.
 
 ## Upstream References
 

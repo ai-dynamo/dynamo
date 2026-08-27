@@ -102,6 +102,7 @@ No framework path in this documentation set is labeled supported yet. This is de
 - A successful HTTP request does not prove a complete RL sample. The framework must verify terminal state, token/logprob alignment, masks where applicable, and its own duplicate-sample policy.
 - DynoSim and request replay reproduce the serving workload, not the trainer, reward computation, policy transitions, or model-dependent branch decisions.
 - ModelExpress accelerates model loading and fleet distribution. It is not the default live-policy refresh mechanism for the framework integrations documented here.
+- Kubernetes is optional for these RL paths. The documented verl recipe supervises local or multi-node processes through its own Ray-based control path; use Kubernetes or another deployment orchestrator only when your environment requires it.
 
 ## Next Step
 

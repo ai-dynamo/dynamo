@@ -9,6 +9,8 @@ subtitle: Coordinate policy transfer, readiness, versioning, cache invalidation,
 
 This guide distinguishes live policy refresh from model distribution and documents the current framework/backend paths without implying that one mechanism applies everywhere.
 
+Kubernetes is not required for the live-update paths in this guide. Deployment-level model rollout may use Kubernetes, another orchestrator, or direct process management; the framework-owned policy-update lifecycle remains the same boundary.
+
 ## Initial Load Is Not Live Policy Refresh
 
 | Job | Typical trigger | Required guarantee | Current Dynamo role |
@@ -70,7 +72,7 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
 
 Discover workers at `GET http://localhost:8001/v1/rl/workers`. For each selected worker, require `pause_generation`, `update_weights_from_disk`, `get_weight_version`, and `resume_generation` in its `routes` list and use its returned `system_url`.
 
-The following example updates one worker. It checks both HTTP failure and the JSON status and uses a trap to attempt resume if a later command fails:
+The following example updates one worker and checks both HTTP failure and the JSON status. It intentionally resumes only after the update and version checks pass; if a command fails, the worker remains paused and must be repaired, replaced, or explicitly recovered before it can serve again:
 
 ```bash
 set -euo pipefail
@@ -79,18 +81,10 @@ WORKER_URL=http://10.0.0.12:8081
 TARGET_VERSION=step-42
 TARGET_PATH=/models/checkpoint-42
 
-resume_worker() {
-  RESUME_RESPONSE=$(curl --fail-with-body "$WORKER_URL/engine/resume_generation" \
-    -H 'Content-Type: application/json' \
-    -d '{}')
-  jq -e '.status == "ok"' <<<"$RESUME_RESPONSE" >/dev/null
-}
-
 PAUSE_RESPONSE=$(curl --fail-with-body "$WORKER_URL/engine/pause_generation" \
   -H 'Content-Type: application/json' \
   -d '{"mode":"keep","clear_cache":false}')
 jq -e '.status == "ok"' <<<"$PAUSE_RESPONSE" >/dev/null
-trap resume_worker EXIT
 
 UPDATE_RESPONSE=$(curl --fail-with-body "$WORKER_URL/engine/update_weights_from_disk" \
   -H 'Content-Type: application/json' \
@@ -102,8 +96,10 @@ VERSION_RESPONSE=$(curl --fail-with-body "$WORKER_URL/engine/get_weight_version"
   -d '{}')
 jq -e --arg version "$TARGET_VERSION" '.status == "ok" and .version == $version' <<<"$VERSION_RESPONSE" >/dev/null
 
-resume_worker
-trap - EXIT
+RESUME_RESPONSE=$(curl --fail-with-body "$WORKER_URL/engine/resume_generation" \
+  -H 'Content-Type: application/json' \
+  -d '{}')
+jq -e '.status == "ok"' <<<"$RESUME_RESPONSE" >/dev/null
 ```
 
 The vLLM handler serializes pause, resume, cache flush, and weight update with a per-worker lock. `update_weights_from_disk` requires the worker to be paused, applies the backend collective RPC, resets the prefix cache before releasing the lock, and then records the supplied version. That provides useful per-worker ordering; it does not prevent other frontend workers from serving, coordinate a whole fleet, or prove that the checkpoint contents match the version string.
@@ -238,13 +234,13 @@ For every published integration, capture one validation report with:
 
 Do not label an update path supported when only transfer bandwidth was measured. Readiness, atomicity, failure, retry, cache, version, and sample-freshness semantics are part of the product contract.
 
-## Validate Both Required Update Paths
+## Qualify Every Claimed Update Path
 
-Before making broad support claims, validate at least two distinct paths across the program: one colocated path and a different disaggregated serving path. Those paths may use different framework/backend combinations, so every path must independently pin its framework commit, backend version, container image digest, model revision, transport, model class, and source and target TP, PP, DP, and EP layouts.
+Validate every topology and transport named by an integration; do not generalize one passing path into a broader support claim. A program-level claim that Dynamo covers both colocated and disaggregated RL serving should include at least two distinct paths: one colocated path and a different disaggregated serving path. Those paths may use different framework/backend combinations, so every path must independently pin its framework commit, backend version, container image digest, model revision, transport, model class, and source and target TP, PP, DP, and EP layouts.
 
 For each path, preserve evidence that all targeted workers were verified, cache handling completed, the requested version was read back, the output changed or a numerical tensor validation passed, a partial failure recovered under the declared policy, and generation succeeded after the update. A transport benchmark or one-worker success cannot satisfy this record.
 
-Have an independent reviewer confirm the two path reports before using “supported” language. The same review must cover the matched routing experiment and [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report), keeping deployment claims tied to one pinned program rather than unrelated demonstrations.
+Have an independent reviewer confirm every claimed path report before using “supported” language. For a program-level colocated-and-disaggregated claim, the review must cover both path reports plus the matched routing experiment and [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report), keeping the conclusion tied to one pinned program rather than unrelated demonstrations.
 
 ## Observe Update Time
 
