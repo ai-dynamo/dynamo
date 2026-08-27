@@ -330,8 +330,7 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
-  # variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves

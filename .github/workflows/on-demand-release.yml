@@ -1,30 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# On-demand release: branch from main / a release branch / a main commit SHA,
-# set the release version, commit it to a new release/<version> branch (which
-# triggers post-merge CI to build the images), then stage all artifacts and
-# trigger the GitLab release-automation pipeline via release.yml.
+# On-demand release: branch from main / a release branch / a commit SHA, set
+# the release version, commit it to a release/<version> branch or a bare named
+# release branch (v<X.Y.Z>[-<name>], pushed with a release/<branch> CI twin so
+# post-merge CI builds the images), then stage all artifacts and trigger the
+# GitLab release-automation pipeline via release.yml. Dispatch is restricted
+# to active members of the release-ops team (vars.RELEASE_OPS_TEAM).
 
 name: On-Demand Release
 
 # workflow_dispatch is capped at 10 inputs by GitHub — this block is at 10;
 # fold any new knob into an existing input.
 on:
-  # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
-  # test flow as release_version 1.4.0 on the existing release/1.4.0 branch, rc10,
-  # all artifacts (containers/wheels/crates/helm=all). REVERT before merge.
-  push:
-    branches:
-      # copy-pr-bot's reviewed-copy branch. Velonix job admission only admits
-      # push on main, release/*, and pull-request/N, so the test loop runs off
-      # the PR copy: comment `/ok to test <sha>` to refresh it. Same filter
-      # fern-docs.yml uses.
-      - pull-request/[0-9]+
   workflow_dispatch:
     inputs:
       source_ref:
-        description: "Branch to fork from: 'main', a 'release/x.y.z' branch, or a 40-char main commit SHA."
+        description: "Ref to fork from: 'main', a 'release/*' branch, a bare named release branch (v<X.Y.Z>[-<name>]), or a 40-char commit SHA."
         required: false
         type: string
         default: main
@@ -33,17 +25,17 @@ on:
         required: true
         type: string
       release_branch:
-        description: 'Branch to create (default release/<version>). For a throwaway run use e.g. release/0.0.0test — it still matches release/*.*.* so post-merge + release-branch checks run, but the publish jobs skip.'
+        description: 'Branch to create (default release/<version>). Also accepts a bare named release v<X.Y.Z>[-<name>], e.g. v1.3.0-nemotron-ultra-dev.1 — must start with v + the release_version base; a release/<branch> CI twin is pushed for the builds, and artifact versions stay numeric (the name lives only in the branch). For a throwaway run use e.g. release/0.0.0test — post-merge + release-branch checks run, but the publish jobs skip.'
         required: false
         type: string
         default: ''
       rc_round:
-        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 10.'
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 0.'
         required: false
         type: string
-        default: '10'
+        default: '0'
       containers:
-        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
+        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner.'
         required: false
         type: string
         default: all
@@ -58,7 +50,7 @@ on:
         type: string
         default: all
       helm:
-        description: 'Helm charts to release: all | none | csv of platform,snapshot.'
+        description: 'Helm charts to release: all | none | platform.'
         required: false
         type: string
         default: all
@@ -78,12 +70,57 @@ permissions:
 
 jobs:
   # ============================================================================
+  # OPS GATE — only active members of the release-ops GitHub team
+  # (vars.RELEASE_OPS_TEAM, in the repo's org) may run this workflow. Fail
+  # closed: an unset var, missing app org Members:read permission, or any API
+  # error denies. github.actor re-resolves on re-runs, so re-running someone
+  # else's run is re-checked too.
+  # ============================================================================
+  authorize:
+    name: Verify release-ops membership
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Require release-ops team membership
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          TEAM: ${{ vars.RELEASE_OPS_TEAM }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEAM}" ]; then
+            echo "::error::vars.RELEASE_OPS_TEAM is not configured; denying every dispatch (fail closed)."
+            exit 1
+          fi
+          HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${ACTOR}")
+          STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
+            "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
+          if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
+            echo "::error::@${ACTOR} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
+            exit 1
+          fi
+          echo "@${ACTOR} authorized via ${ORG}/${TEAM}"
+
+  # ============================================================================
   # CREATE RELEASE BRANCH + VERSION BUMP
   # Pushes with a dedicated token (not GITHUB_TOKEN) so the push triggers
   # post-merge CI, which builds the release images for the bump commit.
   # ============================================================================
   prepare-branch:
     name: Create release branch + version bump
+    needs: [authorize]
     runs-on: prod-default-small-v2
     environment: automated-release
     permissions:
@@ -100,12 +137,11 @@ jobs:
     steps:
       - name: Validate inputs
         env:
-          # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
-          # to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.0' }}
-          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.0' || '') }}
-          RC_ROUND: ${{ inputs.rc_round || '10' }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          # || guards a cleared dispatch field (inputs default fills the rest).
+          RC_ROUND: ${{ inputs.rc_round || '0' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
@@ -117,12 +153,22 @@ jobs:
             echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
             exit 1
           fi
-          if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ ]]; then
-            echo "::error::release_branch must look like release/<name> (got '${RELEASE_BRANCH}')"
+          if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ \
+                && ! "${RELEASE_BRANCH}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            echo "::error::release_branch must be release/<name> or a bare named release v<X.Y.Z>[-<name>] (got '${RELEASE_BRANCH}')"
             exit 1
           fi
-          if [[ ! "${SOURCE_REF}" =~ ^(main|release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?|[0-9a-f]{40})$ ]]; then
-            echo "::error::source_ref must be 'main', a release/x.y.z branch, or a 40-char SHA (got '${SOURCE_REF}')"
+          # A bare named branch must carry the version it stamps (v<X.Y.Z base>-<name>);
+          # artifact versions stay numeric, so this prefix is the only tie between them.
+          if [[ "${RELEASE_BRANCH}" =~ ^v[0-9] ]]; then
+            BASE="${RELEASE_VERSION%%.dev*}"; BASE="${BASE%%.post*}"
+            if [[ "${RELEASE_BRANCH}" != "v${BASE}" && "${RELEASE_BRANCH}" != "v${BASE}-"* ]]; then
+              echo "::error::named branch '${RELEASE_BRANCH}' must start with v${BASE} (the release_version base)"
+              exit 1
+            fi
+          fi
+          if [[ ! "${SOURCE_REF}" =~ ^(main|release/[A-Za-z0-9._-]+|v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?|[0-9a-f]{40})$ ]]; then
+            echo "::error::source_ref must be 'main', a release/* branch, a named release branch (v<X.Y.Z>[-<name>]), or a 40-char SHA (got '${SOURCE_REF}')"
             exit 1
           fi
 
@@ -153,9 +199,9 @@ jobs:
 
           FRAMEWORKS = {"vllm", "sglang", "trtllm"}
           VARIANTS = {"runtime", "efa"}
-          COMPONENTS = {"frontend", "operator", "planner", "snapshot"}
+          COMPONENTS = {"frontend", "operator", "planner"}
           WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
-          HELM_TOKENS = {"platform", "snapshot"}
+          HELM_TOKENS = {"platform"}
 
           def fail(msg):
               print(f"::error::{msg}", file=sys.stderr)
@@ -254,17 +300,15 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          # TEMPORARY(test): || 'main' covers inputless push events. REVERT.
-          ref: ${{ inputs.source_ref || 'main' }}
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set version and create branch
         id: bump
         env:
-          # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.0' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.0' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -277,10 +321,18 @@ jobs:
           set -euo pipefail
 
           BRANCH="${RELEASE_BRANCH:-release/${RELEASE_VERSION}}"
-          # A pure release/X.Y.Z[.devN|.postN] branch is a real release; anything
-          # else (e.g. release/0.0.0test) is a throwaway test branch.
+          # Real releases: pure release/X.Y.Z[.devN|.postN], or a bare named release
+          # v<X.Y.Z>[-<name>] (e.g. v1.3.0-nemotron-ultra-dev.1). Anything else
+          # (e.g. release/0.0.0test) is a throwaway test branch. Bare branches match
+          # no CI push filter (post-merge and runner admission fire only on
+          # main/release/*), so a release/<branch> CI twin is pushed alongside to
+          # build the images; staging consumes the SHA, not the ref.
+          CI_BRANCH="${BRANCH}"
           if [[ "${BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
             IS_TEST=false
+          elif [[ "${BRANCH}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            IS_TEST=false
+            CI_BRANCH="release/${BRANCH}"
           else
             IS_TEST=true
           fi
@@ -346,6 +398,11 @@ jobs:
             git commit -s -m "release: set version ${RELEASE_VERSION}" -m "${SELECTION_MSG}"
             git push origin "${BRANCH}"
           fi
+          # Keep the CI twin of a bare named branch on this commit (fast-forward;
+          # no-op when already there) so post-merge CI builds it.
+          if [ "${CI_BRANCH}" != "${BRANCH}" ]; then
+            git push origin "HEAD:refs/heads/${CI_BRANCH}"
+          fi
 
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -357,7 +414,7 @@ jobs:
         # A dry run sets up the branch/bump only — don't consume an rc.
         if: ${{ !inputs.dry_run }}
         env:
-          RC_ROUND: ${{ inputs.rc_round || '10' }}
+          RC_ROUND: ${{ inputs.rc_round || '0' }}
         run: |
           set -euo pipefail
           # Internal staging registries (crates/helm/wheels) are immutable, so each
@@ -399,7 +456,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ needs.prepare-branch.outputs.bump_sha }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           CONTAINERS: ${{ needs.prepare-branch.outputs.containers }}
           WHEELS: ${{ needs.prepare-branch.outputs.wheels }}
           CRATES: ${{ needs.prepare-branch.outputs.crates }}
@@ -421,7 +479,7 @@ jobs:
             [vllm-runtime]=vllm-runtime     [vllm-efa]=vllm-runtime-efa
             [sglang-runtime]=sglang-runtime [sglang-efa]=sglang-runtime-efa
             [trtllm-runtime]=trtllm-runtime [trtllm-efa]=trtllm-runtime-efa
-            [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner [snapshot]=snapshot-agent
+            [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner
           )
           declare -a TAGS=()
           for tok in "${!CTR[@]}"; do
@@ -444,7 +502,7 @@ jobs:
           while :; do
             missing=()
             for TAG in "${TAGS[@]}"; do
-              if ! aws ecr describe-images --repository-name "ai-dynamo/dynamo" \
+              if ! aws ecr describe-images --repository-name "${ECR_REPOSITORY}" \
                      --image-ids imageTag="${TAG}" --region "${AWS_DEFAULT_REGION}" >/dev/null 2>&1; then
                 missing+=("${TAG}")
               fi
@@ -514,8 +572,7 @@ jobs:
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
-      # TEMPORARY(test): || fallback for inputless push events. REVERT.
-      release_version: ${{ inputs.release_version || '1.4.0' }}
+      release_version: ${{ inputs.release_version }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection.

@@ -33,7 +33,7 @@ on:
         type: string
         default: ''
       containers:
-        description: 'Container subset to publish (all|none|csv of vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,snapshot). Partial rc re-publishes supported.'
+        description: 'Container subset to publish (all|none|csv of vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner). Partial rc re-publishes supported.'
         required: false
         type: string
         default: all
@@ -48,7 +48,7 @@ on:
         type: string
         default: all
       helm:
-        description: 'Helm chart subset to push (all|none|csv of platform,snapshot).'
+        description: 'Helm chart subset to push (all|none|platform).'
         required: false
         type: string
         default: all
@@ -207,9 +207,9 @@ jobs:
               esac
             done
           }
-          validate_subset containers "${CONTAINER_SUBSET:-all}" "vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,snapshot"
+          validate_subset containers "${CONTAINER_SUBSET:-all}" "vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner"
           validate_subset wheels "${WHEEL_SUBSET:-all}" "ai-dynamo,ai-dynamo-runtime,kvbm"
-          validate_subset helm "${HELM_SUBSET:-all}" "platform,snapshot"
+          validate_subset helm "${HELM_SUBSET:-all}" "platform"
           if [[ ! "${CRATE_SUBSET:-all}" =~ ^[A-Za-z0-9_,-]*$ ]]; then
             echo "Error: crate subset may only contain [A-Za-z0-9_-] names separated by commas (got '${CRATE_SUBSET}')"
             exit 1
@@ -489,7 +489,6 @@ jobs:
               "frontend|${COMMIT_SHA}-dynamo-frontend"
               "operator|${COMMIT_SHA}-operator"
               "planner|${COMMIT_SHA}-dynamo-planner"
-              "snapshot|${COMMIT_SHA}-snapshot-agent"
             )
           fi
 
@@ -589,7 +588,7 @@ jobs:
 
           # Copy only the selected container subset; nightly/rc default to the full
           # set (SUBSET=all). Tokens: <fw>-runtime (bare + -cuda13 alias),
-          # <fw>-efa, frontend, operator, planner, snapshot.
+          # <fw>-efa, frontend, operator, planner.
           SUBSET="${CONTAINER_SUBSET:-all}"
           want() {
             [ "${SUBSET}" = "all" ] && return 0
@@ -696,9 +695,8 @@ jobs:
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
               copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}" || true
             fi
-
           else
-            # Optional nightly images — operator, planner, frontend, and the
+            # Optional nightly images — operator, planner, frontend and the
             # three runtime EFA variants — are built by THIS
             # nightly run (ordering-only needs of the release, deliberately
             # outside its success gate) and staged fail-soft: a build flake
@@ -846,7 +844,6 @@ jobs:
           # Each site: chart_token|container_token|values.yaml|image repo (as referenced by the chart)
           SITES=(
             "platform|operator|deploy/helm/charts/platform/components/operator/values.yaml|nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
-            "snapshot|snapshot|deploy/helm/charts/snapshot/values.yaml|nvcr.io/nvidia/ai-dynamo/snapshot-agent"
           )
           for SITE in "${SITES[@]}"; do
             IFS='|' read -r CHART CTOK VALUES REPO <<<"${SITE}"
@@ -898,11 +895,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
 
-          # snapshot + dynamo-platform, mirroring the rcs/dynamo helm runbook.
+          # dynamo-platform, mirroring the rcs/dynamo helm runbook.
           # Only the selected charts are pushed (token = chart dir name);
-          # nightly/rc default to both (HELM_SUBSET defaults to 'all').
+          # nightly/rc default to all (HELM_SUBSET defaults to 'all').
           STAGED_HELM=""
-          for CHART_DIR in deploy/helm/charts/platform deploy/helm/charts/snapshot; do
+          for CHART_DIR in deploy/helm/charts/platform; do
             TOKEN="$(basename "${CHART_DIR}")"
             if [ "${HELM_SUBSET:-all}" != "all" ]; then
               case ",${HELM_SUBSET}," in *,"${TOKEN}",*) ;; *) echo "skip ${TOKEN} chart (not selected)"; continue ;; esac
@@ -927,7 +924,7 @@ jobs:
 
           helm repo remove "${REPO_ALIAS}"
 
-      # Nightly: package the platform chart at the dated pre-release version
+      # Nightly: package platform at the dated pre-release version
       # and dual-push to NGC staging (ChartMuseum + OCI). Values are rewritten
       # in the workspace only, onto the *-nightly repos at this run's tag.
       # Fail-soft per chart via the copy step's *_staged flags; fully fail-soft

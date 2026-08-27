@@ -75,7 +75,6 @@ WORKSPACE_PIN_CARGO_TARGETS = [
 HELM_CHART_TARGETS = [
     ("platform", "deploy/helm/charts/platform/Chart.yaml"),
     ("platform", "deploy/helm/charts/platform/components/operator/Chart.yaml"),
-    ("snapshot", "deploy/helm/charts/snapshot/Chart.yaml"),
 ]
 
 # First-party image `tag:` sites in values.yaml. Each entry is
@@ -92,16 +91,14 @@ HELM_IMAGE_TAG_SITES = [
      "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
     ("operator", "platform", "deploy/helm/charts/platform/components/operator/values.yaml",
      "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
-    ("snapshot", "snapshot", "deploy/helm/charts/snapshot/values.yaml",
-     "nvcr.io/nvidia/ai-dynamo/snapshot-agent"),
 ]
 
 # Normalized subset universes for --containers / --helm token validation.
 CONTAINER_TOKENS = {
     "vllm-runtime", "vllm-efa", "sglang-runtime", "sglang-efa",
-    "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner", "snapshot",
+    "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner",
 }
-HELM_TOKENS = {"platform", "snapshot"}
+HELM_TOKENS = {"platform"}
 
 # Container token -> the NGC repo release.yml actually publishes at :<version>.
 # Used by --image-refs to rewrite the `my-registry`/`my-tag` placeholders in docs,
@@ -118,7 +115,6 @@ IMAGE_REF_TOKENS = {
     "frontend": "dynamo-frontend",
     "operator": "kubernetes-operator",
     "planner": "dynamo-planner",
-    "snapshot": "snapshot-agent",
 }
 GA_REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 PLACEHOLDER_REGISTRY = "my-registry"
@@ -273,7 +269,7 @@ def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> None:
         count=1,
     )
     if is_root:
-        text = PY_RUNTIME_PIN_RE.sub(
+        text = PY_ROOT_PIN_RE.sub(
             lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
             text,
         )
@@ -531,7 +527,7 @@ def main() -> int:
     ap.add_argument("--containers", default="all",
                     help="normalized container subset (all|none|csv) gating image-tag bumps")
     ap.add_argument("--helm", default="all",
-                    help="helm chart subset (all|none|csv of platform,snapshot) gating chart bumps")
+                    help="helm chart subset (all|none|platform) gating chart bumps")
     ap.add_argument("--image-refs", action="store_true",
                     help="also point the my-registry/my-tag placeholders in docs, examples and "
                          "deploy manifests at the GA registry + release version — only for images "
