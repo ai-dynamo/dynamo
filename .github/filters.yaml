@@ -83,6 +83,7 @@ ignore:
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
   - 'scripts/validate_skills.py'
+  - 'scripts/check_action_pins.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
