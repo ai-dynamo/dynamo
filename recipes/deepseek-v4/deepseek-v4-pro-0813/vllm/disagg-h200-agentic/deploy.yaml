@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4-Pro-0813 - disaggregated 1P1D, 16x H200.
 # Agentic workload (64K ISL / 400 OSL) and 1M context from the same config.
-# Prefill needs mnbt 4096 + gpu-mu 0.97: at mnbt 16384 it cannot start at 1M
-# (24.06 GiB KV needed for one request vs 20.75 available). No CPU offload needed --
-# GPU KV holds ~3.1M tokens (prefill) / ~2.8M (decode).
+# Prefill requires mnbt 4096 + gpu-mu 0.97 to start at 1M context.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
