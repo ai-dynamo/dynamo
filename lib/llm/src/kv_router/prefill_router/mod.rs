@@ -89,17 +89,36 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
+/// What decode needs in order to reach the prefill worker directly.
+///
+/// The variants differ in what the engine uses to rendezvous and in which field
+/// on the decode request carries it. The routing workflow around them -- select
+/// a prefill worker, dispatch both legs, pin decode to that worker -- is the
+/// same, which is why they share an outcome rather than a branch each.
+enum DisaggHandoff {
+    /// SGLang: both legs carry the same room and meet at prefill's bootstrap
+    /// server.
+    Bootstrap(BootstrapInfo),
+    /// vLLM `NixlPushConnector`: decode registers its blocks with the named
+    /// prefill engine, which WRITEs into them.
+    NixlPush(PrefillResult),
+}
+
+impl DisaggHandoff {
+    fn attach_to_decode(self, request: &mut PreprocessedRequest) {
+        match self {
+            Self::Bootstrap(info) => request.bootstrap_info = Some(info),
+            Self::NixlPush(result) => request.prefill_result = Some(result),
+        }
+    }
+}
+
 enum PrefillOutcome {
-    Bootstrap {
-        bootstrap_info: BootstrapInfo,
-        worker_id: u64,
-    },
-    /// Prefill runs in the background while decode registers its blocks with
-    /// it. Unlike [`PrefillOutcome::Completed`], the handoff is synthesized
-    /// from discovery before prefill starts, so nothing here is derived from
-    /// the prefill response.
-    NixlPush {
-        result: PrefillResult,
+    /// Decode can reach the prefill worker without the router relaying its
+    /// output. Reached either from discovery before prefill runs, or from the
+    /// prefill response afterwards -- the decode-side handling is identical.
+    Handoff {
+        handoff: DisaggHandoff,
         worker_id: u64,
     },
     Completed {
@@ -176,10 +195,10 @@ fn push_handoff_for(
 
 struct PreparedPrefill {
     worker_id: u64,
-    bootstrap_info: Option<BootstrapInfo>,
-    /// Set when the selected prefill worker advertised NIXL push coordinates,
-    /// which is what lets decode be dispatched without awaiting prefill.
-    push_handoff: Option<PrefillResult>,
+    /// Set when the selected prefill worker advertised coordinates decode can
+    /// reach it by, which is what lets decode be dispatched without awaiting
+    /// prefill.
+    handoff: Option<DisaggHandoff>,
     topology_constraints: Option<RoutingConstraints>,
 }
 
@@ -477,48 +496,50 @@ where
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
-            let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
-                PrefillOutcome::Bootstrap {
-                    bootstrap_info,
-                    worker_id: prepared.worker_id,
-                }
-            } else if let Some(result) = prepared.push_handoff {
+            let outcome = match prepared.handoff {
                 // Awaiting prefill here would defeat the point: decode must be
                 // in flight and holding allocated blocks for the prefill worker
-                // to have somewhere to push to the moment prefill lands.
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
-                PrefillOutcome::NixlPush {
-                    result,
-                    worker_id: prepared.worker_id,
+                // to have somewhere to send to the moment prefill lands.
+                Some(handoff) => {
+                    self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                    PrefillOutcome::Handoff {
+                        handoff,
+                        worker_id: prepared.worker_id,
+                    }
                 }
-            } else {
-                drop(prefill_phase_barrier);
-                let completion =
-                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
-                        .await?;
+                None => {
+                    drop(prefill_phase_barrier);
+                    let completion = Self::consume_prefill_stream(
+                        prefill_stream,
+                        tracker,
+                        self.task_guard.clone(),
+                    )
+                    .await?;
 
-                match completion {
-                    PrefillCompletion::Handoff {
-                        result,
-                        worker_link,
-                    } => {
-                        if let Some(bootstrap_info) =
-                            extract_bootstrap_info(&result.disaggregated_params)
-                        {
-                            PrefillOutcome::Bootstrap {
-                                bootstrap_info,
-                                worker_id: prepared.worker_id,
-                            }
-                        } else {
-                            PrefillOutcome::Completed {
-                                result,
-                                worker_id: prepared.worker_id,
-                                worker_link,
+                    match completion {
+                        PrefillCompletion::Handoff {
+                            result,
+                            worker_link,
+                        } => {
+                            if let Some(bootstrap_info) =
+                                extract_bootstrap_info(&result.disaggregated_params)
+                            {
+                                PrefillOutcome::Handoff {
+                                    handoff: DisaggHandoff::Bootstrap(bootstrap_info),
+                                    worker_id: prepared.worker_id,
+                                }
+                            } else {
+                                PrefillOutcome::Completed {
+                                    result,
+                                    worker_id: prepared.worker_id,
+                                    worker_link,
+                                }
                             }
                         }
+                        PrefillCompletion::Terminal { output } => {
+                            PrefillOutcome::Terminal { output }
+                        }
                     }
-                    PrefillCompletion::Terminal { output } => PrefillOutcome::Terminal { output },
                 }
             };
             Ok((outcome, topology_constraints))
@@ -583,18 +604,11 @@ where
 
         let mut decode_req = req;
         match outcome {
-            PrefillOutcome::Bootstrap {
-                bootstrap_info,
-                worker_id,
-            } => {
-                decode_req.bootstrap_info = Some(bootstrap_info);
-                decode_req.routing_mut().prefill_worker_id = Some(worker_id);
-            }
-            PrefillOutcome::NixlPush { result, worker_id } => {
-                decode_req.prefill_result = Some(result);
+            PrefillOutcome::Handoff { handoff, worker_id } => {
                 // No `migration_link`: the prefill worker's `engine.generate`
-                // span is only reported on its response, which by design has
-                // not arrived yet.
+                // span is only reported on its response, which on the
+                // overlapped path has by design not arrived yet.
+                handoff.attach_to_decode(&mut decode_req);
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
             }
             PrefillOutcome::Completed {
@@ -702,15 +716,27 @@ where
                     handoff_id: Some(Uuid::new_v4()),
                 })
             });
+        // Bootstrap wins when a worker somehow advertises both; the two belong
+        // to different backends, so no deployment produces both today.
+        let handoff = bootstrap_info
+            .map(DisaggHandoff::Bootstrap)
+            .or_else(|| push_handoff.map(DisaggHandoff::NixlPush));
+
         let routing = request.routing_mut();
         routing.prefill_worker_id = Some(worker_id);
         routing.prefill_dp_rank = dp_rank;
-        request.bootstrap_info = bootstrap_info.clone();
+        // Assigned unconditionally so a client-supplied value cannot survive
+        // into the prefill leg. Only the bootstrap rendezvous needs both legs
+        // to carry the payload -- push names an engine that already knows its
+        // own identity, so its prefill leg is dispatched unchanged.
+        request.bootstrap_info = match handoff.as_ref() {
+            Some(DisaggHandoff::Bootstrap(info)) => Some(info.clone()),
+            _ => None,
+        };
 
         Ok(PreparedPrefill {
             worker_id,
-            bootstrap_info,
-            push_handoff,
+            handoff,
             topology_constraints,
         })
     }
@@ -1078,6 +1104,23 @@ mod tests {
             handoff.disaggregated_params["kv_transfer_params"]["remote_engine_id"],
             "prefill-engine-001"
         );
+    }
+
+    /// The variants share an outcome but not a destination: each engine reads
+    /// the handoff from a different field, so routing the payload to the wrong
+    /// one strands decode with no way to reach prefill.
+    #[test]
+    fn each_handoff_lands_on_the_field_its_engine_reads() {
+        let mut request = text_request();
+        DisaggHandoff::NixlPush(nixl_push_handoff(&push_endpoint(), "req-42"))
+            .attach_to_decode(&mut request);
+        assert!(request.prefill_result.is_some());
+        assert!(request.bootstrap_info.is_none());
+
+        let mut request = text_request();
+        DisaggHandoff::Bootstrap(BootstrapInfo::default()).attach_to_decode(&mut request);
+        assert!(request.bootstrap_info.is_some());
+        assert!(request.prefill_result.is_none());
     }
 
     /// Without advertised coordinates there is nothing to overlap with, and the
