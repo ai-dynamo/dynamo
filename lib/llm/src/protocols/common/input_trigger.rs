@@ -22,7 +22,10 @@ use crate::protocols::{
 };
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, CreateChatCompletionRequest,
-    responses::{InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole},
+    responses::{
+        InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole,
+        ToolSearchExecutionType,
+    },
 };
 
 /// Classify an OpenAI Chat Completions request by its last causal message.
@@ -78,21 +81,22 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
     }
 }
 
-/// Return whether an item is tool output supplied back to the model.
+/// Return whether an item is client-supplied tool output fed back to the model.
 ///
-/// Tool calls, hosted-tool lifecycle items, and approval workflow items (including
-/// `McpApprovalResponse`) are not execution results and remain classified as `Other`.
+/// Server-executed or origin-unspecified tool search outputs, tool calls, hosted-tool lifecycle
+/// items, and approval workflow items (including `McpApprovalResponse`) remain classified as
+/// `Other`.
 fn is_response_tool_output(item: &Item) -> bool {
-    matches!(
-        item,
+    match item {
+        Item::ToolSearchOutput(output) => output.execution == Some(ToolSearchExecutionType::Client),
         Item::FunctionCallOutput(_)
-            | Item::ToolSearchOutput(_)
-            | Item::ComputerCallOutput(_)
-            | Item::LocalShellCallOutput(_)
-            | Item::ShellCallOutput(_)
-            | Item::ApplyPatchCallOutput(_)
-            | Item::CustomToolCallOutput(_)
-    )
+        | Item::ComputerCallOutput(_)
+        | Item::LocalShellCallOutput(_)
+        | Item::ShellCallOutput(_)
+        | Item::ApplyPatchCallOutput(_)
+        | Item::CustomToolCallOutput(_) => true,
+        _ => false,
+    }
 }
 
 /// Classify an Anthropic Messages request by its last causal message.
@@ -241,6 +245,7 @@ mod tests {
             }),
             serde_json::json!({
                 "type": "tool_search_output",
+                "execution": "client",
                 "tools": [],
             }),
             serde_json::json!({
@@ -275,6 +280,26 @@ mod tests {
             assert_eq!(
                 classify_response_request(&response_request_with_item(item)),
                 InputTrigger::ToolResult
+            );
+        }
+    }
+
+    #[test]
+    fn responses_hosted_or_unspecified_tool_search_outputs_are_not_tool_results() {
+        for item in [
+            serde_json::json!({
+                "type": "tool_search_output",
+                "execution": "server",
+                "tools": [],
+            }),
+            serde_json::json!({
+                "type": "tool_search_output",
+                "tools": [],
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::Other
             );
         }
     }
