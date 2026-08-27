@@ -4739,6 +4739,46 @@ mod tests {
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
+    /// A vanished-worker dispatch failure must reach the client as 503, not 500.
+    ///
+    /// `PushRouter::resolve_transport` returns `ErrorType::Unavailable` when the
+    /// selected instance left discovery and no permitted fallback is free. That
+    /// only becomes a 503 because `request_was_unavailable` finds the typed
+    /// `DynamoError` in the chain; an untyped error falls past every classifier
+    /// into `internal_server_error_with_details` and is served as 500. This
+    /// covers that composition end to end, which no other test did.
+    #[test]
+    fn unavailable_dispatch_error_maps_to_service_unavailable() {
+        let err: anyhow::Error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Unavailable)
+            .message(
+                "Instance 42 not found and no other instances available for endpoint ns/comp/ep",
+            )
+            .build()
+            .into();
+
+        let (status, Json(body)) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "typed Unavailable must not be served as an internal error"
+        );
+        assert_eq!(body.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+
+        // Contrast: the untyped error this path used to return classifies as
+        // Unknown and degrades to 500.
+        let untyped = anyhow::anyhow!(
+            "Instance 42 not found and no other instances available for endpoint ns/comp/ep"
+        );
+        let (untyped_status, _) = ErrorMessage::from_anyhow(untyped, BACKUP_ERROR_MESSAGE);
+        assert_eq!(
+            untyped_status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "sanity: an untyped dispatch failure is the 500 this fix removes"
+        );
+    }
+
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {
             id: "pool-request".to_string(),

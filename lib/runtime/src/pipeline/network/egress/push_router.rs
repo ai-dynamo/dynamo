@@ -1592,14 +1592,27 @@ where
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            // TODO(https://github.com/ai-dynamo/dynamo/issues/12383): Distinguish
-            // no discoverable fallback from pool-wide overload and return the
-            // appropriate typed error for each case.
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            // The selected instance vanished from discovery and no permitted
+            // fallback is free. Typed rather than a bare `anyhow!` so
+            // `error_type_from_chain` (route spans) and the frontend's status
+            // mapping see a real category instead of `unknown`/500.
+            //
+            // Uniformly `Unavailable`, not a pool-state split: reaching here
+            // means *this request's* worker is gone, which is a discovery fact,
+            // and `transport_resolution_precedes_stale_overload_check` requires
+            // that a vanished instance is never redressed as overload. Nor
+            // `CannotConnect`, which stays the signature of exact dispatch
+            // (`TransportFallback::Deny`) and must remain distinguishable from a
+            // fallback-enabled failure.
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1948,6 +1961,20 @@ mod tests {
             !match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
             "fallback-enabled failure must preserve its existing error semantics: {error}"
         );
+    }
+
+    /// The no-permitted-fallback path must carry a typed `Unavailable`, not a
+    /// bare `anyhow!`. Asserted through `error_type_from_chain` because that is
+    /// what route spans and the frontend's 503 mapping actually call: an
+    /// untyped error classifies as `Unknown` there and is exported as
+    /// `error.type=unknown` / HTTP 500.
+    fn assert_unavailable(error: &anyhow::Error) {
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Unavailable,
+            "no-permitted-fallback failure must be typed Unavailable, got: {error}"
+        );
+        assert_not_cannot_connect(error);
     }
 
     struct StaticMultimodalCacheIndex {
@@ -2940,7 +2967,7 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert_not_cannot_connect(&error);
+        assert_unavailable(&error);
         let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
@@ -3002,7 +3029,7 @@ mod tests {
         let disallowed_error = router
             .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
             .unwrap_err();
-        assert_not_cannot_connect(&disallowed_error);
+        assert_unavailable(&disallowed_error);
 
         let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
