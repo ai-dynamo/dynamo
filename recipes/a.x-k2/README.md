@@ -21,7 +21,7 @@ and keeps embeddings and the LM head in BF16.
 Both variants expose the model as `A.X-K2-NVFP4`, select the
 `FLASHINFER_MLA_SPARSE` attention backend, enable FlashInfer NVFP4 MoE kernels,
 use the `hermes` tool-call parser and `deepseek_v3` reasoning parser, and mount
-the `shared-model-cache` ReadWriteMany (RWX) PersistentVolumeClaim (PVC) at
+the `model-cache` ReadWriteMany (RWX) PersistentVolumeClaim (PVC) at
 `/models`.
 
 ## Prerequisites
@@ -29,7 +29,7 @@ the `shared-model-cache` ReadWriteMany (RWX) PersistentVolumeClaim (PVC) at
 - Dynamo Platform with the `nvidia.com/v1beta1` `DynamoGraphDeployment` API
 - One 4-GPU B200 node for aggregated serving
 - Two 4-GPU B200 nodes and the `rdma/ib` device plugin for disaggregated serving
-- An existing `shared-model-cache` RWX PVC
+- An existing `model-cache` RWX PVC
 - The A.X K2 NVFP4 checkpoint downloaded into that PVC
 - A registry-accessible custom runtime built from [`container/README.md`](container/README.md)
 - A `hf-token-secret` secret in the deployment namespace
@@ -37,7 +37,7 @@ the `shared-model-cache` ReadWriteMany (RWX) PersistentVolumeClaim (PVC) at
 ## Download the Model
 
 The download Job uses the existing PVC. Do not apply
-`model-cache/model-cache.yaml` when `shared-model-cache` already exists.
+`model-cache/model-cache.yaml` when `model-cache` already exists.
 
 ```bash
 export NAMESPACE=<your-namespace>
@@ -92,7 +92,7 @@ kubectl get pods \
 
 The first worker startup compiles model kernels and can take up to 90 minutes.
 `VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`, and `FLASHINFER_WORKSPACE_BASE` point
-into `shared-model-cache` so subsequent workers can reuse the generated
+into `model-cache` so subsequent workers can reuse the generated
 artifacts.
 
 ## Smoke Test

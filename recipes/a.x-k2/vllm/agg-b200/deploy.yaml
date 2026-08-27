@@ -28,12 +28,12 @@ spec:
                 - name: HF_HUB_OFFLINE
                   value: "1"
               volumeMounts:
-                - name: shared-model-cache
+                - name: model-cache
                   mountPath: /models
           volumes:
-            - name: shared-model-cache
+            - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
 
     - name: agg
       type: worker
@@ -124,9 +124,9 @@ spec:
                 limits:
                   nvidia.com/gpu: "4"
               volumeMounts:
-                - name: shared-model-cache
+                - name: model-cache
                   mountPath: /models
           volumes:
-            - name: shared-model-cache
+            - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache

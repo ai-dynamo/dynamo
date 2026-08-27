@@ -50,9 +50,9 @@ spec:
               cpu: "8"
               memory: "16Gi"
           volumeMounts:
-            - name: shared-model-cache
+            - name: model-cache
               mountPath: /models
       volumes:
-        - name: shared-model-cache
+        - name: model-cache
           persistentVolumeClaim:
-            claimName: shared-model-cache
+            claimName: model-cache

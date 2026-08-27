@@ -33,12 +33,12 @@ spec:
                 - name: HF_HUB_OFFLINE
                   value: "1"
               volumeMounts:
-                - name: shared-model-cache
+                - name: model-cache
                   mountPath: /models
           volumes:
-            - name: shared-model-cache
+            - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
 
     - name: VllmPrefillWorker
       type: prefill
@@ -146,12 +146,12 @@ spec:
                   nvidia.com/gpu: "4"
                   rdma/ib: "4"
               volumeMounts:
-                - name: shared-model-cache
+                - name: model-cache
                   mountPath: /models
           volumes:
-            - name: shared-model-cache
+            - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
 
     - name: VllmDecodeWorker
       type: decode
@@ -258,9 +258,9 @@ spec:
                   nvidia.com/gpu: "4"
                   rdma/ib: "4"
               volumeMounts:
-                - name: shared-model-cache
+                - name: model-cache
                   mountPath: /models
           volumes:
-            - name: shared-model-cache
+            - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
