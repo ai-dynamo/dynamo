@@ -1,0 +1,18 @@
+{
+  "complete": 2,
+  "expected_incomplete": 1,
+  "framework_attempts": 3,
+  "input_tokens": 256,
+  "joined_payloads": 3,
+  "joined_terminals": 2,
+  "missing_payload": 0,
+  "missing_terminal": 0,
+  "orphan_terminals": 0,
+  "output_tokens": 44,
+  "payload_records": 3,
+  "policy_mismatches": 0,
+  "strict_violations": 0,
+  "terminal_records": 2,
+  "uncorrelated_payloads": 0,
+  "unexpected_terminal": 0
+}

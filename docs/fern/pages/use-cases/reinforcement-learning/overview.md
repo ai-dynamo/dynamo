@@ -2,77 +2,107 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Reinforcement Learning
-subtitle: Use Dynamo as the rollout-serving plane for RL training systems
+subtitle: Use Dynamo as the rollout-serving plane beneath an RL framework
 ---
 
-**Experimental.** Dynamo can serve rollout generation for reinforcement learning systems that need more than a static inference endpoint. RL frameworks remain responsible for the training loop, reward pipeline, policy update logic, and checkpoint production; Dynamo provides the serving plane around rollout workers.
+**Experimental.** NVIDIA Dynamo provides the rollout-serving infrastructure around an RL framework. The framework still owns the training algorithm, datasets, environments, rewards, trajectory semantics, policy updates, and checkpoint production. Dynamo owns inference-facing concerns such as request routing, rollout-worker discovery and control, token-native generation, backend telemetry, and failure handling.
 
-Use Dynamo when your RL system needs low-latency generation, backend-aware routing, worker discovery, rollout metadata, weight refreshes, fault tolerance, and autoscaling as part of the training loop. The goal is to let RL engineers operate the rollout path with production serving primitives while still integrating with the framework that owns training.
+Use these guides when a static model endpoint is no longer enough: rollout traffic is bursty, many samples share prefixes, generation must return exact token IDs and log probabilities, workers need live policy refreshes, or the serving workload must be diagnosed and replayed independently of the trainer.
+
+## Decide Whether Dynamo Is the Right Layer
+
+Dynamo earns its place when rollout serving has become a distinct distributed-systems job. Do not add it only because an RL framework can call an OpenAI-compatible endpoint.
+
+| Current situation | Recommended path | Decision signal |
+|---|---|---|
+| One static rollout worker, no live refresh, and no routing or fleet-operability problem | Keep the direct backend path until a concrete serving limitation appears | Another control plane would add deployment and debugging work without changing the limiting step. |
+| Multiple workers serve bursty or prefix-sharing rollout groups | Evaluate one Dynamo frontend with a matched direct-backend baseline | Proceed only if routing, queueing, cache reuse, or worker supervision improves a declared serving or framework-goodput metric. |
+| A colocated framework already owns sleep, wake, and CUDA-IPC policy transfer | Use Dynamo for the request plane while preserving the proven framework control path | The verl recipe is this shape; request routing and weight synchronization do not need the same owner. |
+| An external rollout fleet needs discovery and targeted updates | Integrate the request, discovery, and administration planes explicitly | The framework must still own membership, the fleet update barrier, recovery, and sample-freshness policy. |
+| The primary need is trainer, reward, acceptance, or convergence simulation | Keep that work in the framework or a future closed-loop design | Current Dynamo replay and DynoSim model the serving request plane, not RL algorithm semantics. |
+
+Before adopting Dynamo, name the current bottleneck, the baseline, the metric that would justify the change, and the team that will maintain the integration. A successful endpoint smoke proves connectivity; it does not by itself justify changing the rollout architecture.
 
 ## Where Dynamo Fits
 
-A typical RL setup has three planes:
+```mermaid
+flowchart LR
+    F["RL framework"] -->|"token-native rollout requests"| D["Dynamo frontend and router"]
+    D --> W1["rollout worker"]
+    D --> W2["rollout worker"]
+    W1 -->|"tokens, log probabilities, metadata"| F
+    W2 -->|"tokens, log probabilities, metadata"| F
+    F -->|"policy checkpoint or transfer"| C["worker administration plane"]
+    C --> W1
+    C --> W2
+    D --> O["traces and metrics"]
+    W1 --> O
+    W2 --> O
+```
 
-| Plane | Owned by | Dynamo role |
-|---|---|---|
-| Training | RL framework | Produces updated policy weights and decides when rollout workers should refresh. |
-| Rollout serving | Dynamo | Routes generation requests, exposes token and log probability data, discovers live workers, and provides engine control surfaces. |
-| Operations | Platform stack | Scales capacity, observes health, handles failures, and manages deployment lifecycle. |
+| Responsibility | RL framework | Dynamo | Inference backend |
+|---|---:|---:|---:|
+| Training step, rewards, advantages, and sample acceptance | Owns | Does not own | Does not own |
+| Rollout request construction and retry/deduplication policy | Owns | Enforces the serving contract | Executes accepted requests |
+| Shared frontend, routing, discovery, and request-plane health | Integrates | Owns | Publishes worker state and capabilities |
+| Token IDs, log probabilities, terminal reasons, and backend metadata | Consumes and verifies | Transports and normalizes where supported | Produces |
+| Policy refresh trigger and target version | Owns | Exposes control surfaces | Applies backend-specific update |
+| Fleet-wide update barrier and freshness policy | Owns or orchestrates | Does not currently provide a global transaction | Reports per-worker results where supported |
 
-Dynamo sits between the RL orchestrator and inference backends such as vLLM, SGLang, and TensorRT-LLM. For SGLang rollouts, use Dynamo's SGLang-compatible `POST /generate` or `PUT /generate` API. This API routes token-input requests through Dynamo. It preserves SGLang's native streaming response objects. The OpenAI-compatible frontend remains available for cross-backend integrations. Use backend-specific control surfaces to manage workers.
+## Choose a Framework Path
 
-## What Dynamo Adds
+Framework maturity is evidence-based, not a statement that any OpenAI-compatible client can send a request.
 
-| Capability | Why it matters for RL rollouts |
-|---|---|
-| Advanced routing | Steer rollout traffic across workers based on cache locality, backend metadata, load, or deployment topology instead of treating all workers as identical endpoints. |
-| Weight synchronization | Use Model Express and engine control routes to move updated checkpoints into serving without rebuilding the whole rollout stack. |
-| Fault tolerance | Keep rollout generation available when requests, engines, or workers fail, and recover without forcing the RL job to restart its serving plane. |
-| Autoscaling | Match rollout-serving capacity to changing training demand, including bursty generation phases and idle windows between policy updates. |
-| Token and metadata surfaces | Return token IDs, prompt log probabilities, completion log probabilities, routed expert data, and backend metadata needed by RL pipelines. |
-
-## Integration Pattern
-
-1. Deploy Dynamo with the inference backend you want to use for rollouts.
-2. For SGLang, enable the SGLang-compatible `/generate` API.
-3. Send native token-input requests through the Dynamo frontend.
-4. For cross-backend clients, use the OpenAI-compatible completion or chat routes.
-5. When you use the OpenAI-compatible routes, request token and log probability fields through NVIDIA request extensions.
-6. Discover live rollout workers when the orchestrator needs direct worker administration.
-7. Pause selected workers, refresh weights, validate the update, and resume generation.
-8. Use Dynamo's routing, autoscaling, and fault-tolerance features to keep rollout serving aligned with training demand.
-
-For the concrete API shapes, environment variables, and command examples, see the [RL Implementation Guide](implementation-guide.md).
-
-## Framework Integrations
-
-Use Dynamo as the rollout-serving plane behind an RL framework. The framework remains responsible for the training loop and policy updates; Dynamo serves rollout generation and provides production serving capabilities around the rollout workers.
-
-| Framework or example | Dynamo integration path | Status |
-|---|---|---|
-| [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Run Dynamo as an async rollout backend with KV-aware routing, rollout token data, and weight-update control. | Available recipe |
-| [prime-rl Dynamo training recipes](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180) | Train against an external Dynamo/vLLM rollout-serving stack using Dynamo worker discovery and weight-update control. The PR includes Dynamo example configs for Qwen3 0.6B Math, Qwen3 30B Thinking, and GLM-5.2 FP8 R2E. | Open PR |
-| [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Point Slime's external SGLang-compatible engine path at Dynamo's `/generate` API. Use direct per-worker routes for engine controls. | Open PR |
-
-## Backend Support Snapshot
-
-| Capability | vLLM | SGLang | TensorRT-LLM |
+| Framework | Start here | Maturity | What the label means |
 |---|---|---|---|
-| Engine-native token-in/token-out API | `/inference/v1/generate` | `/generate` | Not supported |
-| Token input through `prompt` token arrays | Supported | Supported | Supported |
-| `nvext.token_data` tokenizer bypass | Supported | Supported | Supported |
-| Completion token IDs | Supported | Supported | Supported |
-| Prompt log probabilities | Supported | Supported | Not supported |
-| RL worker discovery | Supported with `--enable-rl` | Not supported | Not supported |
-| Direct RL administration routes | Supported with `--enable-rl` | Backend-specific routes | Not supported |
-| SGLang metadata upload | Not applicable | Supported with `--enable-rl` | Not applicable |
+| verl | [Integrate with verl](verl.md) | Experimental | A public recipe exists and includes smoke, training, routing, and weight-update paths. The Dynamo guide remains experimental until its pinned clean-room validation record is complete. |
+| SLIME | [Review SLIME integration status](slime.md) | Integration in progress | Public prototype PRs demonstrate the intended streaming and discovery contracts, but the accepted upstream path is not settled. |
+| Prime-RL | [Review Prime-RL integration status](prime-rl.md) | Integration in progress | Discovery, recipes, and sidecar work remain in open PRs. The page documents architecture and graduation gates, not a supported launch procedure. |
+| NeMo RL | [Compatibility status](integration-reference.md#framework-compatibility) | Design research | NeMo RL exposes compatible generation and lifecycle concepts, but this documentation set has no validated public Dynamo adapter or recipe. |
 
-## Start Here
+See the [authoritative framework compatibility table](integration-reference.md#framework-compatibility) for pinned evidence, backend and topology constraints, validation dates, and ownership. Frameworks such as Miles, ProRL, OpenRLHF, and SkyRL remain candidates until a maintained public integration passes the same evidence gate.
 
-Use the [RL Implementation Guide](implementation-guide.md) when you are ready to wire an orchestrator to Dynamo. It covers:
+## Choose a Generation Contract
 
-- The vLLM happy path for token-in rollouts, worker discovery, and weight updates.
-- The recommended SGLang `/generate` path for native token-in/token-out rollouts.
-- NVIDIA request extensions for token IDs, log probabilities, routed expert data, and SGLang metadata uploads.
-- The `/v1/rl/workers` discovery API and direct `/engine/` administration routes.
-- How to register custom engine routes for framework-specific rollout control.
+| Need | Recommended starting point |
+|---|---|
+| Native SGLang token-input streaming | SGLang-compatible `POST /generate`; see [Choose a request interface](integration-reference.md#choose-a-request-interface). |
+| Cross-backend token-input generation | OpenAI-compatible `/v1/completions` with integer token arrays or `nvext.token_data`. |
+| Completion token IDs and prompt/completion log probabilities | Request the named `nvext` response fields and verify backend support in the [backend compatibility table](integration-reference.md#backend-compatibility). |
+| Worker discovery and direct lifecycle control | Use the dedicated vLLM discovery listener and each worker's system URL; do not send mutating calls through the inference frontend. |
+| Large SGLang rollout metadata | Use the opt-in `nvext.metadata_upload` path on a trusted control-plane request. |
+
+The [RL integration and compatibility reference](integration-reference.md) defines token authority, streaming, cancellation, discovery, administration, retry, security, and conformance requirements once for every framework.
+
+## Choose an Optimization or Operations Path
+
+| Job | Guide | Outcome |
+|---|---|---|
+| Increase cache reuse and control queueing | [Route RL rollouts](routing.md) | Select a baseline, match routing to rollout shape, tune with causal metrics, and avoid implying that routing enforces policy freshness. |
+| Refresh rollout workers after a policy update | [Update rollout weights](weight-updates.md) | Choose a framework/backend-specific transfer path, coordinate pause/update/cache/version/resume, and recover from partial failure. |
+| Localize a serving bottleneck | [Observe, debug, replay, and simulate RL rollouts](operations-and-simulation.md) | Join framework rollout identity to current Dynamo traces and metrics, then diagnose queue, KV-cache, engine, or update behavior. |
+| Reproduce a rollout-serving workload | [Observe, debug, replay, and simulate RL rollouts](operations-and-simulation.md#replay-and-simulate-the-request-plane) | Capture the request plane, replay or simulate it, disclose fidelity limits, and calibrate conclusions against a live run. |
+
+## Maturity Labels
+
+| Label | Required evidence |
+|---|---|
+| Supported | Merged and released implementation, maintained owner, pinned end-to-end validation through a policy update, compatibility record, and recovery path. |
+| Experimental | Runnable pinned artifact with validation evidence and explicit limitations, but no general compatibility promise. |
+| Integration in progress | Architecture and current status only. Open branches and PRs are evidence, not a production contract. |
+| Design research | A candidate contract or gap analysis with no implication that the integration ships. |
+
+No framework path in this documentation set is labeled supported yet. This is deliberate: token/logprob correctness, a complete training iteration, policy refresh, post-update generation, and recovery must all be independently recorded before graduation.
+
+## Global Boundaries
+
+- Dynamo does not decide whether a trajectory is valid, accepted, on-policy, or fresh enough for training.
+- The current request schema does not expose a stable typed RL context containing framework, rollout ID, policy version, trainer step, or maximum policy lag. Use documented session IDs and explicitly allowlisted application headers for correlation; do not assume Dynamo routes on those values.
+- Worker discovery and system-server routes are administrative interfaces without a separate authentication layer. Keep them on a trusted orchestrator network and expose only required backend methods.
+- A successful HTTP request does not prove a complete RL sample. The framework must verify terminal state, token/logprob alignment, masks where applicable, and its own duplicate-sample policy.
+- DynoSim and request replay reproduce the serving workload, not the trainer, reward computation, policy transitions, or model-dependent branch decisions.
+- ModelExpress accelerates model loading and fleet distribution. It is not the default live-policy refresh mechanism for the framework integrations documented here.
+
+## Next Step
+
+If you are implementing an adapter, start with the [RL integration and compatibility reference](integration-reference.md). If you are running an existing integration, open the matching framework page and check its maturity and validation record before using its commands.

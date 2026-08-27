@@ -1,0 +1,120 @@
+{
+  "schema": "dynamo.rl.validation.v1",
+  "record_state": "planned",
+  "record_id": "",
+  "framework": {
+    "name": "verl",
+    "integration_artifact": "",
+    "recipe_commit": "",
+    "core_commit": ""
+  },
+  "environment": {
+    "dynamo_commit": "",
+    "backend": {
+      "name": "vllm",
+      "version": ""
+    },
+    "container_image": "",
+    "container_image_digest": "",
+    "cuda_version": "",
+    "driver_version": "",
+    "model": {
+      "name": "",
+      "revision": "",
+      "tokenizer_revision": ""
+    },
+    "artifacts": []
+  },
+  "hardware": {
+    "nodes": 0,
+    "gpu_model": "",
+    "gpus_per_node": 0,
+    "interconnect": "",
+    "network": "",
+    "artifacts": []
+  },
+  "topology": {
+    "placement": "colocated",
+    "serving_mode": "aggregated",
+    "trainer_parallelism": {
+      "tp": 0,
+      "pp": 0,
+      "dp": 0,
+      "ep": 0
+    },
+    "rollout_parallelism": {
+      "tp": 0,
+      "pp": 0,
+      "dp": 0,
+      "ep": 0
+    }
+  },
+  "owners": {
+    "framework": "",
+    "dynamo": "",
+    "clean_room_reviewer": ""
+  },
+  "run": {
+    "started_at": "",
+    "completed_at": "",
+    "commands": [],
+    "artifact_root": ""
+  },
+  "gates": {
+    "generation_smoke": {
+      "status": "not_run",
+      "artifacts": []
+    },
+    "token_logprob": {
+      "status": "not_run",
+      "exact_completion_token_ids": false,
+      "completion_logprobs_aligned": false,
+      "prompt_logprobs": "not_run",
+      "terminal_reasons_verified": false,
+      "artifacts": []
+    },
+    "training_iteration": {
+      "status": "not_run",
+      "optimizer_steps": 0,
+      "rollout_phase_completed": false,
+      "reward_or_advantage_completed": false,
+      "actor_update_completed": false,
+      "weight_sync_completed": false,
+      "post_update_rollout_completed": false,
+      "artifacts": []
+    },
+    "policy_update": {
+      "status": "not_run",
+      "target_version": "",
+      "workers_targeted": 0,
+      "workers_verified": 0,
+      "cache_handling": "unverified",
+      "post_update_generation": false,
+      "artifacts": []
+    },
+    "retry_and_cancellation": {
+      "status": "not_run",
+      "duplicate_suppression_verified": false,
+      "canceled_incomplete_sample_verified": false,
+      "artifacts": []
+    },
+    "failure_recovery": {
+      "status": "not_run",
+      "request_failure_recovered": false,
+      "worker_failure_recovered": false,
+      "weight_update_failure_recovered": false,
+      "artifacts": []
+    },
+    "trace_correlation": {
+      "status": "not_run",
+      "framework_attempts": 0,
+      "joined_payloads": 0,
+      "expected_terminals": 0,
+      "joined_terminals": 0,
+      "trace_overhead_percent": null,
+      "artifacts": []
+    }
+  },
+  "limitations": [],
+  "last_validated": ""
+}
