@@ -458,6 +458,7 @@
 # Explicit path overrides and shared rules below take precedence.
 *Dockerfile*                                                                 @ai-dynamo/dynamo-ops-codeowners
 pyproject.toml                                                               @ai-dynamo/dynamo-ops-codeowners
+requirements.txt                                                             @ai-dynamo/dynamo-ops-codeowners
 
 # === Path overrides: a subsystem nested inside another area's tree.
 # More specific, so they win via last-match over area and file-type rules. ===
@@ -581,6 +582,7 @@ pyproject.toml                                                               @ai
 /components/src/dynamo/trtllm/request_handlers/diffusion/                    @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/                  @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/              @ai-dynamo/dynamo-diffusion-codeowners
+/tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt  @ai-dynamo/dynamo-ops-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.codex/                                                                     @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners

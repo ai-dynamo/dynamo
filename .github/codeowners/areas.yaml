@@ -349,6 +349,7 @@ areas:
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
+  - tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt
   - tests/wheels/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
@@ -1164,4 +1165,6 @@ classify:
   - pattern: '*Dockerfile*'
     coowner: ops
   - pattern: pyproject.toml
+    coowner: ops
+  - pattern: requirements.txt
     coowner: ops
