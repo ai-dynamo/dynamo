@@ -211,6 +211,8 @@ A useful policy version must be stable, comparable, and tied to the trainer arti
 
 The current vLLM `get_weight_version` returns the tag supplied by the control caller; it does not hash the applied tensors. Pair it with transport/application success and a post-update smoke. SGLang version metadata can also be updated separately from weight content, so do not treat a version string alone as cryptographic proof.
 
+At the reviewed `5bc908ad` source pin, an update that omits `weight_version` can expose the string `unknown`, while an untouched worker reports `initial`; neither value proves which tensors are resident. [Dynamo PR #13041 at `9672792`](https://github.com/ai-dynamo/dynamo/pull/13041) proposes a distinct undeclared state and a separate version-declaration route, but it remains open, review required, and blocked. Do not use its proposed `null` or `version_declared` response fields until their final contract merges and is pinned.
+
 The current Dynamo router does not select workers by this version. The framework must gate synchronous rollouts or maintain and enforce bounded staleness in its own orchestration and sample-acceptance logic.
 
 ## Cache Correctness

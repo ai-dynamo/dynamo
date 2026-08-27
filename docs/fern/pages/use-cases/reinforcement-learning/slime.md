@@ -5,7 +5,7 @@ title: SLIME Integration Status
 subtitle: Track the experimental shared-endpoint integration and its publication gates
 ---
 
-**Integration in progress.** Do not treat this page as a supported SLIME launch guide. Public prototype work demonstrates key pieces of a Dynamo integration, but the original endpoint PR and its streaming successor are closed without merge, while dynamic discovery remains open. The accepted upstream contract, version set, and maintained recipe must be settled before copy-paste instructions are published here.
+**Integration in progress.** Do not treat this page as a supported SLIME launch guide. Public prototype work demonstrates key pieces of a Dynamo integration, but the original endpoint PR and its streaming successor are closed without merge, dynamic discovery remains open, and the Dynamo-side runnable example is still an unmerged draft. The accepted upstream contract, version set, and maintained recipe must be settled before copy-paste instructions are published here.
 
 ## Current Evidence
 
@@ -14,9 +14,12 @@ subtitle: Track the experimental shared-endpoint integration and its publication
 | [Shared external rollout endpoint PR #1 at `971bf61`](https://github.com/Aphoh/slime/pull/1) | Closed, superseded | Original shared Dynamo-style SGLang endpoint direction | Current integration path or supported code |
 | [Streaming external rollout PR #2 at `4d39b5a`](https://github.com/Aphoh/slime/pull/2) | Closed without merge | Extensive prototype validation for streaming token/logprob behavior and full training | Accepted upstream API, release compatibility, or maintained recipe |
 | [Dynamic engine discovery PR #3 at `06d397f`](https://github.com/Aphoh/slime/pull/3) | Open | Proposed separation of shared generation from discovered per-engine control | Released discovery and failure semantics |
+| [Dynamo external-rollout example PR #12856 at `84babe1`](https://github.com/ai-dynamo/dynamo/pull/12856) | Open draft; review required | Proposed runnable Dynamo SGLang graph, shared `/generate` plane, direct `/engine` allowlist, readiness-filtered discovery, launcher, and focused discovery test | Current-main behavior, an accepted SLIME recipe, independent GPU reproduction, or a Kubernetes requirement |
 | [SLIME upstream main](https://github.com/THUDM/slime) | Active project | Framework architecture and native rollout behavior | A merged Dynamo integration |
 
 Freshness ownership remains with the SLIME integration contributors and Dynamo RL maintainers. The next review must recheck PR disposition, replacement work, accepted config keys, and an upstream owner before changing maturity.
+
+The open Dynamo example uses a Kubernetes headless Service as its discovery mechanism. That is a deployment choice in the draft example, not a requirement of the Dynamo–SLIME contract. A future runnable guide must either keep and justify that exact pinned deployment or document an equally validated non-Kubernetes discovery and process-supervision path.
 
 ## Intended System Boundary
 
