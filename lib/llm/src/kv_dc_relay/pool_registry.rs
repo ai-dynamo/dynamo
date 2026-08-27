@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
 use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, TryAcquireError};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -967,6 +968,7 @@ impl PoolRegistry {
         &self,
         pool_id: PoolId,
         layout_generation: u64,
+        envelope: &EventEnvelope,
         load: ActiveLoad,
     ) -> bool {
         let mut state = self.state.lock();
@@ -979,9 +981,9 @@ impl PoolRegistry {
         let Some(serving) = entry.serving.as_mut() else {
             return false;
         };
-        match serving.load.observe(load) {
+        match serving.load.observe(envelope, load) {
             LoadObservationOutcome::UnknownRank => false,
-            LoadObservationOutcome::IgnoredAdvisory => true,
+            LoadObservationOutcome::IgnoredStale => true,
             LoadObservationOutcome::Updated => {
                 publish_load_if_changed(&state, &self.load_tx, pool_id);
                 true
@@ -1270,7 +1272,21 @@ impl PoolRegistry {
     }
 
     pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
-        self.load_tx.borrow().clone()
+        let state = self.state.lock();
+        let now = Instant::now();
+        let mut snapshots = state
+            .pools
+            .values()
+            .filter(|entry| entry.state == PoolEntryState::Active)
+            .filter_map(|entry| {
+                entry
+                    .serving
+                    .as_ref()
+                    .map(|serving| serving.load.snapshot(entry.identity, now))
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_unstable_by_key(|snapshot| snapshot.producer.pool_id());
+        snapshots
     }
 
     pub(super) fn watch_load(&self) -> watch::Receiver<Vec<PoolLoadSnapshot>> {
@@ -1422,7 +1438,7 @@ fn publish_load_if_changed(
             entry
                 .serving
                 .as_ref()
-                .map(|serving| serving.load.snapshot(entry.identity))
+                .map(|serving| serving.load.snapshot(entry.identity, Instant::now()))
         });
     sender.send_if_modified(|snapshots| {
         match (
@@ -1600,6 +1616,16 @@ mod tests {
                 dp_rank: 0,
             },
         )
+    }
+
+    fn load_envelope(sequence: u64) -> EventEnvelope {
+        EventEnvelope {
+            publisher_id: 1,
+            sequence,
+            published_at: sequence,
+            topic: String::new(),
+            payload: Default::default(),
+        }
     }
 
     fn gated_builder() -> GatedBuilder {
@@ -3034,6 +3060,7 @@ mod tests {
         assert!(!registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad::default(),
         ));
 
@@ -3070,7 +3097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_only_load_is_accepted_without_changing_snapshot() {
+    async fn scheduler_load_updates_optional_pool_facts() {
         let registry = PoolRegistry::new(relay_identity(), config());
         let mut attach_request = request(pool(1), "fast.router.generate", "llama");
         attach_request.serving_facts = Some(PoolServingFacts {
@@ -3083,13 +3110,13 @@ mod tests {
             )]),
         });
         let attachment = registry.attach(attach_request).await.unwrap();
-        let before = registry.load_snapshots();
-        let load_watch = registry.watch_load();
+        let mut load_watch = registry.watch_load();
         assert!(!load_watch.has_changed().unwrap());
 
         assert!(registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,
@@ -3099,8 +3126,11 @@ mod tests {
             },
         ));
 
-        assert_eq!(registry.load_snapshots(), before);
-        assert!(!load_watch.has_changed().unwrap());
+        let snapshot = registry.load_snapshots()[0];
+        assert_eq!(snapshot.active_decode_blocks, Some(30));
+        assert_eq!(snapshot.active_prefill_tokens, Some(512));
+        assert!(load_watch.has_changed().unwrap());
+        load_watch.borrow_and_update();
         registry.detach(attachment).await.unwrap();
     }
 
@@ -3121,6 +3151,7 @@ mod tests {
         assert!(registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,
@@ -3200,7 +3231,7 @@ mod tests {
         load.kv_used_blocks = Some(40);
         load.active_decode_blocks = Some(30);
         load.active_prefill_tokens = Some(512);
-        assert!(registry.observe_load(pool(1), old_generation, load));
+        assert!(registry.observe_load(pool(1), old_generation, &load_envelope(1), load));
         let observed = registry.load_snapshots()[0];
         assert_eq!(observed.kv_used_blocks, Some(40));
         assert_eq!(observed.total_kv_blocks, Some(100));
@@ -3215,6 +3246,7 @@ mod tests {
         assert!(!registry.observe_load(
             pool(1),
             old_generation,
+            &load_envelope(2),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,

@@ -2127,9 +2127,9 @@ async fn run_load_collector(
                 event = subscriber.next() => event,
             };
             match event {
-                Some(Ok((_envelope, load))) => {
+                Some(Ok((envelope, load))) => {
                     retry.succeeded();
-                    if !pools.observe_load(pool_id, layout_generation, load) {
+                    if !pools.observe_load(pool_id, layout_generation, &envelope, load) {
                         tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
                     }
                 }

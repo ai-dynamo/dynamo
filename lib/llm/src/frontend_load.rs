@@ -191,21 +191,11 @@ impl FrontendLoadMetrics {
             );
         }
 
-        let live_requests = state
-            .live
-            .values()
-            .map(|request| {
-                (
-                    request.model.clone(),
-                    request.input_tokens,
-                    request.output_started,
-                )
-            })
-            .collect::<Vec<_>>();
-        for (model, input_tokens, output_started) in live_requests {
-            let Some(load) = gauges.get_mut(&model) else {
+        for request in state.live.values() {
+            let Some(load) = gauges.get_mut(&request.model) else {
                 continue;
             };
+            let input_tokens = request.input_tokens;
             if input_tokens.is_none() {
                 load.input_tokens = None;
             }
@@ -216,7 +206,7 @@ impl FrontendLoadMetrics {
             } else {
                 load.live_input_tokens = None;
             }
-            if output_started {
+            if request.output_started {
                 if !checked_increment(&mut load.output_generation_requests, 1) {
                     return None;
                 }
