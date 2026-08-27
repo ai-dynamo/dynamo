@@ -1159,6 +1159,12 @@ impl<
                 decay_now,
             )
             .await;
+            let admit_now = Instant::now();
+            if queued.due_at.is_some_and(|due_at| due_at <= admit_now) {
+                let mut request = popped.into_payload().request;
+                request.respond(Err(KvSchedulerError::DueTimeExpired));
+                continue;
+            }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
             if let Some(snapshot) = refreshed {
                 tracing::info!(
@@ -1173,7 +1179,6 @@ impl<
                     None
                 };
             }
-            let admit_now = Instant::now();
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
@@ -2194,6 +2199,62 @@ policy_classes:
             Err(KvSchedulerError::DueTimeExpired)
         ));
         assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn queued_classified_request_expires_during_overlap_refresh() {
+        let block_size = 16;
+        let isl = 64;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) = make_queue_with_blocking_refresher(
+            1,
+            block_size,
+            isl,
+            Some(0.0),
+            Arc::clone(&refresher),
+            ADMISSION_CHANNEL_CAPACITY,
+        );
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (queued, queued_rx) = make_request("due-during-refresh", isl);
+        let ingress_at = StdInstant::now();
+        let mut classified = queue.classify_request(&classify_source(&queued));
+        classified.set_due_at(ingress_at + Duration::from_secs(12));
+        queue
+            .enqueue_classified_with_block_hashes_and_lease(
+                queued,
+                Some(vec![LocalBlockHash(42)]),
+                None,
+                Some(classified),
+                ingress_at,
+            )
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.update().await })
+        };
+        refresher.wait_for_calls(1).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        refresher.release_one();
+        update.await.unwrap();
+
+        assert!(matches!(
+            queued_rx.await.unwrap(),
+            Err(KvSchedulerError::DueTimeExpired)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
     }
 
     #[test]
