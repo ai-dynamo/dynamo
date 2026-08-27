@@ -38,6 +38,14 @@ def qualification_case_ids(profile: str = "generic") -> tuple[str, ...]:
     )
 
 
+def case_by_id(cases: tuple[probe.Case, ...], case_id: str) -> probe.Case:
+    return next(case for case in cases if case.case_id == case_id)
+
+
+def error_kinds(errors: list[dict]) -> set[str]:
+    return {str(item.get("kind")) for item in errors}
+
+
 def test_qualification_uses_the_same_24_generic_cases_for_inline_profiles() -> None:
     expected_ids = qualification_generic_case_ids()
 
@@ -109,6 +117,79 @@ def test_auto_calculate_sum_prompt_explicitly_requires_the_tool() -> None:
     assert case.tool_choice == "auto"
     assert "Use the calculate_sum tool" in prompt
     assert "do not calculate the answer yourself" in prompt
+
+
+def test_glm_forced_and_named_cases_require_reasoning_when_enabled() -> None:
+    cases = probe.build_cases("glm5")
+
+    for case_id in (
+        "customer_required_forces_weather",
+        "customer_named_calculator_choice",
+    ):
+        case = case_by_id(cases, case_id)
+        assert case.request_overrides["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "thinking": True,
+        }
+        assert case.expect_reasoning is True
+
+        missing = probe.ChatResult(
+            reasoning_content=None,
+            finish_reason="tool_calls",
+        )
+        missing_errors, _warnings = probe.validate_result(case, missing)
+        assert "missing_reasoning_content" in error_kinds(missing_errors)
+
+        present = probe.ChatResult(
+            reasoning_content="The request requires a forced tool call.",
+            finish_reason="tool_calls",
+        )
+        present_errors, _warnings = probe.validate_result(case, present)
+        assert "missing_reasoning_content" not in error_kinds(present_errors)
+
+
+def test_glm_thinking_disabled_cases_permit_null_reasoning() -> None:
+    cases = probe.build_cases("glm5")
+
+    for case_id in (
+        "customer_required_forces_weather_thinking_disabled",
+        "customer_named_calculator_choice_thinking_disabled",
+    ):
+        case = case_by_id(cases, case_id)
+        assert case.request_overrides["chat_template_kwargs"] == {
+            "enable_thinking": False,
+            "thinking": False,
+        }
+        assert case.expect_reasoning is False
+
+        result = probe.ChatResult(
+            reasoning_content=None,
+            finish_reason="tool_calls",
+        )
+        errors, _warnings = probe.validate_result(case, result)
+        kinds = error_kinds(errors)
+        assert "missing_reasoning_content" not in kinds
+        assert "unexpected_reasoning_content" not in kinds
+
+
+def test_reasoning_expectations_cover_every_inline_profile() -> None:
+    enabled_case_ids = (
+        "customer_required_forces_weather",
+        "customer_named_calculator_choice",
+    )
+    disabled_case_ids = (
+        "customer_required_forces_weather_thinking_disabled",
+        "customer_named_calculator_choice_thinking_disabled",
+    )
+
+    for profile in probe.INLINE_CASE_PROFILES:
+        cases = probe.build_cases(profile)
+        for case_id in enabled_case_ids:
+            assert case_by_id(cases, case_id).expect_reasoning is True
+
+        disabled_expectation = None if profile == "gpt_oss" else False
+        for case_id in disabled_case_ids:
+            assert case_by_id(cases, case_id).expect_reasoning is disabled_expectation
 
 
 def test_natural_language_fragment_matching_normalizes_unicode_dashes() -> None:

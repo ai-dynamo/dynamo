@@ -654,6 +654,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     truncation_literal = "customer-eof-" + ("x" * 512)
     thinking_enabled = {"chat_template_kwargs": {"thinking": True}}
     thinking_disabled = {"chat_template_kwargs": {"thinking": False}}
+    disabled_reasoning_expectation: bool | None = False
     if profile == "qwen3_coder":
         thinking_enabled = {
             "chat_template_kwargs": {"enable_thinking": True, "thinking": True}
@@ -671,6 +672,9 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     if profile == "gpt_oss":
         thinking_enabled = {"reasoning_effort": "low"}
         thinking_disabled = {"reasoning_effort": "low"}
+        # GPT-OSS does not expose a disabled reasoning effort. Its lowest
+        # supported setting may still emit reasoning, so do not assert absence.
+        disabled_reasoning_expectation = None
 
     def merge_request_overrides(
         defaults: dict[str, Any], overrides: dict[str, Any] | None
@@ -905,6 +909,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tools=(weather,),
             tool_choice="required",
             expected_tool_names=("get_weather",),
+            expect_reasoning=True,
         ),
         Case(
             case_id="customer_required_forces_weather_thinking_disabled",
@@ -916,6 +921,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice="required",
             expected_tool_names=("get_weather",),
             request_overrides=thinking_disabled,
+            expect_reasoning=disabled_reasoning_expectation,
         ),
         Case(
             case_id="customer_named_calculator_choice",
@@ -930,6 +936,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice={"type": "function", "function": {"name": "calculate"}},
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
+            expect_reasoning=True,
         ),
         Case(
             case_id="customer_named_calculator_choice_thinking_disabled",
@@ -945,6 +952,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
             request_overrides=thinking_disabled,
+            expect_reasoning=disabled_reasoning_expectation,
         ),
         Case(
             case_id="auto_multi_distinct_tools",
