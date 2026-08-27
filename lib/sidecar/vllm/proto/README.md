@@ -5,9 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored vLLM protocol
 
-- Inference source: [`rust/proto/inference.proto`](https://github.com/vllm-project/vllm/blob/3d1f5cee1552b8208f3009c75f8bc856f27e0eff/rust/proto/inference.proto) at `3d1f5cee1552b8208f3009c75f8bc856f27e0eff`
-- RL Control source: [`rust/proto/control.proto`](https://github.com/vllm-project/vllm/blob/76ebe5a217d7536a5661272c680f0b1e3a62f5be/rust/proto/control.proto) from [vllm-project/vllm#51316](https://github.com/vllm-project/vllm/pull/51316) at `76ebe5a217d7536a5661272c680f0b1e3a62f5be`
-- `inference.proto` SHA-256: `6152c306583166ecd691c9c715cab950523e8d1ed2db3dc2bcb538f6ca90e56f`
-- `control.proto` SHA-256: `db72b0782142054293b07fd48247cc821c048213b9c95dbc37fb0d81dde8f46f`
+Both files are copied from vLLM without modification.
 
-The files are copied without modification. Update the revision and checksums together. `dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`.
+- Upstream commit: [`1f9444a34ff4ebfba4d65c68971bb5306a11aa92`](https://github.com/vllm-project/vllm/commit/1f9444a34ff4ebfba4d65c68971bb5306a11aa92)
+  ([vllm-project/vllm#52840](https://github.com/vllm-project/vllm/pull/52840), "[Rust Frontend][gRPC] Add LoRA lifecycle control")
+- Sources: [`rust/proto/inference.proto`](https://github.com/vllm-project/vllm/blob/1f9444a34ff4ebfba4d65c68971bb5306a11aa92/rust/proto/inference.proto)
+  and [`rust/proto/control.proto`](https://github.com/vllm-project/vllm/blob/1f9444a34ff4ebfba4d65c68971bb5306a11aa92/rust/proto/control.proto)
+- `inference.proto` SHA-256: `078a3d2a94bd03a96fdfdfa31c13a805d00575b365dec5b3f8ed82d36f065e85`
+- `control.proto` SHA-256: `1a050496e7d0f919f398d150d4bff1660d5a5eac57951137aeb0ca5970436696`
+
+`proto_conformance` in `lib/sidecar/vllm/src/tests.rs` pins these checksums and the
+LoRA-relevant field numbers so the vendored copies cannot silently drift from upstream.
+When resyncing, copy both files verbatim and update the commit and both checksums together.
+
+`dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`.

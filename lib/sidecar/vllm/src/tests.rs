@@ -439,6 +439,7 @@ fn server_info() -> pb::ServerInfo {
         api_version: "vllm".to_string(),
         instance_id: "test-instance".to_string(),
         parallelism: Some(pb::ParallelismInfo {
+            world_size: 1,
             tensor_parallel_size: 2,
             pipeline_parallel_size: 1,
             data_parallel_size: 2,
