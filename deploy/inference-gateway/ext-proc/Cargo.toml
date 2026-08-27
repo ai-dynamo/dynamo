@@ -52,8 +52,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 uuid = { workspace = true }
 validator = { workspace = true }
+zmq = "0.10"
 
 [dev-dependencies]
+rmp-serde = { workspace = true }
 tempfile = { workspace = true }
 
 [package.metadata.cargo-machete]

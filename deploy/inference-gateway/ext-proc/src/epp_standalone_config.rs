@@ -24,6 +24,7 @@ const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// bodies so a burst can't exhaust memory. HTTP/2 stream multiplexing means the
 /// TCP-connection cap does not bound requests, so this is the actual guardrail.
 const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
+const DEFAULT_BLOCK_SIZE_STATE_FILE: &str = "/tmp/dyn-epp-calibrated-block-size";
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
@@ -112,8 +113,15 @@ pub struct EppStandaloneConfig {
     #[validate(range(min = 1, message = "DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES must be >= 1"))]
     pub tokenizer_max_response_bytes: usize,
     /// KV-cache block size; MUST equal the inference engine block size.
-    #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
+    /// `0` (the default) self-calibrates from the first observed KV event,
+    /// covering engines whose real block size is only known at boot (hybrid
+    /// Mamba models align it upward). A non-zero value pins it explicitly.
     pub block_size: u32,
+    /// Where the calibrated block size is persisted across restarts: the
+    /// selection service pins the block size per model for the process
+    /// lifetime, so adopting a calibrated value means persisting it here and
+    /// exiting; the next boot reads it back.
+    pub block_size_state_file: String,
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
@@ -170,6 +178,8 @@ impl EppStandaloneConfig {
             )?
             .unwrap_or(DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
+            block_size_state_file: get("DYN_EPP_BLOCK_SIZE_STATE_FILE")
+                .unwrap_or_else(|| DEFAULT_BLOCK_SIZE_STATE_FILE.to_string()),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
@@ -181,6 +191,17 @@ impl EppStandaloneConfig {
     }
 
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
+    /// Block size workers are registered with at boot: the pinned value when
+    /// configured, else the persisted calibration from a previous run, else
+    /// the provisional default (load-only routing until calibration lands).
+    pub fn effective_block_size(&self) -> u32 {
+        if self.block_size > 0 {
+            return self.block_size;
+        }
+        crate::block_size_calibration::read_persisted_block_size(&self.block_size_state_file)
+            .unwrap_or(crate::block_size_calibration::PROVISIONAL_BLOCK_SIZE)
+    }
+
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
@@ -357,18 +378,19 @@ mod tests {
     }
 
     #[test]
-    fn zero_block_size_fails() {
-        assert!(
-            parse_cfg(&[
-                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
-                ("POD_NAMESPACE", "inference"),
-                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
-                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
-                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
-                ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
-            ])
-            .is_err()
-        );
+    fn zero_block_size_means_auto() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
+        ])
+        .expect("config should parse");
+        assert_eq!(cfg.block_size, 0);
+        cfg.validate_config()
+            .expect("block size 0 is auto-calibration, not an error");
     }
 
     #[test]

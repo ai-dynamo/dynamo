@@ -444,6 +444,7 @@ models:
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
+            block_size_state_file: "/tmp/test-epp-block-size".to_string(),
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: None,

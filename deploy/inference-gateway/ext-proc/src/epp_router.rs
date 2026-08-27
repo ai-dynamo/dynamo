@@ -32,6 +32,7 @@ use dynamo_llm::protocols::common::extensions::{
 };
 use serde::Deserialize;
 
+use crate::block_size_calibration::BlockSizeCalibration;
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
@@ -82,8 +83,15 @@ impl EppRouter {
         let reflector = Arc::new(reflector);
         let peer_ready = selector.peer_ready();
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
-            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
+        // Block size 0 = auto: probe the workers' KV event streams and adopt
+        // the observed main-attention block size.
+        let calibration = (cfg.block_size == 0).then(BlockSizeCalibration::start);
+        let adapter = TopologyAdapter::spawn(
+            reflector.as_ref().clone(),
+            selector.clone(),
+            defaults,
+            calibration,
+        );
 
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is

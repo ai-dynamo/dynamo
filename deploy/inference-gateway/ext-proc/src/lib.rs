@@ -12,6 +12,7 @@
 //! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
 //! ```
 
+pub mod block_size_calibration;
 pub mod envoy_helpers;
 pub mod epp;
 pub mod epp_router;
@@ -28,6 +29,7 @@ pub mod server;
 pub mod topology_adapter;
 pub mod vllm_render_client;
 
+pub use block_size_calibration::BlockSizeCalibration;
 pub use epp::Router;
 pub use epp_router::EppRouter;
 pub use epp_standalone_config::{EppMode, EppStandaloneConfig, TokenizerProtocol};
