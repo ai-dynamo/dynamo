@@ -2175,8 +2175,13 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="gpuCountPerPod" type="integer">
-GPUCountPerPod is the number of GPUs requested by the main container in each Pod, resolved from scalar resources or DRA ResourceClaims.
+<ParamField path="gpusPerEngine" type="integer">
+GPUsPerEngine is the number of GPUs assigned to one inference engine in a service replica, across all of its nodes. Independent auxiliary GPU allocations are excluded.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2534,8 +2539,13 @@ runtimeNamespace is the effective Dynamo runtime namespace for this component. W
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="gpuCountPerPod" type="integer">
-gpuCountPerPod is the number of GPUs requested by the main container in each Pod, resolved from scalar resources or DRA ResourceClaims.
+<ParamField path="gpusPerEngine" type="integer">
+gpusPerEngine is the number of GPUs assigned to one inference engine in a component replica, across all of its nodes. Independent auxiliary GPU allocations are excluded.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 

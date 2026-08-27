@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
+from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -51,6 +52,27 @@ def test_prefill_throughput_uses_component_minimum_override():
 
     replicas = scaling._compute_prefill_replicas(
         demand_rps=0.01,
+        isl=1000,
+        osl=150,
+    )
+
+    assert replicas == 3
+
+
+@pytest.mark.parametrize("gpu_cost_per_replica", [4, 5])
+def test_engine_rps_recommendation_is_independent_of_sidecar_cost(
+    gpu_cost_per_replica: int,
+):
+    scaling = _ThroughputScalingHarness()
+    scaling._capabilities = WorkerCapabilities(
+        prefill=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+        )
+    )
+
+    replicas = scaling._compute_prefill_replicas(
+        demand_rps=2.1,
         isl=1000,
         osl=150,
     )

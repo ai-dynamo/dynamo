@@ -77,6 +77,7 @@ func (p *groveProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	clearComponentGPUShapes(programResult.Status.Components)
 
 	// Fail a durable Grove selection when Grove is unavailable rather than falling back.
 	if !p.gate.Enabled(features.Grove) {

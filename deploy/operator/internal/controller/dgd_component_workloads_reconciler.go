@@ -131,11 +131,6 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	// Publish the resolved GPU shape with the authoritative workload status.
-	if err := populateComponentGPUCounts(ctx, &r.syncer, dgd, result.ComponentStatus); err != nil {
-		return result, err
-	}
-
 	return result, nil
 }
 

@@ -11,7 +11,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,8 +34,8 @@ func deploymentEventFilter(
 	})
 }
 
-// componentReferencesDRAClaim reports whether the non-nil component references
-// the named ResourceClaim or ResourceClaimTemplate from its main container.
+// componentReferencesDRAClaim reports whether any regular container in the
+// non-nil component references the named claim or claim template.
 func componentReferencesDRAClaim(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	objectName string,
@@ -45,14 +44,14 @@ func componentReferencesDRAClaim(
 	if component.PodTemplate == nil {
 		return false
 	}
-	mainContainer := dynamo.GetMainContainer(component)
-	if mainContainer == nil || len(mainContainer.Resources.Claims) == 0 {
-		return false
+	containerClaimNames := make(map[string]struct{})
+	for i := range component.PodTemplate.Spec.Containers {
+		for _, claim := range component.PodTemplate.Spec.Containers[i].Resources.Claims {
+			containerClaimNames[claim.Name] = struct{}{}
+		}
 	}
-
-	containerClaimNames := make(map[string]struct{}, len(mainContainer.Resources.Claims))
-	for _, claim := range mainContainer.Resources.Claims {
-		containerClaimNames[claim.Name] = struct{}{}
+	if len(containerClaimNames) == 0 {
+		return false
 	}
 
 	for _, podClaim := range component.PodTemplate.Spec.ResourceClaims {
@@ -69,10 +68,18 @@ func componentReferencesDRAClaim(
 	return false
 }
 
-// componentUsesDRAClaims reports whether the non-nil component's main
-// container references any DRA claims.
+// componentUsesDRAClaims reports whether any regular container in the non-nil
+// component references DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return len(dynamo.GetMainContainerResources(component).Claims) > 0
+	if component.PodTemplate == nil {
+		return false
+	}
+	for i := range component.PodTemplate.Spec.Containers {
+		if len(component.PodTemplate.Spec.Containers[i].Resources.Claims) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *DynamoComponentDeploymentReconciler) mapResourceClaimToDCDRequests(

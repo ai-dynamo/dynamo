@@ -18,7 +18,6 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,7 +27,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Reason string
@@ -49,46 +47,34 @@ type ReconcileResult struct {
 	ComponentStatus map[string]nvidiacomv1beta1.ComponentReplicaStatus
 }
 
-// populateComponentGPUCounts adds the desired per-Pod GPU shape to worker
-// statuses that were observed during this reconciliation.
-func populateComponentGPUCounts(
-	ctx context.Context,
-	reader client.Reader,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
-) error {
-	// Clear every previous resolution before any dependency read can fail.
+// clearComponentGPUShapes removes previously projected GPU shapes before a
+// provider can fail while rendering a replacement.
+func clearComponentGPUShapes(statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 	for componentName, status := range statuses {
-		status.GPUCountPerPod = nil
+		status.GPUsPerEngine = nil
+		status.GPUsPerReplica = nil
 		statuses[componentName] = status
 	}
+}
 
-	// Resolve only observed worker components so incomplete child status stays sparse.
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
-			continue
-		}
-
-		status, ok := statuses[component.ComponentName]
+// applyComponentGPUShapes projects provider-resolved shapes onto observed
+// component statuses. A zero replica cost omits both fields.
+func applyComponentGPUShapes(
+	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+	shapes map[string]dynamo.GPUShape,
+) {
+	for componentName, shape := range shapes {
+		status, ok := statuses[componentName]
 		if !ok {
 			continue
 		}
-
-		// Reuse the operator's scalar-and-DRA resolver for the desired Pod shape.
-		gpuCount, err := dynamo.ResolveContainerGPUs(ctx, reader, dgd.Namespace, component)
-		if err != nil {
-			return fmt.Errorf("resolve GPU count for component %q: %w", component.ComponentName, err)
-		}
-		if gpuCount == 0 {
+		if shape.GPUsPerReplica <= 0 {
 			continue
 		}
-
-		// ComponentReplicaStatus is a map value, so write the resolved copy back.
-		status.GPUCountPerPod = ptr.To(gpuCount)
-		statuses[component.ComponentName] = status
+		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)
+		status.GPUsPerReplica = ptr.To(shape.GPUsPerReplica)
+		statuses[componentName] = status
 	}
-	return nil
 }
 
 func checkResourcesReadiness(resources []Resource) ReconcileResult {

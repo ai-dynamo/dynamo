@@ -6,8 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core import util
+from dynamo.planner.core.base import build_worker_capabilities
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
-from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
+from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -42,7 +45,10 @@ def _controller() -> MagicMock:
     controller.get_worker_info.side_effect = lambda sub_component_type, backend: (
         build_worker_info_from_defaults(backend, sub_component_type)
     )
-    controller.get_gpu_counts.return_value = (2, 4)
+    controller.get_gpu_shapes.return_value = (
+        ComponentGPUShape(2, 2),
+        ComponentGPUShape(4, 4),
+    )
     controller.get_actual_worker_counts = AsyncMock(return_value=(2, 3, True))
     controller.get_model_name.return_value = "test-model"
     return controller
@@ -63,8 +69,8 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     controller.wait_for_deployment_ready = AsyncMock(
         side_effect=lambda **kwargs: order.append("ready")
     )
-    controller.get_gpu_counts.side_effect = lambda **kwargs: (
-        order.append("gpu") or (2, 4)
+    controller.get_gpu_shapes.side_effect = lambda **kwargs: (
+        order.append("gpu") or (ComponentGPUShape(2, 2), ComponentGPUShape(4, 4))
     )
 
     namespace_source = MagicMock()
@@ -135,7 +141,7 @@ async def test_replica_expected_count_tracks_only_stable_observations():
 def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
     config = _config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
     controller = _controller()
-    controller.get_gpu_counts.side_effect = DeploymentValidationError(
+    controller.get_gpu_shapes.side_effect = DeploymentValidationError(
         ["DGD does not declare GPU resources"]
     )
     environment = PlannerEnvironmentImpl(
@@ -149,14 +155,60 @@ def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
 
     assert environment.deployment_state().prefill.num_gpus == 2
     assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().prefill.gpus_per_replica == 2
+    assert environment.deployment_state().decode.gpus_per_replica == 4
     assert config.prefill_engine_num_gpu == 2
     assert config.decode_engine_num_gpu == 4
+
+
+def test_gpu_shape_keeps_engine_width_separate_from_replica_cost():
+    controller = _controller()
+    controller.get_gpu_shapes.return_value = (
+        ComponentGPUShape(2, 3),
+        ComponentGPUShape(4, 5),
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    environment._refresh_gpu_counts()
+    capabilities = build_worker_capabilities(environment.deployment_state())
+
+    assert capabilities.prefill is not None
+    assert capabilities.prefill.num_gpu == 2
+    assert capabilities.prefill.resolved_gpu_cost_per_replica == 3
+    assert capabilities.decode is not None
+    assert capabilities.decode.num_gpu == 4
+    assert capabilities.decode.resolved_gpu_cost_per_replica == 5
+
+
+def test_replica_gpu_cost_change_refreshes_engine_capabilities():
+    old_state = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=_controller(),
+        require_prefill=False,
+        require_decode=True,
+    ).deployment_state()
+    old_state.decode.num_gpus = 4
+    old_state.decode.gpus_per_replica = 4
+    new_state = old_state.clone()
+    new_state.decode.gpus_per_replica = 5
+
+    assert util.deployment_state_changed(
+        old_state,
+        new_state,
+        check_prefill=False,
+        check_decode=True,
+    )
 
 
 def test_gpu_discovery_failure_retains_last_observed_state():
     config = _config(prefill_engine_num_gpu=None, decode_engine_num_gpu=None)
     controller = _controller()
-    controller.get_gpu_counts.side_effect = DeploymentValidationError(
+    controller.get_gpu_shapes.side_effect = DeploymentValidationError(
         ["temporary DGD lookup failure"]
     )
     environment = PlannerEnvironmentImpl(
@@ -167,11 +219,36 @@ def test_gpu_discovery_failure_retains_last_observed_state():
     )
     environment.deployment_state().prefill.num_gpus = 2
     environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().prefill.gpus_per_replica = 3
+    environment.deployment_state().decode.gpus_per_replica = 5
 
     environment._refresh_gpu_counts()
 
     assert environment.deployment_state().prefill.num_gpus == 2
     assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().prefill.gpus_per_replica == 3
+    assert environment.deployment_state().decode.gpus_per_replica == 5
+
+
+def test_authoritative_gpu_shape_disappearance_fails_closed():
+    controller = _controller()
+    controller.get_gpu_shapes.side_effect = GPUShapeUnavailableError(
+        "decode", "operator cleared DRA shape"
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+    )
+    environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().decode.gpus_per_replica = 5
+
+    with pytest.raises(GPUShapeUnavailableError, match="cleared DRA shape"):
+        environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 5
 
 
 @pytest.mark.asyncio
@@ -271,7 +348,7 @@ def test_gpu_refresh_validates_required_widths(
         decode_engine_num_gpu=None,
     )
     controller = _controller()
-    controller.get_gpu_counts.return_value = (None, None)
+    controller.get_gpu_shapes.return_value = (None, None)
     environment = PlannerEnvironmentImpl(
         config=config,
         controller=controller,

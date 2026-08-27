@@ -37,11 +37,13 @@ from dynamo.planner.errors import (
     DeploymentValidationError,
     DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
+    GPUShapeUnavailableError,
     ModelNameNotFoundError,
     PlannerError,
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
+    ComponentGPUShape,
     ComponentPowerConfig,
     get_component_from_type_or_name,
     get_component_type,
@@ -362,26 +364,43 @@ class KubernetesConnector(PlannerConnector):
         require_decode: bool = True,
         deployment: Optional[dict] = None,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components.
+        """Get per-engine GPU counts for prefill and decode components."""
+        prefill_shape, decode_shape = self.get_gpu_shapes(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            deployment=deployment,
+        )
+        return (
+            prefill_shape.gpus_per_engine if prefill_shape is not None else 0,
+            decode_shape.gpus_per_engine if decode_shape is not None else 0,
+        )
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        deployment: Optional[dict] = None,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Get per-engine performance width and per-replica GPU cost.
 
         Pass ``deployment`` to reuse an already-fetched DGD (avoids a second
         GET when the environment also resolves power configs on the same tick).
         """
         if deployment is None:
             deployment = self.get_graph_deployment()
-        return self._get_gpu_counts_from_deployment(
+        return self._get_gpu_shapes_from_deployment(
             deployment,
             require_prefill=require_prefill,
             require_decode=require_decode,
         )
 
-    def _get_gpu_counts_from_deployment(
+    def _get_gpu_shapes_from_deployment(
         self,
         deployment: dict,
         require_prefill: bool = True,
         require_decode: bool = True,
-    ) -> tuple[int, int]:
-        """Get GPU counts from an already-fetched deployment.
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Get GPU shapes from an already-fetched deployment.
 
         Args:
             deployment: Deployment dict to inspect
@@ -389,13 +408,13 @@ class KubernetesConnector(PlannerConnector):
             require_decode: Whether to require a decode component
 
         Returns:
-            Tuple of (prefill_gpu_count, decode_gpu_count)
+            Tuple of (prefill_gpu_shape, decode_gpu_shape)
 
         Raises:
-            DeploymentValidationError: If GPU counts cannot be determined from DGD
+            DeploymentValidationError: If GPU shapes cannot be determined from DGD
         """
-        prefill_gpu_count = 0
-        decode_gpu_count = 0
+        prefill_gpu_shape = None
+        decode_gpu_shape = None
         errors = []
 
         if require_prefill:
@@ -404,9 +423,11 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.PREFILL,
                 )
-                prefill_gpu_count = prefill_service.get_gpu_count(deployment)
+                prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
+            except GPUShapeUnavailableError:
+                raise
             except (PlannerError, ValueError) as e:
-                errors.append(f"Failed to get prefill GPU count: {e}")
+                errors.append(f"Failed to get prefill GPU shape: {e}")
 
         if require_decode:
             try:
@@ -414,14 +435,16 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.DECODE,
                 )
-                decode_gpu_count = decode_service.get_gpu_count(deployment)
+                decode_gpu_shape = decode_service.get_gpu_shape(deployment)
+            except GPUShapeUnavailableError:
+                raise
             except (PlannerError, ValueError) as e:
-                errors.append(f"Failed to get decode GPU count: {e}")
+                errors.append(f"Failed to get decode GPU shape: {e}")
 
         if errors:
             raise DeploymentValidationError(errors)
 
-        return prefill_gpu_count, decode_gpu_count
+        return prefill_gpu_shape, decode_gpu_shape
 
     def get_component_power_configs(
         self,
@@ -434,10 +457,10 @@ class KubernetesConnector(PlannerConnector):
         """Resolve DGD-owned per-role power configs from worker podTemplate annotations.
 
         One DGD GET unless ``deployment`` is provided (shared with
-        ``get_gpu_counts`` on the same tick). ``watts_per_replica`` on each
+        ``get_gpu_shapes`` on the same tick). ``watts_per_replica`` on each
         config uses the replica-wide GPU total (nodeCount × per-pod) via
-        ``Service.get_total_gpu_count()``, independent of the per-pod
-        ``num_gpus`` the GPU-budget math consumes.
+        ``Service.get_total_gpu_count()``. GPU-budget math independently uses
+        the operator-projected ``gpusPerReplica``.
 
         The typed parser errors (``PowerAnnotationMissingError`` /
         ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /

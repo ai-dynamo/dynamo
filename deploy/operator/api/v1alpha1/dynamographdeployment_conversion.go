@@ -813,8 +813,11 @@ func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.Com
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}
-	if src.GPUCountPerPod != nil {
-		dst.GPUCountPerPod = ptr.To(*src.GPUCountPerPod)
+	if src.GPUsPerEngine != nil {
+		dst.GPUsPerEngine = ptr.To(*src.GPUsPerEngine)
+	}
+	if src.GPUsPerReplica != nil {
+		dst.GPUsPerReplica = ptr.To(*src.GPUsPerReplica)
 	}
 	if src.ReadyReplicas != nil {
 		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
@@ -839,8 +842,11 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}
-	if src.GPUCountPerPod != nil {
-		dst.GPUCountPerPod = ptr.To(*src.GPUCountPerPod)
+	if src.GPUsPerEngine != nil {
+		dst.GPUsPerEngine = ptr.To(*src.GPUsPerEngine)
+	}
+	if src.GPUsPerReplica != nil {
+		dst.GPUsPerReplica = ptr.To(*src.GPUsPerReplica)
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]

@@ -52,6 +52,7 @@ type grovePodCliqueSetRender struct {
 	existing         *grovev1alpha1.PodCliqueSet
 	desired          *grovev1alpha1.PodCliqueSet
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment
+	gpuShapes        map[string]dynamo.GPUShape
 }
 
 func newGroveWorkloadRenderer(
@@ -104,10 +105,15 @@ func (r *groveWorkloadRenderer) Render(
 	if err != nil {
 		return nil, err
 	}
+	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, renderDeployment, desired)
+	if err != nil {
+		return nil, err
+	}
 	return &grovePodCliqueSetRender{
 		existing:         existingPodCliqueSet,
 		desired:          desired,
 		renderDeployment: renderDeployment,
+		gpuShapes:        gpuShapes,
 	}, nil
 }
 

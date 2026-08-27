@@ -263,14 +263,14 @@ def test_observe_dra_worker_uses_operator_resolved_gpu_count():
         },
         "status": {
             "observedGeneration": 2,
-            "components": {"decode-svc": {"gpuCountPerPod": 2}},
+            "components": {"decode-svc": {"gpusPerEngine": 4, "gpusPerReplica": 5}},
         },
     }
     _install_connector(cm, "default/my-dgd", deployment)
 
     pools = cm.observe(require_complete=True)["default/my-dgd"]
 
-    assert pools["decode"].gpu_per_replica == 4
+    assert pools["decode"].gpu_per_replica == 5
 
 
 def test_observe_generic_worker_keyed_by_name_then_role_hint():

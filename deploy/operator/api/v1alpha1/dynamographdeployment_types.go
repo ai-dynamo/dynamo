@@ -306,11 +306,19 @@ type ServiceReplicaStatus struct {
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
-	// GPUCountPerPod is the number of GPUs requested by the main container in
-	// each Pod, resolved from scalar resources or DRA ResourceClaims.
+	// GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+	// service replica, across all of its nodes. Independent auxiliary GPU
+	// allocations are excluded.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
+
+	// GPUsPerReplica is the unique GPU allocation added when this service scales
+	// by one replica, across all nodes, runtime containers, and provider-owned Pods.
+	// Shared DRA claims are counted once.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
-	GPUCountPerPod *int64 `json:"gpuCountPerPod,omitempty"`
+	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.

@@ -207,11 +207,9 @@ class KubernetesCapacityManager(CapacityManager):
         return ""
 
     @staticmethod
-    def _gpu_per_replica(deployment: dict, component: dict, service: Service) -> int:
-        """GPUs per replica = main-container GPUs × node count (multinode)."""
-        multinode = component.get("multinode")
-        node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
-        return service.get_gpu_count(deployment) * int(node_count)
+    def _gpu_per_replica(deployment: dict, service: Service) -> int:
+        """Return the operator-projected unique GPU cost of one replica."""
+        return service.get_gpu_shape(deployment).gpus_per_replica
 
     @staticmethod
     def _record_pool_component(
@@ -254,9 +252,7 @@ class KubernetesCapacityManager(CapacityManager):
                 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
             ):
                 try:
-                    gpu_per_replica = self._gpu_per_replica(
-                        deployment, component, service
-                    )
+                    gpu_per_replica = self._gpu_per_replica(deployment, service)
                 except ValueError:
                     if component_type == "":
                         # An untyped non-worker component is not a pool.
@@ -278,7 +274,7 @@ class KubernetesCapacityManager(CapacityManager):
                 gpu_per_replica=(
                     gpu_per_replica
                     if gpu_per_replica is not None
-                    else self._gpu_per_replica(deployment, component, service)
+                    else self._gpu_per_replica(deployment, service)
                 ),
             )
         return pools

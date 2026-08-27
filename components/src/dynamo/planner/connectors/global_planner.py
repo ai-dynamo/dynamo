@@ -23,6 +23,7 @@ from dynamo.planner.errors import (
     ModelNameNotFoundError,
     UserProvidedModelNameMismatchError,
 )
+from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -319,11 +320,25 @@ class GlobalPlannerConnector(PlannerConnector):
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[Optional[int], Optional[int]]:
-        """Resolve pool-local GPU shape when available."""
+        """Resolve pool-local per-engine GPU widths when available."""
         local = self._get_local_k8s_connector()
         if local is None:
             return None, None
         return local.get_gpu_counts(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Resolve pool-local GPU shapes when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None, None
+        return local.get_gpu_shapes(
             require_prefill=require_prefill,
             require_decode=require_decode,
         )

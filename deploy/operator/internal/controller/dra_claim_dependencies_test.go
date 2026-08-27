@@ -51,6 +51,20 @@ func testDRAClaimComponent(objectName string, template bool) nvidiacomv1beta1.Dy
 	}
 }
 
+func testSidecarDRAClaimComponent(objectName string, template bool) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	component := testDRAClaimComponent(objectName, template)
+	claims := component.PodTemplate.Spec.Containers[0].Resources.Claims
+	component.PodTemplate.Spec.Containers[0].Resources.Claims = nil
+	component.PodTemplate.Spec.Containers = append(
+		component.PodTemplate.Spec.Containers,
+		corev1.Container{
+			Name:      "gpu-sidecar",
+			Resources: corev1.ResourceRequirements{Claims: claims},
+		},
+	)
+	return component
+}
+
 func TestMapResourceClaimToDCDRequests(t *testing.T) {
 	t.Log("Create matching multinode and single-node component deployments")
 	matching := &nvidiacomv1beta1.DynamoComponentDeployment{
@@ -66,10 +80,16 @@ func TestMapResourceClaimToDCDRequests(t *testing.T) {
 		},
 	}
 	singleNode.Spec.Multinode = nil
+	sidecar := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sidecar", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: testSidecarDRAClaimComponent("gpu-claim", false),
+		},
+	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode, sidecar).Build(),
 	}
 
 	t.Log("Map a ResourceClaim event to its dependent component deployment")
@@ -80,6 +100,7 @@ func TestMapResourceClaimToDCDRequests(t *testing.T) {
 	assert.ElementsMatch(t, []ctrl.Request{
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}},
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "single-node"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "sidecar"}},
 	}, requests)
 }
 
@@ -108,10 +129,13 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 	component.Annotations = map[string]string{
 		commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
 	}
+	sidecar := matching.DeepCopy()
+	sidecar.Name = "sidecar"
+	sidecar.Spec.Components[1] = testSidecarDRAClaimComponent("gpu-template", true)
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode, component).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode, component, sidecar).Build(),
 	}
 
 	t.Log("Map a ResourceClaimTemplate event to its dependent graph deployment")
@@ -123,6 +147,7 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}},
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "single-node"}},
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "component"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "sidecar"}},
 	}, requests)
 }
 
@@ -143,6 +168,9 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 	singleNode := draBacked.DeepCopy()
 	singleNode.Name = "single-node"
 	singleNode.Spec.Multinode = nil
+	sidecar := draBacked.DeepCopy()
+	sidecar.Name = "sidecar"
+	sidecar.Spec.DynamoComponentDeploymentSharedSpec = testSidecarDRAClaimComponent("gpu-template", true)
 	scalarGPU := &nvidiacomv1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "scalar-gpu", Namespace: "dra-workloads"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
@@ -154,7 +182,7 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(draBacked, singleNode, draBackedOutsideScope, scalarGPU).Build(),
+		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(draBacked, singleNode, sidecar, draBackedOutsideScope, scalarGPU).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "dra-workloads"}},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
@@ -167,6 +195,7 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 	assert.ElementsMatch(t, []ctrl.Request{
 		{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "dra-backed"}},
 		{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "single-node"}},
+		{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "sidecar"}},
 	}, requests)
 }
 

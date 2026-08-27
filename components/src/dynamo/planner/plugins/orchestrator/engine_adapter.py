@@ -1225,7 +1225,7 @@ class OrchestratorEngineAdapter:
                 if component == "prefill"
                 else self._capabilities.decode
             )
-            gpu = caps.num_gpu if caps else None
+            gpu = caps.resolved_gpu_cost_per_replica if caps else None
             if gpu is None:
                 return max(replicas, min_endpoint)
             return proportional_clamp_single(
@@ -1254,8 +1254,8 @@ class OrchestratorEngineAdapter:
 
         p_caps = self._capabilities.prefill
         d_caps = self._capabilities.decode
-        p_gpu = p_caps.num_gpu if p_caps else None
-        d_gpu = d_caps.num_gpu if d_caps else None
+        p_gpu = p_caps.resolved_gpu_cost_per_replica if p_caps else None
+        d_gpu = d_caps.resolved_gpu_cost_per_replica if d_caps else None
         if p_gpu is None or d_gpu is None:
             return (
                 max(base_p, prefill_min_endpoint) if proposed_p else None,

@@ -22,14 +22,14 @@ class ComponentState:
     info: Optional[WorkerInfo] = None
     replicas: ReplicaState = field(default_factory=ReplicaState)
     num_gpus: Optional[int] = None
+    gpus_per_replica: Optional[int] = None
     # DGD-owned per-GPU power cap (watts) parsed from this component's worker
     # podTemplate annotation, and the already-multiplied per-replica draw
     # (cap × get_total_gpu_count()). Both are startup-static for the Planner
     # lifetime; DGD admission rejects tuple changes, which require DGD
     # replacement and a new Planner. They stay None when power awareness is off.
-    # ``num_gpus`` deliberately stays on the per-pod ``get_gpu_count()`` — power
-    # awareness must not change GPU-budget math — while ``power_watts_per_replica``
-    # uses the replica-wide (nodeCount × per-pod) GPU total.
+    # ``num_gpus`` is the inference-engine width used by performance models;
+    # ``gpus_per_replica`` is the unique allocation used by GPU-budget math.
     power_gpu_limit_watts: Optional[int] = None
     power_watts_per_replica: Optional[int] = None
 

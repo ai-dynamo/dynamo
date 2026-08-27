@@ -24,6 +24,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
+    GPUShapeUnavailableError,
     PowerAnnotationInvalidError,
     PowerAnnotationMissingError,
     SubComponentNotFoundError,
@@ -50,6 +51,14 @@ GPU_RESOURCE_KEY = "nvidia.com/gpu"
 # two are asserted identical by a contract test rather than shared as a package
 # import, because the agent image does not install the ``dynamo`` package.
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
+
+
+@dataclass(frozen=True)
+class ComponentGPUShape:
+    """Inference-engine GPU width and unique allocation per replica."""
+
+    gpus_per_engine: int
+    gpus_per_replica: int
 
 
 def break_arguments(args: list[str] | None) -> list[str]:
@@ -164,13 +173,11 @@ class Service(BaseModel):
         except ValueError:
             return None
 
-    def get_gpu_count(self, deployment: Optional[dict] = None) -> int:
+    def get_gpu_count(self) -> int:
         """Get the GPU count from the component's resource specification.
 
         GPU count is read from the v1beta1 main container resources
-        (``nvidia.com/gpu``). When ``deployment`` is provided, DRA-backed
-        components fall back to the operator-resolved ``gpuCountPerPod`` in
-        the current DGD status.
+        (``nvidia.com/gpu``).
 
         Returns:
             The number of GPUs configured for this component
@@ -185,41 +192,16 @@ class Service(BaseModel):
         # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
         # typically treat requests and limits as equivalent since GPUs are
         # non-compressible and allocated exclusively (no fractional sharing).
-        # TODO: Prefer current-generation gpuCountPerPod once all supported Operator
-        # versions publish it; scalar-first preserves bootstrap and rolling upgrades.
         if GPU_RESOURCE_KEY in limits:
             gpu_str = limits[GPU_RESOURCE_KEY]
         else:
             gpu_str = requests.get(GPU_RESOURCE_KEY)
 
-        if gpu_str is None and deployment is not None:
-            component_status = (
-                deployment.get("status", {}).get("components", {}).get(self.name, {})
-            )
-            gpu_str = component_status.get("gpuCountPerPod")
-            if gpu_str is not None:
-                generation = deployment.get("metadata", {}).get("generation")
-                observed_generation = deployment.get("status", {}).get(
-                    "observedGeneration"
-                )
-                if (
-                    generation is None
-                    or observed_generation is None
-                    or observed_generation != generation
-                ):
-                    raise ValueError(
-                        f"Resolved GPU count for component '{self.name}' is not current: "
-                        f"metadata.generation={generation}, "
-                        f"status.observedGeneration={observed_generation}."
-                    )
-
         if gpu_str is None:
             raise ValueError(
                 f"No GPU count specified for component '{self.name}'. "
                 f"Please set main container resources.limits.{GPU_RESOURCE_KEY} "
-                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD, or ensure "
-                "the operator publishes status.components.<name>.gpuCountPerPod "
-                "for DRA-backed components."
+                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD."
             )
 
         try:
@@ -238,6 +220,90 @@ class Service(BaseModel):
                 f"GPU count must be a positive integer."
             )
         return gpu_count
+
+    def get_gpu_shape(self, deployment: dict) -> ComponentGPUShape:
+        """Return the current operator-projected shape or a scalar fallback."""
+        deployment_status = deployment.get("status", {})
+        component_status = deployment_status.get("components", {}).get(self.name, {})
+        engine_raw = component_status.get("gpusPerEngine")
+        replica_raw = component_status.get("gpusPerReplica")
+        if engine_raw is not None or replica_raw is not None:
+            generation = deployment.get("metadata", {}).get("generation")
+            observed_generation = deployment.get("status", {}).get("observedGeneration")
+            if (
+                generation is None
+                or observed_generation is None
+                or observed_generation != generation
+            ):
+                raise GPUShapeUnavailableError(
+                    self.name,
+                    f"Resolved GPU shape for component '{self.name}' is not current: "
+                    f"metadata.generation={generation}, "
+                    f"status.observedGeneration={observed_generation}.",
+                )
+            if engine_raw is None or replica_raw is None:
+                raise GPUShapeUnavailableError(
+                    self.name,
+                    f"Incomplete GPU shape for component '{self.name}': "
+                    "both gpusPerEngine and gpusPerReplica are required.",
+                )
+            try:
+                engine = int(engine_raw)
+                replica = int(replica_raw)
+            except (TypeError, ValueError) as err:
+                raise GPUShapeUnavailableError(
+                    self.name,
+                    f"Invalid GPU shape for component '{self.name}': "
+                    f"gpusPerEngine={engine_raw!r}, gpusPerReplica={replica_raw!r}.",
+                ) from err
+            if engine < 0 or replica <= 0:
+                raise GPUShapeUnavailableError(
+                    self.name,
+                    f"Invalid GPU shape for component '{self.name}': "
+                    f"gpusPerEngine={engine}, gpusPerReplica={replica}.",
+                )
+            return ComponentGPUShape(engine, replica)
+
+        if self.requires_authoritative_gpu_shape():
+            deployment_state = deployment_status.get("state", "unknown")
+            raise GPUShapeUnavailableError(
+                self.name,
+                "operator status has no gpusPerEngine/gpusPerReplica fields "
+                f"for a DRA or auxiliary-GPU component (deployment state {deployment_state!r})",
+            )
+
+        per_node = self.get_gpu_count()
+        per_engine = per_node * self.get_node_count()
+        return ComponentGPUShape(per_engine, per_engine)
+
+    def requires_authoritative_gpu_shape(self) -> bool:
+        """Whether spec-only fallback could miss a distinct GPU allocation."""
+
+        containers = (
+            self.service.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        )
+        for container in containers:
+            resources = container.get("resources", {})
+            if resources.get("claims"):
+                return True
+            is_main = container.get("name") == MAIN_CONTAINER_NAME
+            limits = resources.get("limits", {})
+            requests = resources.get("requests", {})
+            resource_names = set(limits) | set(requests)
+            for resource_name in resource_names:
+                if resource_name != GPU_RESOURCE_KEY and not resource_name.startswith(
+                    "nvidia.com/mig-"
+                ):
+                    continue
+                if is_main and resource_name == GPU_RESOURCE_KEY:
+                    continue
+                raw = limits.get(resource_name, requests.get(resource_name))
+                try:
+                    if int(raw) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    return True
+        return False
 
     def get_node_count(self) -> int:
         """Return multinode.nodeCount from the component spec, defaulting to 1.

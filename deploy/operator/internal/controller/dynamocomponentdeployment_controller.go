@@ -145,6 +145,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
 		dynamoComponentDeployment.Spec.Experimental,
 	)...); compatibilityErr != nil {
+		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
+			return ctrl.Result{}, fmt.Errorf("clear GPU shape for invalid checkpoint configuration: %w", clearErr)
+		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
@@ -168,6 +171,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
 		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile",
 			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
+		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
+			logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
+		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
@@ -286,6 +292,7 @@ type ComponentReconcileResult struct {
 	reason               string
 	message              string
 	serviceReplicaStatus *nvidiacomv1beta1.ComponentReplicaStatus
+	gpuShape             *dynamo.GPUShape
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
@@ -316,6 +323,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
+	gpuShape, err := dynamo.ResolveGPUShape(
+		ctx,
+		r.Client,
+		dynamoComponentDeployment.Namespace,
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		[]dynamo.PodSpecMultiplicity{{PodSpec: &deployment.Spec.Template.Spec, Count: 1}},
+	)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("resolve Deployment GPU shape: %w", err)
+	}
+	var gpuShapeStatus *dynamo.GPUShape
+	if gpuShape.GPUsPerReplica > 0 {
+		gpuShapeStatus = &gpuShape
+	}
 
 	if IsDeploymentReady(deployment) {
 		return ComponentReconcileResult{
@@ -324,6 +345,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 			reason:               "DeploymentReady",
 			message:              "Deployment is ready",
 			serviceReplicaStatus: serviceReplicaStatus,
+			gpuShape:             gpuShapeStatus,
 		}, nil
 	}
 	return ComponentReconcileResult{
@@ -332,6 +354,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		reason:               "DeploymentNotReady",
 		message:              "Deployment is not ready",
 		serviceReplicaStatus: serviceReplicaStatus,
+		gpuShape:             gpuShapeStatus,
 	}, nil
 }
 
@@ -412,6 +435,24 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
+	groupSize := dynamoComponentDeployment.GetNumberOfNodes()
+	gpuShape, err := dynamo.ResolveGPUShape(
+		ctx,
+		r.Client,
+		dynamoComponentDeployment.Namespace,
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		[]dynamo.PodSpecMultiplicity{
+			{PodSpec: &lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec, Count: 1},
+			{PodSpec: &lwsObj.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec, Count: groupSize - 1},
+		},
+	)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("resolve LeaderWorkerSet GPU shape: %w", err)
+	}
+	var gpuShapeStatus *dynamo.GPUShape
+	if gpuShape.GPUsPerReplica > 0 {
+		gpuShapeStatus = &gpuShape
+	}
 	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
@@ -419,6 +460,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 			reason:               "LeaderWorkerSetReady",
 			message:              "LeaderWorkerSet is ready",
 			serviceReplicaStatus: &lwsReplicaStatus,
+			gpuShape:             gpuShapeStatus,
 		}, nil
 	}
 
@@ -428,24 +470,17 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		reason:               "LeaderWorkerSetNotReady",
 		message:              "LeaderWorkerSet is not ready",
 		serviceReplicaStatus: &lwsReplicaStatus,
+		gpuShape:             gpuShapeStatus,
 	}, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
-	// Resolve the desired GPU shape before publishing the component status.
-	var gpuCountErr error
 	if componentReconcileResult.serviceReplicaStatus != nil {
-		componentReconcileResult.serviceReplicaStatus.GPUCountPerPod = nil
-		gpuCount, err := dynamo.ResolveContainerGPUs(
-			ctx,
-			r.Client,
-			dynamoComponentDeployment.Namespace,
-			&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
-		)
-		if err != nil {
-			gpuCountErr = fmt.Errorf("resolve component GPU count: %w", err)
-		} else if gpuCount > 0 {
-			componentReconcileResult.serviceReplicaStatus.GPUCountPerPod = ptr.To(gpuCount)
+		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil
+		componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = nil
+		if componentReconcileResult.gpuShape != nil && componentReconcileResult.gpuShape.GPUsPerReplica > 0 {
+			componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = ptr.To(componentReconcileResult.gpuShape.GPUsPerEngine)
+			componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = ptr.To(componentReconcileResult.gpuShape.GPUsPerReplica)
 		}
 	}
 
@@ -475,15 +510,28 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Component = componentReconcileResult.serviceReplicaStatus
-	if gpuCountErr == nil {
-		dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
-	}
+	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
 		return fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
 	}
-	return gpuCountErr
+	return nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) clearDCDGPUShape(ctx context.Context, req ctrl.Request) error {
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if err := r.Get(ctx, req.NamespacedName, dcd); err != nil {
+		return err
+	}
+	if dcd.Status.Component == nil ||
+		(dcd.Status.Component.GPUsPerEngine == nil && dcd.Status.Component.GPUsPerReplica == nil) {
+		return nil
+	}
+	original := dcd.DeepCopy()
+	dcd.Status.Component.GPUsPerEngine = nil
+	dcd.Status.Component.GPUsPerReplica = nil
+	return r.Status().Patch(ctx, dcd, client.MergeFrom(original))
 }
 
 func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) nvidiacomv1beta1.ComponentReplicaStatus {

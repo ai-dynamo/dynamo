@@ -4,6 +4,8 @@
 """Unit tests for the shared GPU budget primitives in
 ``dynamo.planner.core.budget``."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from dynamo.planner.core.budget import (
@@ -12,6 +14,8 @@ from dynamo.planner.core.budget import (
     proportional_clamp_pair,
     proportional_clamp_single,
 )
+from dynamo.planner.core.state_machine import PlannerScalingState
+from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -253,3 +257,33 @@ def test_clamp_single_ceiling_below_min_endpoint_zeros():
     # min_endpoint*4=4 — even one replica overshoots the hard cap, so the
     # deployment is infeasible and must be zeroed.
     assert proportional_clamp_single(2, 4, 3, 3, 1) == 0
+
+
+@pytest.mark.parametrize(
+    ("gpu_cost_per_replica", "expected"),
+    [
+        (None, 2),
+        (4, 2),
+        (5, 1),
+    ],
+)
+def test_planner_budget_uses_replica_cost_not_engine_width(
+    gpu_cost_per_replica, expected
+):
+    """A zero-GPU sidecar preserves the old limit; one GPU lowers it."""
+    state = PlannerScalingState.__new__(PlannerScalingState)
+    state._config = SimpleNamespace(
+        min_gpu_budget=-1,
+        max_gpu_budget=8,
+        min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
+    )
+    state._capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+        )
+    )
+
+    assert state._apply_single_budget(3, "decode") == expected

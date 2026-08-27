@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -157,6 +158,151 @@ func ResolveGPUCount(
 		count, err := gpuCountFromClaimSpec(ctx, deviceClasses, claimSpec, containerClaim.Request)
 		if err != nil {
 			return 0, fmt.Errorf("cannot determine GPU count for ResourceClaim %q: %w", containerClaim.Name, err)
+		}
+		total += count
+	}
+	return total, nil
+}
+
+// PodSpecMultiplicity describes how many copies of a rendered Pod spec belong
+// to one component replica.
+type PodSpecMultiplicity struct {
+	PodSpec *corev1.PodSpec
+	Count   int32
+}
+
+type claimSelection struct {
+	claims     []corev1.ResourceClaim
+	requests   map[string]struct{}
+	selectsAll bool
+}
+
+func (s *claimSelection) add(claim corev1.ResourceClaim) {
+	if claim.Request == "" {
+		s.claims = []corev1.ResourceClaim{claim}
+		s.selectsAll = true
+		return
+	}
+	if s.selectsAll {
+		return
+	}
+	if s.requests == nil {
+		s.requests = make(map[string]struct{})
+	}
+	if _, ok := s.requests[claim.Request]; ok {
+		return
+	}
+	s.requests[claim.Request] = struct{}{}
+	s.claims = append(s.claims, claim)
+}
+
+// ResolvePodGPUCount returns the unique GPUs allocated to all regular
+// containers in one Pod. Scalar GPU resources and DRA allocations are
+// additive; repeated references to the same DRA request are counted once.
+func ResolvePodGPUCount(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	podSpec *corev1.PodSpec,
+) (int, error) {
+	return ResolvePodSetGPUCount(ctx, cl, namespace, []PodSpecMultiplicity{{
+		PodSpec: podSpec,
+		Count:   1,
+	}})
+}
+
+// ResolvePodSetGPUCount returns the unique GPU allocation across all rendered
+// Pods in one component replica. ResourceClaimTemplates are charged per Pod;
+// repeated references to the same concrete ResourceClaim are charged once
+// across the whole set.
+func ResolvePodSetGPUCount(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	pods []PodSpecMultiplicity,
+) (int, error) {
+	total := 0
+	directClaimOrder := make([]string, 0)
+	directClaims := make(map[string]*claimSelection)
+	for _, pod := range pods {
+		if pod.PodSpec == nil {
+			return 0, fmt.Errorf("cannot resolve Pod GPU count without a pod spec")
+		}
+		if pod.Count <= 0 {
+			return 0, fmt.Errorf("rendered Pod multiplicity must be positive, got %d", pod.Count)
+		}
+
+		podClaims := make(map[string]corev1.PodResourceClaim, len(pod.PodSpec.ResourceClaims))
+		for _, podClaim := range pod.PodSpec.ResourceClaims {
+			podClaims[podClaim.Name] = podClaim
+		}
+		claimOrder := make([]string, 0)
+		claimSelections := make(map[string]*claimSelection)
+		for i := range pod.PodSpec.Containers {
+			container := &pod.PodSpec.Containers[i]
+			scalarCount, err := ExtractGPUCountFromResourceRequirements(container.Resources)
+			if err != nil {
+				return 0, fmt.Errorf("container %q: %w", container.Name, err)
+			}
+			total += scalarCount * int(pod.Count)
+
+			for _, claim := range container.Resources.Claims {
+				selection, ok := claimSelections[claim.Name]
+				if !ok {
+					selection = &claimSelection{}
+					claimSelections[claim.Name] = selection
+					claimOrder = append(claimOrder, claim.Name)
+				}
+				selection.add(claim)
+			}
+		}
+
+		for _, claimName := range claimOrder {
+			selection := claimSelections[claimName]
+			podClaim, ok := podClaims[claimName]
+			if !ok {
+				return 0, fmt.Errorf("container ResourceClaim %q has no matching pod resourceClaim", claimName)
+			}
+			if podClaim.ResourceClaimTemplateName == nil &&
+				podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "" {
+				directName := *podClaim.ResourceClaimName
+				directSelection, ok := directClaims[directName]
+				if !ok {
+					directSelection = &claimSelection{}
+					directClaims[directName] = directSelection
+					directClaimOrder = append(directClaimOrder, directName)
+				}
+				for _, claim := range selection.claims {
+					claim.Name = directName
+					directSelection.add(claim)
+				}
+				continue
+			}
+
+			count, err := ResolveGPUCount(ctx, cl, namespace, pod.PodSpec, corev1.ResourceRequirements{
+				Claims: selection.claims,
+			})
+			if err != nil {
+				return 0, err
+			}
+			total += count * int(pod.Count)
+		}
+	}
+
+	for _, directName := range directClaimOrder {
+		selection := directClaims[directName]
+		count, err := ResolveGPUCount(
+			ctx,
+			cl,
+			namespace,
+			&corev1.PodSpec{ResourceClaims: []corev1.PodResourceClaim{{
+				Name:              directName,
+				ResourceClaimName: ptr.To(directName),
+			}}},
+			corev1.ResourceRequirements{Claims: selection.claims},
+		)
+		if err != nil {
+			return 0, err
 		}
 		total += count
 	}
