@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Optional overlay: authenticate the mocker demo's etcd control plane.
+#
+# The base docker-compose.yml runs etcd with ALLOW_NONE_AUTHENTICATION=yes.
+# Layer this file on top to require a root password and hand the same
+# credentials to the frontend + mocker-backend services:
+#
+#   # If you already ran the base compose, etcd persisted an anonymous data
+#   # volume and will reuse it, so ETCD_ROOT_PASSWORD is not applied. Remove it:
+#   docker compose -f docker-compose.yml down -v
+#
+#   export ETCD_ROOT_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f docker-compose.yml -f docker-compose.etcd-auth.yml up --build
+#
+# The dynamo-runtime etcd client consumes ETCD_AUTH_USERNAME/ETCD_AUTH_PASSWORD
+# (lib/runtime/src/transports/etcd.rs). This overlay demonstrates password
+# authentication only; TLS/mutual-TLS additionally requires configuring the etcd
+# server's TLS listener and mounting server + client certificates, which is out
+# of scope for this example.
+
+services:
+  etcd-server:
+    environment:
+      # Setting ETCD_ROOT_PASSWORD makes the Bitnami entrypoint create the
+      # `root` user and enable auth on first boot. `:?` fails fast if auth is
+      # requested but no password was supplied.
+      - ALLOW_NONE_AUTHENTICATION=no
+      - ETCD_ROOT_PASSWORD=${ETCD_ROOT_PASSWORD:?set ETCD_ROOT_PASSWORD to enable etcd auth}
+    healthcheck:
+      # `endpoint health` returns permission-denied (treated as healthy) even
+      # without credentials, but pass root creds so the probe is unambiguous.
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "--user", "root:${ETCD_ROOT_PASSWORD}", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  frontend:
+    environment:
+      - ETCD_AUTH_USERNAME=root
+      - ETCD_AUTH_PASSWORD=${ETCD_ROOT_PASSWORD:?set ETCD_ROOT_PASSWORD to enable etcd auth}
+
+  mocker-backend:
+    environment:
+      - ETCD_AUTH_USERNAME=root
+      - ETCD_AUTH_PASSWORD=${ETCD_ROOT_PASSWORD:?set ETCD_ROOT_PASSWORD to enable etcd auth}

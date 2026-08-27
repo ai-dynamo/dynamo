@@ -341,6 +341,7 @@ areas:
   - container/use-sccache.sh
   - deny.toml
   - dev/docker-compose.yml
+  - dev/docker-compose.etcd-auth.yml
   - dev/nats-server.conf
   - dev/sanity_check.py
   - dynamo.code-workspace
@@ -965,6 +966,10 @@ shared:
   - operator
   - gms
 - glob: dev/docker-compose.yml
+  owners:
+  - ops
+  - runtime
+- glob: dev/docker-compose.etcd-auth.yml
   owners:
   - ops
   - runtime
