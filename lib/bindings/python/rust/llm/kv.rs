@@ -20,8 +20,6 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-#[cfg(feature = "select-service")]
-use dynamo_kv_router::TrackingHashAlgorithm;
 #[cfg(feature = "custom-policy")]
 use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
@@ -37,10 +35,13 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest,
+    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -515,14 +516,13 @@ where
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn run_select_service_cli_with_worker_selection_policy_factory<I, T, F>(
+pub(crate) fn run_select_service_cli<I, T>(
     args: I,
-    resolve_policy: F,
+    policy_registry: WorkerSelectionPolicyRegistry,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
-    F: FnOnce(&KvRouterConfig) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>>,
 {
     let cli = SelectServiceCli::try_parse_from(
         std::iter::once(OsString::from("python -m dynamo.select_service"))
@@ -545,6 +545,7 @@ where
     if let Some(key_id) = cli.router_tracking_key_id {
         kv_router_config.router_tracking_key_id = Some(key_id);
     }
+    warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
     let config = SelectionServiceConfig {
         port: cli.port,
         threads: cli.threads,
@@ -558,12 +559,10 @@ where
             cli.selection_cache_max_bytes,
         ),
     };
-    let builder = config
-        .service_builder()
-        .resolved_worker_selection_policy_factory(resolve_policy(&config.kv_router_config)?);
+    let builder = config.service_builder(WorkerType::Aggregated, policy_registry);
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
-    rt.block_on(selection::run_server_with_service(config.port, service))
+    rt.block_on(selection::run_server(config.port, service))
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -658,13 +657,16 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        let factory = crate::standalone_worker_selection_policy_factory(&kv_router_config)
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])
             .map_err(to_pyerr)?;
-        let mut builder = SelectionServiceBuilder::new(kv_router_config)
-            .indexer_threads(indexer_threads)
-            .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner)
-            .resolved_worker_selection_policy_factory(factory);
+        let mut builder = SelectionServiceBuilder::new(
+            kv_router_config,
+            WorkerType::Aggregated,
+            crate::linked_worker_selection_policy_registry(),
+        )
+        .indexer_threads(indexer_threads)
+        .indexer_peers(indexer_peers.unwrap_or_default())
+        .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
