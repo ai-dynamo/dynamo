@@ -513,7 +513,9 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable fixed request metrics so prompt_tokens_details can be returned.
+    # Keep request metrics enabled independently of engine-level detailed timing.
+    # Dynamo consumes request_perf_metrics and metrics_dict for Prometheus and
+    # KV-transfer observability, but not time_breakdown_metrics.
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
