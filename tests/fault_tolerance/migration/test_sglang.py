@@ -695,4 +695,5 @@ def test_request_migration_sglang_decode(
                 expected_ongoing_request_count=1,
                 graceful_shutdown_endpoint=("backend", "generate"),
                 wait_for_worker_health_shutdown=True,
+                verify_replacement_worker=True,
             )
