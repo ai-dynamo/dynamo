@@ -135,3 +135,5 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
   to be used when frontend decoding is enabled. When it is disabled, it is not passed properly to
   the frameworks.
 - For multimodal items, only public URLs are supported.
+- `reasoning_effort` has no effect beyond enabling or disabling reasoning, since Gemma 4's chat
+  template does not support it.
