@@ -250,7 +250,14 @@ class PlannerRecommendationConfig(BaseModel):
         bucket_values = bucket.choices if isinstance(bucket, Choices) else [bucket]
         if isinstance(bucket, IntegerRange):
             step = bucket.range.step or 1
-            bucket_values = list(range(bucket.range.min, bucket.range.max + 1, step))
+            candidates = range(bucket.range.min, bucket.range.max + 1, step)
+            bucket_values = [
+                value for value in candidates if math.isqrt(value) ** 2 == value
+            ]
+            if not bucket_values:
+                raise ValueError(
+                    "fpm_sample_bucket_size range contains no perfect squares"
+                )
         for value in bucket_values:
             if value is None:
                 continue

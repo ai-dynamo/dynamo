@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,6 +14,9 @@ from typing import Any, Protocol
 from aisimulate.aic import materialize_aic_num_gpu_blocks
 
 from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.args import (
+    resolve_planner_profile_data as _resolve_mocker_planner_profile_data,
+)
 
 
 class PlannerProfileDataResult(Protocol):
@@ -36,11 +38,7 @@ def resolve_planner_profile_data(
         return SimpleNamespace(npz_path=None)
     if planner_profile_data.suffix == ".npz":
         return SimpleNamespace(npz_path=planner_profile_data)
-    try:
-        module = importlib.import_module("dynamo.mocker.args")
-    except ImportError:
-        return SimpleNamespace(npz_path=None)
-    return module.resolve_planner_profile_data(planner_profile_data)
+    return _resolve_mocker_planner_profile_data(planner_profile_data)
 
 
 def load_engine_args(

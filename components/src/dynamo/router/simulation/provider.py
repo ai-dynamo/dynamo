@@ -25,6 +25,9 @@ from aisimulate.sweeper.provider import (
 )
 
 from .config import (
+    OVERLAP_SCORE_CREDIT_DEFAULTS,
+    PREFILL_LOAD_SCALE_DEFAULTS,
+    TEMPERATURE_DEFAULTS,
     RouterPredictionConfig,
     RouterRecommendationConfig,
     RouterSearchSpace,
@@ -94,8 +97,8 @@ def _aic_perf_config_from_candidate(
         backend_version=str(sample.get("backend_version") or "") or None,
         tp=int(sample[f"{prefix}tp"]),
         attention_dp=int(sample[f"{prefix}attention_dp"]),
-        moe_tp=int(sample[f"{prefix}moe_tp"]),
-        moe_ep=int(sample[f"{prefix}moe_ep"]),
+        moe_tp=int(sample.get(f"{prefix}moe_tp", 1)),
+        moe_ep=int(sample.get(f"{prefix}moe_ep", 1)),
     )
 
 
@@ -200,12 +203,15 @@ class DynamoRouterSweepConfigProvider:
             else [load_model]
         )
         numeric_specs = {
-            "overlap_score_credit": (public.overlap_score_credit, [0.0, 0.5, 1.0]),
+            "overlap_score_credit": (
+                public.overlap_score_credit,
+                list(OVERLAP_SCORE_CREDIT_DEFAULTS),
+            ),
             "prefill_load_scale": (
                 public.prefill_load_scale,
-                [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+                list(PREFILL_LOAD_SCALE_DEFAULTS),
             ),
-            "temperature": (public.temperature, [0.0, 0.2, 0.5, 1.0]),
+            "temperature": (public.temperature, list(TEMPERATURE_DEFAULTS)),
         }
         modes = _deployment_modes(context.core_search_space)
         if policies == ["round_robin"]:
@@ -262,8 +268,8 @@ class DynamoRouterSweepConfigProvider:
             "mode": ["kv_router"],
             "prefill_load_model_type": list(load_models),
         }
-        ranges: dict[str, tuple[float, float]] = {}
-        log_ranges: list[str] = []
+        ranges = {}
+        log_ranges = []
         for name, (value, defaults) in numeric_specs.items():
             if isinstance(value, NumericRange):
                 raw = value.range

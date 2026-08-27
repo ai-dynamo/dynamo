@@ -14,9 +14,12 @@ from aisimulate.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MODES = frozenset({"kv_router", "round_robin"})
-OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
-PREFILL_LOAD_SCALES = frozenset({0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0})
-TEMPERATURES = frozenset({0.0, 0.2, 0.5, 1.0})
+OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
+PREFILL_LOAD_SCALE_DEFAULTS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
+TEMPERATURE_DEFAULTS = (0.0, 0.2, 0.5, 1.0)
+OVERLAP_SCORE_CREDITS = frozenset(OVERLAP_SCORE_CREDIT_DEFAULTS)
+PREFILL_LOAD_SCALES = frozenset(PREFILL_LOAD_SCALE_DEFAULTS)
+TEMPERATURES = frozenset(TEMPERATURE_DEFAULTS)
 LOAD_MODELS = frozenset({"none", "aic"})
 StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=False)]
 Policy = Literal["round_robin", "kv_router"]
@@ -161,7 +164,12 @@ class RouterRecommendationConfig(BaseModel):
                 if isinstance(self.prefill_load_model.type, Choices)
                 else {self.prefill_load_model.type}
             )
-            if load_types != {"none"} or conflicts:
+            if load_types != {"none"}:
+                raise ValueError(
+                    "router.policy=round_robin rejects prefill_load_model.type "
+                    f"{sorted(load_types)}; only 'none' is allowed"
+                )
+            if conflicts:
                 raise ValueError(
                     "router.policy=round_robin rejects KV-router fields "
                     f"{sorted(conflicts)}"
@@ -194,21 +202,13 @@ class RouterSearchSpace(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: list[str] = Field(default_factory=lambda: ["kv_router", "round_robin"])
-    overlap_score_credit: list[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0])
-    prefill_load_scale: list[float] = Field(
-        default_factory=lambda: [
-            0.0,
-            0.25,
-            0.5,
-            1.0,
-            2.0,
-            4.0,
-            8.0,
-            16.0,
-            32.0,
-        ]
+    overlap_score_credit: list[float] = Field(
+        default_factory=lambda: list(OVERLAP_SCORE_CREDIT_DEFAULTS)
     )
-    temperature: list[float] = Field(default_factory=lambda: [0.0, 0.2, 0.5, 1.0])
+    prefill_load_scale: list[float] = Field(
+        default_factory=lambda: list(PREFILL_LOAD_SCALE_DEFAULTS)
+    )
+    temperature: list[float] = Field(default_factory=lambda: list(TEMPERATURE_DEFAULTS))
     prefill_load_model_type: list[str] = Field(default_factory=lambda: ["none"])
     active_decode_blocks_threshold: int | None = None
     active_prefill_tokens_threshold: int | None = None
@@ -226,14 +226,15 @@ class RouterSearchSpace(BaseModel):
             "public_schema": True,
             "mode": domain_choices(public.pop("policy"), ["kv_router", "round_robin"]),
             "overlap_score_credit": domain_choices(
-                public.pop("overlap_score_credit", None), [0.0, 0.5, 1.0]
+                public.pop("overlap_score_credit", None),
+                list(OVERLAP_SCORE_CREDIT_DEFAULTS),
             ),
             "prefill_load_scale": domain_choices(
                 public.pop("prefill_load_scale", None),
-                [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+                list(PREFILL_LOAD_SCALE_DEFAULTS),
             ),
             "temperature": domain_choices(
-                public.pop("temperature", None), [0.0, 0.2, 0.5, 1.0]
+                public.pop("temperature", None), list(TEMPERATURE_DEFAULTS)
             ),
         }
         load_model = public.pop("prefill_load_model", None)

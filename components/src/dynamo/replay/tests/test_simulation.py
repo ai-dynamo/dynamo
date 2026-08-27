@@ -158,6 +158,32 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert report.metadata["planner_total_ticks"] == 7
 
 
+def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_paths": ["first.jsonl", "second.jsonl"],
+            "trace_format": "dynamo",
+            "arrival_speedup_ratio": 2.0,
+        },
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
+    assert seen["arrival_speedup_ratio"] == 2.0
+    assert report.metrics["completed_requests"] == 2.0
+
+
 def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
     seen = {}
 

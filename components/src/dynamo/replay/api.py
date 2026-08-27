@@ -16,6 +16,20 @@ from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 
 
+def _planner_replay_adapter():
+    """Load Planner replay lazily to break the replay.api/mocker import cycle.
+
+    ``dynamo.replay.planner`` imports ``dynamo.mocker``, whose package
+    initializer imports ``dynamo.replay.api`` for compatibility wrappers.
+    Importing Planner at module scope therefore fails in spawned workers while
+    this module is still partially initialized.
+    """
+
+    from dynamo.replay.planner import planner_replay_adapter
+
+    return planner_replay_adapter
+
+
 class _CommonReplayOptions(TypedDict, total=False):
     extra_engine_args: Any
     prefill_engine_args: Any
@@ -210,9 +224,7 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
-        from dynamo.replay.planner import planner_replay_adapter
-
-        adapter_scope = planner_replay_adapter(
+        adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -346,9 +358,7 @@ def run_synthetic_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        from dynamo.replay.planner import planner_replay_adapter
-
-        adapter_scope = planner_replay_adapter(
+        adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,

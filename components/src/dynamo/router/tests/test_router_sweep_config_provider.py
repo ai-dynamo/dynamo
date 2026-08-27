@@ -318,6 +318,23 @@ def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> N
     assert plan.fragment.log_float_ranges_by_branch["agg"] == ["prefill_load_scale"]
 
 
+def test_round_robin_load_model_error_names_the_conflict() -> None:
+    with pytest.raises(ValueError, match="rejects prefill_load_model.type"):
+        create_provider().compile_recommendation(
+            {
+                "policy": "round_robin",
+                "prefill_load_model": {"type": "aic"},
+            },
+            RecommendationAdapterContext(
+                engine={},
+                traffic={},
+                evaluation={},
+                optimization={},
+                sweep=_sweep_context(),
+            ),
+        )
+
+
 def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
     adapter = create_provider()
     context = RecommendationAdapterContext(
@@ -371,6 +388,49 @@ def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
         "prefill_load_model": {"type": "none"},
     }
     assert round_robin.runtime_hooks == ()
+
+
+def test_candidate_aic_materialization_defaults_absent_moe_parallelism() -> None:
+    adapter = create_provider()
+    plan = adapter.compile_recommendation(
+        {
+            "policy": "kv_router",
+            "prefill_load_model": {"type": "aic"},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+            optimization={},
+            sweep=_sweep_context(),
+        ),
+    )
+    selection = {
+        name: values[0]
+        for name, values in plan.fragment.choices_by_branch["agg"].items()
+    }
+    context = CandidateContext(
+        sample={
+            "deployment_mode": "agg",
+            "backend": "vllm",
+            "backend_version": "0.11.0",
+            "hardware_sku": "h200_sxm",
+            "model_name": "example/model",
+            "tp": 1,
+            "attention_dp": 1,
+        },
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="agg",
+            backend="vllm",
+            backend_version="0.11.0",
+        ),
+    )
+
+    result = adapter.materialize_candidate(plan, selection, context)
+    aic_config = result.runtime_hooks[0].config["aic_perf_config"]
+
+    assert aic_config["aic_moe_tp_size"] is None
+    assert aic_config["aic_moe_ep_size"] is None
 
 
 @pytest.mark.parametrize(

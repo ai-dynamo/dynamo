@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -23,6 +23,8 @@ from dynamo.mocker import MockEngineArgs
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
+
+logger = logging.getLogger(__name__)
 
 
 def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
@@ -320,9 +322,9 @@ def prepare_planner_replay(
                 "benchmark_granularity": benchmark_granularity,
             }
         )
-        sys.stderr.write(
-            "Note: throughput-based scaling regression requires AIC perf model; "
-            "falling back to load-based scaling only.\n"
+        logger.warning(
+            "throughput-based scaling regression requires AIC perf model; "
+            "falling back to load-based scaling only"
         )
         return adapter
 
@@ -340,9 +342,10 @@ def prepare_planner_replay(
         KeyError,
         FileNotFoundError,
     ) as exc:
-        sys.stderr.write(
-            f"Warning: AIC session creation failed ({exc}); throughput regression "
-            "will not be bootstrapped.\n"
+        logger.warning(
+            "AIC session creation failed (%s); throughput regression will not "
+            "be bootstrapped",
+            exc,
         )
         adapter.set_bootstrap_metadata(
             {
@@ -360,9 +363,10 @@ def prepare_planner_replay(
             decode_session, d_args, benchmark_granularity
         )
     except (RuntimeError, ValueError, KeyError, ArithmeticError) as exc:
-        sys.stderr.write(
-            f"Warning: AIC benchmark generation failed ({exc}); throughput "
-            "regression will not be bootstrapped.\n"
+        logger.warning(
+            "AIC benchmark generation failed (%s); throughput regression will "
+            "not be bootstrapped",
+            exc,
         )
         prefill_fpms, decode_fpms = [], []
 
@@ -379,7 +383,7 @@ def prepare_planner_replay(
             adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
         else:
             bootstrap_metadata["status"] = "empty"
-            sys.stderr.write("Warning: AIC produced no agg benchmark FPMs\n")
+            logger.warning("AIC produced no agg benchmark FPMs")
     elif prefill_fpms and decode_fpms:
         adapter.install_benchmark_fpms(
             prefill_fpms=prefill_fpms,
@@ -387,9 +391,10 @@ def prepare_planner_replay(
         )
     else:
         bootstrap_metadata["status"] = "empty"
-        sys.stderr.write(
-            "Warning: AIC produced empty benchmark FPMs "
-            f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
+        logger.warning(
+            "AIC produced empty benchmark FPMs (prefill=%d, decode=%d)",
+            len(prefill_fpms),
+            len(decode_fpms),
         )
     adapter.set_bootstrap_metadata(bootstrap_metadata)
     return adapter

@@ -56,16 +56,33 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
     requirement_sets = [
-        _requirement_names(root_project["dependencies"]),
-        *(
-            _requirement_names(requirements)
-            for requirements in root_project["optional-dependencies"].values()
+        (
+            "pyproject.toml project.dependencies",
+            _requirement_names(root_project["dependencies"]),
         ),
-        _requirement_names(benchmark_project["dependencies"]),
-        _requirements_file_names(ROOT / "container/deps/requirements.frontend.txt"),
-        _requirements_file_names(ROOT / "container/deps/requirements.planner.txt"),
+        *(
+            (
+                f"pyproject.toml project.optional-dependencies.{name}",
+                _requirement_names(requirements),
+            )
+            for name, requirements in root_project["optional-dependencies"].items()
+        ),
+        (
+            "benchmarks/pyproject.toml project.dependencies",
+            _requirement_names(benchmark_project["dependencies"]),
+        ),
+        (
+            "container/deps/requirements.frontend.txt",
+            _requirements_file_names(ROOT / "container/deps/requirements.frontend.txt"),
+        ),
+        (
+            "container/deps/requirements.planner.txt",
+            _requirements_file_names(ROOT / "container/deps/requirements.planner.txt"),
+        ),
     ]
-    assert all(not (names & LEGACY_DISTRIBUTIONS) for names in requirement_sets)
+    for label, names in requirement_sets:
+        retired = names & LEGACY_DISTRIBUTIONS
+        assert not retired, f"{label} installs retired distributions: {sorted(retired)}"
 
     features = bindings_cargo["features"]
     dependencies = bindings_cargo["dependencies"]

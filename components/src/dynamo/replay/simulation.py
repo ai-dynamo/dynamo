@@ -199,7 +199,10 @@ class DynamoReplayRunner:
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
-        return spec.workload.get("trace_path") is not None
+        return (
+            spec.workload.get("trace_path") is not None
+            or spec.workload.get("trace_paths") is not None
+        )
 
     @staticmethod
     def _arrival_speedup_ratio(spec: ReplaySpec) -> float:

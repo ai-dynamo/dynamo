@@ -244,6 +244,13 @@ def _independent_preset_mappings(
             or mapping["load_adjustment_interval_seconds"]
             < mapping["throughput_adjustment_interval_seconds"]
         ]
+    elif group == "fpm_sampling":
+        mappings = [
+            mapping
+            for mapping in mappings
+            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
+            == mapping["fpm_sample_bucket_size"]
+        ]
     return mappings
 
 
@@ -562,11 +569,16 @@ def _dynamo_trace_is_agentic(traffic: Mapping[str, JSONValue]) -> bool:
                 if not line.strip():
                     continue
                 record = json.loads(line)
+                if not isinstance(record, Mapping):
+                    continue
                 event = record.get("event", record)
+                if not isinstance(event, Mapping):
+                    continue
                 event_type = event.get("event_type", record.get("event_type"))
                 if event_type != "request_end":
                     continue
-                return event.get("agent_context") is not None
+                if event.get("agent_context") is not None:
+                    return True
     return False
 
 

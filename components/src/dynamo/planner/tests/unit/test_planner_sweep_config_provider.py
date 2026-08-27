@@ -618,6 +618,41 @@ def test_planner_default_preset_conflicts_and_off_exposes_leaf_dimensions() -> N
     }.issubset(choices)
 
 
+def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    plan = create_provider().compile_recommendation(
+        {
+            "fpm_sampling": {"preset": False},
+            "max_num_fpm_samples": 64,
+            "fpm_sample_bucket_size": {"range": {"min": 4, "max": 64, "step": 4}},
+        },
+        context,
+    )
+
+    assert plan.fragment.choices_by_branch["agg"]["fpm_sample_bucket_size"] == [
+        4,
+        16,
+        36,
+        64,
+    ]
+
+    with pytest.raises(ValueError, match="contains no perfect squares"):
+        create_provider().compile_recommendation(
+            {
+                "fpm_sampling": {"preset": False},
+                "max_num_fpm_samples": 64,
+                "fpm_sample_bucket_size": {"range": {"min": 5, "max": 8, "step": 1}},
+            },
+            context,
+        )
+
+
 def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
     context = RecommendationAdapterContext(
         engine={},
@@ -764,6 +799,10 @@ def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) 
     trace.write_text(
         json.dumps({"event_type": "request_payload"})
         + "\n"
+        + json.dumps(17)
+        + "\n"
+        + json.dumps({"event_type": "request_end", "request": {}})
+        + "\n"
         + json.dumps(
             {
                 "event": {
@@ -774,7 +813,7 @@ def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) 
         )
         + "\n"
     )
-    with pytest.raises(ValueError, match="planner.policy=disabled"):
+    with pytest.raises(ValueError, match=r"planner\.policy=disabled"):
         create_provider().compile_recommendation(
             {"policy": "enabled"},
             RecommendationAdapterContext(

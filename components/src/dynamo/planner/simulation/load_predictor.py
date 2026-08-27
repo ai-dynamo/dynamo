@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.offline.trace_data import (
+    extract_metrics_from_mooncake,
+    extract_metrics_from_trace_paths,
+)
+
 from .presets import throughput_intervals
 
 if TYPE_CHECKING:
@@ -212,8 +217,6 @@ def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
 def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     """Aggregate a Mooncake trace using the Planner's production trace utility."""
 
-    from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
-
     return [
         Window(
             float(metrics["request_count"]),
@@ -230,8 +233,6 @@ def build_windows_from_trace_paths(
     interval_s: int,
 ) -> list[Window]:
     """Aggregate one resolved public traffic source into predictor windows."""
-
-    from dynamo.planner.offline.trace_data import extract_metrics_from_trace_paths
 
     return [
         Window(
