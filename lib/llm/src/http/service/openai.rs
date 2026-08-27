@@ -1225,7 +1225,11 @@ async fn completions_batch(
             err_response
         })?;
 
-    let mut response_collector = state.create_response_collector(&metric_model, &inflight_guard);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let frontend_load = inflight_guard.frontend_load_request();
+    let batch_input_tokens = Arc::new(parking_lot::Mutex::new(vec![0; batch_size]));
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1271,7 +1275,23 @@ async fn completions_batch(
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
         let n_u32 = n as u32;
+        let frontend_load = frontend_load.clone();
+        let batch_input_tokens = batch_input_tokens.clone();
         let remapped_stream = stream.map(move |mut response| {
+            if let Ok(Some(metrics)) =
+                crate::protocols::common::metrics::LLMMetricAnnotation::from_annotation(&response)
+            {
+                let total_input_tokens = {
+                    let mut input_tokens = batch_input_tokens.lock();
+                    input_tokens[prompt_idx] = input_tokens[prompt_idx].max(metrics.input_tokens);
+                    input_tokens
+                        .iter()
+                        .try_fold(0_usize, |total, &tokens| total.checked_add(tokens))
+                };
+                if let Some(total_input_tokens) = total_input_tokens {
+                    frontend_load.observe(total_input_tokens, metrics.chunk_tokens);
+                }
+            }
             if let Some(ref mut data) = response.data {
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
@@ -4322,7 +4342,7 @@ async fn images(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Images,
         streaming,
         &request_id,
@@ -4330,7 +4350,7 @@ async fn images(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector_for_request(&model, &inflight);
+        .create_response_collector_for_request(&metric_model, &inflight);
 
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
@@ -4340,7 +4360,7 @@ async fn images(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -4445,7 +4465,7 @@ async fn videos(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Videos,
         streaming,
         &request_id,
@@ -4453,14 +4473,14 @@ async fn videos(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector_for_request(&model, &inflight);
+        .create_response_collector_for_request(&metric_model, &inflight);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -4559,20 +4579,22 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Videos,
+        true,
+        request.id(),
+    );
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector_for_request(&model, &inflight);
+        .create_response_collector_for_request(&metric_model, &inflight);
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -4840,7 +4862,7 @@ async fn audio_speech(
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Audios,
         streams_audio_chunks,
         &request_id,
@@ -4848,7 +4870,7 @@ async fn audio_speech(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector_for_request(&model, &inflight);
+        .create_response_collector_for_request(&metric_model, &inflight);
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
@@ -4856,7 +4878,7 @@ async fn audio_speech(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));

@@ -1600,6 +1600,10 @@ impl InflightGuard {
         self.timer.elapsed().as_millis()
     }
 
+    pub(crate) fn frontend_load_request(&self) -> crate::frontend_load::FrontendLoadRequest {
+        self.frontend_load.clone()
+    }
+
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
         self.error_type = ErrorType::None;
@@ -1843,7 +1847,7 @@ impl ResponseMetricCollector {
         }
     }
 
-    fn observe_frontend_load(&self, input_tokens: usize, generated_tokens: usize) {
+    pub(crate) fn observe_frontend_load(&self, input_tokens: usize, generated_tokens: usize) {
         if let Some(request) = &self.frontend_load {
             request.observe(input_tokens, generated_tokens);
         }

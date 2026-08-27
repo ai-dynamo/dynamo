@@ -45,12 +45,9 @@ const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
 const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
 
 #[derive(Debug)]
-// Keep actor subscriptions crate-private because delivery cursors and recovery belong above it.
-pub(crate) struct DcCkfSubscription {
-    pub(crate) snapshot: DcCkfSnapshot,
-    pub(crate) deltas: broadcast::Receiver<DcCkfDelta>,
-    pub(crate) stats: DcCkfStats,
-    pub(crate) members: Vec<(WorkerWithDpRank, usize)>,
+pub(super) struct DcCkfSubscription {
+    pub(super) snapshot: DcCkfSnapshot,
+    pub(super) deltas: broadcast::Receiver<DcCkfDelta>,
 }
 
 // NOTE: `dynamo-llm` enables the router's general metrics feature in production. Keep these
@@ -537,7 +534,7 @@ impl KvDcRelayHandle {
             .await
     }
 
-    pub(crate) async fn subscribe(
+    pub(super) async fn subscribe(
         &self,
         lease: LaneLease,
     ) -> Result<DcCkfSubscription, KvDcRelayError> {
@@ -552,8 +549,6 @@ impl KvDcRelayHandle {
         Ok(DcCkfSubscription {
             snapshot: subscription.snapshot,
             deltas: subscription.deltas,
-            stats: subscription.stats,
-            members: subscription.members,
         })
     }
 
@@ -967,8 +962,6 @@ pub(super) struct ActorSnapshot {
 struct ActorSubscription {
     snapshot: DcCkfSnapshot,
     deltas: broadcast::Receiver<DcCkfDelta>,
-    stats: DcCkfStats,
-    members: Vec<(WorkerWithDpRank, usize)>,
 }
 
 struct ActorCore {
@@ -1041,14 +1034,7 @@ async fn snapshot_after_barrier_blocking(
                 // Prevent a gap after snapshot sequence N by subscribing before the actor can
                 // resume mutations.
                 let deltas = publisher.sink().sender.subscribe();
-                let stats = state.stats();
-                let members = state.member_counts();
-                ActorSubscription {
-                    snapshot,
-                    deltas,
-                    stats,
-                    members,
-                }
+                ActorSubscription { snapshot, deltas }
             });
         (ActorCore { state, publisher }, result)
     })

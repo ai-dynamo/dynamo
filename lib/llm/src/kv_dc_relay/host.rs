@@ -437,7 +437,7 @@ impl EndpointAvailabilityWatch {
 }
 
 #[derive(Default)]
-struct HostTerminalState {
+pub(super) struct HostTerminalState {
     last_error: Mutex<Option<String>>,
 }
 
@@ -691,11 +691,12 @@ impl KvDcRelay {
             Some(
                 RelayStatsRuntime::start(
                     component.clone(),
-                    relay_identity,
                     statuses.clone(),
                     pools.clone(),
+                    publication_source.clone(),
                     listen_address,
-                    cancel.child_token(),
+                    cancel.clone(),
+                    terminal.clone(),
                 )
                 .await?,
             )
@@ -1140,7 +1141,11 @@ fn spawn_host_task_supervisor(
     })
 }
 
-fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState, reason: String) {
+pub(super) fn record_host_failure(
+    cancel: &CancellationToken,
+    terminal: &HostTerminalState,
+    reason: String,
+) {
     tracing::error!(error = %reason, "KV DC Relay host failed");
     terminal.record(reason);
     cancel.cancel();
@@ -2103,8 +2108,14 @@ async fn run_load_collector(
 ) {
     let mut retry = LoadRetryBackoff::default();
     loop {
-        let subscriber =
-            EventSubscriber::for_endpoint_id(component.drt(), &endpoint, KV_METRICS_SUBJECT).await;
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = EventSubscriber::for_endpoint_id(
+                component.drt(),
+                &endpoint,
+                KV_METRICS_SUBJECT,
+            ) => subscriber,
+        };
         let mut subscriber = match subscriber {
             Ok(subscriber) => subscriber.typed::<ActiveLoad>(),
             Err(error) => {

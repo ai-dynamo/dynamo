@@ -1085,6 +1085,15 @@ pub struct WorkerSelectionResult {
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerLoadScope {
+    /// Load observed only by the publishing scheduler.
+    Local,
+    /// Load already includes observations replicated from peer schedulers.
+    ReplicaSynchronized,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
@@ -1094,6 +1103,9 @@ pub struct ActiveLoad {
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
+    /// Present only for scheduler-originated load and describes its aggregation scope.
+    #[serde(default)]
+    pub scheduler_load_scope: Option<SchedulerLoadScope>,
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
@@ -2816,6 +2828,34 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
+    }
+
+    #[test]
+    fn active_load_defaults_missing_scheduler_scope() {
+        let load: ActiveLoad = serde_json::from_str(
+            r#"{"worker_id":1,"dp_rank":0,"active_decode_blocks":10,"active_prefill_tokens":20,"kv_used_blocks":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load.scheduler_load_scope, None);
+    }
+
+    #[test]
+    fn active_load_round_trips_scheduler_scope() {
+        let load = ActiveLoad {
+            worker_id: 1,
+            active_decode_blocks: Some(10),
+            active_prefill_tokens: Some(20),
+            scheduler_load_scope: Some(SchedulerLoadScope::ReplicaSynchronized),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_string(&load).unwrap();
+        assert!(serialized.contains(r#""scheduler_load_scope":"replica_synchronized""#));
+        assert_eq!(
+            serde_json::from_str::<ActiveLoad>(&serialized).unwrap(),
+            load
         );
     }
 }

@@ -14,8 +14,8 @@ pub use dynamo_kv_router::multi_worker_sequence::{
     SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
+    MAX_REPLICA_BATCH_EVENTS, SchedulerLoadScope, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
@@ -31,12 +31,13 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::AbortHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
-use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT, SchedulerLoadSender};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
 use dynamo_kv_router::protocols::PrefillLoadHint;
@@ -46,6 +47,7 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+const ACTIVE_LOAD_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 enum DeferredReplicaLeaseEvent {
     Admitted(SchedulerBookingDescriptor),
@@ -269,7 +271,58 @@ fn active_sequence_event_channel(
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventPublisher>,
     scheduler_load: SchedulerLoadSender,
+    scheduler_load_scope: SchedulerLoadScope,
+    load_tx: watch::Sender<HashMap<WorkerWithDpRank, ActiveLoad>>,
+    load_task: AbortHandle,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
+}
+
+impl RuntimeSequencePublisher {
+    fn publish_remote_load(&self, snapshot: SchedulerLoadSnapshot) {
+        let load = ActiveLoad {
+            worker_id: snapshot.worker.worker_id,
+            dp_rank: snapshot.worker.dp_rank,
+            active_decode_blocks: Some(snapshot.active_decode_blocks),
+            active_prefill_tokens: Some(snapshot.active_prefill_tokens),
+            scheduler_load_scope: Some(self.scheduler_load_scope),
+            kv_used_blocks: None,
+        };
+        self.load_tx.send_if_modified(|latest| {
+            if latest.get(&snapshot.worker) == Some(&load) {
+                false
+            } else {
+                latest.insert(snapshot.worker, load);
+                true
+            }
+        });
+    }
+
+    fn publish_remote_load_batch(&self, snapshots: &[SchedulerLoadSnapshot]) {
+        self.load_tx.send_if_modified(|latest| {
+            let mut changed = false;
+            for snapshot in snapshots {
+                let load = ActiveLoad {
+                    worker_id: snapshot.worker.worker_id,
+                    dp_rank: snapshot.worker.dp_rank,
+                    active_decode_blocks: Some(snapshot.active_decode_blocks),
+                    active_prefill_tokens: Some(snapshot.active_prefill_tokens),
+                    scheduler_load_scope: Some(self.scheduler_load_scope),
+                    kv_used_blocks: None,
+                };
+                if latest.get(&snapshot.worker) != Some(&load) {
+                    latest.insert(snapshot.worker, load);
+                    changed = true;
+                }
+            }
+            changed
+        });
+    }
+}
+
+impl Drop for RuntimeSequencePublisher {
+    fn drop(&mut self) {
+        self.load_task.abort();
+    }
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -282,9 +335,11 @@ impl SequencePublisher for RuntimeSequencePublisher {
 
     fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
         self.scheduler_load.publish(snapshot);
+        self.publish_remote_load(snapshot);
     }
 
     fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        self.publish_remote_load_batch(&snapshots);
         self.scheduler_load.publish_batch(snapshots);
     }
 
@@ -305,14 +360,80 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 
     fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.publish_remote_load(SchedulerLoadSnapshot {
+            worker: *worker,
+            active_decode_blocks: 0,
+            active_prefill_tokens: 0,
+        });
         self.worker_status_metrics
             .set_registered(worker.worker_id, worker.dp_rank, worker_type);
     }
 
     fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.load_tx
+            .send_if_modified(|latest| latest.remove(worker).is_some());
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
     }
+}
+
+async fn run_active_load_publisher(
+    publisher: EventPublisher,
+    mut load_rx: watch::Receiver<HashMap<WorkerWithDpRank, ActiveLoad>>,
+    cancellation_token: CancellationToken,
+) {
+    let mut published = HashMap::<WorkerWithDpRank, ActiveLoad>::new();
+    let mut replay = tokio::time::interval_at(
+        Instant::now() + ACTIVE_LOAD_REPLAY_INTERVAL,
+        ACTIVE_LOAD_REPLAY_INTERVAL,
+    );
+    replay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        let replay_all = tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            changed = load_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                false
+            }
+            _ = replay.tick() => true,
+        };
+        let pending =
+            pending_active_loads(&load_rx.borrow_and_update(), &mut published, replay_all);
+        for (worker, load) in pending {
+            let result = tokio::select! {
+                _ = cancellation_token.cancelled() => return,
+                result = publisher.publish(&load) => result,
+            };
+            match result {
+                Ok(()) => {
+                    published.insert(worker, load);
+                }
+                Err(error) => tracing::trace!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    %error,
+                    "Failed to publish scheduler ActiveLoad"
+                ),
+            }
+        }
+    }
+}
+
+fn pending_active_loads(
+    latest: &HashMap<WorkerWithDpRank, ActiveLoad>,
+    published: &mut HashMap<WorkerWithDpRank, ActiveLoad>,
+    replay_all: bool,
+) -> Vec<(WorkerWithDpRank, ActiveLoad)> {
+    let removed = published.keys().any(|worker| !latest.contains_key(worker));
+    published.retain(|worker, _| latest.contains_key(worker));
+    latest
+        .iter()
+        .filter(|(worker, load)| replay_all || removed || published.get(*worker) != Some(*load))
+        .map(|(worker, load)| (*worker, load.clone()))
+        .collect()
 }
 
 trait SingletonEventPublisher: Send + Sync {
@@ -585,11 +706,26 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     } else {
         None
     };
+    let metrics_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+    let (load_tx, load_rx) = watch::channel(HashMap::new());
+    let load_task = tokio::spawn(run_active_load_publisher(
+        metrics_publisher,
+        load_rx,
+        cancellation_token.child_token(),
+    ))
+    .abort_handle();
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
         scheduler_load,
+        scheduler_load_scope: if replica_sync {
+            SchedulerLoadScope::ReplicaSynchronized
+        } else {
+            SchedulerLoadScope::Local
+        },
+        load_tx,
+        load_task,
         worker_status_metrics,
     };
 
@@ -722,6 +858,30 @@ mod tests {
             router_id: 7,
             lora_name: None,
         }
+    }
+
+    fn active_load(worker_id: u64, blocks: u64) -> ActiveLoad {
+        ActiveLoad {
+            worker_id,
+            active_decode_blocks: Some(blocks),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn active_load_removal_republishes_the_remaining_topology() {
+        let removed = WorkerWithDpRank::new(1, 0);
+        let retained = WorkerWithDpRank::new(2, 0);
+        let mut published = HashMap::from([
+            (removed, active_load(1, 10)),
+            (retained, active_load(2, 20)),
+        ]);
+        let latest = HashMap::from([(retained, active_load(2, 20))]);
+
+        let pending = pending_active_loads(&latest, &mut published, false);
+
+        assert_eq!(pending, [(retained, active_load(2, 20))]);
+        assert!(!published.contains_key(&removed));
     }
 
     struct BlockingSingletonPublisher {

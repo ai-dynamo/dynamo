@@ -76,27 +76,19 @@ message CuckooProducerIdentity
   CuckooFormat format = 4;
 }
 
-message CuckooPoolSnapshot
-{
-  CuckooProducerIdentity producer = 1;
-  uint64 sequence = 2;
-  bytes packed_buckets = 3;
-  DataStatus status = 4;
-  CuckooPoolStats stats = 5;
+enum CuckooFrameKind {
+  CUCKOO_FRAME_KIND_UNSPECIFIED = 0;
+  CUCKOO_FRAME_KIND_SNAPSHOT_CHUNK = 1;
+  CUCKOO_FRAME_KIND_DELTA = 2;
 }
 
-message CuckooBucketImage
-{
-  uint64 bucket_index = 1;
-  fixed64 packed_bucket = 2;
-}
-
-message CuckooPoolDelta
+message CuckooPoolFrame
 {
   CuckooProducerIdentity producer = 1;
   uint64 base_sequence = 2;
   uint64 sequence = 3;
-  repeated CuckooBucketImage buckets = 4;
+  CuckooFrameKind kind = 4;
+  bytes cbi1_payload = 5;
 }
 
 message CuckooPoolRetired
@@ -120,7 +112,6 @@ message CuckooPoolStats
 message CuckooStreamHeartbeat
 {
   uint64 catalog_revision = 1;
-  bool initial_sync_complete = 2;
 }
 
 message KvCuckooFilterUpdate
@@ -128,11 +119,10 @@ message KvCuckooFilterUpdate
   RelayMessageMetadata metadata = 1;
   oneof update
   {
-    CuckooPoolSnapshot snapshot = 2;
-    CuckooPoolDelta delta = 3;
-    CuckooPoolRetired retired = 4;
-    CuckooPoolStats stats = 5;
-    CuckooStreamHeartbeat heartbeat = 6;
+    CuckooPoolFrame frame = 2;
+    CuckooPoolRetired retired = 3;
+    CuckooPoolStats stats = 4;
+    CuckooStreamHeartbeat heartbeat = 5;
   }
 }
 
@@ -159,9 +149,8 @@ message PoolKvUsage
 message LoadSnapshot
 {
   RelayMessageMetadata metadata = 1;
-  uint32 window_ms = 2;
-  repeated PoolLoad pools = 3;
-  repeated ModelLoad models = 4;
+  repeated PoolLoad pools = 2;
+  repeated ModelLoad models = 3;
 }
 
 message PoolLoad
@@ -187,12 +176,12 @@ message ModelLoad
   optional uint64 output_generation_requests = 7;
   repeated PoolIdentity serving_pools = 8;
 
-  uint64 requests_started = 10;
-  uint64 requests_completed = 11;
-  uint64 requests_failed = 12;
-  uint64 requests_cancelled = 13;
-  optional uint64 input_tokens = 14;
-  uint64 output_tokens = 15;
+  optional uint64 requests_started_total = 10;
+  optional uint64 requests_completed_total = 11;
+  optional uint64 requests_failed_total = 12;
+  optional uint64 requests_cancelled_total = 13;
+  optional uint64 input_tokens_total = 14;
+  optional uint64 output_tokens_total = 15;
 
   DataStatus status = 20;
   uint32 expected_frontends = 21;

@@ -673,14 +673,21 @@ impl GenerateMetricLifecycle {
         input_tokens: usize,
     ) -> Self {
         let metrics = state.metrics_clone();
+        let inflight = metrics.clone().create_inflight_guard(
+            &metric_model,
+            super::metrics::Endpoint::Generate,
+            false,
+            request_id,
+        );
         Self {
-            inflight: metrics.clone().create_inflight_guard(
+            collector: GenerateMetricCollector::new(
+                metrics,
                 &metric_model,
-                super::metrics::Endpoint::Generate,
-                false,
-                request_id,
+                &inflight,
+                tracker,
+                input_tokens,
             ),
-            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            inflight,
             metric_model,
         }
     }
@@ -694,11 +701,16 @@ impl GenerateMetricCollector {
     fn new(
         metrics: Arc<super::metrics::Metrics>,
         model: &str,
+        request: &InflightGuard,
         tracker: Arc<RequestTracker>,
         input_tokens: usize,
     ) -> Self {
+        let response = metrics
+            .clone()
+            .create_response_collector_for_request(model, request);
+        response.observe_frontend_load(input_tokens, 0);
         Self {
-            response: metrics.clone().create_response_collector(model),
+            response,
             http_queue: Some(metrics.create_http_queue_guard(model)),
             tracker,
             input_tokens,
@@ -769,6 +781,8 @@ impl GenerateMetricCollector {
         {
             drop(guard);
         }
+        self.response
+            .observe_frontend_load(self.input_tokens, chunk_tokens);
         self.response
             .observe_response(self.input_tokens, chunk_tokens);
     }
@@ -2769,8 +2783,19 @@ mod tests {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let metric_model = state.manager().metric_model_for(MODEL).to_string();
-        let mut collector =
-            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let inflight = state.metrics_clone().create_inflight_guard(
+            &metric_model,
+            Endpoint::Generate,
+            false,
+            "generate-worker-metadata-test",
+        );
+        let mut collector = GenerateMetricCollector::new(
+            state.metrics_clone(),
+            &metric_model,
+            &inflight,
+            tracker,
+            3,
+        );
         let mut first = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![10],
             index: Some(0),
@@ -2835,8 +2860,19 @@ mod tests {
         state.metrics_clone().register(&registry).unwrap();
 
         {
-            let mut collector =
-                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            let inflight = state.metrics_clone().create_inflight_guard(
+                &metric_model,
+                Endpoint::Generate,
+                false,
+                "generate-cache-metric-test",
+            );
+            let mut collector = GenerateMetricCollector::new(
+                state.metrics_clone(),
+                &metric_model,
+                &inflight,
+                tracker,
+                3,
+            );
             let mut annotated = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![10],
                 index: Some(0),

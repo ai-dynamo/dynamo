@@ -8,31 +8,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dynamo_kv_router::identity::{IdentitySource as DynamoIdentitySource, PoolId};
-use dynamo_kv_router::indexer::cuckoo::{
-    ConsumerInstanceId, DcCkfDelta, LaneLease, ProducerIdentity,
-};
+use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, EventChannelQuery};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use prost::Message;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use super::actor::{DcCkfSubscription, KvDcRelayHandle};
-use super::host::{SharedEndpointStatus, SlotLifecycle};
+use super::host::{HostTerminalState, SharedEndpointStatus, SlotLifecycle, record_host_failure};
 use super::identity::{
     CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, ModelTarget, WorkerRole,
 };
 use super::load::PoolLoadSnapshot;
 use super::pool_registry::PoolRegistry;
-use crate::frontend_load::{
-    FRONTEND_LOAD_TOPIC, FRONTEND_LOAD_WINDOW_MS, FrontendLoadFrame, FrontendModelLoad,
+use super::publication::{
+    PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
+    PublicationFrameKind, RelayPublicationSource,
 };
+use crate::frontend_load::{FRONTEND_LOAD_TOPIC, FrontendLoadFrame, FrontendModelLoad};
 use crate::worker_type::WorkerType;
 
 type EndpointStatuses =
@@ -47,23 +46,31 @@ use proto::kv_dc_relay_server::{KvDcRelay, KvDcRelayServer};
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const SOURCE_FRESHNESS: Duration = Duration::from_secs(3);
 const MAX_CKF_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
-const CKF_STREAM_CAPACITY: usize = 64;
+const FRONTEND_EVENT_CAPACITY: usize = 64;
+// One native delta can approach the wire limit. Backpressure here is preferable
+// to retaining another per-client backlog of large delta buffers.
+const CKF_POOL_EVENT_CAPACITY: usize = 1;
+const CKF_OUTPUT_CAPACITY: usize = 1;
 
 pub(super) struct RelayStatsRuntime {
-    tasks: Vec<JoinHandle<()>>,
+    cancel: CancellationToken,
+    supervisor: JoinHandle<()>,
 }
 
 impl RelayStatsRuntime {
     pub(super) async fn start(
         component: Component,
-        identity: DcRelayIdentity,
         statuses: EndpointStatuses,
         pools: Arc<PoolRegistry>,
+        publication_source: Arc<dyn RelayPublicationSource>,
         listen_address: SocketAddr,
-        cancel: CancellationToken,
+        fatal_cancel: CancellationToken,
+        terminal: Arc<HostTerminalState>,
     ) -> anyhow::Result<Self> {
+        let identity = publication_source.relay_identity();
         validate_listen_address(listen_address)?;
         let listener = tokio::net::TcpListener::bind(listen_address).await?;
+        let cancel = fatal_cancel.child_token();
         let metadata = relay_metadata(identity);
         let (usage_tx, usage_rx) = watch::channel(proto::KvUsageSnapshot {
             metadata: Some(metadata),
@@ -71,71 +78,120 @@ impl RelayStatsRuntime {
         });
         let (load_tx, load_rx) = watch::channel(proto::LoadSnapshot {
             metadata: Some(metadata),
-            window_ms: FRONTEND_LOAD_WINDOW_MS,
             pools: Vec::new(),
             models: Vec::new(),
         });
-        let (frontend_tx, frontend_rx) = mpsc::channel(CKF_STREAM_CAPACITY);
+        let (frontend_tx, frontend_rx) = mpsc::channel(FRONTEND_EVENT_CAPACITY);
 
         let frontend_component = component.clone();
         let frontend_cancel = cancel.child_token();
-        let frontend_task = tokio::spawn(async move {
-            run_frontend_subscriber(frontend_component, frontend_tx, frontend_cancel).await;
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            (
+                "frontend subscriber",
+                run_frontend_subscriber(frontend_component, frontend_tx, frontend_cancel).await,
+            )
         });
 
         let aggregate_component = component.clone();
         let aggregate_statuses = statuses.clone();
         let aggregate_cancel = cancel.child_token();
         let aggregate_pools = pools.clone();
-        let aggregate_task = tokio::spawn(async move {
-            run_aggregate_publisher(
-                aggregate_component,
-                identity,
-                aggregate_statuses,
-                aggregate_pools,
-                frontend_rx,
-                (usage_tx, load_tx),
-                aggregate_cancel,
+        tasks.spawn(async move {
+            (
+                "aggregate publisher",
+                run_aggregate_publisher(
+                    aggregate_component,
+                    identity,
+                    aggregate_statuses,
+                    aggregate_pools,
+                    frontend_rx,
+                    (usage_tx, load_tx),
+                    aggregate_cancel,
+                )
+                .await,
             )
-            .await;
         });
 
         let service = RelayStatsService {
-            identity,
             pools,
+            publication_source,
             statuses,
             usage: usage_rx,
             load: load_rx,
+            cancel: cancel.child_token(),
         };
         let server_cancel = cancel.child_token();
-        let server_task = tokio::spawn(async move {
-            let server = KvDcRelayServer::new(service)
-                .max_encoding_message_size(MAX_CKF_MESSAGE_BYTES)
-                .max_decoding_message_size(MAX_CKF_MESSAGE_BYTES);
-            let result = tonic::transport::Server::builder()
-                .add_service(server)
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    server_cancel.cancelled_owned(),
-                )
-                .await;
-            if let Err(error) = result {
-                tracing::error!(%error, "KV DC Relay gRPC server stopped");
-            }
+        tasks.spawn(async move {
+            (
+                "gRPC server",
+                tonic::transport::Server::builder()
+                    .add_service(
+                        KvDcRelayServer::new(service)
+                            .max_encoding_message_size(MAX_CKF_MESSAGE_BYTES),
+                    )
+                    .serve_with_incoming_shutdown(
+                        TcpListenerStream::new(listener),
+                        server_cancel.cancelled_owned(),
+                    )
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         });
 
+        let runtime_cancel = cancel.clone();
+        let supervisor = tokio::spawn(supervise_stats_tasks(tasks, cancel, fatal_cancel, terminal));
+
         Ok(Self {
-            tasks: vec![frontend_task, aggregate_task, server_task],
+            cancel: runtime_cancel,
+            supervisor,
         })
     }
 
     pub(super) async fn shutdown(self) {
-        for task in self.tasks {
-            if let Err(error) = task.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "KV DC Relay stats task failed during shutdown");
+        self.cancel.cancel();
+        if let Err(error) = self.supervisor.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "KV DC Relay stats supervisor failed during shutdown");
+        }
+    }
+}
+
+async fn supervise_stats_tasks(
+    mut tasks: JoinSet<(&'static str, anyhow::Result<()>)>,
+    cancel: CancellationToken,
+    fatal_cancel: CancellationToken,
+    terminal: Arc<HostTerminalState>,
+) {
+    let failure = tokio::select! {
+        _ = cancel.cancelled() => None,
+        result = tasks.join_next() => {
+            if cancel.is_cancelled() {
+                None
+            } else {
+                Some(match result {
+                    Some(Ok((task, Ok(())))) => {
+                        format!("KV DC Relay stats {task} stopped unexpectedly")
+                    }
+                    Some(Ok((task, Err(error)))) => {
+                        format!("KV DC Relay stats {task} failed: {error}")
+                    }
+                    Some(Err(error)) => format!("KV DC Relay stats task failed: {error}"),
+                    None => "KV DC Relay stats supervisor lost all tasks".to_string(),
+                })
             }
+        }
+    };
+    if let Some(reason) = failure {
+        record_host_failure(&fatal_cancel, &terminal, reason);
+    }
+    cancel.cancel();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "KV DC Relay stats task failed during shutdown");
         }
     }
 }
@@ -143,21 +199,30 @@ impl RelayStatsRuntime {
 fn validate_listen_address(address: SocketAddr) -> anyhow::Result<()> {
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "KV DC Relay gRPC must bind loopback unless mTLS termination is configured"
+        "KV DC Relay gRPC must bind to a loopback address"
     );
     Ok(())
 }
 
 #[derive(Clone)]
 struct RelayStatsService {
-    identity: DcRelayIdentity,
     pools: Arc<PoolRegistry>,
+    publication_source: Arc<dyn RelayPublicationSource>,
     statuses: EndpointStatuses,
     usage: watch::Receiver<proto::KvUsageSnapshot>,
     load: watch::Receiver<proto::LoadSnapshot>,
+    cancel: CancellationToken,
 }
 
 type ResponseStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 #[tonic::async_trait]
 impl KvDcRelay for RelayStatsService {
@@ -169,43 +234,93 @@ impl KvDcRelay for RelayStatsService {
         &self,
         _request: Request<()>,
     ) -> Result<Response<Self::WatchKvCuckooFilterStream>, Status> {
-        let (sender, receiver) = mpsc::channel(CKF_STREAM_CAPACITY);
+        let (sender, receiver) = mpsc::channel(CKF_OUTPUT_CAPACITY);
         let pools = self.pools.clone();
+        let publication_source = self.publication_source.clone();
         let statuses = self.statuses.clone();
-        let identity = self.identity;
+        let cancel = self.cancel.child_token();
+        let task_cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(error) = run_ckf_stream(identity, pools, statuses, sender.clone()).await {
-                let _ = sender.send(Err(error)).await;
+            tokio::select! {
+                _ = task_cancel.cancelled() => {}
+                result = run_ckf_stream(
+                    pools,
+                    publication_source,
+                    statuses,
+                    sender.clone(),
+                ) => {
+                    if let Err(error) = result {
+                        tokio::select! {
+                            _ = task_cancel.cancelled() => {}
+                            _ = sender.send(Err(error)) => {}
+                        }
+                    }
+                }
             }
         });
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+        Ok(Response::new(ckf_response_stream(receiver, cancel)))
     }
 
     async fn watch_kv_usage(
         &self,
         _request: Request<()>,
     ) -> Result<Response<Self::WatchKvUsageStream>, Status> {
-        Ok(Response::new(watch_stream(self.usage.clone())))
+        Ok(Response::new(watch_stream(
+            self.usage.clone(),
+            self.cancel.child_token(),
+        )))
     }
 
     async fn watch_load(
         &self,
         _request: Request<()>,
     ) -> Result<Response<Self::WatchLoadStream>, Status> {
-        Ok(Response::new(watch_stream(self.load.clone())))
+        Ok(Response::new(watch_stream(
+            self.load.clone(),
+            self.cancel.child_token(),
+        )))
     }
 }
 
-fn watch_stream<T>(mut receiver: watch::Receiver<T>) -> ResponseStream<T>
+fn ckf_response_stream<T>(
+    mut receiver: mpsc::Receiver<Result<T, Status>>,
+    cancel: CancellationToken,
+) -> ResponseStream<T>
+where
+    T: Send + 'static,
+{
+    let cancel = CancelOnDrop(cancel);
+    Box::pin(async_stream::stream! {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = cancel.0.cancelled() => break,
+                item = receiver.recv() => item,
+            };
+            let Some(item) = item else {
+                break;
+            };
+            yield item;
+        }
+    })
+}
+
+fn watch_stream<T>(mut receiver: watch::Receiver<T>, cancel: CancellationToken) -> ResponseStream<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    let cancel = CancelOnDrop(cancel);
     Box::pin(async_stream::stream! {
         loop {
+            if cancel.0.is_cancelled() {
+                break;
+            }
             let value = receiver.borrow_and_update().clone();
             yield Ok(value);
-            if receiver.changed().await.is_err() {
-                break;
+            tokio::select! {
+                biased;
+                _ = cancel.0.cancelled() => break,
+                changed = receiver.changed() => if changed.is_err() { break },
             }
         }
     })
@@ -213,27 +328,75 @@ where
 
 struct FrontendEvent {
     publisher_id: u64,
-    sequence: u64,
     published_at: u64,
     received_at: Instant,
     frame: FrontendLoadFrame,
+}
+
+#[derive(Default)]
+struct RelayLoadState {
+    frontends: HashMap<u64, FrontendSourceState>,
+    totals: HashMap<String, TrafficCounters>,
+}
+
+#[derive(Default)]
+struct FrontendSourceState {
+    sequence: u64,
+    counters: HashMap<String, TrafficCounters>,
+    latest: Option<FrontendEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrafficCounters {
+    requests_started_total: Option<u64>,
+    requests_completed_total: Option<u64>,
+    requests_failed_total: Option<u64>,
+    requests_cancelled_total: Option<u64>,
+    input_tokens_total: Option<u64>,
+    output_tokens_total: Option<u64>,
+}
+
+impl Default for TrafficCounters {
+    fn default() -> Self {
+        Self {
+            requests_started_total: Some(0),
+            requests_completed_total: Some(0),
+            requests_failed_total: Some(0),
+            requests_cancelled_total: Some(0),
+            input_tokens_total: Some(0),
+            output_tokens_total: Some(0),
+        }
+    }
+}
+
+impl From<&FrontendModelLoad> for TrafficCounters {
+    fn from(model: &FrontendModelLoad) -> Self {
+        Self {
+            requests_started_total: model.requests_started_total,
+            requests_completed_total: model.requests_completed_total,
+            requests_failed_total: model.requests_failed_total,
+            requests_cancelled_total: model.requests_cancelled_total,
+            input_tokens_total: model.input_tokens_total,
+            output_tokens_total: model.output_tokens_total,
+        }
+    }
 }
 
 async fn run_frontend_subscriber(
     component: Component,
     sender: mpsc::Sender<FrontendEvent>,
     cancel: CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let namespace = component.namespace().clone();
     loop {
         let mut subscriber = tokio::select! {
-            _ = cancel.cancelled() => return,
+            _ = cancel.cancelled() => return Ok(()),
             result = EventSubscriber::for_namespace(&namespace, FRONTEND_LOAD_TOPIC) => match result {
                 Ok(subscriber) => subscriber.typed::<FrontendLoadFrame>(),
                 Err(error) => {
                     tracing::warn!(%error, "KV DC Relay frontend-load subscription failed");
                     tokio::select! {
-                        _ = cancel.cancelled() => return,
+                        _ = cancel.cancelled() => return Ok(()),
                         _ = tokio::time::sleep(SNAPSHOT_INTERVAL) => continue,
                     }
                 }
@@ -242,35 +405,41 @@ async fn run_frontend_subscriber(
 
         loop {
             let event = tokio::select! {
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => return Ok(()),
                 event = subscriber.next() => event,
             };
             let Some(event) = event else {
                 break;
             };
             match event {
-                Ok((envelope, frame)) if frame.window_ms == FRONTEND_LOAD_WINDOW_MS => {
+                Ok((envelope, frame)) => {
                     let event = FrontendEvent {
                         publisher_id: envelope.publisher_id,
-                        sequence: envelope.sequence,
                         published_at: envelope.published_at,
                         received_at: Instant::now(),
                         frame,
                     };
-                    if sender.send(event).await.is_err() {
-                        return;
+                    let sent = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = sender.send(event) => result,
+                    };
+                    if sent.is_err() {
+                        if cancel.is_cancelled() {
+                            return Ok(());
+                        }
+                        anyhow::bail!("frontend aggregate channel closed");
                     }
                 }
-                Ok((envelope, frame)) => tracing::warn!(
-                    publisher_id = envelope.publisher_id,
-                    window_ms = frame.window_ms,
-                    "ignoring frontend load frame with unsupported window"
-                ),
                 Err(error) => {
                     tracing::warn!(%error, "KV DC Relay frontend-load stream failed; reconnecting");
                     break;
                 }
             }
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(SNAPSHOT_INTERVAL) => {}
         }
     }
 }
@@ -286,23 +455,27 @@ async fn run_aggregate_publisher(
         watch::Sender<proto::LoadSnapshot>,
     ),
     cancel: CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let (usage_tx, load_tx) = snapshots;
-    let mut frontends = HashMap::<u64, FrontendEvent>::new();
+    let mut state = RelayLoadState::default();
     let mut interval = tokio::time::interval(SNAPSHOT_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => return,
+            _ = cancel.cancelled() => return Ok(()),
             event = frontend_rx.recv() => match event {
-                Some(event) => record_frontend_event(&mut frontends, event),
-                None => return,
+                Some(event) => record_frontend_event(&mut state, event),
+                None if cancel.is_cancelled() => return Ok(()),
+                None => anyhow::bail!("frontend subscriber channel closed"),
             },
             _ = interval.tick() => {
-                let (expected_publishers, discovery_complete) = expected_frontend_publishers(&component).await;
+                let (expected_publishers, discovery_complete) = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    expected = expected_frontend_publishers(&component) => expected,
+                };
                 retain_discovered_frontends(
-                    &mut frontends,
+                    &mut state,
                     &expected_publishers,
                     discovery_complete,
                 );
@@ -316,7 +489,7 @@ async fn run_aggregate_publisher(
                     identity,
                     &catalog,
                     &worker_pools,
-                    &frontends,
+                    &state,
                     expected_publishers,
                     discovery_complete,
                     now,
@@ -328,17 +501,51 @@ async fn run_aggregate_publisher(
     }
 }
 
-fn record_frontend_event(frontends: &mut HashMap<u64, FrontendEvent>, event: FrontendEvent) {
+fn record_frontend_event(state: &mut RelayLoadState, event: FrontendEvent) {
     let frontend_id = event.frame.frontend_instance_id;
-    if frontends.values().any(|current| {
-        current.publisher_id == event.publisher_id && event.sequence <= current.sequence
-    }) {
+    let sequence = event.frame.sequence;
+    if sequence == 0 {
+        tracing::warn!(
+            frontend_id,
+            "ignoring frontend load frame with zero sequence"
+        );
         return;
     }
-    frontends.retain(|current_frontend, current| {
-        *current_frontend == frontend_id || current.publisher_id != event.publisher_id
-    });
-    frontends.insert(frontend_id, event);
+    if state
+        .frontends
+        .get(&frontend_id)
+        .is_some_and(|current| sequence <= current.sequence)
+    {
+        return;
+    }
+    if state.frontends.iter().any(|(current_frontend, current)| {
+        *current_frontend != frontend_id
+            && current
+                .latest
+                .as_ref()
+                .is_some_and(|latest| latest.publisher_id == event.publisher_id)
+    }) {
+        tracing::warn!(
+            frontend_id,
+            publisher_id = event.publisher_id,
+            "ignoring frontend load publisher that changed frontend identity"
+        );
+        return;
+    }
+
+    let source = state.frontends.entry(frontend_id).or_default();
+    for model in &event.frame.models {
+        let current = TrafficCounters::from(model);
+        let previous = source.counters.get(&model.model);
+        state
+            .totals
+            .entry(model.model.clone())
+            .or_default()
+            .accumulate(previous, &current);
+        source.counters.insert(model.model.clone(), current);
+    }
+    source.sequence = sequence;
+    source.latest = Some(event);
 }
 
 async fn expected_frontend_publishers(component: &Component) -> (HashSet<u64>, bool) {
@@ -365,14 +572,79 @@ async fn expected_frontend_publishers(component: &Component) -> (HashSet<u64>, b
 }
 
 fn retain_discovered_frontends(
-    frontends: &mut HashMap<u64, FrontendEvent>,
+    state: &mut RelayLoadState,
     expected_publishers: &HashSet<u64>,
     discovery_complete: bool,
 ) {
     if !discovery_complete {
         return;
     }
-    frontends.retain(|_, event| expected_publishers.contains(&event.publisher_id));
+    for frontend in state.frontends.values_mut() {
+        if frontend
+            .latest
+            .as_ref()
+            .is_some_and(|event| !expected_publishers.contains(&event.publisher_id))
+        {
+            frontend.latest = None;
+        }
+    }
+}
+
+impl TrafficCounters {
+    fn accumulate(&mut self, previous: Option<&Self>, current: &Self) {
+        accumulate_counter(
+            &mut self.requests_started_total,
+            previous.map(|value| value.requests_started_total),
+            current.requests_started_total,
+        );
+        accumulate_counter(
+            &mut self.requests_completed_total,
+            previous.map(|value| value.requests_completed_total),
+            current.requests_completed_total,
+        );
+        accumulate_counter(
+            &mut self.requests_failed_total,
+            previous.map(|value| value.requests_failed_total),
+            current.requests_failed_total,
+        );
+        accumulate_counter(
+            &mut self.requests_cancelled_total,
+            previous.map(|value| value.requests_cancelled_total),
+            current.requests_cancelled_total,
+        );
+        accumulate_counter(
+            &mut self.input_tokens_total,
+            previous.map(|value| value.input_tokens_total),
+            current.input_tokens_total,
+        );
+        accumulate_counter(
+            &mut self.output_tokens_total,
+            previous.map(|value| value.output_tokens_total),
+            current.output_tokens_total,
+        );
+    }
+
+    fn required_are_complete(&self) -> bool {
+        self.requests_started_total.is_some()
+            && self.requests_completed_total.is_some()
+            && self.requests_failed_total.is_some()
+            && self.requests_cancelled_total.is_some()
+            && self.output_tokens_total.is_some()
+    }
+}
+
+fn accumulate_counter(
+    total: &mut Option<u64>,
+    previous: Option<Option<u64>>,
+    current: Option<u64>,
+) {
+    *total = match (*total, previous, current) {
+        (Some(total), None, Some(current)) => total.checked_add(current),
+        (Some(total), Some(Some(previous)), Some(current)) => current
+            .checked_sub(previous)
+            .and_then(|delta| total.checked_add(delta)),
+        _ => None,
+    };
 }
 
 struct WorkerPool {
@@ -388,8 +660,10 @@ struct WorkerPool {
     active_decode_blocks: Option<u64>,
     active_prefill_tokens: Option<u64>,
     max_concurrency: Option<u64>,
-    complete: bool,
-    observed_at_unix_ms: u64,
+    kv_complete: bool,
+    scheduler_complete: bool,
+    kv_observed_at_unix_ms: u64,
+    scheduler_observed_at_unix_ms: u64,
 }
 
 async fn collect_worker_pools(
@@ -425,8 +699,11 @@ async fn collect_worker_pools(
         let observed_ranks = load_snapshot.map_or(0, |snapshot| {
             u64::try_from(snapshot.kv_observed_ranks).unwrap_or(u64::MAX)
         });
-        let complete = lifecycle_active && load_snapshot.is_some_and(PoolLoadSnapshot::is_complete);
-        let (capacity_blocks, used_blocks) = if complete {
+        let kv_complete =
+            lifecycle_active && load_snapshot.is_some_and(PoolLoadSnapshot::is_kv_complete);
+        let scheduler_complete =
+            lifecycle_active && load_snapshot.is_some_and(PoolLoadSnapshot::is_scheduler_complete);
+        let (capacity_blocks, used_blocks) = if kv_complete {
             load_snapshot
                 .map(|snapshot| (snapshot.total_kv_blocks, snapshot.kv_used_blocks))
                 .unwrap_or_default()
@@ -441,20 +718,23 @@ async fn collect_worker_pools(
             block_size_tokens: descriptor.query_semantics().kv_block_size(),
             expected_ranks,
             observed_ranks,
-            live_workers: complete
+            live_workers: lifecycle_active
                 .then(|| u64::try_from(membership.runtime_configs.len()).unwrap_or(u64::MAX)),
             capacity_blocks,
             used_blocks,
             active_decode_blocks: load_snapshot
-                .filter(|_| complete)
+                .filter(|_| scheduler_complete)
                 .and_then(|snapshot| snapshot.active_decode_blocks),
             active_prefill_tokens: load_snapshot
-                .filter(|_| complete)
+                .filter(|_| scheduler_complete)
                 .and_then(|snapshot| snapshot.active_prefill_tokens),
-            max_concurrency: complete.then_some(max_concurrency).flatten(),
-            complete,
-            observed_at_unix_ms: load_snapshot
-                .map_or(0, |snapshot| snapshot.source_observed_at_unix_ms),
+            max_concurrency: lifecycle_active.then_some(max_concurrency).flatten(),
+            kv_complete,
+            scheduler_complete,
+            kv_observed_at_unix_ms: load_snapshot
+                .map_or(0, |snapshot| snapshot.kv_source_observed_at_unix_ms),
+            scheduler_observed_at_unix_ms: load_snapshot
+                .map_or(0, |snapshot| snapshot.scheduler_source_observed_at_unix_ms),
         });
     }
     result.sort_unstable_by_key(|pool| pool.pool_id);
@@ -493,8 +773,8 @@ fn build_usage_snapshot(identity: DcRelayIdentity, pools: &[WorkerPool]) -> prot
                 observed_ranks: pool.observed_ranks,
                 capacity_blocks: pool.capacity_blocks,
                 used_blocks: pool.used_blocks,
-                status: data_status(pool.complete, pool.expected_ranks > 0),
-                source_observed_at_unix_ms: pool.observed_at_unix_ms,
+                status: data_status(pool.kv_complete, pool.expected_ranks > 0),
+                source_observed_at_unix_ms: pool.kv_observed_at_unix_ms,
             })
             .collect(),
     }
@@ -504,12 +784,17 @@ fn build_load_snapshot(
     identity: DcRelayIdentity,
     catalog: &DcPoolCatalog,
     worker_pools: &[WorkerPool],
-    frontends: &HashMap<u64, FrontendEvent>,
+    state: &RelayLoadState,
     mut expected_publishers: HashSet<u64>,
     discovery_complete: bool,
     now: Instant,
 ) -> proto::LoadSnapshot {
-    for event in frontends.values() {
+    let frontends = state
+        .frontends
+        .values()
+        .filter_map(|frontend| frontend.latest.as_ref())
+        .collect::<Vec<_>>();
+    for event in &frontends {
         expected_publishers.insert(event.publisher_id);
     }
 
@@ -522,8 +807,8 @@ fn build_load_snapshot(
             active_prefill_tokens: pool.active_prefill_tokens,
             active_decode_blocks: pool.active_decode_blocks,
             max_concurrency: pool.max_concurrency,
-            scheduler_status: data_status(pool.complete, pool.expected_ranks > 0),
-            scheduler_observed_at_unix_ms: pool.observed_at_unix_ms,
+            scheduler_status: data_status(pool.scheduler_complete, pool.expected_ranks > 0),
+            scheduler_observed_at_unix_ms: pool.scheduler_observed_at_unix_ms,
         })
         .collect();
 
@@ -536,7 +821,7 @@ fn build_load_snapshot(
             aggregate.serving_pools.insert(descriptor.pool_id());
         }
     }
-    for event in frontends.values() {
+    for event in frontends {
         for model in &event.frame.models {
             registrations
                 .entry(model.model.clone())
@@ -547,13 +832,18 @@ fn build_load_snapshot(
 
     let expected_frontends = u32::try_from(expected_publishers.len()).unwrap_or(u32::MAX);
     let models = registrations
-        .into_values()
-        .map(|aggregate| aggregate.finish(expected_frontends, discovery_complete))
+        .into_iter()
+        .map(|(model, aggregate)| {
+            aggregate.finish(
+                expected_frontends,
+                discovery_complete,
+                state.totals.get(&model),
+            )
+        })
         .collect();
 
     proto::LoadSnapshot {
         metadata: Some(relay_metadata(identity)),
-        window_ms: FRONTEND_LOAD_WINDOW_MS,
         pools,
         models,
     }
@@ -569,12 +859,6 @@ struct ModelAggregate {
     live_input_tokens: Option<u64>,
     input_processing_requests: u64,
     output_generation_requests: u64,
-    requests_started: u64,
-    requests_completed: u64,
-    requests_failed: u64,
-    requests_cancelled: u64,
-    input_tokens: Option<u64>,
-    output_tokens: u64,
     source_observed_at_unix_ms: Option<u64>,
     overflowed: bool,
 }
@@ -591,12 +875,6 @@ impl ModelAggregate {
             live_input_tokens: Some(0),
             input_processing_requests: 0,
             output_generation_requests: 0,
-            requests_started: 0,
-            requests_completed: 0,
-            requests_failed: 0,
-            requests_cancelled: 0,
-            input_tokens: Some(0),
-            output_tokens: 0,
             source_observed_at_unix_ms: None,
             overflowed: false,
         }
@@ -644,35 +922,6 @@ impl ModelAggregate {
             model.output_generation_requests,
             &mut self.overflowed,
         );
-        add_counter(
-            &mut self.requests_started,
-            model.requests_started,
-            &mut self.overflowed,
-        );
-        add_counter(
-            &mut self.requests_completed,
-            model.requests_completed,
-            &mut self.overflowed,
-        );
-        add_counter(
-            &mut self.requests_failed,
-            model.requests_failed,
-            &mut self.overflowed,
-        );
-        add_counter(
-            &mut self.requests_cancelled,
-            model.requests_cancelled,
-            &mut self.overflowed,
-        );
-        add_counter(
-            &mut self.output_tokens,
-            model.output_tokens,
-            &mut self.overflowed,
-        );
-        self.input_tokens = match (self.input_tokens, model.input_tokens) {
-            (Some(total), Some(value)) => total.checked_add(value),
-            _ => None,
-        };
         self.source_observed_at_unix_ms = Some(
             self.source_observed_at_unix_ms
                 .map_or(event.published_at, |current| {
@@ -681,14 +930,20 @@ impl ModelAggregate {
         );
     }
 
-    fn finish(mut self, expected_frontends: u32, discovery_complete: bool) -> proto::ModelLoad {
+    fn finish(
+        mut self,
+        expected_frontends: u32,
+        discovery_complete: bool,
+        traffic: Option<&TrafficCounters>,
+    ) -> proto::ModelLoad {
         let complete = discovery_complete
             && expected_frontends > 0
             && self.observed_frontends == expected_frontends
             && self
                 .source_observed_at_unix_ms
                 .is_some_and(|timestamp| timestamp > 0)
-            && !self.overflowed;
+            && !self.overflowed
+            && traffic.is_some_and(TrafficCounters::required_are_complete);
         let mut serving_pools = self.serving_pools.drain().collect::<Vec<_>>();
         serving_pools.sort_unstable();
         proto::ModelLoad {
@@ -702,12 +957,12 @@ impl ModelAggregate {
             input_processing_requests: complete.then_some(self.input_processing_requests),
             output_generation_requests: complete.then_some(self.output_generation_requests),
             serving_pools: serving_pools.into_iter().map(pool_identity).collect(),
-            requests_started: self.requests_started,
-            requests_completed: self.requests_completed,
-            requests_failed: self.requests_failed,
-            requests_cancelled: self.requests_cancelled,
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
+            requests_started_total: traffic.and_then(|value| value.requests_started_total),
+            requests_completed_total: traffic.and_then(|value| value.requests_completed_total),
+            requests_failed_total: traffic.and_then(|value| value.requests_failed_total),
+            requests_cancelled_total: traffic.and_then(|value| value.requests_cancelled_total),
+            input_tokens_total: traffic.and_then(|value| value.input_tokens_total),
+            output_tokens_total: traffic.and_then(|value| value.output_tokens_total),
             status: data_status(complete, self.observed_frontends > 0),
             expected_frontends,
             observed_frontends: self.observed_frontends,
@@ -738,7 +993,7 @@ fn add_counter(total: &mut u64, value: u64, overflowed: &mut bool) {
 }
 
 enum PoolEvent {
-    Delta(PoolId, DcCkfDelta),
+    Frame(PoolId, Arc<PublicationFrame>),
     Closed(PoolId, Status),
 }
 
@@ -747,7 +1002,6 @@ struct CkfPoolStream {
     endpoint: dynamo_runtime::protocols::EndpointId,
     task: JoinHandle<()>,
     capacity_omissions: u64,
-    sequence: u64,
     fenced: bool,
 }
 
@@ -757,21 +1011,29 @@ impl Drop for CkfPoolStream {
     }
 }
 
+impl CkfPoolStream {
+    async fn stop(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+
 async fn run_ckf_stream(
-    relay_identity: DcRelayIdentity,
     pools: Arc<PoolRegistry>,
+    publication_source: Arc<dyn RelayPublicationSource>,
     statuses: EndpointStatuses,
     output: mpsc::Sender<Result<proto::KvCuckooFilterUpdate, Status>>,
 ) -> Result<(), Status> {
-    let mut catalog_rx = pools.watch_catalog();
-    let (event_tx, mut event_rx) = mpsc::channel(CKF_STREAM_CAPACITY);
+    let relay_identity = publication_source.relay_identity();
+    let mut catalog_rx = publication_source.watch_catalog();
+    let (event_tx, mut event_rx) = mpsc::channel(CKF_POOL_EVENT_CAPACITY);
     let mut active = HashMap::<PoolId, CkfPoolStream>::new();
 
     loop {
         let catalog = catalog_rx.borrow_and_update().clone();
         reconcile_ckf_catalog(
-            relay_identity,
-            &pools,
+            pools.as_ref(),
+            publication_source.as_ref(),
             &statuses,
             &output,
             &event_tx,
@@ -788,7 +1050,6 @@ async fn run_ckf_stream(
                 relay_identity,
                 proto::kv_cuckoo_filter_update::Update::Heartbeat(proto::CuckooStreamHeartbeat {
                     catalog_revision: catalog.revision(),
-                    initial_sync_complete: true,
                 }),
             )
             .await?;
@@ -808,8 +1069,8 @@ async fn run_ckf_stream(
                 changed.map_err(|_| Status::unavailable("Relay catalog closed"))?;
                 let catalog = catalog_rx.borrow_and_update().clone();
                 reconcile_ckf_catalog(
-                    relay_identity,
-                    &pools,
+                    pools.as_ref(),
+                    publication_source.as_ref(),
                     &statuses,
                     &output,
                     &event_tx,
@@ -818,50 +1079,51 @@ async fn run_ckf_stream(
                 ).await?;
             }
             event = event_rx.recv() => match event {
-                Some(PoolEvent::Delta(pool_id, delta)) => {
-                    let Some(stream) = active.get_mut(&pool_id) else { continue; };
-                    if delta.identity() != stream.identity {
+                Some(PoolEvent::Frame(pool_id, frame)) => {
+                    let Some(stream) = active.get(&pool_id) else { continue; };
+                    if frame.identity() != stream.identity {
                         continue;
                     }
-                    let Some(handle) = pools.active_handle(pool_id) else { continue; };
-                    let (stats, sequence, members) = handle.state_stats().await
-                        .map_err(|error| Status::unavailable(error.to_string()))?;
-                    let omissions = stats.aggregation().capacity_failures();
-                    let expected_ranks = expected_ranks(&statuses, &stream.endpoint).await;
-                    let materialized_ranks = u64::try_from(members.len()).unwrap_or(u64::MAX);
-                    let complete = omissions == 0
-                        && expected_ranks > 0
-                        && materialized_ranks == expected_ranks;
-                    if omissions > stream.capacity_omissions || (!complete && !stream.fenced) {
-                        stream.capacity_omissions = omissions;
-                        stream.fenced = true;
+                    if frame.kind() == PublicationFrameKind::SnapshotChunk {
                         send_ckf(
                             &output,
                             relay_identity,
-                            proto::kv_cuckoo_filter_update::Update::Stats(ckf_stats(
-                                stream.identity,
-                                sequence,
-                                &members,
-                                stats.aggregation().unique_block_count(),
-                                omissions,
-                                complete,
-                            )),
+                            proto::kv_cuckoo_filter_update::Update::Frame(ckf_frame(&frame)),
+                        ).await?;
+                        continue;
+                    }
+                    let identity = stream.identity;
+                    let endpoint = stream.endpoint.clone();
+                    let was_fenced = stream.fenced;
+                    let prior_omissions = stream.capacity_omissions;
+                    let Some(status) = ckf_pool_status(
+                        &pools,
+                        &statuses,
+                        pool_id,
+                        identity,
+                        &endpoint,
+                    ).await? else {
+                        continue;
+                    };
+                    let complete = status.status == proto::DataStatus::Complete as i32;
+                    if status.capacity_omissions > prior_omissions
+                        || (!complete && !was_fenced)
+                    {
+                        send_ckf(
+                            &output,
+                            relay_identity,
+                            proto::kv_cuckoo_filter_update::Update::Stats(status.clone()),
                         ).await?;
                     }
-                    if delta.sequence() <= stream.sequence {
-                        continue;
+                    if let Some(stream) = active.get_mut(&pool_id) {
+                        stream.capacity_omissions = status.capacity_omissions;
+                        stream.fenced |= !complete;
                     }
-                    if delta.base_sequence() != stream.sequence {
-                        return Err(Status::data_loss("Relay CKF sequence gap"));
-                    }
-                    stream.sequence = delta.sequence();
-                    if complete && !stream.fenced {
+                    if complete && !was_fenced {
                         send_ckf(
                             &output,
                             relay_identity,
-                            proto::kv_cuckoo_filter_update::Update::Delta(
-                                ckf_delta(delta).map_err(Status::resource_exhausted)?,
-                            ),
+                            proto::kv_cuckoo_filter_update::Update::Frame(ckf_frame(&frame)),
                         ).await?;
                     }
                 }
@@ -871,8 +1133,8 @@ async fn run_ckf_stream(
             },
             _ = heartbeat.tick() => {
                 refresh_ckf_pools(
-                    relay_identity,
-                    &pools,
+                    pools.as_ref(),
+                    publication_source.as_ref(),
                     &statuses,
                     &output,
                     &event_tx,
@@ -884,7 +1146,6 @@ async fn run_ckf_stream(
                     relay_identity,
                     proto::kv_cuckoo_filter_update::Update::Heartbeat(proto::CuckooStreamHeartbeat {
                         catalog_revision: revision,
-                        initial_sync_complete: true,
                     }),
                 ).await?;
             }
@@ -893,14 +1154,15 @@ async fn run_ckf_stream(
 }
 
 async fn reconcile_ckf_catalog(
-    relay_identity: DcRelayIdentity,
-    pools: &Arc<PoolRegistry>,
+    pools: &PoolRegistry,
+    publication_source: &dyn RelayPublicationSource,
     statuses: &EndpointStatuses,
     output: &mpsc::Sender<Result<proto::KvCuckooFilterUpdate, Status>>,
     event_tx: &mpsc::Sender<PoolEvent>,
     active: &mut HashMap<PoolId, CkfPoolStream>,
     catalog: &DcPoolCatalog,
 ) -> Result<(), Status> {
+    let relay_identity = publication_source.relay_identity();
     let desired = catalog
         .pools()
         .iter()
@@ -914,7 +1176,7 @@ async fn reconcile_ckf_catalog(
         .collect::<Vec<_>>();
     for (pool_id, identity) in retired {
         if let Some(stream) = active.remove(&pool_id) {
-            stream.task.abort();
+            stream.stop().await;
         }
         send_ckf(
             output,
@@ -932,38 +1194,33 @@ async fn reconcile_ckf_catalog(
         if active.contains_key(&descriptor.pool_id()) {
             continue;
         }
-        let handle = pools
-            .active_handle(descriptor.pool_id())
-            .ok_or_else(|| Status::unavailable("Relay pool disappeared during CKF sync"))?;
-        let subscription = subscribe_ckf(&handle).await?;
-        let DcCkfSubscription {
-            snapshot,
-            deltas,
-            stats,
-            members,
-        } = subscription;
-        let capacity_omissions = stats.aggregation().capacity_failures();
-        let snapshot_sequence = snapshot.sequence();
-        let expected_ranks = expected_ranks(statuses, descriptor.serving_endpoint()).await;
-        let complete = capacity_omissions == 0
-            && expected_ranks > 0
-            && u64::try_from(members.len()).ok() == Some(expected_ranks);
-        let snapshot = ckf_snapshot(
-            snapshot,
-            &members,
-            stats.aggregation().unique_block_count(),
-            capacity_omissions,
-            complete,
-        )
-        .map_err(Status::resource_exhausted)?;
         let identity = descriptor.producer();
+        let Some(status) = ckf_pool_status(
+            pools,
+            statuses,
+            descriptor.pool_id(),
+            identity,
+            descriptor.serving_endpoint(),
+        )
+        .await?
+        else {
+            return Err(Status::unavailable(
+                "Relay pool disappeared during CKF sync",
+            ));
+        };
+        let capacity_omissions = status.capacity_omissions;
+        let complete = status.status == proto::DataStatus::Complete as i32;
         send_ckf(
             output,
             relay_identity,
-            proto::kv_cuckoo_filter_update::Update::Snapshot(snapshot),
+            proto::kv_cuckoo_filter_update::Update::Stats(status),
         )
         .await?;
-        let task = spawn_delta_forwarder(descriptor.pool_id(), deltas, event_tx.clone());
+        let stream = publication_source
+            .subscribe_pool(identity)
+            .await
+            .map_err(publication_status)?;
+        let task = spawn_frame_forwarder(descriptor.pool_id(), stream, event_tx.clone());
         active.insert(
             descriptor.pool_id(),
             CkfPoolStream {
@@ -971,7 +1228,6 @@ async fn reconcile_ckf_catalog(
                 endpoint: descriptor.serving_endpoint().clone(),
                 task,
                 capacity_omissions,
-                sequence: snapshot_sequence,
                 fenced: !complete,
             },
         );
@@ -980,50 +1236,40 @@ async fn reconcile_ckf_catalog(
 }
 
 async fn refresh_ckf_pools(
-    relay_identity: DcRelayIdentity,
-    pools: &Arc<PoolRegistry>,
+    pools: &PoolRegistry,
+    publication_source: &dyn RelayPublicationSource,
     statuses: &EndpointStatuses,
     output: &mpsc::Sender<Result<proto::KvCuckooFilterUpdate, Status>>,
     event_tx: &mpsc::Sender<PoolEvent>,
     active: &mut HashMap<PoolId, CkfPoolStream>,
 ) -> Result<(), Status> {
+    let relay_identity = publication_source.relay_identity();
     let pool_ids = active.keys().copied().collect::<Vec<_>>();
     for pool_id in pool_ids {
         let Some(stream) = active.get(&pool_id) else {
             continue;
         };
         let endpoint = stream.endpoint.clone();
+        let identity = stream.identity;
         let was_fenced = stream.fenced;
         let prior_omissions = stream.capacity_omissions;
-        let expected = expected_ranks(statuses, &endpoint).await;
-        let Some(handle) = pools.active_handle(pool_id) else {
+        let Some(status) = ckf_pool_status(pools, statuses, pool_id, identity, &endpoint).await?
+        else {
             continue;
         };
-        let (stats, sequence, members) = handle
-            .state_stats()
-            .await
-            .map_err(|error| Status::unavailable(error.to_string()))?;
-        let omissions = stats.aggregation().capacity_failures();
-        let complete =
-            omissions == 0 && expected > 0 && u64::try_from(members.len()).ok() == Some(expected);
+        let capacity_omissions = status.capacity_omissions;
+        let complete = status.status == proto::DataStatus::Complete as i32;
         if !complete {
-            if omissions > prior_omissions || !was_fenced {
+            if status.capacity_omissions > prior_omissions || !was_fenced {
                 send_ckf(
                     output,
                     relay_identity,
-                    proto::kv_cuckoo_filter_update::Update::Stats(ckf_stats(
-                        handle.identity(),
-                        sequence,
-                        &members,
-                        stats.aggregation().unique_block_count(),
-                        omissions,
-                        false,
-                    )),
+                    proto::kv_cuckoo_filter_update::Update::Stats(status),
                 )
                 .await?;
             }
             if let Some(stream) = active.get_mut(&pool_id) {
-                stream.capacity_omissions = omissions;
+                stream.capacity_omissions = capacity_omissions;
                 stream.fenced = true;
             }
             continue;
@@ -1032,45 +1278,31 @@ async fn refresh_ckf_pools(
             continue;
         }
 
-        let DcCkfSubscription {
-            snapshot,
-            deltas,
-            stats,
-            members,
-        } = subscribe_ckf(&handle).await?;
-        let omissions = stats.aggregation().capacity_failures();
-        let complete =
-            omissions == 0 && expected > 0 && u64::try_from(members.len()).ok() == Some(expected);
-        if !complete {
-            continue;
-        }
-        let identity = snapshot.identity();
-        let sequence = snapshot.sequence();
-        let snapshot = ckf_snapshot(
-            snapshot,
-            &members,
-            stats.aggregation().unique_block_count(),
-            omissions,
-            true,
-        )
-        .map_err(Status::resource_exhausted)?;
+        let old_stream = active
+            .remove(&pool_id)
+            .expect("refresh pool was present before resubscription");
+        old_stream.stop().await;
+        let stream = publication_source
+            .subscribe_pool(identity)
+            .await
+            .map_err(publication_status)?;
         send_ckf(
             output,
             relay_identity,
-            proto::kv_cuckoo_filter_update::Update::Snapshot(snapshot),
+            proto::kv_cuckoo_filter_update::Update::Stats(status),
         )
         .await?;
-        let task = spawn_delta_forwarder(pool_id, deltas, event_tx.clone());
-        let Some(stream) = active.get_mut(&pool_id) else {
-            task.abort();
-            continue;
-        };
-        stream.task.abort();
-        stream.identity = identity;
-        stream.task = task;
-        stream.capacity_omissions = omissions;
-        stream.sequence = sequence;
-        stream.fenced = false;
+        let task = spawn_frame_forwarder(pool_id, stream, event_tx.clone());
+        active.insert(
+            pool_id,
+            CkfPoolStream {
+                identity,
+                endpoint,
+                task,
+                capacity_omissions,
+                fenced: false,
+            },
+        );
     }
     Ok(())
 }
@@ -1097,53 +1329,77 @@ async fn expected_ranks(
         .unwrap_or_default()
 }
 
-async fn subscribe_ckf(handle: &KvDcRelayHandle) -> Result<DcCkfSubscription, Status> {
-    let identity = handle.identity();
-    let lease = LaneLease::new(
-        ConsumerInstanceId::new(identity.producer_incarnation()),
-        0,
-        identity.layout_generation(),
-    );
-    handle
-        .subscribe(lease)
+async fn ckf_pool_status(
+    pools: &PoolRegistry,
+    statuses: &EndpointStatuses,
+    pool_id: PoolId,
+    identity: ProducerIdentity,
+    endpoint: &dynamo_runtime::protocols::EndpointId,
+) -> Result<Option<proto::CuckooPoolStats>, Status> {
+    let Some(handle) = pools.active_handle(pool_id) else {
+        return Ok(None);
+    };
+    if handle.identity() != identity {
+        return Ok(None);
+    }
+    let (stats, sequence, members) = handle
+        .state_stats()
         .await
-        .map_err(|error| Status::unavailable(error.to_string()))
+        .map_err(|error| Status::unavailable(error.to_string()))?;
+    let capacity_omissions = stats.aggregation().capacity_failures();
+    let expected_ranks = expected_ranks(statuses, endpoint).await;
+    let materialized_ranks = u64::try_from(members.len()).unwrap_or(u64::MAX);
+    let complete =
+        capacity_omissions == 0 && expected_ranks > 0 && materialized_ranks == expected_ranks;
+    Ok(Some(ckf_stats(
+        identity,
+        sequence,
+        &members,
+        stats.aggregation().unique_block_count(),
+        capacity_omissions,
+        complete,
+    )))
 }
 
-fn spawn_delta_forwarder(
+fn spawn_frame_forwarder(
     pool_id: PoolId,
-    mut deltas: tokio::sync::broadcast::Receiver<DcCkfDelta>,
+    mut stream: PoolPublicationStream,
     sender: mpsc::Sender<PoolEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            match deltas.recv().await {
-                Ok(delta) => {
-                    if sender.send(PoolEvent::Delta(pool_id, delta)).await.is_err() {
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(frame) => {
+                    if sender.send(PoolEvent::Frame(pool_id, frame)).await.is_err() {
                         return;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Err(error) => {
                     let _ = sender
-                        .send(PoolEvent::Closed(
-                            pool_id,
-                            Status::resource_exhausted("CKF consumer lagged; reconnect required"),
-                        ))
-                        .await;
-                    return;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    let _ = sender
-                        .send(PoolEvent::Closed(
-                            pool_id,
-                            Status::unavailable("Relay CKF pool closed"),
-                        ))
+                        .send(PoolEvent::Closed(pool_id, publication_status(error)))
                         .await;
                     return;
                 }
             }
         }
+        let _ = sender
+            .send(PoolEvent::Closed(
+                pool_id,
+                Status::unavailable("Relay CKF publication stream closed"),
+            ))
+            .await;
     })
+}
+
+fn publication_status(error: PublicationError) -> Status {
+    match error.kind() {
+        PublicationErrorKind::NotFound
+        | PublicationErrorKind::ProducerMismatch
+        | PublicationErrorKind::Unavailable => Status::unavailable(error.to_string()),
+        PublicationErrorKind::ResourceExhausted => Status::resource_exhausted(error.to_string()),
+        PublicationErrorKind::InvalidPublication => Status::data_loss(error.to_string()),
+        PublicationErrorKind::Internal => Status::internal(error.to_string()),
+    }
 }
 
 async fn send_ckf(
@@ -1166,59 +1422,17 @@ async fn send_ckf(
         .map_err(|_| Status::cancelled("CKF consumer disconnected"))
 }
 
-fn ckf_snapshot(
-    snapshot: dynamo_kv_router::indexer::cuckoo::DcCkfSnapshot,
-    members: &[(dynamo_kv_router::protocols::WorkerWithDpRank, usize)],
-    unique_blocks: usize,
-    capacity_omissions: u64,
-    complete: bool,
-) -> Result<proto::CuckooPoolSnapshot, &'static str> {
-    let encoded_len = snapshot
-        .buckets()
-        .len()
-        .checked_mul(std::mem::size_of::<u64>())
-        .ok_or("CKF snapshot size overflow")?;
-    if encoded_len > MAX_CKF_MESSAGE_BYTES {
-        return Err("CKF snapshot exceeds the v1 64 MiB limit");
+fn ckf_frame(frame: &PublicationFrame) -> proto::CuckooPoolFrame {
+    proto::CuckooPoolFrame {
+        producer: Some(ckf_producer(frame.identity())),
+        base_sequence: frame.base_sequence(),
+        sequence: frame.sequence(),
+        kind: match frame.kind() {
+            PublicationFrameKind::SnapshotChunk => proto::CuckooFrameKind::SnapshotChunk as i32,
+            PublicationFrameKind::Delta => proto::CuckooFrameKind::Delta as i32,
+        },
+        cbi1_payload: frame.payload().to_vec(),
     }
-    let mut packed_buckets = Vec::with_capacity(encoded_len);
-    for bucket in snapshot.buckets() {
-        packed_buckets.extend_from_slice(&bucket.to_le_bytes());
-    }
-    Ok(proto::CuckooPoolSnapshot {
-        producer: Some(ckf_producer(snapshot.identity())),
-        sequence: snapshot.sequence(),
-        packed_buckets,
-        status: data_status(complete, !members.is_empty()),
-        stats: Some(ckf_stats(
-            snapshot.identity(),
-            snapshot.sequence(),
-            members,
-            unique_blocks,
-            capacity_omissions,
-            complete,
-        )),
-    })
-}
-
-fn ckf_delta(delta: DcCkfDelta) -> Result<proto::CuckooPoolDelta, &'static str> {
-    let buckets = delta
-        .images()
-        .iter()
-        .map(|image| {
-            Ok(proto::CuckooBucketImage {
-                bucket_index: u64::try_from(image.bucket())
-                    .map_err(|_| "CKF bucket index exceeds u64")?,
-                packed_bucket: image.value(),
-            })
-        })
-        .collect::<Result<Vec<_>, &'static str>>()?;
-    Ok(proto::CuckooPoolDelta {
-        producer: Some(ckf_producer(delta.identity())),
-        base_sequence: delta.base_sequence(),
-        sequence: delta.sequence(),
-        buckets,
-    })
 }
 
 fn ckf_stats(
@@ -1336,8 +1550,18 @@ mod tests {
     use dynamo_kv_router::identity::{
         CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
+    use dynamo_kv_router::indexer::cuckoo::{CkfConfig, DcCkfState};
+    use futures::StreamExt;
+    use tokio::sync::Semaphore;
 
     use super::*;
+    use crate::kv_dc_relay::discovery::DcMembershipView;
+    use crate::kv_dc_relay::pool_registry::PoolActorConfig;
+    use crate::kv_dc_relay::publication::{
+        DEFAULT_ACTIVE_POOL_STREAMS, DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY,
+        DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT, RegistryPublicationSource,
+    };
+    use crate::kv_dc_relay::topology::TopologyPublisher;
 
     fn frontend_event(
         publisher_id: u64,
@@ -1347,13 +1571,12 @@ mod tests {
     ) -> FrontendEvent {
         FrontendEvent {
             publisher_id,
-            sequence,
             published_at: sequence,
             received_at: Instant::now(),
             frame: FrontendLoadFrame {
                 frontend_instance_id,
+                sequence,
                 serving_ready: true,
-                window_ms: FRONTEND_LOAD_WINDOW_MS,
                 models: vec![model],
             },
         }
@@ -1365,8 +1588,12 @@ mod tests {
             pending_first_output_requests: pending,
             pending_first_output_input_tokens: Some(17),
             live_input_tokens: Some(31),
-            input_tokens: Some(11),
-            output_tokens: 7,
+            requests_started_total: Some(5),
+            requests_completed_total: Some(3),
+            requests_failed_total: Some(1),
+            requests_cancelled_total: Some(1),
+            input_tokens_total: Some(11),
+            output_tokens_total: Some(7),
             ..Default::default()
         }
     }
@@ -1390,6 +1617,37 @@ mod tests {
         )
     }
 
+    fn empty_pool_registry(identity: DcRelayIdentity) -> Arc<PoolRegistry> {
+        Arc::new(PoolRegistry::new(
+            identity,
+            PoolActorConfig {
+                expected_unique_blocks: 32,
+                publication_threshold: 1,
+                publication_delay: Duration::from_millis(1),
+            },
+        ))
+    }
+
+    fn empty_publication_source(
+        identity: DcRelayIdentity,
+        pools: Arc<PoolRegistry>,
+        lifecycle: CancellationToken,
+    ) -> Arc<dyn RelayPublicationSource> {
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView::default(),
+            &pools.catalog(),
+        ));
+        Arc::new(RegistryPublicationSource::new(
+            pools,
+            topology,
+            identity,
+            lifecycle,
+            Arc::new(Semaphore::new(DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY)),
+            DEFAULT_ACTIVE_POOL_STREAMS,
+            DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
+        ))
+    }
+
     #[test]
     fn grpc_listener_accepts_only_loopback_addresses() {
         assert!(validate_listen_address("127.0.0.1:50051".parse().unwrap()).is_ok());
@@ -1398,34 +1656,182 @@ mod tests {
         assert!(validate_listen_address("192.0.2.10:50051".parse().unwrap()).is_err());
     }
 
+    #[tokio::test]
+    async fn watch_stream_coalesces_to_the_latest_cumulative_snapshot() {
+        let (sender, receiver) = watch::channel(0_u64);
+        let mut stream = watch_stream(receiver, CancellationToken::new());
+        assert_eq!(stream.next().await.unwrap().unwrap(), 0);
+
+        sender.send_replace(1);
+        sender.send_replace(3);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn watch_stream_drops_its_snapshot_on_cancellation() {
+        let (_sender, receiver) = watch::channel(7_u64);
+        let cancel = CancellationToken::new();
+        let mut stream = watch_stream(receiver, cancel.clone());
+
+        cancel.cancel();
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ckf_response_stream_drops_queued_data_on_cancellation() {
+        let cancel = CancellationToken::new();
+        let (sender, receiver) = mpsc::channel(1);
+        sender.send(Ok(7_u64)).await.unwrap();
+        let mut stream = ckf_response_stream(receiver, cancel.clone());
+
+        cancel.cancel();
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stats_task_failure_cancels_the_relay_and_its_siblings() {
+        let cancel = CancellationToken::new();
+        let fatal_cancel = CancellationToken::new();
+        let terminal = Arc::new(HostTerminalState::default());
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async {
+            (
+                "failed task",
+                Err(anyhow::anyhow!("intentional test failure")),
+            )
+        });
+        let sibling_cancel = cancel.clone();
+        tasks.spawn(async move {
+            sibling_cancel.cancelled().await;
+            ("sibling task", Ok(()))
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_stats_tasks(tasks, cancel.clone(), fatal_cancel.clone(), terminal),
+        )
+        .await
+        .expect("stats supervisor should stop after a child failure");
+
+        assert!(cancel.is_cancelled());
+        assert!(fatal_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stats_closes_an_open_ckf_stream() {
+        let identity = DcRelayIdentity::new(1, 2);
+        let cancel = CancellationToken::new();
+        let (_usage_tx, usage) = watch::channel(proto::KvUsageSnapshot::default());
+        let (_load_tx, load) = watch::channel(proto::LoadSnapshot::default());
+        let pools = empty_pool_registry(identity);
+        let service = RelayStatsService {
+            pools: pools.clone(),
+            publication_source: empty_publication_source(identity, pools, cancel.child_token()),
+            statuses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            usage,
+            load,
+            cancel: cancel.clone(),
+        };
+        let mut stream = service
+            .watch_kv_cuckoo_filter(Request::new(()))
+            .await
+            .unwrap()
+            .into_inner();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("CKF stream should publish its initial heartbeat")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first.update,
+            Some(proto::kv_cuckoo_filter_update::Update::Heartbeat(_))
+        ));
+
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("CKF stream should close after cancellation")
+                .is_none()
+        );
+    }
+
     #[test]
-    fn frontend_frames_replace_by_publisher_and_ignore_stale_sequences() {
-        let mut frontends = HashMap::new();
-        record_frontend_event(&mut frontends, frontend_event(1, 2, 10, model_load("a", 2)));
-        record_frontend_event(&mut frontends, frontend_event(1, 1, 10, model_load("a", 9)));
+    fn frontend_frames_replace_by_frontend_and_ignore_stale_sequences() {
+        let mut state = RelayLoadState::default();
+        record_frontend_event(&mut state, frontend_event(1, 2, 10, model_load("a", 2)));
+        record_frontend_event(&mut state, frontend_event(1, 1, 10, model_load("a", 9)));
         assert_eq!(
-            frontends[&10].frame.models[0].pending_first_output_requests,
+            state.frontends[&10].latest.as_ref().unwrap().frame.models[0]
+                .pending_first_output_requests,
             2
         );
 
-        record_frontend_event(&mut frontends, frontend_event(1, 3, 20, model_load("a", 3)));
-        assert!(!frontends.contains_key(&10));
-        assert_eq!(frontends[&20].publisher_id, 1);
+        record_frontend_event(&mut state, frontend_event(1, 3, 20, model_load("a", 3)));
+        assert!(!state.frontends.contains_key(&20));
 
-        record_frontend_event(&mut frontends, frontend_event(2, 1, 20, model_load("a", 4)));
-        retain_discovered_frontends(&mut frontends, &HashSet::from([2]), true);
-        assert_eq!(frontends.len(), 1);
-        assert_eq!(frontends[&20].publisher_id, 2);
+        record_frontend_event(&mut state, frontend_event(2, 3, 10, model_load("a", 4)));
+        retain_discovered_frontends(&mut state, &HashSet::from([2]), true);
+        assert_eq!(state.frontends.len(), 1);
+        assert_eq!(
+            state.frontends[&10].latest.as_ref().unwrap().publisher_id,
+            2
+        );
     }
 
     #[test]
     fn failed_discovery_does_not_discard_last_known_frontend_frame() {
-        let mut frontends = HashMap::from([(10, frontend_event(1, 1, 10, model_load("a", 1)))]);
-        retain_discovered_frontends(&mut frontends, &HashSet::new(), false);
-        assert_eq!(frontends.len(), 1);
+        let mut state = RelayLoadState::default();
+        record_frontend_event(&mut state, frontend_event(1, 1, 10, model_load("a", 1)));
+        retain_discovered_frontends(&mut state, &HashSet::new(), false);
+        assert!(state.frontends[&10].latest.is_some());
 
-        retain_discovered_frontends(&mut frontends, &HashSet::new(), true);
-        assert!(frontends.is_empty());
+        retain_discovered_frontends(&mut state, &HashSet::new(), true);
+        assert!(state.frontends[&10].latest.is_none());
+    }
+
+    #[test]
+    fn cumulative_frontend_frames_recover_skipped_publications() {
+        let mut state = RelayLoadState::default();
+        let mut first = model_load("a", 1);
+        first.requests_started_total = Some(2);
+        first.output_tokens_total = Some(10);
+        record_frontend_event(&mut state, frontend_event(1, 1, 10, first));
+
+        let mut latest = model_load("a", 1);
+        latest.requests_started_total = Some(5);
+        latest.output_tokens_total = Some(30);
+        record_frontend_event(&mut state, frontend_event(1, 3, 10, latest));
+
+        assert_eq!(state.totals["a"].requests_started_total, Some(5));
+        assert_eq!(state.totals["a"].output_tokens_total, Some(30));
+    }
+
+    #[test]
+    fn cumulative_frontend_totals_survive_departure_and_reconnect() {
+        let mut state = RelayLoadState::default();
+        record_frontend_event(&mut state, frontend_event(1, 1, 10, model_load("a", 1)));
+        retain_discovered_frontends(&mut state, &HashSet::new(), true);
+        assert_eq!(state.totals["a"].requests_started_total, Some(5));
+
+        let mut resumed = model_load("a", 1);
+        resumed.requests_started_total = Some(8);
+        record_frontend_event(&mut state, frontend_event(2, 2, 10, resumed));
+        assert_eq!(state.totals["a"].requests_started_total, Some(8));
+    }
+
+    #[test]
+    fn regressed_frontend_counter_fails_closed() {
+        let mut state = RelayLoadState::default();
+        record_frontend_event(&mut state, frontend_event(1, 1, 10, model_load("a", 1)));
+        let mut regressed = model_load("a", 1);
+        regressed.requests_started_total = Some(4);
+        record_frontend_event(&mut state, frontend_event(1, 2, 10, regressed));
+
+        assert_eq!(state.totals["a"].requests_started_total, None);
     }
 
     #[test]
@@ -1433,19 +1839,20 @@ mod tests {
         let mut aggregate = ModelAggregate::new(registration("a"));
         let event = frontend_event(1, 1, 10, model_load("a", 2));
         aggregate.observe(&event, &event.frame.models[0], Instant::now());
-        let complete = aggregate.finish(1, true);
+        let traffic = TrafficCounters::from(&event.frame.models[0]);
+        let complete = aggregate.finish(1, true, Some(&traffic));
         assert_eq!(complete.status, proto::DataStatus::Complete as i32);
         assert_eq!(complete.ready_frontends, Some(1));
         assert_eq!(complete.pending_first_output_requests, Some(2));
         assert_eq!(complete.pending_first_output_input_tokens, Some(17));
         assert_eq!(complete.live_input_tokens, Some(31));
-        assert_eq!(complete.input_tokens, Some(11));
-        assert_eq!(complete.output_tokens, 7);
+        assert_eq!(complete.input_tokens_total, Some(11));
+        assert_eq!(complete.output_tokens_total, Some(7));
         assert_eq!(complete.source_observed_at_unix_ms, 1);
 
         let mut aggregate = ModelAggregate::new(registration("a"));
         aggregate.observe(&event, &event.frame.models[0], Instant::now());
-        let incomplete = aggregate.finish(2, true);
+        let incomplete = aggregate.finish(2, true, Some(&traffic));
         assert_eq!(incomplete.status, proto::DataStatus::Degraded as i32);
         assert_eq!(incomplete.ready_frontends, None);
         assert_eq!(incomplete.observed_frontends, 1);
@@ -1459,8 +1866,9 @@ mod tests {
         load.live_input_tokens = None;
         let event = frontend_event(1, 1, 10, load);
         aggregate.observe(&event, &event.frame.models[0], Instant::now());
+        let traffic = TrafficCounters::from(&event.frame.models[0]);
 
-        let model = aggregate.finish(1, true);
+        let model = aggregate.finish(1, true, Some(&traffic));
 
         assert_eq!(model.status, proto::DataStatus::Complete as i32);
         assert_eq!(model.pending_first_output_input_tokens, None);
@@ -1475,7 +1883,8 @@ mod tests {
         aggregate.observe(&older, &older.frame.models[0], Instant::now());
         aggregate.observe(&newer, &newer.frame.models[0], Instant::now());
 
-        let model = aggregate.finish(2, true);
+        let traffic = TrafficCounters::default();
+        let model = aggregate.finish(2, true, Some(&traffic));
 
         assert_eq!(model.status, proto::DataStatus::Complete as i32);
         assert_eq!(model.source_observed_at_unix_ms, 10);
@@ -1487,7 +1896,8 @@ mod tests {
         let mut event = frontend_event(1, 1, 10, model_load("a", 2));
         event.received_at = Instant::now() - SOURCE_FRESHNESS - Duration::from_millis(1);
         aggregate.observe(&event, &event.frame.models[0], Instant::now());
-        let model = aggregate.finish(1, true);
+        let traffic = TrafficCounters::from(&event.frame.models[0]);
+        let model = aggregate.finish(1, true, Some(&traffic));
         assert_eq!(model.status, proto::DataStatus::Unavailable as i32);
         assert_eq!(model.observed_frontends, 0);
     }
@@ -1506,5 +1916,21 @@ mod tests {
             proto::IdentitySource::DefaultDerived as i32
         );
         assert_eq!(identity.dc_id, 3);
+    }
+
+    #[test]
+    fn ckf_grpc_frame_preserves_canonical_publication_metadata() {
+        let format = DcCkfState::new(CkfConfig::new(32)).unwrap().format();
+        let producer = ProducerIdentity::new(pool_id(), 5, 7, format);
+        let frame =
+            PublicationFrame::test_frame(producer, 11, 12, PublicationFrameKind::SnapshotChunk);
+
+        let grpc = ckf_frame(&frame);
+
+        assert_eq!(grpc.producer, Some(ckf_producer(producer)));
+        assert_eq!(grpc.base_sequence, 11);
+        assert_eq!(grpc.sequence, 12);
+        assert_eq!(grpc.kind, proto::CuckooFrameKind::SnapshotChunk as i32);
+        assert!(grpc.cbi1_payload.is_empty());
     }
 }

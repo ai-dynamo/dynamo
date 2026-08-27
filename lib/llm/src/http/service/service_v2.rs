@@ -139,6 +139,7 @@ pub struct State {
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
     service_observer: Arc<ServiceObserver>,
+    frontend_load_task: Option<tokio::task::AbortHandle>,
     flags: StateFlags,
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
@@ -468,20 +469,21 @@ impl State {
     ) -> Self {
         let metrics = Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix()));
         let service_observer = Arc::new(ServiceObserver::default());
-        if let Some(runtime) = config.runtime {
+        let frontend_load_task = config.runtime.map(|runtime| {
             crate::frontend_load::start_frontend_load_publisher(
                 runtime,
                 manager.clone(),
                 service_observer.clone(),
                 metrics.frontend_load(),
                 cancel_token.child_token(),
-            );
-        }
+            )
+        });
         Self {
             manager,
             metrics,
             discovery_client,
             service_observer,
+            frontend_load_task,
             nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -636,6 +638,14 @@ impl State {
     /// Response field used for emitted OpenAI-compatible reasoning content.
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        if let Some(task) = &self.frontend_load_task {
+            task.abort();
+        }
     }
 }
 

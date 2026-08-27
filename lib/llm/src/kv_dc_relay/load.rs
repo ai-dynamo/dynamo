@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
-use dynamo_kv_router::protocols::{ActiveLoad, WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{ActiveLoad, SchedulerLoadScope, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::transports::event_plane::EventEnvelope;
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -33,8 +33,16 @@ struct ObservedValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LoadObservation {
     kv_used_blocks: Option<ObservedValue>,
-    active_decode_blocks: Option<ObservedValue>,
-    active_prefill_tokens: Option<ObservedValue>,
+    scheduler: HashMap<u64, SchedulerObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchedulerObservation {
+    scope: SchedulerLoadScope,
+    active_decode_blocks: u64,
+    active_prefill_tokens: u64,
+    received_at: Instant,
+    published_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,19 +69,29 @@ pub struct PoolLoadSnapshot {
     pub kv_expected_ranks: usize,
     pub active_decode_blocks: Option<u64>,
     pub active_prefill_tokens: Option<u64>,
-    pub source_observed_at_unix_ms: u64,
-    complete: bool,
+    pub kv_source_observed_at_unix_ms: u64,
+    pub scheduler_source_observed_at_unix_ms: u64,
 }
 
 impl PoolLoadSnapshot {
-    pub fn has_degraded_coverage(self) -> bool {
+    pub fn has_degraded_kv_coverage(self) -> bool {
         self.kv_expected_ranks == 0
             || self.kv_observed_ranks < self.kv_expected_ranks
             || self.kv_capacity_ranks < self.kv_expected_ranks
     }
 
-    pub fn is_complete(self) -> bool {
-        self.complete
+    pub fn is_kv_complete(self) -> bool {
+        !self.has_degraded_kv_coverage()
+            && self.kv_used_blocks.is_some()
+            && self.total_kv_blocks.is_some()
+            && self.kv_source_observed_at_unix_ms > 0
+    }
+
+    pub fn is_scheduler_complete(self) -> bool {
+        self.kv_expected_ranks > 0
+            && self.active_decode_blocks.is_some()
+            && self.active_prefill_tokens.is_some()
+            && self.scheduler_source_observed_at_unix_ms > 0
     }
 }
 
@@ -93,7 +111,7 @@ impl PoolLoadState {
     pub(super) fn replace_capacity(
         &mut self,
         runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         let capacities = match load_ranks_from_configs(runtime_configs) {
             Ok(capacities) => capacities,
             Err(error) => {
@@ -106,11 +124,11 @@ impl PoolLoadState {
             }
         };
         if self.capacities == capacities {
-            return Ok(false);
+            return Ok(());
         }
         self.capacities = capacities;
         self.clear_source_state();
-        Ok(true)
+        Ok(())
     }
 
     pub(super) fn observe(
@@ -128,10 +146,6 @@ impl PoolLoadState {
         received_at: Instant,
     ) -> LoadObservationOutcome {
         let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
-        if !self.capacities.contains_key(&rank) {
-            return LoadObservationOutcome::UnknownRank;
-        }
-
         if let Some(previous) = self.publisher_sequences.get(&envelope.publisher_id) {
             if envelope.sequence <= *previous {
                 return LoadObservationOutcome::IgnoredStale;
@@ -144,6 +158,9 @@ impl PoolLoadState {
         }
         self.publisher_sequences
             .insert(envelope.publisher_id, envelope.sequence);
+        if !self.capacities.contains_key(&rank) {
+            return LoadObservationOutcome::UnknownRank;
+        }
 
         let observed = |value: Option<u64>| {
             value.map(|value| ObservedValue {
@@ -157,21 +174,33 @@ impl PoolLoadState {
         if load.kv_used_blocks.is_some() {
             observation.kv_used_blocks = observed(load.kv_used_blocks);
         }
-        if load.active_decode_blocks.is_some() {
-            observation.active_decode_blocks = observed(load.active_decode_blocks);
-        }
-        if load.active_prefill_tokens.is_some() {
-            observation.active_prefill_tokens = observed(load.active_prefill_tokens);
+        match (
+            load.scheduler_load_scope,
+            load.active_decode_blocks,
+            load.active_prefill_tokens,
+        ) {
+            (Some(scope), Some(active_decode_blocks), Some(active_prefill_tokens)) => {
+                observation.scheduler.insert(
+                    envelope.publisher_id,
+                    SchedulerObservation {
+                        scope,
+                        active_decode_blocks,
+                        active_prefill_tokens,
+                        received_at,
+                        published_at_unix_ms: envelope.published_at,
+                    },
+                );
+            }
+            (Some(_), _, _) => {
+                observation.scheduler.remove(&envelope.publisher_id);
+            }
+            (None, _, _) => {}
         }
         LoadObservationOutcome::Updated
     }
 
-    pub(super) fn clear_observations(&mut self) -> bool {
-        if self.observations.is_empty() && self.publisher_sequences.is_empty() {
-            return false;
-        }
+    pub(super) fn clear_observations(&mut self) {
         self.clear_source_state();
-        true
     }
 
     fn clear_source_state(&mut self) {
@@ -182,12 +211,7 @@ impl PoolLoadState {
     pub(super) fn snapshot(&self, producer: ProducerIdentity, now: Instant) -> PoolLoadSnapshot {
         let mut kv_used_blocks = Some(0_u64);
         let mut total_kv_blocks = Some(0_u64);
-        let mut active_decode_blocks = Some(0_u64);
-        let mut active_prefill_tokens = Some(0_u64);
-        let mut active_decode_ranks = 0_usize;
-        let mut active_prefill_ranks = 0_usize;
-        let mut source_observed_at_unix_ms = None;
-        let mut valid = true;
+        let mut kv_source_observed_at_unix_ms = None;
         let mut snapshot = PoolLoadSnapshot {
             producer,
             kv_used_blocks: None,
@@ -197,18 +221,16 @@ impl PoolLoadState {
             kv_expected_ranks: 0,
             active_decode_blocks: None,
             active_prefill_tokens: None,
-            source_observed_at_unix_ms: 0,
-            complete: false,
+            kv_source_observed_at_unix_ms: 0,
+            scheduler_source_observed_at_unix_ms: 0,
         };
         for (rank, capacity) in &self.capacities {
             snapshot.kv_expected_ranks = snapshot.kv_expected_ranks.saturating_add(1);
             if let Some(total) = capacity.total_kv_blocks {
                 snapshot.kv_capacity_ranks = snapshot.kv_capacity_ranks.saturating_add(1);
-                valid &= checked_add(&mut total_kv_blocks, total);
+                checked_add(&mut total_kv_blocks, total);
             }
             let Some(observation) = self.observations.get(rank) else {
-                active_decode_blocks = None;
-                active_prefill_tokens = None;
                 continue;
             };
             if let Some(value) = observation
@@ -222,27 +244,13 @@ impl PoolLoadState {
                 })
             {
                 snapshot.kv_observed_ranks = snapshot.kv_observed_ranks.saturating_add(1);
-                valid &= checked_add(&mut kv_used_blocks, value.value);
-                source_observed_at_unix_ms = Some(
-                    source_observed_at_unix_ms
+                checked_add(&mut kv_used_blocks, value.value);
+                kv_source_observed_at_unix_ms = Some(
+                    kv_source_observed_at_unix_ms
                         .map_or(value.published_at_unix_ms, |current: u64| {
                             current.min(value.published_at_unix_ms)
                         }),
                 );
-            }
-            if let Some(value) = observation
-                .active_decode_blocks
-                .filter(|value| observation_is_fresh(*value, now))
-            {
-                active_decode_ranks = active_decode_ranks.saturating_add(1);
-                let _ = checked_add(&mut active_decode_blocks, value.value);
-            }
-            if let Some(value) = observation
-                .active_prefill_tokens
-                .filter(|value| observation_is_fresh(*value, now))
-            {
-                active_prefill_ranks = active_prefill_ranks.saturating_add(1);
-                let _ = checked_add(&mut active_prefill_tokens, value.value);
             }
         }
         if snapshot.kv_expected_ranks != 0
@@ -255,18 +263,12 @@ impl PoolLoadState {
         {
             snapshot.total_kv_blocks = total_kv_blocks;
         }
-        if snapshot.kv_expected_ranks != 0 && active_decode_ranks == snapshot.kv_expected_ranks {
-            snapshot.active_decode_blocks = active_decode_blocks;
-        }
-        if snapshot.kv_expected_ranks != 0 && active_prefill_ranks == snapshot.kv_expected_ranks {
-            snapshot.active_prefill_tokens = active_prefill_tokens;
-        }
-        snapshot.source_observed_at_unix_ms = source_observed_at_unix_ms.unwrap_or_default();
-        snapshot.complete = valid
-            && !snapshot.has_degraded_coverage()
-            && snapshot.kv_used_blocks.is_some()
-            && snapshot.total_kv_blocks.is_some()
-            && snapshot.source_observed_at_unix_ms > 0;
+        snapshot.kv_source_observed_at_unix_ms = kv_source_observed_at_unix_ms.unwrap_or_default();
+        (
+            snapshot.active_decode_blocks,
+            snapshot.active_prefill_tokens,
+            snapshot.scheduler_source_observed_at_unix_ms,
+        ) = aggregate_scheduler_load(&self.capacities, &self.observations, now);
         snapshot
     }
 }
@@ -278,27 +280,134 @@ fn clear_publisher_values(observation: &mut LoadObservation, publisher_id: u64) 
     {
         observation.kv_used_blocks = None;
     }
-    if observation
-        .active_decode_blocks
-        .is_some_and(|value| value.publisher_id == publisher_id)
-    {
-        observation.active_decode_blocks = None;
+    observation.scheduler.remove(&publisher_id);
+}
+
+fn aggregate_scheduler_load(
+    capacities: &HashMap<WorkerWithDpRank, LoadCapacity>,
+    observations: &HashMap<WorkerWithDpRank, LoadObservation>,
+    now: Instant,
+) -> (Option<u64>, Option<u64>, u64) {
+    if capacities.is_empty() {
+        return (None, None, 0);
     }
-    if observation
-        .active_prefill_tokens
-        .is_some_and(|value| value.publisher_id == publisher_id)
+
+    let mut observed_scope = None;
+    for scheduler in observations
+        .values()
+        .flat_map(|observation| observation.scheduler.values())
+        .filter(|scheduler| scheduler_is_fresh(scheduler, now))
     {
-        observation.active_prefill_tokens = None;
+        let scope = scheduler.scope;
+        if observed_scope.is_some_and(|observed| observed != scope) {
+            return (None, None, 0);
+        }
+        observed_scope = Some(scope);
     }
+
+    match observed_scope {
+        Some(SchedulerLoadScope::Local) => {
+            aggregate_local_scheduler_load(capacities, observations, now)
+        }
+        Some(SchedulerLoadScope::ReplicaSynchronized) => {
+            aggregate_replicated_scheduler_load(capacities, observations, now)
+        }
+        None => (None, None, 0),
+    }
+}
+
+fn aggregate_local_scheduler_load(
+    capacities: &HashMap<WorkerWithDpRank, LoadCapacity>,
+    observations: &HashMap<WorkerWithDpRank, LoadObservation>,
+    now: Instant,
+) -> (Option<u64>, Option<u64>, u64) {
+    let mut decode = Some(0_u64);
+    let mut prefill = Some(0_u64);
+    let mut oldest = None;
+
+    for rank in capacities.keys() {
+        let Some(observation) = observations.get(rank) else {
+            return (None, None, 0);
+        };
+        let mut observed_rank = false;
+        for scheduler in observation.scheduler.values().filter(|scheduler| {
+            scheduler.scope == SchedulerLoadScope::Local && scheduler_is_fresh(scheduler, now)
+        }) {
+            observed_rank = true;
+            checked_add(&mut decode, scheduler.active_decode_blocks);
+            checked_add(&mut prefill, scheduler.active_prefill_tokens);
+            record_oldest(&mut oldest, scheduler.published_at_unix_ms);
+        }
+        if !observed_rank {
+            return (None, None, 0);
+        }
+    }
+
+    (decode, prefill, oldest.unwrap_or_default())
+}
+
+fn aggregate_replicated_scheduler_load(
+    capacities: &HashMap<WorkerWithDpRank, LoadCapacity>,
+    observations: &HashMap<WorkerWithDpRank, LoadObservation>,
+    now: Instant,
+) -> (Option<u64>, Option<u64>, u64) {
+    let Some(first_rank) = capacities.keys().next() else {
+        return (None, None, 0);
+    };
+    let Some(first_observation) = observations.get(first_rank) else {
+        return (None, None, 0);
+    };
+    let Some(publisher_id) = first_observation
+        .scheduler
+        .iter()
+        .filter(|(_, scheduler)| {
+            scheduler.scope == SchedulerLoadScope::ReplicaSynchronized
+                && scheduler_is_fresh(scheduler, now)
+        })
+        .map(|(&publisher_id, _)| publisher_id)
+        .filter(|publisher_id| {
+            capacities.keys().all(|rank| {
+                observations
+                    .get(rank)
+                    .and_then(|observation| observation.scheduler.get(publisher_id))
+                    .is_some_and(|scheduler| {
+                        scheduler.scope == SchedulerLoadScope::ReplicaSynchronized
+                            && scheduler_is_fresh(scheduler, now)
+                    })
+            })
+        })
+        .min()
+    else {
+        return (None, None, 0);
+    };
+
+    let mut decode = Some(0_u64);
+    let mut prefill = Some(0_u64);
+    let mut oldest = None;
+    for rank in capacities.keys() {
+        let scheduler = &observations[rank].scheduler[&publisher_id];
+        checked_add(&mut decode, scheduler.active_decode_blocks);
+        checked_add(&mut prefill, scheduler.active_prefill_tokens);
+        record_oldest(&mut oldest, scheduler.published_at_unix_ms);
+    }
+    (decode, prefill, oldest.unwrap_or_default())
+}
+
+fn scheduler_is_fresh(scheduler: &SchedulerObservation, now: Instant) -> bool {
+    scheduler.published_at_unix_ms > 0
+        && now.saturating_duration_since(scheduler.received_at) <= LOAD_FRESHNESS
+}
+
+fn record_oldest(oldest: &mut Option<u64>, timestamp: u64) {
+    *oldest = Some(oldest.map_or(timestamp, |current| current.min(timestamp)));
 }
 
 fn observation_is_fresh(value: ObservedValue, now: Instant) -> bool {
     now.saturating_duration_since(value.received_at) <= LOAD_FRESHNESS
 }
 
-fn checked_add(total: &mut Option<u64>, value: u64) -> bool {
+fn checked_add(total: &mut Option<u64>, value: u64) {
     *total = (*total).and_then(|total| total.checked_add(value));
-    total.is_some()
 }
 
 const MAX_LOAD_RANKS_PER_WORKER: u32 = 4096;
@@ -427,7 +536,7 @@ mod tests {
         assert_eq!(snapshot.kv_observed_ranks, 1);
         assert_eq!(snapshot.kv_capacity_ranks, 1);
         assert_eq!(snapshot.kv_expected_ranks, 1);
-        assert!(!snapshot.has_degraded_coverage());
+        assert!(!snapshot.has_degraded_kv_coverage());
     }
 
     #[test]
@@ -454,7 +563,7 @@ mod tests {
         assert_eq!(snapshot.kv_capacity_ranks, 0);
         assert_eq!(snapshot.kv_used_blocks, Some(70));
         assert_eq!(snapshot.total_kv_blocks, None);
-        assert!(snapshot.has_degraded_coverage());
+        assert!(snapshot.has_degraded_kv_coverage());
     }
 
     #[test]
@@ -501,7 +610,7 @@ mod tests {
         assert_eq!(snapshot.kv_observed_ranks, 1);
         assert_eq!(snapshot.kv_capacity_ranks, 2);
         assert_eq!(snapshot.kv_expected_ranks, 2);
-        assert!(snapshot.has_degraded_coverage());
+        assert!(snapshot.has_degraded_kv_coverage());
     }
 
     #[test]
@@ -522,9 +631,38 @@ mod tests {
         assert_eq!(observe(&mut state, known), LoadObservationOutcome::Updated);
         assert_eq!(snapshot(&state).kv_used_blocks, Some(40));
         assert_eq!(snapshot(&state).kv_observed_ranks, 1);
-        assert!(state.clear_observations());
+        state.clear_observations();
         assert_eq!(snapshot(&state).kv_used_blocks, None);
         assert_eq!(snapshot(&state).kv_observed_ranks, 0);
+    }
+
+    #[test]
+    fn unknown_rank_events_still_advance_the_publisher_sequence() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 2, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+
+        let mut first = load(9, 0);
+        first.kv_used_blocks = Some(40);
+        assert_eq!(
+            state.observe_at(&envelope(1, 1, 10), first, now),
+            LoadObservationOutcome::Updated
+        );
+        assert_eq!(
+            state.observe_at(&envelope(1, 2, 20), load(99, 0), now),
+            LoadObservationOutcome::UnknownRank
+        );
+        let mut second = load(9, 1);
+        second.kv_used_blocks = Some(30);
+        assert_eq!(
+            state.observe_at(&envelope(1, 3, 30), second, now),
+            LoadObservationOutcome::Updated
+        );
+
+        assert_eq!(state.snapshot(producer(), now).kv_used_blocks, Some(70));
     }
 
     #[test]
@@ -548,20 +686,18 @@ mod tests {
         );
         assert_eq!(snapshot(&state).kv_used_blocks, Some(70));
 
-        assert!(
-            state
-                .replace_capacity(&HashMap::from([
-                    (9, config(0, 1, Some(200), Some(2_048))),
-                    (10, config(0, 1, Some(100), Some(2_048))),
-                ]))
-                .unwrap()
-        );
+        state
+            .replace_capacity(&HashMap::from([
+                (9, config(0, 1, Some(200), Some(2_048))),
+                (10, config(0, 1, Some(100), Some(2_048))),
+            ]))
+            .unwrap();
         let snapshot = snapshot(&state);
         assert_eq!(snapshot.kv_expected_ranks, 2);
         assert_eq!(snapshot.kv_observed_ranks, 0);
         assert_eq!(snapshot.kv_used_blocks, None);
         assert_eq!(snapshot.total_kv_blocks, Some(300));
-        assert!(snapshot.has_degraded_coverage());
+        assert!(snapshot.has_degraded_kv_coverage());
     }
 
     #[test]
@@ -585,7 +721,7 @@ mod tests {
             state.observe_at(&envelope(1, 2, 20), second, now),
             LoadObservationOutcome::Updated
         );
-        assert!(state.snapshot(producer(), now).is_complete());
+        assert!(state.snapshot(producer(), now).is_kv_complete());
 
         let mut stale = load(9, 0);
         stale.kv_used_blocks = Some(99);
@@ -602,12 +738,12 @@ mod tests {
             LoadObservationOutcome::Updated
         );
         let snapshot = state.snapshot(producer(), now);
-        assert!(!snapshot.is_complete());
+        assert!(!snapshot.is_kv_complete());
         assert_eq!(snapshot.kv_observed_ranks, 1);
 
         let stale_snapshot =
             state.snapshot(producer(), now + LOAD_FRESHNESS + Duration::from_nanos(1));
-        assert!(!stale_snapshot.is_complete());
+        assert!(!stale_snapshot.is_kv_complete());
         assert_eq!(stale_snapshot.kv_observed_ranks, 0);
     }
 
@@ -626,14 +762,134 @@ mod tests {
         let mut router = load(9, 0);
         router.active_decode_blocks = Some(12);
         router.active_prefill_tokens = Some(34);
+        router.scheduler_load_scope = Some(SchedulerLoadScope::Local);
         state.observe_at(&envelope(2, 1, 20), router, now);
 
         let snapshot = state.snapshot(producer(), now);
-        assert!(snapshot.is_complete());
+        assert!(snapshot.is_kv_complete());
+        assert!(snapshot.is_scheduler_complete());
         assert_eq!(snapshot.kv_used_blocks, Some(40));
         assert_eq!(snapshot.active_decode_blocks, Some(12));
         assert_eq!(snapshot.active_prefill_tokens, Some(34));
-        assert_eq!(snapshot.source_observed_at_unix_ms, 10);
+        assert_eq!(snapshot.kv_source_observed_at_unix_ms, 10);
+        assert_eq!(snapshot.scheduler_source_observed_at_unix_ms, 20);
+    }
+
+    #[test]
+    fn scheduler_completeness_does_not_depend_on_kv_usage() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+        let mut router = load(9, 0);
+        router.active_decode_blocks = Some(12);
+        router.active_prefill_tokens = Some(34);
+        router.scheduler_load_scope = Some(SchedulerLoadScope::Local);
+        state.observe_at(&envelope(2, 1, 20), router, now);
+
+        let snapshot = state.snapshot(producer(), now);
+        assert!(!snapshot.is_kv_complete());
+        assert!(snapshot.is_scheduler_complete());
+        assert_eq!(snapshot.active_decode_blocks, Some(12));
+        assert_eq!(snapshot.active_prefill_tokens, Some(34));
+        assert_eq!(snapshot.scheduler_source_observed_at_unix_ms, 20);
+    }
+
+    #[test]
+    fn local_scheduler_publishers_are_summed() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+
+        for (publisher_id, decode, prefill) in [(2, 12, 34), (3, 5, 7)] {
+            let mut router = load(9, 0);
+            router.active_decode_blocks = Some(decode);
+            router.active_prefill_tokens = Some(prefill);
+            router.scheduler_load_scope = Some(SchedulerLoadScope::Local);
+            state.observe_at(&envelope(publisher_id, 1, publisher_id * 10), router, now);
+        }
+
+        let snapshot = state.snapshot(producer(), now);
+        assert_eq!(snapshot.active_decode_blocks, Some(17));
+        assert_eq!(snapshot.active_prefill_tokens, Some(41));
+        assert_eq!(snapshot.scheduler_source_observed_at_unix_ms, 20);
+    }
+
+    #[test]
+    fn synchronized_scheduler_publishers_are_not_double_counted() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+
+        for (publisher_id, decode, prefill) in [(2, 12, 34), (3, 15, 37)] {
+            let mut router = load(9, 0);
+            router.active_decode_blocks = Some(decode);
+            router.active_prefill_tokens = Some(prefill);
+            router.scheduler_load_scope = Some(SchedulerLoadScope::ReplicaSynchronized);
+            state.observe_at(&envelope(publisher_id, 1, publisher_id * 10), router, now);
+        }
+
+        let snapshot = state.snapshot(producer(), now);
+        assert_eq!(snapshot.active_decode_blocks, Some(12));
+        assert_eq!(snapshot.active_prefill_tokens, Some(34));
+        assert_eq!(snapshot.scheduler_source_observed_at_unix_ms, 20);
+    }
+
+    #[test]
+    fn mixed_scheduler_scopes_fail_closed() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+
+        for (publisher_id, scope) in [
+            (2, SchedulerLoadScope::Local),
+            (3, SchedulerLoadScope::ReplicaSynchronized),
+        ] {
+            let mut router = load(9, 0);
+            router.active_decode_blocks = Some(12);
+            router.active_prefill_tokens = Some(34);
+            router.scheduler_load_scope = Some(scope);
+            state.observe_at(&envelope(publisher_id, 1, 20), router, now);
+        }
+
+        let snapshot = state.snapshot(producer(), now);
+        assert!(!snapshot.is_scheduler_complete());
+        assert_eq!(snapshot.active_decode_blocks, None);
+        assert_eq!(snapshot.active_prefill_tokens, None);
+    }
+
+    #[test]
+    fn incomplete_scoped_scheduler_report_withdraws_that_publisher() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let now = Instant::now();
+
+        let mut complete = load(9, 0);
+        complete.active_decode_blocks = Some(12);
+        complete.active_prefill_tokens = Some(34);
+        complete.scheduler_load_scope = Some(SchedulerLoadScope::Local);
+        state.observe_at(&envelope(2, 1, 20), complete, now);
+        assert!(state.snapshot(producer(), now).is_scheduler_complete());
+
+        let mut incomplete = load(9, 0);
+        incomplete.active_decode_blocks = Some(13);
+        incomplete.scheduler_load_scope = Some(SchedulerLoadScope::Local);
+        state.observe_at(&envelope(2, 2, 30), incomplete, now);
+        assert!(!state.snapshot(producer(), now).is_scheduler_complete());
     }
 
     #[test]
@@ -646,7 +902,7 @@ mod tests {
         let mut report = load(9, 0);
         report.kv_used_blocks = Some(40);
         assert_eq!(observe(&mut state, report), LoadObservationOutcome::Updated);
-        assert!(!snapshot(&state).has_degraded_coverage());
+        assert!(!snapshot(&state).has_degraded_kv_coverage());
 
         let error = state
             .replace_capacity(&HashMap::from([(9, config(0, 0, Some(100), None))]))
@@ -659,6 +915,6 @@ mod tests {
         assert_eq!(snapshot.kv_observed_ranks, 0);
         assert_eq!(snapshot.kv_capacity_ranks, 0);
         assert_eq!(snapshot.kv_expected_ranks, 0);
-        assert!(snapshot.has_degraded_coverage());
+        assert!(snapshot.has_degraded_kv_coverage());
     }
 }
