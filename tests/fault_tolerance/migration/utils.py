@@ -726,6 +726,7 @@ def run_migration_test(
     graceful_shutdown: Callable[[ManagedProcess], AbstractContextManager[None]]
     | None = None,
     verify_replacement_worker: bool = False,
+    before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
 ) -> None:
     """
@@ -754,8 +755,12 @@ def run_migration_test(
         verify_replacement_worker: Require the surviving worker to accept the
             exact request ID and expose one completed generate request with
             nonzero response bytes. Intended for isolated per-test workers.
+        before_worker_fault: Optional state-based synchronization callback run
+            immediately before fault injection. The request must remain active
+            while the callback runs.
         force_max_output_tokens: Disable EOS and require the request's full
-            max_tokens budget so fault injection cannot race an early EOS.
+            max_tokens budget so state-based fault synchronization cannot race
+            an early EOS.
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -792,6 +797,12 @@ def run_migration_test(
         assert (
             request_thread.is_alive()
         ), "Request completed before the worker fault was injected"
+
+    if before_worker_fault is not None:
+        before_worker_fault()
+        assert (
+            request_thread.is_alive()
+        ), "Request completed while waiting to inject the worker fault"
 
     # Step 4: Stop the worker (kill or graceful shutdown)
     shutdown_context: AbstractContextManager[None] = nullcontext()

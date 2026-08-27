@@ -106,7 +106,7 @@ def wait_for_sglang_kv_transfer(
     baseline_count: float,
     baseline_total_mb: float,
     max_wait_time: float = 10.0,
-) -> None:
+) -> tuple[float, float]:
     """Wait for a completed, non-empty SGLang KV transfer after the baseline."""
     deadline = time.monotonic() + max_wait_time
     transfer_count = baseline_count
@@ -125,11 +125,11 @@ def wait_for_sglang_kv_transfer(
                     transfer_count - baseline_count,
                     total_mb - baseline_total_mb,
                 )
-                return
+                return transfer_count, total_mb
         except (requests.RequestException, ValueError) as error:
             last_error = error
 
-        poll_event.wait(timeout=0.1)
+        poll_event.wait(timeout=0.01)
 
     pytest.fail(
         "SGLang did not report a completed, non-empty KV transfer after the "
@@ -584,11 +584,11 @@ def test_request_migration_sglang_kv_transfer(
     """
     End-to-end test for request migration with KV re-transfer in disaggregated mode.
 
-    Setup: 1 prefill worker + 2 decode workers. The test faults the decode
-    worker before any response token, proves that the replacement handles the
-    same request, and requires SGLang to report a completed non-empty KV
-    transfer. It intentionally makes no timing assertion about the signal
-    landing inside the underlying transfer operation.
+    Setup: 1 prefill worker + 2 decode workers. The test waits for the initial
+    KV transfer to complete, faults the selected decode worker, proves that the
+    replacement handles the same request, and requires a second completed,
+    non-empty KV transfer after the fault. Synchronization uses transfer state,
+    not timing assertions.
 
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
@@ -642,9 +642,19 @@ def test_request_migration_sglang_kv_transfer(
             baseline_transfer_count, baseline_total_mb = get_sglang_kv_transfer_metrics(
                 prefill_worker.system_port
             )
+            post_initial_transfer: tuple[float, float] | None = None
 
-            # Step 3: Fault the first decode before any response token, then
-            # prove the replacement drains the request and KV is transferred.
+            def wait_for_initial_transfer() -> None:
+                nonlocal post_initial_transfer
+                post_initial_transfer = wait_for_sglang_kv_transfer(
+                    prefill_worker.system_port,
+                    baseline_transfer_count,
+                    baseline_total_mb,
+                )
+
+            # Step 3: Wait until the selected decode has received the initial
+            # KV payload, then fault it and require the replacement request to
+            # trigger a second transfer.
             run_migration_test(
                 frontend,
                 decode1,
@@ -662,11 +672,13 @@ def test_request_migration_sglang_kv_transfer(
                 graceful_shutdown_endpoint=("backend", "generate"),
                 wait_for_worker_health_shutdown=True,
                 verify_replacement_worker=True,
+                before_worker_fault=wait_for_initial_transfer,
+                force_max_output_tokens=True,
             )
+            assert post_initial_transfer is not None
             wait_for_sglang_kv_transfer(
                 prefill_worker.system_port,
-                baseline_transfer_count,
-                baseline_total_mb,
+                *post_initial_transfer,
             )
 
 
