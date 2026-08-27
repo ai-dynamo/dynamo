@@ -105,8 +105,6 @@ spec:
                   value: "1"
                 - name: VLLM_ENGINE_READY_TIMEOUT_S
                   value: "14400"
-                - name: VLLM_USE_V2_MODEL_RUNNER
-                  value: "0"
                 - name: VLLM_USE_RUST_FRONTEND
                   value: "1"
                 - name: VLLM_SERVER_DEV_MODE
@@ -168,6 +166,13 @@ spec:
               args:
                 - |
                   pip install --no-cache-dir ai-dynamo==1.4.1
+
+                  # WAR: disable cudnn globally to prevent segfault in GLM _kpool_* kernels during MM profiling.
+                  mkdir -p /opt/glm53-workarounds
+                  printf 'import torch\ntorch.backends.cudnn.enabled = False\n' \
+                    > /opt/glm53-workarounds/sitecustomize.py
+                  export PYTHONPATH="/opt/glm53-workarounds${PYTHONPATH:+:$PYTHONPATH}"
+
                   exec python3 -m dynamo.vllm \
                     --model zai-org/GLM-5.3-Flash \
                     --served-model-name zai-org/GLM-5.3-Flash \
@@ -182,7 +187,11 @@ spec:
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45 \
-                    --limit-mm-per-prompt '{"image":0,"video":0}' \
+                    --enable-multimodal \
+                    --limit-mm-per-prompt '{"image":1,"video":0}' \
+                    --mm-encoder-tp-mode data \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --compilation-config '{"cudagraph_mm_encoder":true}' \
                     --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq"}'
               resources:
                 claims:

@@ -26,7 +26,7 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
 ## Supported features
 
-- Modalities: Text; Image (disagg only, up to 1 image per request)
+- Modalities: Text; Image (up to 1 image per request, both agg and disagg)
 - Reasoning
 - Tool calling
 
@@ -98,8 +98,8 @@ See [perf/README.md](perf/README.md) for the full benchmark workflow.
   `nvcr.io/nvidia/ai-dynamo/vllm-runtime` base and switch to
   `UCX_TLS: cuda_copy,cuda_ipc,tcp` + `UCX_CUDA_IPC_ENABLE_MNNVL: "y"`.
 - A cudnn workaround (`torch.backends.cudnn.enabled = False` via `sitecustomize.py`) is required
-  in the disagg recipe to prevent a segfault in GLM `_kpool_*` kernels on GB200. This workaround
-  does not affect image inference — the MM encoder runs correctly with cudnn disabled.
+  in both agg and disagg recipes to prevent a segfault in GLM `_kpool_*` kernels during MM encoder
+  profiling on GB200. This workaround does not affect image inference.
 - `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
   decode workers; mismatching these produces silent garbage output.
 - H200 recipes are in progress.
