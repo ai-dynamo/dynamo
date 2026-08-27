@@ -2539,3 +2539,80 @@ class TestThinkingControlParity:  # FRONTEND.10
             tool_parser_class=None,
         )
         assert kwargs == case.expected
+
+
+class TestReasoningUsageEstimator:
+    """Reasoning-token usage on the Python chat-processor path.
+
+    dynamo #12181 added this only to the Rust OpenAIPreprocessor, which
+    `--dyn-chat-processor vllm` bypasses, so `reasoning_tokens` was absent from usage
+    entirely (the worker's _build_completion_usage emits no completion_tokens_details).
+    """
+
+    @staticmethod
+    def _est():
+        from dynamo.frontend.vllm_processor import _ReasoningUsageEstimator
+
+        return _ReasoningUsageEstimator()
+
+    @staticmethod
+    def _choice(index=0, reasoning=None, content=None, tools=None):
+        delta = {}
+        if reasoning is not None:
+            delta["reasoning_content"] = reasoning
+        if content is not None:
+            delta["content"] = content
+        if tools is not None:
+            delta["tool_calls"] = tools
+        return {"index": index, "delta": delta}
+
+    def test_counts_only_reasoning_chunks(self):
+        e = self._est()
+        e.observe([self._choice(reasoning="a")], 10)
+        e.observe([self._choice(reasoning="b")], 5)
+        e.observe([self._choice(content="answer")], 7)
+        assert e.total == 15
+
+    def test_active_choice_without_visible_output_still_counts(self):
+        e = self._est()
+        e.observe([self._choice(reasoning="a")], 4)
+        e.observe([self._choice()], 3)
+        e.observe([self._choice(content="x")], 9)
+        assert e.total == 7
+
+    def test_usage_only_frame_while_reasoning_counts(self):
+        e = self._est()
+        e.observe([self._choice(reasoning="a")], 4)
+        e.observe([], 2)
+        assert e.total == 6
+
+    def test_content_only_counts_nothing(self):
+        e = self._est()
+        e.observe([self._choice(content="hi")], 12)
+        assert e.total == 0
+
+    def test_tool_call_is_visible_output_and_stops_reasoning(self):
+        e = self._est()
+        e.observe([self._choice(reasoning="a")], 5)
+        e.observe([self._choice(tools=[{"id": "1"}])], 6)
+        assert e.total == 5
+
+    def test_annotate_fills_when_absent_and_does_not_mutate_input(self):
+        e = self._est()
+        e.total = 42
+        usage = {"completion_tokens": 100}
+        out = e.annotate(usage)
+        assert out["completion_tokens_details"]["reasoning_tokens"] == 42
+        assert "completion_tokens_details" not in usage
+
+    def test_annotate_preserves_a_positive_backend_value(self):
+        e = self._est()
+        e.total = 42
+        usage = {"completion_tokens_details": {"reasoning_tokens": 7}}
+        assert e.annotate(usage)["completion_tokens_details"]["reasoning_tokens"] == 7
+
+    def test_annotate_replaces_a_zero_backend_value(self):
+        e = self._est()
+        e.total = 42
+        usage = {"completion_tokens_details": {"reasoning_tokens": 0}}
+        assert e.annotate(usage)["completion_tokens_details"]["reasoning_tokens"] == 42
