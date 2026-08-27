@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Set up Protoc
+description: Install the pinned Protobuf compiler used by Dynamo Rust CI
+
+inputs:
+  version:
+    description: Protobuf release version
+    required: false
+    default: '30.2'
+  sha256:
+    description: SHA-256 of the linux-x86_64 release archive
+    required: false
+    default: '327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f'
+
+runs:
+  using: composite
+  steps:
+    - name: Install protoc
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ inputs.version }}
+        PROTOC_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_ARCH}" != "X64" ]]; then
+          echo "::error::setup-protoc currently supports X64 runners only (got ${RUNNER_ARCH})."
+          exit 1
+        fi
+
+        protoc_zip="protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+        download_path="${RUNNER_TEMP}/${protoc_zip}"
+        curl --retry 5 --retry-delay 2 --fail --show-error --silent --location \
+          --output "${download_path}" \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${protoc_zip}"
+        echo "${PROTOC_SHA256}  ${download_path}" | sha256sum -c -
+        unzip -q -o "${download_path}" -d "${HOME}/.local"
+        rm "${download_path}"
+        echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+        "${HOME}/.local/bin/protoc" --version

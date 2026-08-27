@@ -15,7 +15,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
-| `sidecar` | Unified multi-architecture sidecar image build plus unit and integration tests |
+| `sidecar` | Unified multi-architecture sidecar image build plus unit and integration tests; includes shared Cargo and Rust inputs consumed by the image |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |

@@ -39,24 +39,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
-# NGC does not publish a Rust toolchain image. Install the same pinned Rust
-# release used by the workspace through the pinned rustup installer.
+# NGC does not publish a Rust toolchain image. Keep this setup aligned with
+# container/templates/dynamo_base.Dockerfile, which installs Rust for the
+# backend containers.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:${PATH} \
+    PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.96.1
 
-RUN case "${TARGETARCH}" in \
-        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
-        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
-        *) echo "Unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && wget --tries=3 --waitretry=5 \
-        "https://static.rust-lang.org/rustup/archive/1.28.1/${RUST_TARGET}/rustup-init" \
-    && chmod +x rustup-init \
-    && ./rustup-init -y --no-modify-path --profile minimal \
-        --default-toolchain "${RUST_VERSION}" --default-host "${RUST_TARGET}" \
-    && rm rustup-init
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
+    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 WORKDIR /src
 

@@ -145,6 +145,56 @@ const testCases = [
     expect: { sidecar: true, core: true },
     desc: 'sidecar workflow changes run their own job and core CI checks'
   },
+  {
+    file: '.github/actions/setup-protoc/action.yml',
+    expect: { sidecar: true, core: true },
+    desc: 'shared protoc setup changes rerun sidecar and core CI checks'
+  },
+  {
+    file: 'Cargo.lock',
+    expect: { sidecar: true, core: true, rust: true },
+    desc: 'workspace dependency changes rebuild and retest the sidecar'
+  },
+  {
+    file: 'rust-toolchain.toml',
+    expect: { sidecar: true },
+    desc: 'Rust toolchain changes rebuild and retest the sidecar'
+  },
+  {
+    file: '.dockerignore',
+    expect: { sidecar: true, core: true },
+    desc: 'Docker build-context policy changes rebuild the sidecar'
+  },
+  {
+    file: '.github/actions/init-dynamo-builder/action.yml',
+    expect: { sidecar: true, core: true },
+    desc: 'builder initialization changes rerun the sidecar pipeline'
+  },
+  {
+    file: '.github/workflows/shared-copy.yml',
+    expect: { sidecar: true, core: true },
+    desc: 'registry promotion changes rerun the sidecar pipeline'
+  },
+  {
+    file: '.github/actions/skopeo-copy/action.yml',
+    expect: { sidecar: true, core: true },
+    desc: 'registry copy action changes rerun the sidecar pipeline'
+  },
+  {
+    file: 'lib/runtime/src/lib.rs',
+    expect: { sidecar: true, core: true, rust: true },
+    desc: 'shared Rust dependency changes rebuild and retest the sidecar'
+  },
+  {
+    file: 'examples/router/custom-policy-example/catalog/Cargo.toml',
+    expect: { sidecar: true, rust: true },
+    desc: 'copied workspace manifests trigger the sidecar build'
+  },
+  {
+    file: 'deploy/inference-gateway/ext-proc/src/main.rs',
+    expect: { sidecar: true, rust: true },
+    desc: 'copied external workspace members trigger the sidecar build'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {

@@ -15,10 +15,19 @@ on:
         required: false
         type: number
         default: 60
+      extra_tags:
+        description: 'Additional ECR tags (newline-separated)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      target_tag_plain:
+        description: 'Plain sidecar image tag prefix'
+        value: ${{ jobs.build.outputs.target_tag_plain }}
 
 jobs:
   tests:
-    name: dynamo-sidecar / tests
+    name: Test cpu, amd64
     runs-on:
       group: Fastchecker
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
@@ -28,21 +37,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Set up system dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Match the lightweight protoc setup used by pre-merge Rust tests.
-          PB_REL="https://github.com/protocolbuffers/protobuf/releases"
-          PROTOC_VER="30.2"
-          PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
-          PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
-          curl --retry 5 --retry-delay 2 -fsSLO "${PB_REL}/download/v${PROTOC_VER}/${PROTOC_ZIP}"
-          echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
-          unzip "${PROTOC_ZIP}" -d "${HOME}/.local"
-          rm "${PROTOC_ZIP}"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          "${HOME}/.local/bin/protoc" --version
+      - name: Set up Protoc
+        uses: $/.github/actions/setup-protoc
 
       - name: Cache Cargo artifacts
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
@@ -66,15 +62,35 @@ jobs:
             -p dynamo-trtllm-sidecar
 
   build:
-    name: dynamo-sidecar / image
+    name: Build multi-arch cpu
     needs: tests
     runs-on: prod-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     permissions:
       contents: read
+    outputs:
+      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Docker Login
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          target_tag_plain="dynamo-sidecar"
+          echo "target_tag_plain=${target_tag_plain}" >> "${GITHUB_OUTPUT}"
+          echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}" >> "${GITHUB_OUTPUT}"
 
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
@@ -84,17 +100,37 @@ jobs:
           arch: linux/amd64,linux/arm64
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
 
-      - name: Build sidecar image
+      - name: Calculate extra tags
+        id: extra-tags
         shell: bash
         env:
-          BUILDER_NAME: ${{ inputs.builder_name }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
         run: |
           set -euo pipefail
-          # No output is exported: both platform images are fully built and
-          # retained in BuildKit's cache as a CI gate, but not published.
-          docker buildx build --builder "${BUILDER_NAME}" \
-            --platform linux/amd64,linux/arm64 \
-            --progress plain \
-            --target runtime \
-            --file lib/sidecar/Dockerfile \
-            .
+          {
+            echo 'tags<<EOF'
+            while IFS= read -r tag; do
+              if [[ -n "${tag}" ]]; then
+                echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"
+              fi
+            done <<< "${EXTRA_TAGS}"
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and Push Image
+        uses: $/.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          framework: dynamo-sidecar
+          target: runtime
+          build_target: runtime
+          dockerfile: ./lib/sidecar/Dockerfile
+          platform: linux/amd64,linux/arm64
+          cuda_version: ''
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          push_image: true
+          no_load: true
+          use_sccache: false

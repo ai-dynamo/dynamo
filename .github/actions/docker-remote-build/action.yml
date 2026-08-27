@@ -52,6 +52,10 @@ inputs:
     description: 'Docker build target stage (passed as --target); empty = build to last stage'
     required: false
     default: ''
+  dockerfile:
+    description: 'Dockerfile path relative to the repository root'
+    required: false
+    default: './container/rendered.Dockerfile'
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -71,6 +75,7 @@ runs:
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
         CUDA_VERSION: ${{ inputs.cuda_version }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
       run: |
         set -x
 
@@ -165,7 +170,7 @@ runs:
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
-          -f ./container/rendered.Dockerfile \
+          -f "${DOCKERFILE}" \
           $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
