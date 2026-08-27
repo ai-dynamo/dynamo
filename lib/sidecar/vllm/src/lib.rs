@@ -8,6 +8,7 @@ mod client;
 mod convert;
 mod engine;
 mod json;
+mod lora;
 mod model;
 
 /// Generated vLLM gRPC types, temporarily exposed for the Mocker server until

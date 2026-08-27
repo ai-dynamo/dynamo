@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
@@ -182,6 +183,41 @@ impl VllmClient {
             .map(|response| response.sources)
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
+
+    pub(crate) async fn load_lora(
+        &self,
+        lora_name: String,
+        source_path: String,
+    ) -> Result<pb::LoadLoraResponse, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc(
+            "LoadLora",
+            client.load_lora(pb::LoadLoraRequest {
+                lora_name,
+                source_path,
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn unload_lora(
+        &self,
+        lora_name: String,
+    ) -> Result<pb::UnloadLoraResponse, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc(
+            "UnloadLora",
+            client.unload_lora(pb::UnloadLoraRequest { lora_name }),
+        )
+        .await
+    }
+
+    pub(crate) async fn list_loras(&self) -> Result<Vec<pb::LoraAdapter>, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc("ListLoras", client.list_loras(pb::ListLorasRequest {}))
+            .await
+            .map(|response| response.adapters)
+    }
 }
 
 pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
@@ -194,4 +230,67 @@ pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoErro
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
+}
+
+/// Bounded deadline applied to every LoRA lifecycle RPC.
+///
+/// `GrpcTransportConfig` only bounds connection startup, so without this a stalled
+/// vLLM server would hold an adapter's lifecycle lock forever.
+pub(crate) const LORA_RPC_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A failed LoRA lifecycle RPC, retaining the native gRPC status.
+///
+/// Dynamo needs the raw code to decide whether the call definitively failed or
+/// may have committed on the vLLM side and therefore requires reconciliation.
+#[derive(Debug, Clone)]
+pub(crate) struct LoraRpcError {
+    pub(crate) rpc: &'static str,
+    pub(crate) code: tonic::Code,
+    pub(crate) message: String,
+}
+
+impl LoraRpcError {
+    /// True when vLLM gave a definitive answer, so its state is known.
+    ///
+    /// Anything else (internal errors, timeouts, a dropped connection) may have
+    /// committed before failing and must be reconciled against `ListLoras`.
+    pub(crate) fn is_definitive(&self) -> bool {
+        matches!(
+            self.code,
+            tonic::Code::InvalidArgument
+                | tonic::Code::AlreadyExists
+                | tonic::Code::NotFound
+                | tonic::Code::FailedPrecondition
+        )
+    }
+
+    pub(crate) fn into_dynamo(self) -> DynamoError {
+        status_to_dynamo(self.rpc, tonic::Status::new(self.code, self.message))
+    }
+}
+
+impl std::fmt::Display for LoraRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} ({:?})", self.rpc, self.message, self.code)
+    }
+}
+
+/// Drive one LoRA lifecycle RPC under [`LORA_RPC_DEADLINE`].
+async fn lora_rpc<T>(
+    rpc: &'static str,
+    call: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, LoraRpcError> {
+    match tokio::time::timeout(LORA_RPC_DEADLINE, call).await {
+        Ok(Ok(response)) => Ok(response.into_inner()),
+        Ok(Err(status)) => Err(LoraRpcError {
+            rpc,
+            code: status.code(),
+            message: status.message().to_string(),
+        }),
+        Err(_) => Err(LoraRpcError {
+            rpc,
+            code: tonic::Code::DeadlineExceeded,
+            message: format!("{rpc} exceeded the {LORA_RPC_DEADLINE:?} lifecycle deadline"),
+        }),
+    }
 }
