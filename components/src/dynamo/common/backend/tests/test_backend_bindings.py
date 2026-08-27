@@ -83,6 +83,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             total_kv_blocks=1000,
             max_num_seqs=64,
             max_num_batched_tokens=2048,
+            max_gpu_lora_count=4,
         ),
     )
     assert cfg.model == "m2"
@@ -95,6 +96,42 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.total_kv_blocks == 1000
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
+    assert llm.max_gpu_lora_count == 4
+
+
+def test_llm_registration_positional_args_keep_their_meaning():
+    """``max_gpu_lora_count`` is appended, never inserted.
+
+    Existing callers pass the first fields positionally, so a new field in the
+    middle would silently rebind their arguments instead of failing loudly."""
+    llm = backend.LlmRegistration(
+        4096,  # context_length
+        32,  # kv_cache_block_size
+        2000,  # total_kv_blocks
+        128,  # max_num_seqs
+        4096,  # max_num_batched_tokens
+        2,  # data_parallel_size
+        1,  # data_parallel_start_rank
+        "127.0.0.1",  # bootstrap_host
+        5678,  # bootstrap_port
+    )
+    assert llm.context_length == 4096
+    assert llm.kv_cache_block_size == 32
+    assert llm.total_kv_blocks == 2000
+    assert llm.max_num_seqs == 128
+    assert llm.max_num_batched_tokens == 4096
+    assert llm.data_parallel_size == 2
+    assert llm.data_parallel_start_rank == 1
+    assert llm.bootstrap_host == "127.0.0.1"
+    assert llm.bootstrap_port == 5678
+    assert llm.max_gpu_lora_count is None
+
+    assert (
+        backend.LlmRegistration(
+            4096, 32, 2000, 128, 4096, 2, 1, "127.0.0.1", 5678, 8
+        ).max_gpu_lora_count
+        == 8
+    )
 
 
 def test_worker_config_minimum_args():
