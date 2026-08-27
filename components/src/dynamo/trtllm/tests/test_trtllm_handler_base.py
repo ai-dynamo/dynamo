@@ -470,6 +470,37 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
+        self, monkeypatch
+    ):
+        handler = self._make_handler()
+        handler.shutdown_event = asyncio.Event()
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-waiter-cleanup"
+
+        original_create_task = asyncio.create_task
+        shutdown_tasks = []
+
+        def track_shutdown_task(coro):
+            task = original_create_task(coro)
+            shutdown_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_shutdown_task)
+        monitor_task = original_create_task(
+            handler._handle_cancellation(generation_result, context)
+        )
+        await asyncio.sleep(0)
+        monitor_task.cancel()
+        await monitor_task
+
+        assert killed_future.cancelled()
+        assert shutdown_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_shutdown_calls_abort_directly(self):
         """Shutdown calls abort on whatever is passed (wrapper or real), immediately."""
