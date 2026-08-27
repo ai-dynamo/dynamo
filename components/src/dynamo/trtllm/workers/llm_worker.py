@@ -512,18 +512,12 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Follow the engine flag rather than forcing this on. The only reader of
-    # `request_perf_metrics` in this backend is the KV-transfer histogram in
-    # HandlerBase, whose collector is built only when publish_events_and_metrics
-    # is set -- so with publishing off nothing reads it. `cached_tokens` comes
-    # from `res.cached_tokens`, which is independent of these flags.
-    #
-    # `arg_map` is fully resolved here (extra/override engine args already
-    # merged), so this honours `--trtllm.return_perf_metrics` too. Compare with
-    # `is True` rather than `bool()`: override_engine_args arrives via
-    # json.loads, so a JSON string "false" would be truthy while pydantic
-    # coerces it to False. Erring toward False is safe -- TRT-LLM computes
-    # `sampling or engine`, so an engine-level True still turns it back on.
+    # Follow the engine flag: with publishing off, nothing reads
+    # `request_perf_metrics` -- its one consumer, the KV-transfer histogram, is
+    # publish-gated. `cached_tokens` is unaffected (it reads `res.cached_tokens`).
+    # `is True` guards against override_engine_args passing the JSON string
+    # "false", which `bool()` would accept; under-reading is safe because
+    # TRT-LLM computes `sampling or engine`.
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = (
             arg_map.get("return_perf_metrics") is True
