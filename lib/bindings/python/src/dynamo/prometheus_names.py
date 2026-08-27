@@ -629,8 +629,13 @@ class work_handler:
         INVALID_MESSAGE = "invalid_message"
         # Response stream creation error
         RESPONSE_STREAM = "response_stream"
-        # Generation error
+        # Generation setup error: `generate()` returned an error instead of a
+        # response stream, so no response frame was ever produced
         GENERATE = "generate"
+        # The engine returned a typed error after the response stream had
+        # already opened. Counted at most once per request, and not counted
+        # for user cancellation or worker shutdown
+        ENGINE_STREAM = "engine_stream"
         # Response serialization error
         SERIALIZATION = "serialization"
         # Response publishing error

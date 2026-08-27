@@ -788,7 +788,8 @@ where
     {
         let err = response.as_ref().and_then(|response| response.err());
         let kind = ResponseFrameKind::classify(
-            err.as_ref().map(|err| err as &(dyn std::error::Error + 'static)),
+            err.as_ref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
         );
         let wrapper = NetworkStreamWrapper {
             data: response,
