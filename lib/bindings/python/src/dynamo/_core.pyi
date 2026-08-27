@@ -1181,6 +1181,7 @@ class KvEventPublisher:
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
+        video_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1201,7 +1202,9 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
             batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
                 flushes at each submitted source-list boundary.
+            image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
+            video_token_id: Optional model video-placeholder token for exact MM routing.
         """
 
     def publish_stored(
