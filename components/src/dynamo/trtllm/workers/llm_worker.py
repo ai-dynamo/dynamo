@@ -512,20 +512,21 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Per-request perf metrics feed `prompt_tokens_details.cached_tokens` and the
-    # KV-transfer histograms, but TRT-LLM fills `request_perf_metrics` on every
-    # decode step while Dynamo only reads it on finish. Follow the engine flag
-    # instead of forcing it on: `arg_map` is fully resolved here, so this also
-    # honours `--trtllm.return_perf_metrics false` and `override_engine_args`.
-    request_perf_metrics = bool(arg_map.get("return_perf_metrics", False))
+    # Follow the engine flag rather than forcing this on. The only reader of
+    # `request_perf_metrics` in this backend is the KV-transfer histogram in
+    # HandlerBase, whose collector is built only when publish_events_and_metrics
+    # is set -- so with publishing off nothing reads it. `cached_tokens` comes
+    # from `res.cached_tokens`, which is independent of these flags.
+    #
+    # `arg_map` is fully resolved here (extra/override engine args already
+    # merged), so this honours `--trtllm.return_perf_metrics` too. Compare with
+    # `is True` rather than `bool()`: override_engine_args arrives via
+    # json.loads, so a JSON string "false" would be truthy while pydantic
+    # coerces it to False. Erring toward False is safe -- TRT-LLM computes
+    # `sampling or engine`, so an engine-level True still turns it back on.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = request_perf_metrics
-    if not request_perf_metrics:
-        logging.info(
-            "Per-request perf metrics are disabled (return_perf_metrics=False); "
-            "usage.prompt_tokens_details.cached_tokens will not be reported. "
-            "Enable --publish-kv-events, or set return_perf_metrics: true in "
-            "extra engine args, to turn them back on."
+        default_sampling_params.return_perf_metrics = (
+            arg_map.get("return_perf_metrics") is True
         )
     model_input = ModelInput.Tokens
 
