@@ -93,8 +93,11 @@ jobs:
           'pytest-benchmark>=4'
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
-    - name: Test recipe generators
-      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py
+    - name: Test recipe generators and docs artifacts
+      # tests/docs/ is passed as a directory so this stays in step with the
+      # `tests/docs/**` filter entry: a suite added there runs here rather than
+      # falling out of `core` and being tested nowhere.
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py tests/docs/
 
   api-docs:
     name: Generated API References

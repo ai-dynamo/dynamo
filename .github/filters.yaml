@@ -15,12 +15,13 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
-#   examples -> recipe-check (Kustomize recipe generation and unit tests)
+#   examples -> recipe-check (Kustomize recipe generation, recipe catalog
+#               artifacts, and the unit tests covering both)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   ignore, sidecar
 
 all:
   - '**'
@@ -91,6 +92,12 @@ examples:
   - 'scripts/kustomize-matrix.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
+  # Recipe catalog sources and the tests/docs/ suite that validates them. Those
+  # tests read only the catalog and its validator, so recipe-check is the job
+  # that can run them -- see the matching negation under `core`. The catalog is
+  # listed so a change to the data runs the tests that check it.
+  - 'docs/fern/pages/recipes/_catalog/**'
+  - 'tests/docs/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
@@ -184,6 +191,10 @@ core:
   - '!lib/sidecar/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
+  # tests/docs/ validates docs artifacts and imports nothing from the runtime,
+  # so it cannot observe a container or backend change. recipe-check runs the
+  # whole directory in seconds on ubuntu-latest instead.
+  - '!tests/docs/**'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
