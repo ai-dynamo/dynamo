@@ -57,6 +57,8 @@ Current `main` includes the shared routing-policy refactor from [Dynamo PR #1288
 
 The framework must configure the same frontend that actually receives rollout traffic. Do not launch a second frontend only to copy a generic CLI example.
 
+When evaluating against current Dynamo `main`, also verify the effective worker-set configuration rather than trusting the frontend command alone. A worker set that advertises router settings replaces the frontend defaults instead of merging with them, and every replica in that set must advertise the same values or Dynamo admits none of them. Restate every required nondefault worker setting and confirm the resolved `Activating prefill router` log for each routing hop. See [configuration scope and precedence](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configuration-scope-and-precedence). Framework snapshots pinned to an older Dynamo release must follow and verify that release's precedence rules separately.
+
 | Framework path | Router setting | Important boundary |
 |---|---|---|
 | verl native Dynamo variant | `actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode` with `thunderagent.enabled=false` | The recipe-owned frontend translates this value into Dynamo routing. When ThunderAgent is enabled, it owns the internal scheduling decision and the same comparison no longer isolates native Dynamo routing. |
