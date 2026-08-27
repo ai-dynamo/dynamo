@@ -106,7 +106,6 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         }
 
 
-# Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 # ``KVTransferConfig.kv_connector`` value that selects push mode.
 PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
 
@@ -116,11 +115,14 @@ PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     PUSH_CONNECTOR_NAME: NixlConnectorProtocol,
+    "NeuronNixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
 
 # Connectors that transfer over NIXL and therefore need the side-channel host
 # resolved before the engine starts. Both directions use the same side channel.
+# NeuronNixlConnector is deliberately absent: it shares the params shape but
+# main does not resolve a side-channel host for it.
 NIXL_CONNECTOR_NAMES: Tuple[str, ...] = ("NixlConnector", PUSH_CONNECTOR_NAME)
 
 # Wrapper connectors that compose sub-connectors under

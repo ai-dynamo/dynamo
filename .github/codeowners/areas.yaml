@@ -513,14 +513,12 @@ areas:
   - recipes/CONTRIBUTING.md
   - recipes/README.md
   - recipes/deepseek-r1/
-  - recipes/deepseek-v32-fp4/
   - recipes/deepseek-v4/
   - recipes/gaie_checks.sh
   - recipes/glm-5-nvfp4/
   - recipes/gpt-oss-120b/
   - recipes/hf_hub_secret/
   - recipes/kimi-k2.5/
-  - recipes/llama-3-70b/
   - recipes/nemotron-3-nano-omni/
   - recipes/nemotron-3-super-fp8/
   - recipes/qwen3-235b-a22b-fp8/
@@ -549,6 +547,18 @@ shared:
   - router
   - agents
 - glob: .agents/
+  owners:
+  - process
+  - agents
+- glob: .codex/
+  owners:
+  - process
+  - agents
+- glob: agents/
+  owners:
+  - process
+  - agents
+- glob: agent-docs/
   owners:
   - process
   - agents

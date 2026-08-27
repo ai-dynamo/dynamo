@@ -23,6 +23,7 @@ use crate::protocols::common::extensions::{
 pub mod aggregator;
 mod delta;
 pub mod tool_parser_v2;
+pub(crate) mod unified_parser;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -293,6 +294,7 @@ pub(super) fn stream_choice_chunk_from_template(
     template: &NvCreateChatCompletionStreamResponse,
     index: u32,
     content: Option<ChatCompletionMessageContent>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
@@ -308,7 +310,7 @@ pub(super) fn stream_choice_chunk_from_template(
             tool_calls,
             function_call: None,
             refusal: None,
-            reasoning_content: None,
+            reasoning_content,
         },
         finish_reason,
         logprobs: None,

@@ -140,7 +140,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
 | **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
-| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions. Retention defaults to TTL; experimental `--router-approximate-cache-policy lru` uses advertised per-rank KV capacity. |
 
 ### Aggregated vs. Disaggregated Topology
 
@@ -189,9 +189,15 @@ This is not specific to router flags — any card difference splits a set the sa
 - **Applying the flag to only some replicas of a set splits it.** Whether by flag or by an exported `DYN_ROUTER_MODE` that reaches some processes and not others, every member of a set must end up with the same value.
 
 > [!IMPORTANT]
-> An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. If you set `--router-mode kv` on a worker and the frontend was tuned with KV flags such as `--router-temperature`, restate those flags on the worker too, or that set falls back to KV defaults.
+> An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. On a worker, a flag you do not pass means **the default**, not "inherit the frontend's value". If the frontend was tuned with `--router-kv-overlap-score-credit 2.5` and a worker advertises only `--router-mode kv`, that worker set routes with the default `1.0` — the tuning is not inherited, it is replaced. Restate on the worker every flag that matters for it.
 
-Because the flags are shared with the frontend, they read the same environment variables — `--router-mode` reads `DYN_ROUTER_MODE`. Kubernetes scopes environment per service, so a frontend's value does not reach workers, and the launch scripts pass the flag rather than exporting it. The one case to watch is a shell that exports `DYN_ROUTER_MODE` and then starts both the frontend and workers: there the workers advertise it instead of inheriting.
+Merging is not offered because it cannot be done correctly: the KV tuning is flat concrete values with no record of which ones were set explicitly, so a deliberate `1.0` is indistinguishable from a default `1.0`.
+
+Workers and the frontend share defaults exactly — both build their configuration from the same argument groups — so the values only diverge when the frontend is tuned and the worker is not.
+
+The flags also read the same environment variables, and this changes the answer depending on how you deploy. If the frontend's tuning comes from the environment and the worker shares that environment — a single shell starting both — the worker picks the tuning up and nothing is lost. Kubernetes scopes environment per service, so there the worker sees only its own flags. The same intent can therefore produce different routing in the two setups. `--router-mode` itself is the exception in the other direction: a shared `DYN_ROUTER_MODE` makes a worker advertise when you meant it to inherit.
+
+The `Activating prefill router` log line reports the configuration each hop actually resolved — mode, block size, session TTL, and KV tuning — which is the quickest way to confirm what a worker set ended up with.
 
 The frontend-only options (`--router-min-initial-workers`, `--enforce-disagg`, `--admission-control`) are not accepted by workers, since a model card does not carry them.
 

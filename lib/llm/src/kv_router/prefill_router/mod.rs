@@ -30,7 +30,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
-    kv_router::WorkerSelectorFactory,
+    kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::{ModelRuntimeConfig, NixlPushEndpoint},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -45,8 +45,6 @@ mod activation;
 mod admission;
 mod conditional_bypass;
 mod query;
-
-use admission::InnerPrefillRouter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -254,7 +252,10 @@ where
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
-    router_mode: RouterMode,
+    /// Mode of the decode set that owns this router. Governs decode-side
+    /// decisions, and is the fallback for the prefill hop -- not its mode. That
+    /// lives on [`PrefillBinding::prefill_router_mode`].
+    decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -267,7 +268,6 @@ where
     model_name: String,
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
-    is_eagle: bool,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
@@ -280,7 +280,11 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     endpoint_id: EndpointId,
-    router: InnerPrefillRouter<Sel>,
+    router: Arc<RoutingHost<Sel>>,
+    /// Resolved at activation from the prefill card. Lives here rather than on
+    /// `PrefillRouter` because it is unknowable until a target is discovered,
+    /// and changes when the binding is rebuilt.
+    prefill_router_mode: RouterMode,
 }
 
 struct PrefillBuildContext<Sel>
@@ -288,12 +292,12 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
+    /// Fallback mode for the prefill hop when the prefill card advertises none.
+    decode_router_mode: RouterMode,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     model_name: String,
-    is_eagle: bool,
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
@@ -442,13 +446,6 @@ where
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
-            return Err(anyhow::anyhow!(
-                "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
-            ));
-        }
-
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
@@ -461,6 +458,16 @@ where
         let Some(binding) = self.binding.load_full() else {
             return next.generate(context.map(|_| req)).await;
         };
+
+        // Keyed on the prefill mode, not the decode set's, and checked after
+        // the binding loads because that is where the prefill mode lives.
+        if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
+            ));
+        }
+
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
@@ -959,7 +966,6 @@ mod tests {
             None,
             "test-model".to_string(),
             "test-namespace".to_string(),
-            false,
             None,
         );
         let task_state = Arc::downgrade(&router.activation_task_state);

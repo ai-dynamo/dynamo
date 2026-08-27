@@ -22,6 +22,7 @@ import pytest
 from dynamo.vllm.kv_connector_protocols import (
     KV_CONNECTOR_PROTOCOLS,
     NIXL_CONNECTOR_NAMES,
+    PUSH_CONNECTOR_NAME,
     KvConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
@@ -479,6 +480,7 @@ def test_registry_keys_match_vllm_connector_names():
     assert set(KV_CONNECTOR_PROTOCOLS) == {
         "NixlConnector",
         "NixlPushConnector",
+        "NeuronNixlConnector",
         "MooncakeConnector",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
@@ -521,7 +523,10 @@ def test_nixl_connector_names_cover_every_registered_nixl_protocol():
         for name, cls in KV_CONNECTOR_PROTOCOLS.items()
         if issubclass(cls, NixlConnectorProtocol)
     }
-    assert set(NIXL_CONNECTOR_NAMES) == registered_nixl
+    # Subset, not equality: sharing the params shape does not imply needing a
+    # side channel resolved (NeuronNixlConnector shares one but is not gated).
+    assert set(NIXL_CONNECTOR_NAMES) <= registered_nixl
+    assert {"NixlConnector", PUSH_CONNECTOR_NAME} <= set(NIXL_CONNECTOR_NAMES)
 
 
 # ---------------------------------------------------------------------------
