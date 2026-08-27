@@ -54,9 +54,9 @@ def test_cpu_limit_is_exported_to_gpu_parallel_scheduler() -> None:
     assert _run_pytest_step()["env"]["NUM_CPUS"] == "${{ inputs.cpu_limit }}"
 
 
-def test_trtllm_gpu_parallel_stage_is_capped_at_four_slots() -> None:
+def test_trtllm_gpu_parallel_stage_is_capped_at_two_slots() -> None:
     assert (
-        _resolved_cpu_budget(suite="trtllm", max_vram_gib="80", cpu_limit="10") == "4"
+        _resolved_cpu_budget(suite="trtllm", max_vram_gib="80", cpu_limit="10") == "2"
     )
 
 

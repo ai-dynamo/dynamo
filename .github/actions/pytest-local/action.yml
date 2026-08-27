@@ -168,17 +168,18 @@ runs:
         # BEGIN parallel CPU budget
         # The VRAM-aware scheduler cannot infer the runner pod's intended CPU
         # budget from os.cpu_count(), so give it the action's explicit limit.
-        # TRT-LLM starts MPI ranks and several runtime processes per test; cap
-        # only its GPU-parallel stage more conservatively to avoid overwhelming
-        # the H100 runner. Other suites keep the caller-provided CPU limit.
+        # TRT-LLM starts MPI ranks and several runtime processes per test. The
+        # H100 lane has two GPUs, so allow at most one TRT-heavy test per GPU;
+        # higher slot counts still starve startup even when VRAM fits. Other
+        # suites keep the caller-provided CPU limit.
         if [[ -n "${PYTEST_MAX_VRAM_GIB}" ]]; then
           if ! [[ "${NUM_CPUS}" =~ ^[1-9][0-9]*$ ]]; then
             echo "❌ cpu_limit must be a positive integer; got '${NUM_CPUS}'"
             exit 1
           fi
-          if [[ "${DYNAMO_TEST_SUITE_NAME}" == "trtllm" && ${NUM_CPUS} -gt 4 ]]; then
-            echo "📊 TRT-LLM GPU parallelism: capping CPU-backed scheduler slots ${NUM_CPUS} -> 4"
-            NUM_CPUS=4
+          if [[ "${DYNAMO_TEST_SUITE_NAME}" == "trtllm" && ${NUM_CPUS} -gt 2 ]]; then
+            echo "📊 TRT-LLM GPU parallelism: capping CPU-backed scheduler slots ${NUM_CPUS} -> 2"
+            NUM_CPUS=2
             export NUM_CPUS
           fi
         fi
