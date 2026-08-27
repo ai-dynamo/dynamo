@@ -238,7 +238,7 @@ The example EPP links the example catalog and registers it before the standard r
 ```rust
 let mut registry = WorkerSelectionPolicyRegistry::default();
 dynamo_custom_policy_example_catalog::register(&mut registry)?;
-run_with_worker_selection_policy_registry(registry).await
+run(Some(registry)).await
 ```
 
 Run the binary in standalone mode:

@@ -48,9 +48,11 @@ def _adapter(architecture: str = "Qwen3VLForConditionalGeneration"):
     [
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     ],
 )
-def test_qwen3_vl_decoder_selects_native_adapter(architecture):
+def test_supported_qwen_decoder_selects_native_adapter(architecture):
     assert type(_adapter(architecture)).__name__ == "Qwen3VLNativeAdapter"
 
 

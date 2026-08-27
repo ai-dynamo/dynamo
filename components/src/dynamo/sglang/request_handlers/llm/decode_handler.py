@@ -363,6 +363,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                "min_new_tokens": stop_conditions.get("min_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
@@ -375,6 +376,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             param_mapping = {
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                "min_new_tokens": request.get("min_tokens"),
                 **_sampling_option_params(request),
                 **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
