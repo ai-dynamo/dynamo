@@ -240,7 +240,7 @@ Do not label an update path supported when only transfer bandwidth was measured.
 
 ## Record Both Required Update Paths
 
-Fill `weight_paths` in the checked [cross-cutting program-record template](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/rl_program_record.template.json). The publication gate requires at least two distinct passed records across the program: one path with `placement: colocated` and a different path with `serving_mode: disaggregated`. Those paths may use different framework/backend combinations, so every path independently pins its framework commit, backend version, container image digest, model revision, transport, model class, and source/target TP, PP, DP, and EP layout.
+Fill `weight_paths` in the checked [cross-cutting program-record template](../../../scripts/rl_program_record.template.json). The publication gate requires at least two distinct passed records across the program: one path with `placement: colocated` and a different path with `serving_mode: disaggregated`. Those paths may use different framework/backend combinations, so every path independently pins its framework commit, backend version, container image digest, model revision, transport, model class, and source/target TP, PP, DP, and EP layout.
 
 For each path, preserve evidence that all targeted workers were verified, cache handling completed, the requested version was read back, the output changed or a numerical tensor validation passed, a partial failure recovered under the declared policy, and generation succeeded after the update. A transport benchmark or one-worker success cannot satisfy this record.
 

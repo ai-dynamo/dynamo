@@ -109,7 +109,9 @@ def test_invalid_numeric_telemetry_is_rejected() -> None:
 def test_fractional_token_count_is_rejected() -> None:
     records = _joined_records()
     records[0]["request_end"]["request"]["output_tokens"] = 24.5
-    with pytest.raises(rl_ops_report.ReportError, match="output_tokens must be an integer"):
+    with pytest.raises(
+        rl_ops_report.ReportError, match="output_tokens must be an integer"
+    ):
         rl_ops_report.build_report(records)
 
 

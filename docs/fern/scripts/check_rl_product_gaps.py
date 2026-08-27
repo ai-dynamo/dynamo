@@ -70,7 +70,9 @@ def load_registry(path: Path) -> dict[str, Any]:
     return value
 
 
-def _check_shape(value: Any, shape: dict[str, Any], location: str, findings: list[str]) -> None:
+def _check_shape(
+    value: Any, shape: dict[str, Any], location: str, findings: list[str]
+) -> None:
     if not isinstance(value, dict):
         findings.append(f"{location} must be an object")
         return
@@ -149,8 +151,10 @@ def _assertions(
     *,
     require_contains: bool,
 ) -> None:
-    if not isinstance(value, list) or not value or any(
-        not isinstance(item, dict) for item in value
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, dict) for item in value)
     ):
         findings.append(f"{location} must contain at least one assertion object")
         return
@@ -193,7 +197,9 @@ def _dependency_findings(gaps: list[dict[str, Any]], findings: list[str]) -> Non
             if dependency == gap_id:
                 findings.append(f"{gap_id}.depends_on must not contain itself")
             elif dependency not in by_id:
-                findings.append(f"{gap_id}.depends_on references unknown gap {dependency}")
+                findings.append(
+                    f"{gap_id}.depends_on references unknown gap {dependency}"
+                )
             elif PRIORITIES.get(by_id[dependency]["priority"], 99) > PRIORITIES.get(
                 gap["priority"], -1
             ):
@@ -262,8 +268,10 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
     decision = registry.get("closed_loop_decision")
     _check_shape(decision, DECISION_SHAPE, "closed_loop_decision", findings)
     gaps = registry.get("gaps")
-    if not isinstance(gaps, list) or not gaps or any(
-        not isinstance(gap, dict) for gap in gaps
+    if (
+        not isinstance(gaps, list)
+        or not gaps
+        or any(not isinstance(gap, dict) for gap in gaps)
     ):
         findings.append("gaps must contain at least one object")
         return findings
@@ -334,9 +342,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
     _dependency_findings(gaps, findings)
 
     if decision["status"] != "follow_on_dep_required":
-        findings.append(
-            "closed_loop_decision.status must be follow_on_dep_required"
-        )
+        findings.append("closed_loop_decision.status must be follow_on_dep_required")
     if decision["current_scope"] != "request_plane_only":
         findings.append("closed_loop_decision.current_scope must be request_plane_only")
     if decision["decision_vehicle"] != "DEP":

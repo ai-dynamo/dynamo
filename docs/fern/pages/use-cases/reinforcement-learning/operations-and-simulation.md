@@ -116,7 +116,7 @@ python3 docs/fern/scripts/rl_trace_join.py \
 
 The example joins opaque rollout and attempt headers case-insensitively, uses the Dynamo request ID to find `request_end`, checks the captured policy header against the framework target, preserves compact terminal metrics, and excludes captured request and response bodies from its output. It accepts `.jsonl` and `.jsonl.gz` trace shards. Strict mode fails for a missing payload join, a missing required terminal, an unexpected terminal, or a missing/mismatched policy header.
 
-The checked fixture contains two completed requests and one intentionally incomplete timed-out attempt. Its repeated sequence hashes, different KV hit rates, queue depths, and timing values are synthetic signals for exercising a query—not measurements and not evidence that a framework integration works. Replace both inputs with a real framework ledger and trace, inspect the joined rows, and preserve the resulting summary with the run record. The [join script](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/rl_trace_join.py), [framework-attempt fixture](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/fixtures/rl_trace_join/framework-attempts.jsonl), and [trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/fixtures/rl_trace_join/request-trace.jsonl) are maintained with this guide.
+The checked fixture contains two completed requests and one intentionally incomplete timed-out attempt. Its repeated sequence hashes, different KV hit rates, queue depths, and timing values are synthetic signals for exercising a query—not measurements and not evidence that a framework integration works. Replace both inputs with a real framework ledger and trace, inspect the joined rows, and preserve the resulting summary with the run record. The [join script](../../../scripts/rl_trace_join.py), [framework-attempt fixture](../../../scripts/fixtures/rl_trace_join/framework-attempts.jsonl), and [trace fixture](../../../scripts/fixtures/rl_trace_join/request-trace.jsonl) are maintained with this guide.
 
 ### Generate a checked request-plane operations report
 
@@ -131,7 +131,7 @@ python3 docs/fern/scripts/rl_ops_report.py \
 
 The `dynamo.rl.operations-report.v1` artifact reports join and framework terminal status, accepted/rejected counts, target and observed policy-header counts, finish reasons, per-worker activity, and field coverage plus min/mean/p50/p95/max for the current request-trace token, queue, prefill, decode, KV, transfer-estimate, and latency fields. Percentiles use linear interpolation over the observed terminal rows. Missing optional fields have zero coverage and null statistics; they are never imputed as measured zero. Strict mode requires at least one terminal, accepts only complete or expected-incomplete joins, and rejects policy-header mismatches.
 
-This report contains no captured request or response body and does not invent diagnosis thresholds. It also does not join aggregate Prometheus series. Most importantly, the current request trace has no standardized weight-update phase, duration, result, or served-content event; preserve update lifecycle timing and content verification in the framework/control ledger and review it beside this report. The checked [report script](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/rl_ops_report.py) and [expected synthetic report](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/fixtures/rl_trace_join/expected-operations-report.json) define the maintained request-plane query artifact.
+This report contains no captured request or response body and does not invent diagnosis thresholds. It also does not join aggregate Prometheus series. Most importantly, the current request trace has no standardized weight-update phase, duration, result, or served-content event; preserve update lifecycle timing and content verification in the framework/control ledger and review it beside this report. The checked [report script](../../../scripts/rl_ops_report.py) and [expected synthetic report](../../../scripts/fixtures/rl_trace_join/expected-operations-report.json) define the maintained request-plane query artifact.
 
 ## Diagnose the Live Run
 
@@ -343,7 +343,7 @@ The checker validates completeness and arithmetic; it does not inspect the truth
 
 ## Prioritized Product Gaps and Closed-Loop Decision
 
-These are issue-ready proposals, not committed roadmap items or assigned owners. The checked [product-gap register](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/rl_product_gaps.json) records the source assertions, dependencies, acceptance evidence, owner teams, documentation behavior, and expiration trigger behind each summary:
+These are issue-ready proposals, not committed roadmap items or assigned owners. The checked [product-gap register](../../../scripts/rl_product_gaps.json) records the source assertions, dependencies, acceptance evidence, owner teams, documentation behavior, and expiration trigger behind each summary:
 
 | Gap | Priority | Vehicle | Contract needed | Documentation boundary until accepted |
 |---|---|---|---|---|

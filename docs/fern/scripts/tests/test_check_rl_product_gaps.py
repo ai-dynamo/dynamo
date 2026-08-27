@@ -28,7 +28,9 @@ def test_required_source_text_drift_is_detected() -> None:
         "field_that_does_not_exist"
     )
     findings = check_rl_product_gaps.validate_registry(registry)
-    assert any("no longer contains 'field_that_does_not_exist'" in item for item in findings)
+    assert any(
+        "no longer contains 'field_that_does_not_exist'" in item for item in findings
+    )
 
 
 def test_gap_closing_source_signal_expires_the_register() -> None:
@@ -37,7 +39,10 @@ def test_gap_closing_source_signal_expires_the_register() -> None:
         "pub session_id: String"
     )
     findings = check_rl_product_gaps.validate_registry(registry)
-    assert any("now contains gap-closing signal 'pub session_id: String'" in item for item in findings)
+    assert any(
+        "now contains gap-closing signal 'pub session_id: String'" in item
+        for item in findings
+    )
 
 
 def test_documented_boundary_drift_is_detected() -> None:
@@ -46,7 +51,10 @@ def test_documented_boundary_drift_is_detected() -> None:
         "boundary that is not documented"
     ]
     findings = check_rl_product_gaps.validate_registry(registry)
-    assert any("no longer contains 'boundary that is not documented'" in item for item in findings)
+    assert any(
+        "no longer contains 'boundary that is not documented'" in item
+        for item in findings
+    )
 
 
 def test_gap_ids_must_be_unique() -> None:
@@ -75,7 +83,10 @@ def test_priority_cannot_outrun_a_dependency() -> None:
     registry = _registry()
     registry["gaps"][0]["depends_on"] = ["DYN-RL-GAP-004"]
     findings = check_rl_product_gaps.validate_registry(registry)
-    assert any("cannot have higher urgency than dependency DYN-RL-GAP-004" in item for item in findings)
+    assert any(
+        "cannot have higher urgency than dependency DYN-RL-GAP-004" in item
+        for item in findings
+    )
 
 
 def test_acceptance_evidence_must_be_actionable() -> None:

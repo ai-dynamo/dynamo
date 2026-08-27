@@ -48,7 +48,18 @@ flowchart LR
 | Cross-node service discovery and messaging | Recipe-managed etcd and NATS |
 | Trainer-to-request correlation and acceptance | verl/recipe; Dynamo does not infer rollout or policy semantics |
 
-The recipe launches one Ray actor per node to supervise subprocesses. The actor reserves no GPUs itself; it forwards the colocated trainer allocation into Dynamo vLLM shards. Generation goes through the shared frontend, while control operations go through the recipe's Ray and ZMQ path. Request routing therefore belongs to Dynamo, but the current weight transfer does not use Dynamo's public discovery endpoint or ModelExpress.
+The recipe launches one Ray actor per node to supervise subprocesses. The actor reserves no GPUs itself; it forwards the colocated trainer allocation into Dynamo vLLM shards. Generation goes through the shared frontend, while control operations go through the recipe's Ray and ZMQ path. With ThunderAgent disabled, request routing belongs to Dynamo's native router; with ThunderAgent enabled, its program-aware scheduler owns the internal routing decision. The current weight transfer uses the same recipe-owned CUDA-IPC path in either variant, not Dynamo's public discovery endpoint or ModelExpress.
+
+## Choose One Recipe Variant
+
+The reviewed `dynamo_trainer.yaml` enables ThunderAgent by default. That default is a separate execution path from the native Dynamo router used by the validation-only smoke and the baseline workflow in this guide.
+
+| Variant | Required setting | Routing owner | Dynamo version rule |
+|---|---|---|---|
+| Native Dynamo router | `thunderagent.enabled=false` | Dynamo native router selected by `router_mode` | Pin the exact Dynamo source commit used by the run and validate it with the recipe; the recipe does not publish a native-path Dynamo pin. |
+| ThunderAgent | `thunderagent.enabled=true` | ThunderAgent program-aware scheduler behind the frontend | Use the exact Dynamo source requirement documented by the pinned recipe and validate this as a distinct framework variant. |
+
+Unless a section explicitly says ThunderAgent, commands in this guide select the native path with `++actor_rollout_ref.rollout.engine_kwargs.dynamo.thunderagent.enabled=false`. Do not compare or combine results across the two variants as if only the routing policy changed: they have different scheduling ownership and version requirements.
 
 ## Prerequisites
 
@@ -62,6 +73,10 @@ The recipe launches one Ray actor per node to supervise subprocesses. The actor 
 Use the upstream `REQUIRED_VERL.txt` rather than guessing a compatible verl release. The recipe repository provides an installer that reads the pin without evaluating the file as shell code.
 
 ## Select a Reproducible Environment
+
+The reviewed recipe snapshot pins the core verl commit, but it does not pin a complete Dynamo runtime image, a native-path Dynamo commit, the CUDA/driver pair, or the resulting vLLM dependency set. Its `install_verl.sh` installs verl only; the clone and installer commands below are therefore not a complete environment bootstrap. Before using them, choose one variant, start from a clean Linux GPU environment, pin a Dynamo source commit, and install its vLLM backend using [Building from Source](../../developer-guide/advanced-customizations/building-from-source.md). Ensure `etcd` and `nats-server` are installed separately.
+
+Do not assume that a stable verl image or the latest Dynamo vLLM image satisfies both projects merely because each works independently. Resolve the combined environment, preserve its immutable image digest and package inventory, and require the host preflight below to match the record before treating the smoke as evidence. The missing upstream end-to-end image pin is one reason this page remains experimental.
 
 From a clean parent directory, clone the reviewed recipe snapshot and ask its installer to create the matching editable verl checkout:
 
@@ -189,6 +204,7 @@ python3 -m recipe.dynamo.main_dynamo \
   actor_rollout_ref.rollout.name=dynamo \
   actor_rollout_ref.rollout.mode=async \
   actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode=kv \
+  ++actor_rollout_ref.rollout.engine_kwargs.dynamo.thunderagent.enabled=false \
   trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
   trainer.total_training_steps=2
@@ -223,6 +239,8 @@ The reviewed recipe sends control RPCs to its per-node actors and updates coloca
 Do not use the public vLLM `/v1/rl/workers` workflow as a substitute for this recipe path unless the recipe is explicitly redesigned to do so. See [Update rollout weights](weight-updates.md#verl-colocated-cuda-ipc) for the boundary.
 
 ## Configure Routing
+
+This section assumes `thunderagent.enabled=false`. When ThunderAgent is enabled, `router_mode` does not identify the same internal scheduling decision, so validate and report that path separately.
 
 Start with two matched variants:
 
@@ -292,7 +310,7 @@ Until that record exists, the public recipe is usable experimental evidence, not
 
 ## Complete an Independent Clean-Room Review
 
-After the framework validation record and cross-cutting program record each pass their publication gate, assign an independent reviewer to execute this guide from a fresh workspace. Start from the checked [clean-room review template](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/rl_clean_room_record.template.json) and validate the completed record with the [clean-room publication-gate checker](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/check_rl_clean_room_record.py). The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have artifacts, and every blocking or major finding is resolved. See the [evidence ledger](evidence-ledger.md#independent-clean-room-review-required-for-release) for the complete owner, independence, broken-link, waiver, and approval contract.
+After the framework validation record and cross-cutting program record each pass their publication gate, assign an independent reviewer to execute this guide from a fresh workspace. Start from the checked [clean-room review template](../../../scripts/rl_clean_room_record.template.json) and validate the completed record with the [clean-room publication-gate checker](../../../scripts/check_rl_clean_room_record.py). The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have artifacts, and every blocking or major finding is resolved. See the [evidence ledger](evidence-ledger.md#independent-clean-room-review-required-for-release) for the complete owner, independence, broken-link, waiver, and approval contract.
 
 After approval, close the three records and their referenced files into one digest-verified local bundle using the [artifact bundle procedure](evidence-ledger.md#close-and-verify-the-publication-artifact-bundle). Bundle verification proves byte integrity and record linkage; it does not replace the independent review of what each artifact demonstrates.
 

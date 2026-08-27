@@ -268,7 +268,7 @@
       },
       {
         "category": "field",
-        "tokens": ["actor_rollout_ref.rollout.engine_kwargs.dynamo", "enable_worker_system_metrics", "free_engine_on_train", "kv_offload_backend", "request_completion_token_ids", "request_engine_data", "router_mode", "thunderagent.enabled", "update_weights"],
+        "tokens": ["actor_rollout_ref.rollout.engine_kwargs.dynamo", "dynamo_trainer.yaml", "enable_worker_system_metrics", "free_engine_on_train", "kv_offload_backend", "request_completion_token_ids", "request_engine_data", "router_mode", "thunderagent.enabled", "update_weights"],
         "evidence_ids": ["RL-FW-VERL-001"],
         "owner": "verl recipe and Dynamo RL maintainers",
         "expiration_trigger": "Pinned verl trainer, rollout, server, or ThunderAgent configuration change"
@@ -464,7 +464,7 @@
           {"block": 6, "language": "bash", "sha256": "60905a85e13ad71c3e54d00b7f384511f6fae75f38ec819466ebc6e8ee641e2d", "evidence_ids": ["RL-FW-VERL-001"]},
           {"block": 7, "language": "text", "sha256": "95c202c89b4908ababc04bd365362b9c1ae67e009abe0040c86a8561bcd35353", "evidence_ids": ["RL-FW-VERL-001"]},
           {"block": 8, "language": "bash", "sha256": "72c131f7d709393b471a6b04b53476362dcc9071c577193eae66769bf7bb64a9", "evidence_ids": ["RL-FW-VERL-001"]},
-          {"block": 9, "language": "bash", "sha256": "d6922f25b58520378a72636109bb76c481e4fbf75957ababe85333379ee0802b", "evidence_ids": ["RL-FW-VERL-001"]},
+          {"block": 9, "language": "bash", "sha256": "caffcdd8168c173a65a2cf33fac69c73eac57a9edd99080f0ce2d93eb893efee", "evidence_ids": ["RL-FW-VERL-001"]},
           {"block": 10, "language": "bash", "sha256": "4dff5cc36d579b677e73f7741a4ca034b24e5a97c1d3c1f8ebb291fa414a36b1", "evidence_ids": ["RL-FW-VERL-001"]}
         ]
       },
@@ -1407,6 +1407,10 @@
             "contains": [
               "COMMIT=d82d2777b5dc3e96a8a45168d02660312707ab98",
               "verl.git@d82d2777b5dc3e96a8a45168d02660312707ab98"
+            ],
+            "not_contains": [
+              "DYNAMO_COMMIT=",
+              "CONTAINER_IMAGE="
             ]
           },
           {
@@ -1415,7 +1419,8 @@
               "--recipe NAME",
               "--method pip|git",
               "--dest DIR",
-              "--show"
+              "--show",
+              "cd '$dest' && $pip_bin install -e ."
             ]
           },
           {
@@ -1424,7 +1429,8 @@
               "actor_rollout_ref.rollout.name=dynamo",
               "actor_rollout_ref.rollout.mode=async",
               "router_mode",
-              "thunderagent:"
+              "thunderagent:",
+              "enabled: true"
             ]
           },
           {
@@ -1438,7 +1444,8 @@
               "`free_engine_on_train`",
               "`enable_worker_system_metrics`",
               "python3 recipe/dynamo/main_dynamo.py",
-              "VERL_DYNAMO_WORKER_METRICS_DIR"
+              "VERL_DYNAMO_WORKER_METRICS_DIR",
+              "Dynamo: source commit `59d614641837e593f0567b79d75394aae5f864e0`"
             ]
           },
           {
@@ -1510,7 +1517,8 @@
             "contains": [
               "461b830cfee4f5a67c21edc300c24373230babc7",
               "d82d2777b5dc3e96a8a45168d02660312707ab98",
-              "| Experimental |"
+              "| Experimental |",
+              "pins and installs core verl only"
             ]
           },
           {
@@ -1519,6 +1527,8 @@
               "**Experimental.**",
               "461b830cfee4f5a67c21edc300c24373230babc7",
               "d82d2777b5dc3e96a8a45168d02660312707ab98",
+              "## Choose One Recipe Variant",
+              "does not pin a complete Dynamo runtime image",
               "python3 docs/fern/scripts/check_rl_validation_record.py",
               "--publication-gate"
             ]
@@ -1526,7 +1536,8 @@
           {
             "path": "docs/fern/pages/use-cases/reinforcement-learning/evidence-ledger.md",
             "contains": [
-              "d82d2777b5dc3e96a8a45168d02660312707ab98"
+              "d82d2777b5dc3e96a8a45168d02660312707ab98",
+              "pins core verl but not one complete Dynamo runtime image"
             ]
           }
         ]

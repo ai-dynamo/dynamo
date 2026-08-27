@@ -138,7 +138,9 @@ def _metric_summary(values: list[float | int], terminal_rows: int) -> dict[str, 
         ),
     }
     if not numeric:
-        summary.update({"min": None, "mean": None, "p50": None, "p95": None, "max": None})
+        summary.update(
+            {"min": None, "mean": None, "p50": None, "p95": None, "max": None}
+        )
         return summary
     summary.update(
         {
@@ -195,7 +197,9 @@ def build_report(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     for index, row in enumerate(rows, start=1):
         location = f"joined row {index}"
         framework = _required_object(row.get("framework"), f"{location}.framework")
-        join_status = _optional_string(row.get("join_status"), f"{location}.join_status")
+        join_status = _optional_string(
+            row.get("join_status"), f"{location}.join_status"
+        )
         if join_status not in ALLOWED_JOIN_STATUSES:
             raise ReportError(
                 f"{location}.join_status must be one of {sorted(ALLOWED_JOIN_STATUSES)}"
@@ -212,7 +216,9 @@ def build_report(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         elif isinstance(accepted, bool):
             acceptance_counts["accepted" if accepted else "rejected"] += 1
         else:
-            raise ReportError(f"{location}.framework.accepted must be boolean when present")
+            raise ReportError(
+                f"{location}.framework.accepted must be boolean when present"
+            )
 
         target_policy = _optional_string(
             framework.get("target_policy_version"),
@@ -230,13 +236,17 @@ def build_report(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         elif isinstance(policy_match, bool):
             policy_match_counts["matched" if policy_match else "mismatched"] += 1
         else:
-            raise ReportError(f"{location}.policy_header_matches must be boolean or null")
+            raise ReportError(
+                f"{location}.policy_header_matches must be boolean or null"
+            )
 
         request_end = row.get("request_end")
         if request_end is None:
             continue
         request_end = _required_object(request_end, f"{location}.request_end")
-        request = _required_object(request_end.get("request"), f"{location}.request_end.request")
+        request = _required_object(
+            request_end.get("request"), f"{location}.request_end.request"
+        )
         terminal_rows += 1
 
         for field in METRIC_FIELDS:
@@ -251,7 +261,8 @@ def build_report(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         finish_metadata = request.get("finish_reason_metadata")
         if finish_metadata is not None:
             finish_metadata = _required_object(
-                finish_metadata, f"{location}.request_end.request.finish_reason_metadata"
+                finish_metadata,
+                f"{location}.request_end.request.finish_reason_metadata",
             )
             finish_reason = _optional_string(
                 finish_metadata.get("finish_reason"),
@@ -334,7 +345,9 @@ def strict_findings(report: dict[str, Any]) -> list[str]:
         findings.append(f"strict report rejects join statuses: {', '.join(unexpected)}")
     mismatches = report["policy_versions"]["header_match"].get("mismatched", 0)
     if mismatches:
-        findings.append(f"strict report rejects {mismatches} policy-header mismatch(es)")
+        findings.append(
+            f"strict report rejects {mismatches} policy-header mismatch(es)"
+        )
     return findings
 
 

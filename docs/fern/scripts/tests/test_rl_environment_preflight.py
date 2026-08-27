@@ -94,7 +94,10 @@ class FakeMachine:
             path = argv[2]
             output = " M modified.py\n" if path in self.dirty else ""
             return subprocess.CompletedProcess(argv, 0, output, "")
-        if argv[:2] == ["nvidia-smi", "--query-gpu=index,name,driver_version,memory.total"]:
+        if argv[:2] == [
+            "nvidia-smi",
+            "--query-gpu=index,name,driver_version,memory.total",
+        ]:
             return subprocess.CompletedProcess(argv, 0, self.gpu_rows, "")
         if argv[:3] == ["nvidia-smi", "topo", "-m"]:
             return subprocess.CompletedProcess(
@@ -228,7 +231,11 @@ def test_cli_writes_failed_report_and_strict_mode_returns_failure(
     record_path = tmp_path / "record.json"
     output = tmp_path / "preflight.json"
     record_path.write_text(json.dumps(_record()), encoding="utf-8")
-    report = {"strict_status": "failed", "failed_check_count": 1, "not_checked_count": 2}
+    report = {
+        "strict_status": "failed",
+        "failed_check_count": 1,
+        "not_checked_count": 2,
+    }
     monkeypatch.setattr(
         rl_environment_preflight,
         "build_report",
@@ -259,7 +266,11 @@ def test_cli_non_strict_mode_preserves_findings_without_claiming_success(
     record_path = tmp_path / "record.json"
     output = tmp_path / "preflight.json"
     record_path.write_text(json.dumps(_record()), encoding="utf-8")
-    report = {"strict_status": "failed", "failed_check_count": 1, "not_checked_count": 2}
+    report = {
+        "strict_status": "failed",
+        "failed_check_count": 1,
+        "not_checked_count": 2,
+    }
     monkeypatch.setattr(
         rl_environment_preflight,
         "build_report",
@@ -289,7 +300,11 @@ def test_cli_rejects_a_symlinked_output(
     record_path.write_text(json.dumps(_record()), encoding="utf-8")
     target.write_text("{}", encoding="utf-8")
     output.symlink_to(target)
-    report = {"strict_status": "passed", "failed_check_count": 0, "not_checked_count": 2}
+    report = {
+        "strict_status": "passed",
+        "failed_check_count": 0,
+        "not_checked_count": 2,
+    }
     monkeypatch.setattr(
         rl_environment_preflight,
         "build_report",

@@ -131,7 +131,9 @@ def _git_probe(
             "--untracked-files=normal",
         ),
     )
-    observed_commit = head_result.stdout.strip() if head_result.returncode == 0 else None
+    observed_commit = (
+        head_result.stdout.strip() if head_result.returncode == 0 else None
+    )
     dirty_entries = (
         [line for line in status_result.stdout.splitlines() if line]
         if status_result.returncode == 0
@@ -302,7 +304,8 @@ def build_report(
             not structure_findings,
             expected=check_rl_validation_record.SCHEMA,
             observed=record.get("schema"),
-            detail="; ".join(structure_findings) or "Validation-record structure is valid.",
+            detail="; ".join(structure_findings)
+            or "Validation-record structure is valid.",
         )
     )
     if structure_findings:
@@ -363,9 +366,7 @@ def build_report(
         ]
     )
 
-    expected_image_digest = record.get("environment", {}).get(
-        "container_image_digest"
-    )
+    expected_image_digest = record.get("environment", {}).get("container_image_digest")
     digest_well_formed = bool(
         observed_image_digest and IMAGE_DIGEST.fullmatch(observed_image_digest)
     )
@@ -446,9 +447,7 @@ def build_report(
         "hardware": gpu_probe,
         "checks": checks,
         "failed_check_count": len(failures),
-        "not_checked_count": sum(
-            item["status"] == "not_checked" for item in checks
-        ),
+        "not_checked_count": sum(item["status"] == "not_checked" for item in checks),
         "claim_boundary": "Host and checkout preflight; not training, correctness, performance, or owner-acceptance evidence.",
     }
     return report, failures

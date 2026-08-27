@@ -81,7 +81,9 @@ def _bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list
     return root, [framework_path, program_path, clean_path]
 
 
-def test_complete_bundle_builds_and_verifies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_bundle_builds_and_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, records = _bundle(tmp_path, monkeypatch)
     index, findings = rl_artifact_bundle.build_index(root, records)
     assert findings == []
@@ -119,9 +121,9 @@ def test_nested_environment_and_hardware_artifacts_are_digest_closed(
     }
     _write_json(records[0], framework)
     clean_room = json.loads(records[2].read_text(encoding="utf-8"))
-    clean_room["linked_records"]["framework_validation"]["sha256"] = (
-        rl_artifact_bundle._sha256(records[0])
-    )
+    clean_room["linked_records"]["framework_validation"][
+        "sha256"
+    ] = rl_artifact_bundle._sha256(records[0])
     _write_json(records[2], clean_room)
     index, findings = rl_artifact_bundle.build_index(root, records)
     assert findings == []
@@ -222,16 +224,18 @@ def test_external_artifact_uri_is_not_claimed_as_closed(
     )
     _write_json(records[0], framework)
     clean = json.loads(records[2].read_text(encoding="utf-8"))
-    clean["linked_records"]["framework_validation"]["sha256"] = (
-        rl_artifact_bundle._sha256(records[0])
-    )
+    clean["linked_records"]["framework_validation"][
+        "sha256"
+    ] = rl_artifact_bundle._sha256(records[0])
     _write_json(records[2], clean)
     index, findings = rl_artifact_bundle.build_index(root, records)
     assert index["external_uris"] == [
         "artifact://external-store/run.log",
         "https://logs.example/run.json",
     ]
-    assert any("external artifact URIs are not closed" in finding for finding in findings)
+    assert any(
+        "external artifact URIs are not closed" in finding for finding in findings
+    )
 
 
 def test_noncanonical_or_traversing_uri_is_rejected(
@@ -309,7 +313,9 @@ def test_real_planned_templates_cannot_form_a_complete_bundle(tmp_path: Path) ->
     index, findings = rl_artifact_bundle.build_index(root, records)
     assert index["closure_status"] == "incomplete"
     assert all(not entry["publication_gate_passed"] for entry in index["records"])
-    assert any("record_state must be passed for publication" in item for item in findings)
+    assert any(
+        "record_state must be passed for publication" in item for item in findings
+    )
     assert "records do not reference any artifact URIs" in findings
 
 

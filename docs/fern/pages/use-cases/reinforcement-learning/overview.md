@@ -5,7 +5,7 @@ title: Reinforcement Learning
 subtitle: Use Dynamo as the rollout-serving plane beneath an RL framework
 ---
 
-**Experimental.** NVIDIA Dynamo provides the rollout-serving infrastructure around an RL framework. The framework still owns the training algorithm, datasets, environments, rewards, trajectory semantics, policy updates, and checkpoint production. Dynamo owns inference-facing concerns such as request routing, rollout-worker discovery and control, token-native generation, backend telemetry, and failure handling.
+**Experimental.** NVIDIA Dynamo provides the rollout-serving infrastructure around an RL framework. The framework still owns the training algorithm, datasets, environments, rewards, trajectory semantics, policy updates, and checkpoint production. Dynamo supplies inference-facing routing, token-native transport, backend telemetry, serving failure propagation, and backend-specific worker discovery and control where supported. It does not own framework retry policy, sample acceptance, fleet-wide update atomicity, or recovery policy.
 
 Use these guides when a static model endpoint is no longer enough: rollout traffic is bursty, many samples share prefixes, generation must return exact token IDs and log probabilities, workers need live policy refreshes, or the serving workload must be diagnosed and replayed independently of the trainer.
 

@@ -199,7 +199,9 @@ def _record_entry(
         raise BundleError(f"record {relative} must have a non-empty schema")
     checker = PUBLICATION_CHECKERS.get(schema)
     publication_findings = (
-        checker(record) if checker is not None else [f"unsupported record schema {schema}"]
+        checker(record)
+        if checker is not None
+        else [f"unsupported record schema {schema}"]
     )
     entry = {
         "schema": schema,
@@ -230,7 +232,9 @@ def _artifact_entry(root: Path, uri: str) -> dict[str, Any]:
     }
 
 
-def _record_roles(entries: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def _record_roles(
+    entries: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
     findings: list[str] = []
     by_schema: dict[str, dict[str, Any]] = {}
     expected = set(RECORD_SCHEMAS.values())
@@ -277,7 +281,9 @@ def _clean_room_links(
     return findings
 
 
-def build_index(root_path: Path, record_paths: Iterable[Path]) -> tuple[dict[str, Any], list[str]]:
+def build_index(
+    root_path: Path, record_paths: Iterable[Path]
+) -> tuple[dict[str, Any], list[str]]:
     root = _artifact_root(root_path)
     paths = list(record_paths)
     if not paths:
@@ -414,7 +420,9 @@ def verify_index(
         if isinstance(entry, dict) and isinstance(entry.get("uri"), str)
     }
     if len(indexed_artifacts) != len(index["artifacts"]):
-        findings.append("index artifact entries must be objects with unique string URIs")
+        findings.append(
+            "index artifact entries must be objects with unique string URIs"
+        )
     if set(rebuilt_records) != set(indexed_records):
         findings.append("indexed record path set does not match rebuilt bundle")
     if set(rebuilt_artifacts) != set(indexed_artifacts):
