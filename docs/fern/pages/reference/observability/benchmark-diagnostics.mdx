@@ -77,17 +77,91 @@ The `emptyDir` in this example survives container restarts but not Pod deletion.
 
 ## Collect Metrics on Kubernetes with Tachometer
 
-Use Prometheus when it is already part of the cluster. For a bounded benchmark without a metrics backend, run the [Tachometer benchmark collector](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/tachometer-benchmark-capture.yaml). It has an explicit endpoint list so you can see exactly which frontend and worker metrics it captures.
+Use Prometheus when it is already part of the cluster. For a bounded benchmark without a metrics backend, deploy the following Tachometer collector. Its explicit endpoint list shows exactly which frontend and worker metrics it captures.
 
-Before applying the manifest, set the Tachometer image, an existing output PersistentVolumeClaim (PVC), a run ID, and the host name or Pod IP for every frontend and worker. Copy the `[[endpoints]]` worker block for each additional worker. The sample uses `8000` for frontend metrics and `9090` for worker metrics; update an endpoint URL if your deployment overrides either port. The Tachometer image is not bundled with Dynamo.
+Before applying the manifest, set the Tachometer image, an existing output PersistentVolumeClaim (PVC), a run ID, and the host name or Pod IP for every frontend and worker. Copy and edit a frontend or worker `[[endpoints]]` block for each additional Pod. The sample uses `8000` for frontend metrics and `9090` for worker metrics; update an endpoint URL if your deployment overrides either port. The Tachometer image is not bundled with Dynamo.
 
 <Steps>
-<Step title="Prepare the collector manifest">
+<Step title="Save and edit the collector manifest">
 
-Download the manifest, edit its documented replacements, then apply it in the DGD namespace.
+Create `tachometer-benchmark-capture.yaml` with the following manifest. Replace the image, existing PVC, run ID, and endpoint host placeholders before applying it.
+
+```yaml
+# Replace the image, PVC, run ID, and every endpoint host before applying.
+# Copy and edit a frontend or worker endpoint block for each additional Pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tachometer-benchmark-config
+data:
+  tachometer.toml: |
+    storage = "file:///data/REPLACE_WITH_RUN_ID"
+    rows_per_parquet = 1000000
+    save_interval_secs = 5
+
+    [[endpoints]]
+    name = "frontend-0"
+    url = "http://REPLACE_WITH_FRONTEND_HOST:8000/metrics"
+    frequency = 0.2
+    filter = "frontend"
+    [endpoints.node_metadata]
+    component = "frontend"
+    run_id = "REPLACE_WITH_RUN_ID"
+
+    [[endpoints]]
+    name = "worker-0"
+    url = "http://REPLACE_WITH_WORKER_0_HOST:9090/metrics"
+    frequency = 0.2
+    filter = "backend"
+    [endpoints.node_metadata]
+    component = "worker"
+    run_id = "REPLACE_WITH_RUN_ID"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tachometer-benchmark
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tachometer-benchmark
+  template:
+    metadata:
+      labels:
+        app: tachometer-benchmark
+    spec:
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: tachometer
+          image: REPLACE_WITH_TACHOMETER_IMAGE
+          command: ["/tachometer-scraper"]
+          args:
+            - --config
+            - /etc/tachometer/tachometer.toml
+            - --local-dir
+            - /tmp/tachometer
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tachometer
+              readOnly: true
+            - name: output
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: tachometer-benchmark-config
+        - name: output
+          persistentVolumeClaim:
+            claimName: REPLACE_WITH_EXISTING_PVC
+```
+
+</Step>
+<Step title="Start the collector">
+
+Apply the manifest in the DGD namespace after the DGD reaches its planned replica count.
 
 ```bash
-curl --fail --location --remote-name https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/observability/tachometer-benchmark-capture.yaml
 kubectl apply --namespace <namespace> --filename tachometer-benchmark-capture.yaml
 ```
 
@@ -114,7 +188,7 @@ The output path is `/data/<run-id>/final.parquet` in the collector and `<run-id>
 </Step>
 </Steps>
 
-Start the collector after the DGD reaches its planned replica count. Update its endpoint list after any scale-up, scale-down, or rolling replacement.
+Update the collector endpoint list after any scale-up, scale-down, or rolling replacement.
 
 ## Save Kubernetes Logs and Request Traces
 
