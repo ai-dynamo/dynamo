@@ -53,6 +53,45 @@ If the endpoint requires bearer authentication, export `DYNAMO_API_KEY` and add 
     Start with a read-only smoke test and verify the requested fact independently. A successful HTTP response proves connectivity, not that the deployed model is strong enough for coding or tool use.
 
   </Tab>
+  <Tab title="DeepSeek Harness">
+
+    DeepSeek Harness (DSH) uses the Chat Completions API and needs no source patch, Dynamo-specific bridge, or ACP client. Install the validated release, then configure its native settings file at `$DSH_HOME/settings.yaml` or `~/.dsh/settings.yaml`:
+
+    ```bash
+    npm install --global '@deepseek-ai/dsh@0.1.0-rc.8'
+    ```
+
+    ```yaml
+    agent-default-model:
+      provider: deepseek-official
+      model: your-recipe-served-model
+      reasoningEffort: off
+
+    llm-deepseek:
+      apiKeyEnv: DEEPSEEK_API_KEY
+      baseURL: https://your-dynamo-endpoint.example.com/v1
+      thinking: disabled
+      reasoningEffort: off
+      maxTokens: 4096
+      defaultContextWindow: 32768
+      models:
+        - id: your-recipe-served-model
+          name: Dynamo recipe model
+          contextWindow: 32768
+          maxTokens: 4096
+    ```
+
+    Replace the endpoint, model, context window, output limit, and reasoning settings with values supported by the selected recipe. Set `DEEPSEEK_API_KEY` to the deployment token, or to any nonempty placeholder for an unauthenticated endpoint.
+
+    Use headless mode for one bounded task:
+
+    ```bash
+    dsh --profile headless 'Inspect one named file and report one verified fact.'
+    ```
+
+    Headless mode creates and persists one session artifact, prints the final answer, and exits by design. Use `dsh web` when a person needs a long-running UI with persistent sessions. A successful tool call proves the transport works; separately qualify the deployed model's coding and tool-use quality.
+
+  </Tab>
   <Tab title="Pi">
 
     Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:
