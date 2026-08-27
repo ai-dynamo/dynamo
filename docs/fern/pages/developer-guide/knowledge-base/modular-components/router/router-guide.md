@@ -19,7 +19,7 @@ The Frontend and EPP use the same worker selection behavior. Do not configure th
 
 ## Choose a Routing Mode
 
-Use `kv` mode when cache reuse should affect placement. Workers publish KV lifecycle events so the router can measure per-worker prefix overlap; when events are unavailable, approximate mode predicts cache state from prior router decisions.
+Use `kv` mode when cache reuse should affect placement. Workers publish KV lifecycle events so the router can measure per-worker prefix overlap. Without worker events, `kv` mode uses load-only scoring; set `--no-router-kv-events` to predict cache state from routing decisions instead.
 
 Use `round-robin`, `random`, `power-of-two`, `least-loaded`, or `device-aware-weighted` when cache state is not part of the decision. Use `direct` when an upstream component has already selected a worker. See [Routing Concepts](routing-concepts.md#basic-routing) for policy behavior and [Configuration and Tuning](configuration-and-tuning.md#kv-event-transport) for event transport.
 

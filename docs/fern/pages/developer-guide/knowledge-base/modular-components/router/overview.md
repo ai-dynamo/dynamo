@@ -25,7 +25,7 @@ For a topology comparison and the configuration boundary between the Frontend an
 1. The request host tokenizes and normalizes the request.
 2. The router filters workers that cannot serve it.
 3. The router scores eligible workers using cache overlap and projected load.
-4. The selected worker runs the request and publishes KV lifecycle events for future selections.
+4. Aggregated deployments run on the selected worker, while disaggregated deployments select separate prefill and decode workers. Workers publish KV lifecycle events when available; set `--no-router-kv-events` to predict cache state when the router cannot consume them.
 
 Read [KV-Aware Routing](../../concepts/system-architecture/kv-aware-routing.md) for the architecture-level flow. Read [Routing Concepts](routing-concepts.md) for the cost model, [Router Filtering](worker-filtering.md) for eligibility, and [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) for policy-class arbitration.
 

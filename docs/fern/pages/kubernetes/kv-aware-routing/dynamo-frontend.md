@@ -60,7 +60,7 @@ For the router to track which blocks each worker holds, workers must publish KV 
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
-Setting the Frontend to `kv` mode alone does not provide worker cache state. Without worker KV events, the router falls back to load-only decisions.
+Setting the Frontend to `kv` mode alone does not provide worker cache state. Without worker KV events, `kv` mode uses load-only scoring. To predict cache state from routing decisions instead, set `--no-router-kv-events` on the Frontend.
 
 The Frontend and worker snippets above are drawn from the [disagg-kv-router recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml), where six prefill workers publish KV events and the Frontend routes across them.
 
