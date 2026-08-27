@@ -11,6 +11,15 @@ pub enum SidecarStartupError {
     Dynamo(DynamoError),
 }
 
+impl SidecarStartupError {
+    pub fn into_dynamo(self) -> DynamoError {
+        match self {
+            Self::Cli(error) => invalid_argument(error.to_string()),
+            Self::Dynamo(error) => error,
+        }
+    }
+}
+
 impl fmt::Display for SidecarStartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
