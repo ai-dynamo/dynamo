@@ -122,6 +122,8 @@ curl -N http://localhost:8000/generate \
 
 Dynamo forwards native response objects as server-sent events and terminates the successful stream with `[DONE]`. The current Dynamo route requires one non-empty token sequence, `stream: true`, and `sampling_params.n: 1`; it does not accept text, batched, multimodal, or non-streaming requests. Prompt log probabilities are not parity-complete for prefill/decode deployments, so validate an aggregated deployment before depending on them. See the [SGLang backend reference](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md) for current backend behavior.
 
+The experimental out-of-process SGLang sidecar can serve the same frontend route. It discovers SGLang's HTTP port through `GetServerInfo`, requires `--incremental-streaming-output`, and probes `/health` before advertising native-generate capability. When either check fails, the sidecar continues serving its gRPC generation path for other compatible frontend interfaces but does not advertise native `/generate`. When the checks pass, it forwards the preserved SGLang request fields to the worker's HTTP `/generate` endpoint and replaces only Dynamo-owned input, request, and routing fields. Pin this behavior to the reviewed sidecar source; it does not establish a released SLIME integration.
+
 ## Treat Streaming as a State Machine
 
 An adapter should maintain explicit per-request state rather than treating the first HTTP 200 as success.
@@ -237,27 +239,27 @@ For verl, choose the native-router or ThunderAgent variant before constructing t
 
 ## Backend Compatibility
 
-This matrix describes the Dynamo interfaces on `main` at [`0718004e`](https://github.com/ai-dynamo/dynamo/tree/0718004e5d075c6eed352ae8a53fb48df4554067). It is not a framework-level support claim.
+This matrix describes the Dynamo interfaces on `main` at [`b9203b2c`](https://github.com/ai-dynamo/dynamo/tree/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1). It is not a framework-level support claim.
 
 | Capability | vLLM | SGLang | TensorRT-LLM |
 |---|---|---|---|
 | Reviewed Python package pin | `vllm==0.27.1` | `sglang[diffusion]==0.5.18` | `tensorrt-llm==1.3.0rc24` |
-| Preferred RL generation path | OpenAI-compatible completions or chat; experimental vLLM-compatible `/inference/v1/generate` is vLLM-specific, opt-in, and unary-only | Native `/generate` for SGLang clients; OpenAI-compatible routes for cross-backend clients | OpenAI-compatible routes |
+| Preferred RL generation path | OpenAI-compatible completions or chat; experimental vLLM-compatible `/inference/v1/generate` is vLLM-specific, opt-in, and unary-only | Native `/generate` for SGLang clients through an eligible in-process worker or experimental sidecar; OpenAI-compatible routes for cross-backend clients | OpenAI-compatible routes |
 | Token input | Supported through token-array `prompt` or `nvext.token_data` | Supported through native `input_ids`, token-array `prompt`, or `nvext.token_data` | Supported through token-array `prompt` or `nvext.token_data` |
 | Completion token IDs | Named `nvext` field supported | Native output IDs and named `nvext` field supported | Named `nvext` field supported through the shared response path |
 | Prompt log probabilities | Supported | Supported with topology limitations; validate aggregated versus P/D behavior | Handler plumbing exists on the reviewed main pin; no dedicated RL E2E coverage is recorded here |
 | Native SGLang metadata upload | Not applicable | Supported with RL-enabled worker and fsspec dependencies | Not applicable |
 | `/v1/rl/workers` | Supported for RL-enabled workers | Not currently registered | Not currently registered |
 | Fixed Dynamo RL administration routes | vLLM pause/resume, version, disk/distributed update, and group lifecycle routes | SGLang `/engine/control/*` weight routes; additional methods require an explicit allowlist | No common RL administration contract documented here |
-| Dedicated RL TITO E2E evidence on Dynamo main | [vLLM test](https://github.com/ai-dynamo/dynamo/blob/0718004e5d075c6eed352ae8a53fb48df4554067/tests/rl/test_token_in_token_out.py) | [SGLang test](https://github.com/ai-dynamo/dynamo/blob/0718004e5d075c6eed352ae8a53fb48df4554067/tests/rl/test_token_in_token_out.py) | No dedicated test in that file |
+| Dedicated RL TITO E2E evidence on Dynamo main | [vLLM test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_token_in_token_out.py) | [SGLang in-process test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_token_in_token_out.py); the sidecar proxy has source-level tests but no separate RL GPU E2E recorded here | No dedicated test in that file |
 | Evidence last checked | 2026-08-27 | 2026-08-27 | 2026-08-27 |
 | Freshness owner | Dynamo vLLM and RL maintainers | Dynamo SGLang and RL maintainers | Dynamo TensorRT-LLM and RL maintainers |
 
 `/inference/v1/generate` is disabled by default and registers when `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` is truthy. The current handler rejects `stream: true`; do not substitute it for the streaming adapter contract or present it as a shared backend route.
 
-The vLLM discovery and administration lifecycle is covered by the [RL worker discovery E2E test](https://github.com/ai-dynamo/dynamo/blob/0718004e5d075c6eed352ae8a53fb48df4554067/tests/rl/test_worker_discovery.py). Backend-native metadata and raw `engine_data` remain backend-specific even where named token fields are normalized.
+The vLLM discovery and administration lifecycle is covered by the [RL worker discovery E2E test](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/tests/rl/test_worker_discovery.py). The [SGLang sidecar native-HTTP implementation](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/lib/sidecar/sglang/src/native_http.rs) defines the discovery, health, request-rewrite, streaming, cancellation, and error boundary described above. Backend-native metadata and raw `engine_data` remain backend-specific even where named token fields are normalized.
 
-The package pins come from [`pyproject.toml` at the reviewed Dynamo commit](https://github.com/ai-dynamo/dynamo/blob/0718004e5d075c6eed352ae8a53fb48df4554067/pyproject.toml). Runtime images can add architecture-specific dependencies and constraints, so every validation run must also preserve the exact image digest rather than treating the Python package pin as the complete environment.
+The package pins come from [`pyproject.toml` at the reviewed Dynamo commit](https://github.com/ai-dynamo/dynamo/blob/b9203b2c5c3623b97c2c16c72ac0ae307c4290e1/pyproject.toml). Runtime images can add architecture-specific dependencies and constraints, so every validation run must also preserve the exact image digest rather than treating the Python package pin as the complete environment.
 
 ## Topology and Feature Qualification
 

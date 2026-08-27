@@ -49,7 +49,7 @@ X-Dynamo-Parent-Session-ID: rollout-run42-parent2
 
 The session ID groups requests and can support replay relationships. Supplying it does not enable session affinity unless the frontend is configured for affinity, and it does not cause Dynamo to validate a policy version.
 
-For cross-component logs and distributed traces, also send a stable `x-request-id`; Dynamo propagates it as correlation metadata. It is not the internal Dynamo request ID and does not carry framework semantics by itself.
+For cross-component logs and distributed traces, also send a stable `x-request-id`; Dynamo propagates it as correlation metadata. It is not the internal Dynamo request ID and does not carry framework semantics by itself. Native SGLang `/generate` gives a body `rid` precedence over this header, so use one stable `rid` or omit it and let `x-request-id` supply the request identity.
 
 For framework fields that are not typed by Dynamo, use an application-owned run ledger. On the OpenAI chat-completion path, a direct request-trace join can use non-secret application headers explicitly allowlisted for `request_payload` capture:
 
@@ -72,7 +72,8 @@ export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST=x-rl-rollout-id,x-rl-attempt-i
 |---|---|---|
 | OpenAI chat completions | Allowlisted opaque framework headers in `request_payload`, joined to `request_end` by Dynamo request ID | Captures request/response payload records and therefore requires strict data handling. |
 | OpenAI completions | `X-Dynamo-Session-ID` when its semantics match, plus `x-request-id` in logs and distributed traces | The current payload recorder does not emit `request_payload` rows for completions, so arbitrary application headers are not available in the request trace. |
-| Native SGLang `/generate` or experimental vLLM `/inference/v1/generate` | `X-Dynamo-Session-ID` when its semantics match, plus `x-request-id` in logs and distributed traces | The current payload recorder does not emit `request_payload` rows for native generate interfaces. |
+| Native SGLang `/generate` | `X-Dynamo-Session-ID` when its semantics match, plus a stable body `rid` or, when `rid` is omitted, `x-request-id` in logs and distributed traces | The body `rid` takes precedence over the header, and the current payload recorder does not emit `request_payload` rows for native generate interfaces. |
+| Experimental vLLM `/inference/v1/generate` | `X-Dynamo-Session-ID` when its semantics match, plus `x-request-id` in logs and distributed traces | The current payload recorder does not emit `request_payload` rows for native generate interfaces. |
 
 If a framework cannot map rollout identity to Dynamo session identity and does not use chat completions, preserve the join in the framework ledger and distributed logs rather than claiming a request-trace header join that the selected interface does not emit.
 

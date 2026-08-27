@@ -39,7 +39,7 @@ The intended split is sound: all generation requests use one Dynamo frontend so 
 
 | Need | Current Dynamo surface | Qualification |
 |---|---|---|
-| Native token-input streaming | SGLang-compatible `/generate` | Covered by Dynamo's SGLang TITO E2E test for one streaming sample; review [integration requirements](integration-reference.md#sglang-native-token-streaming). |
+| Native token-input streaming | SGLang-compatible `/generate` through an eligible in-process worker or experimental sidecar | The in-process path has one Dynamo RL TITO E2E test. The sidecar advertises this route only after discovering a healthy SGLang HTTP endpoint with incremental streaming enabled; review [integration requirements](integration-reference.md#sglang-native-token-streaming). |
 | Completion token IDs and selected log probabilities | Native SGLang streaming objects or named OpenAI-compatible `nvext` fields | Validate exact alignment on the pinned SLIME/SGLang versions. |
 | Large final `meta_info` payload | `nvext.metadata_upload.url` on the OpenAI-compatible path | Uses trusted fsspec destinations; not part of native `/generate`. |
 | Request cancellation | Dynamo cancellation propagation | Remote prefill cancellation in SGLang P/D remains a known limitation. |
@@ -47,6 +47,8 @@ The intended split is sound: all generation requests use one Dynamo frontend so 
 | Generic vLLM RL discovery endpoint | `/v1/rl/workers` | Does not currently register SGLang workers; the SLIME integration must not assume otherwise. |
 
 See the [SGLang backend reference](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md#engine-routes) for current fixed and configurable engine routes.
+
+The current sidecar proxy closes a Dynamo transport gap for out-of-process SGLang workers. It does not resolve SLIME's upstream adapter, system-URL discovery, fleet membership, weight-update coordination, or clean-room validation gates, so it does not change this page's integration-in-progress maturity.
 
 ## Contract Decisions Required Before a Runnable Guide
 
