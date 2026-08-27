@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import pytest
-
 from dynamo.replay.hybrid_cache import (
     HybridCacheConfig,
     HybridCacheRequest,
@@ -74,6 +73,22 @@ def test_deepseek_store_geometry_uses_group_specific_fixed_slots() -> None:
     assert result.cpu_store_offers == 23
     assert result.cpu_occupancy_slots == 23
     assert result.cpu_reserved_bytes == 23 * 8_317_440
+
+
+def test_cpu_blocks_are_coalesced_before_store_and_eviction() -> None:
+    simulator = VllmHybridCacheSimulator(
+        _deepseek_config(
+            blocks_per_chunk=4,
+            cpu_slot_bytes=45_950_976,
+        )
+    )
+
+    result = simulator.process(_request(tokens=1024))
+
+    assert result.cpu_store_offers_by_group == {0: 1, 1: 1, 2: 1, 3: 1, 4: 4}
+    assert result.cpu_store_offers == 8
+    assert result.cpu_occupancy_slots == 8
+    assert result.cpu_reserved_bytes == 8 * 45_950_976
 
 
 def test_store_threshold_counts_post_mask_offers() -> None:
