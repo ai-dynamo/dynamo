@@ -383,11 +383,8 @@ impl Runtime {
     ///
     /// Calling this more than once is a no-op after the first call.
     pub fn shutdown(&self) {
-        // Phase 1 runs here rather than in the coordinator task so that it cannot be lost
-        // along with that task, and ahead of the `initiated` latch so that the
-        // postcondition also holds for a second caller that races the first one between
-        // the latch and this line. `CancellationToken::cancel` is idempotent, so the
-        // repeat costs a redundant call and nothing else.
+        // Runs here, not in the coordinator task, so it cannot be lost with it; ahead of the
+        // `initiated` latch so a racing second caller also returns with it cancelled.
         self.endpoint_shutdown_token.cancel();
 
         if self.shutdown_state.initiated.swap(true, Ordering::SeqCst) {
@@ -405,9 +402,8 @@ impl Runtime {
         let owns_executor = matches!(self.primary, RuntimeType::Shared(_))
             || matches!(self.secondary, RuntimeType::Shared(_));
 
-        // Nothing is ever sent on this channel. The teardown thread blocks on the receiver
-        // so that dropping the coordinator task — whether it finished or was discarded —
-        // wakes it immediately instead of leaving it on the timeout.
+        // Nothing is ever sent: dropping the coordinator task, finished or discarded, wakes
+        // the teardown thread's `recv_timeout` immediately.
         let (coordinator_alive, coordinator_done) = if owns_executor {
             let (tx, rx) = std::sync::mpsc::channel::<()>();
             (Some(tx), Some(rx))
@@ -459,10 +455,8 @@ impl Runtime {
     /// a `shutdown` call — `transports::etcd` and `storage::kv::etcd` both build one,
     /// `block_on` it and drop it — must keep the plain drop behaviour.
     fn spawn_owned_teardown(&self, coordinator_done: std::sync::mpsc::Receiver<()>) {
-        // Holding these clones is what keeps `Arc::get_mut` in `Drop for RuntimeType` from
-        // succeeding on the caller's thread, so a drop from an async context short-circuits
-        // instead of calling `shutdown_background` on the executor the coordinator is
-        // queued on.
+        // These clones keep `Arc::get_mut` in `Drop for RuntimeType` from succeeding on the
+        // caller's thread, so an async-context drop cannot call `shutdown_background`.
         let primary = self.primary.clone();
         let secondary = self.secondary.clone();
         let wait_bound = graceful_shutdown_timeout() + TEARDOWN_WAIT_MARGIN;
@@ -534,9 +528,8 @@ impl Drop for RuntimeType {
                 } else {
                     // We are not inside an async context, dropping the runtime is safe.
                     //
-                    // This is the branch the teardown thread spawned by `Runtime::shutdown`
-                    // takes, so it is the normal end of life for an owned runtime that was
-                    // shut down: a real blocking drop after the shutdown phases have run.
+                    // The teardown thread spawned by `Runtime::shutdown` takes this branch:
+                    // the normal end of life for an owned runtime after its phases have run.
                     unsafe { ManuallyDrop::drop(md_runtime) };
                 }
             }
@@ -632,9 +625,8 @@ mod tests {
         // `shutdown_background` on the executor the coordinator is queued on.
         drop(runtime);
 
-        // Release the graceful task before the worker, so phase 2 observes a zero count and
-        // returns without waiting. That keeps the test off both the wall clock and a
-        // `Notify` wakeup, either of which would make it timing-dependent.
+        // Release the graceful task before the worker so phase 2 sees a zero count and returns
+        // at once, keeping the test off the wall clock and a `Notify` wakeup.
         drop(guard);
         let _ = release_worker.send(());
 
@@ -661,21 +653,7 @@ mod tests {
         .await;
     }
 
-    /// Regression coverage for the executor-lifetime half of the fix, i.e. for
-    /// `owns_executor`, the `coordinator_alive`/`coordinator_done` channel, and
-    /// [`Runtime::spawn_owned_teardown`].
-    ///
-    /// The two tests above only observe phase 1, which is why this one exists: it looks at
-    /// the owned executor *while the shutdown phases are still in flight* rather than
-    /// after they have finished. The graceful guard is what creates that window — phase 2
-    /// parks on it, so the coordinator cannot reach phase 3 and the teardown thread cannot
-    /// let go of the executor while the probe runs.
-    ///
-    /// Without `spawn_owned_teardown`, `Arc::get_mut` in `Drop for RuntimeType` succeeds on
-    /// the last handle, the drop happens in an async context, and `shutdown_background()`
-    /// destroys that executor right there — so the probe task is never polled and this test
-    /// is red. Observing the executor only *after* completion cannot tell the two apart:
-    /// the executor is dead by then either way, and under the bug it died sooner.
+    /// The owned executor must still poll work queued after the last handle is dropped, while the shutdown phases run.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owned_executor_outlives_the_drop_while_phases_are_in_flight() {
         const PROBE: &str = "polled by the owned executor";
