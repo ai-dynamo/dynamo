@@ -25,6 +25,7 @@ const TJCS_CMYK: c_int = 3;
 const TJCS_YCCK: c_int = 4;
 const TJPF_RGB: c_int = 0;
 const TJPF_GRAY: c_int = 6;
+const TJFLAG_LIMITSCANS: c_int = 32_768;
 
 type TjInitDecompress = unsafe extern "C" fn() -> TjHandle;
 type TjDecompressHeader3 = unsafe extern "C" fn(
@@ -232,7 +233,7 @@ pub(crate) fn decode_jpeg(
             0,
             h,
             pixel_format,
-            0,
+            TJFLAG_LIMITSCANS,
         );
         if rc != 0 {
             return Ok(None);
