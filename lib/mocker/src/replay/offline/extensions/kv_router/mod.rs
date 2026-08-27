@@ -37,7 +37,7 @@ use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
+    ReplaySequencePublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
     replay_slots, replay_worker_config, replay_workers_with_configs,
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
@@ -327,7 +327,8 @@ pub(crate) struct OfflineReplayRouter {
     profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
-    slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
+    slots: Arc<ActiveSequencesMultiWorker<ReplaySequencePublisher>>,
+    publisher: ReplaySequencePublisher,
     selector: DefaultWorkerSelector,
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
@@ -337,7 +338,21 @@ pub(crate) struct OfflineReplayRouter {
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
-    router: OfflineReplayRouter,
+    routers: Vec<OfflineReplayRouter>,
+    request_owners: HashMap<Uuid, usize>,
+    next_router: usize,
+    delivery_rate: f64,
+    delivery_seed: u64,
+    delivery_sequence: u64,
+    sync_enabled: bool,
+    sync_stats: ReplayReplicaSyncStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::replay) struct ReplayReplicaSyncStats {
+    pub attempted: u64,
+    pub delivered: u64,
+    pub dropped: u64,
 }
 
 impl KvRouterPlacement {
@@ -348,19 +363,31 @@ impl KvRouterPlacement {
         num_workers: usize,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
-        let router = match selector_seed {
-            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
+        let config = replay_router_config(args, router_config);
+        let sync_enabled = config.router_replica_sync;
+        let mut routers = Vec::with_capacity(args.router_replicas);
+        for replica in 0..args.router_replicas {
+            let seed = selector_seed.map(|seed| seed.wrapping_add(replica as u64));
+            routers.push(OfflineReplayRouter::new_for_replica(
                 args,
-                router_config,
-                prefill_load_estimator,
+                Some(config.clone()),
+                prefill_load_estimator.clone(),
                 num_workers,
-                Some(seed),
-            )?,
-            None => {
-                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
-            }
-        };
-        Ok(Self { router })
+                seed,
+                replica as u64,
+                sync_enabled,
+            )?);
+        }
+        Ok(Self {
+            routers,
+            request_owners: HashMap::new(),
+            next_router: (args.router_replica_seed as usize) % args.router_replicas,
+            delivery_rate: args.router_replica_sync_delivery_rate,
+            delivery_seed: args.router_replica_seed,
+            delivery_sequence: 0,
+            sync_enabled,
+            sync_stats: ReplayReplicaSyncStats::default(),
+        })
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -368,7 +395,7 @@ impl KvRouterPlacement {
             request_id: admission.uuid,
             scheduler_id: admission.worker_idx,
             reported_overlap_tokens: admission.overlap_blocks as usize
-                * self.router.block_size as usize,
+                * self.routers[0].block_size as usize,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
                 isl_blocks: admission.isl_blocks,
@@ -381,6 +408,61 @@ impl KvRouterPlacement {
             .into_iter()
             .map(|admission| self.placement(admission))
             .collect()
+    }
+
+    fn should_deliver(&mut self, target: usize) -> bool {
+        if self.delivery_rate <= 0.0 {
+            return false;
+        }
+        if self.delivery_rate >= 1.0 {
+            return true;
+        }
+        self.delivery_sequence = self.delivery_sequence.wrapping_add(1);
+        let mut value = self.delivery_seed
+            ^ self.delivery_sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (target as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let sample = (value ^ (value >> 31)) as f64 / u64::MAX as f64;
+        sample < self.delivery_rate
+    }
+
+    fn synchronize_lifecycle(&mut self, source: usize) {
+        let events = self.routers[source].publisher.drain();
+        if !self.sync_enabled || self.routers.len() == 1 {
+            return;
+        }
+        for target in 0..self.routers.len() {
+            if target == source {
+                continue;
+            }
+            self.sync_stats.attempted += events.len() as u64;
+            let delivered = events
+                .iter()
+                .filter(|_| self.should_deliver(target))
+                .cloned()
+                .collect::<Vec<_>>();
+            self.sync_stats.delivered += delivered.len() as u64;
+            self.sync_stats.dropped += (events.len() - delivered.len()) as u64;
+            self.routers[target].slots.apply_replica_batch(delivered);
+            // Replica-applied events are not republished, but drain defensively if that changes.
+            self.routers[target].publisher.drain();
+        }
+        self.log_sync_stats();
+    }
+
+    fn log_sync_stats(&self) {
+        tracing::debug!(
+            attempted = self.sync_stats.attempted,
+            delivered = self.sync_stats.delivered,
+            dropped = self.sync_stats.dropped,
+            "offline replay replica-sync progress"
+        );
+    }
+
+    #[cfg(test)]
+    fn replica_sync_stats(&self) -> ReplayReplicaSyncStats {
+        self.sync_stats
     }
 }
 
@@ -452,8 +534,9 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         let request_id = request_metadata
             .uuid
             .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
-        let admissions = self
-            .router
+        let owner = self.next_router;
+        self.next_router = (self.next_router + 1) % self.routers.len();
+        let admissions = self.routers[owner]
             .on_compact_request_arrival_for_session(
                 request,
                 max_output_tokens,
@@ -462,6 +545,8 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
                 now_ms,
             )?
             .admissions;
+        self.request_owners.insert(request_id, owner);
+        self.synchronize_lifecycle(owner);
         let mut decision = PlacementDecision::Queued;
         let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
         for admission in admissions {
@@ -476,50 +561,91 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_kv_events(observation.0)?;
-        Ok(self.placements(effects.admissions))
+        for replica in 0..self.routers.len() {
+            let events = observation
+                .0
+                .iter()
+                .filter(|_| self.should_deliver(replica))
+                .cloned()
+                .collect::<Vec<_>>();
+            self.sync_stats.attempted += observation.0.len() as u64;
+            self.sync_stats.delivered += events.len() as u64;
+            self.sync_stats.dropped += (observation.0.len() - events.len()) as u64;
+            self.routers[replica].on_kv_events(events)?;
+        }
+        self.log_sync_stats();
+        Ok(Vec::new())
     }
 
     fn cancel_pending(&mut self, request_id: Uuid) -> bool {
-        self.router.cancel_pending(request_id)
+        let canceled = self
+            .request_owners
+            .get(&request_id)
+            .is_some_and(|owner| self.routers[*owner].cancel_pending(request_id));
+        if canceled {
+            self.request_owners.remove(&request_id);
+        }
+        canceled
     }
 
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_request_completed(request_id, now_ms)?;
+        let owner = self.request_owners.remove(&request_id).unwrap_or(0);
+        let effects = self.routers[owner].on_request_completed(request_id, now_ms)?;
+        self.synchronize_lifecycle(owner);
         Ok(self.placements(effects.admissions))
     }
 
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_prefill_completed(request_id, now_ms)?;
+        let owner = *self.request_owners.get(&request_id).unwrap_or(&0);
+        let effects = self.routers[owner].on_prefill_completed(request_id, now_ms)?;
+        self.synchronize_lifecycle(owner);
         Ok(self.placements(effects.admissions))
     }
 
     fn pending_count(&self) -> usize {
-        self.router.pending_count()
+        self.routers
+            .iter()
+            .map(OfflineReplayRouter::pending_count)
+            .sum()
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.router.add_worker(worker.worker_id)?;
+        for router in &mut self.routers {
+            router.add_worker(worker.worker_id)?;
+        }
         Ok(Vec::new())
     }
 
     fn worker_draining(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.router.remove_worker(worker.worker_id)?;
+        for router in &mut self.routers {
+            router.remove_worker(worker.worker_id)?;
+        }
         Ok(Vec::new())
     }
 
     fn worker_removed(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.router.finalize_worker_removal(worker.worker_id)?;
+        for router in &mut self.routers {
+            router.finalize_worker_removal(worker.worker_id)?;
+        }
         Ok(Vec::new())
     }
 
     fn topology_settled(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_topology_changed(now_ms)?;
-        Ok(self.placements(effects.admissions))
+        let mut admissions = Vec::new();
+        for replica in 0..self.routers.len() {
+            admissions.extend(
+                self.routers[replica]
+                    .on_topology_changed(now_ms)?
+                    .admissions,
+            );
+            self.synchronize_lifecycle(replica);
+        }
+        Ok(self.placements(admissions))
     }
 }
 
 impl OfflineReplayRouter {
+    #[cfg(test)]
     pub(crate) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
@@ -535,6 +661,7 @@ impl OfflineReplayRouter {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_selector_seed(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
@@ -542,11 +669,38 @@ impl OfflineReplayRouter {
         num_workers: usize,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
+        Self::new_for_replica(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+            0,
+            false,
+        )
+    }
+
+    fn new_for_replica(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        selector_seed: Option<u64>,
+        router_id: u64,
+        replica_sync: bool,
+    ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let slots = replay_slots(args, &workers_with_configs);
+        let publisher = ReplaySequencePublisher::default();
+        let slots = replay_slots(
+            args,
+            &workers_with_configs,
+            publisher.clone(),
+            replica_sync,
+            router_id,
+        );
         let selector = replay_selector_with_seed(&config, selector_seed)?;
         let profile = config
             .configured_policy_profile()
@@ -560,6 +714,7 @@ impl OfflineReplayRouter {
             worker_config_template,
             workers_with_configs,
             slots,
+            publisher,
             selector,
             pending: PolicyQueue::new(profile),
             indexer: SyncReplayIndexer::new(args.block_size as u32),
@@ -1092,10 +1247,14 @@ mod tests {
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        KvReplayMetadata, KvRouterPlacement, OfflineReplayRouter, ReplayReplicaSyncStats,
+        ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
+    use crate::replay::offline::extensions::kv_events::RouterEventBatch;
+    use aisimulate_core::replay::{PlacementPolicy, ReplayPromptTokenSource, ReplayRequestContext};
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
@@ -1935,5 +2094,111 @@ policy_classes:
             router.debug_snapshot(0.0).pending[0].uuid,
             Uuid::from_u128(2)
         );
+    }
+
+    fn replica_placement(delivery_rate: f64) -> KvRouterPlacement {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .router_replicas(2)
+            .router_replica_sync_delivery_rate(delivery_rate)
+            .router_replica_seed(7)
+            .build()
+            .unwrap();
+        let config = KvRouterConfig {
+            router_replica_sync: true,
+            ..KvRouterConfig::default()
+        };
+        KvRouterPlacement::new_with_selector_seed(&args, Some(config), None, 1, None).unwrap()
+    }
+
+    fn place_direct(placement: &mut KvRouterPlacement, request: &DirectRequest) {
+        <KvRouterPlacement as PlacementPolicy<DirectRequest>>::place(
+            placement,
+            request,
+            KvReplayMetadata::default(),
+            None,
+            0.0,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn full_replica_delivery_converges_active_load_views() {
+        let mut placement = replica_placement(1.0);
+        place_direct(&mut placement, &request(1, 7));
+        place_direct(&mut placement, &request_with_priorities(2, 8, 128, 0, 0));
+
+        let snapshots = placement
+            .routers
+            .iter()
+            .map(|router| router.debug_snapshot(0.0).active_tokens_by_worker)
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots[0], vec![(0, 192)]);
+        assert_eq!(snapshots[0], snapshots[1]);
+        assert_eq!(
+            placement.replica_sync_stats(),
+            ReplayReplicaSyncStats {
+                attempted: 2,
+                delivered: 2,
+                dropped: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn dropped_replica_events_leave_measurable_stale_views() {
+        let mut placement = replica_placement(0.0);
+        place_direct(&mut placement, &request(1, 7));
+        place_direct(&mut placement, &request_with_priorities(2, 8, 128, 0, 0));
+
+        let snapshots = placement
+            .routers
+            .iter()
+            .map(|router| router.debug_snapshot(0.0).active_tokens_by_worker)
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots, vec![vec![(0, 128)], vec![(0, 64)]]);
+        assert_eq!(
+            placement.replica_sync_stats(),
+            ReplayReplicaSyncStats {
+                attempted: 2,
+                delivered: 0,
+                dropped: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn kv_event_delivery_controls_each_replica_cache_view() {
+        let event = store_event(0, 1, 99, StorageTier::Device);
+        let mut converged = replica_placement(1.0);
+        <KvRouterPlacement as PlacementPolicy<DirectRequest>>::observe(
+            &mut converged,
+            RouterEventBatch(vec![event.clone()]),
+            0.0,
+        )
+        .unwrap();
+        assert!(
+            converged.routers.iter().all(|router| router
+                .debug_snapshot(0.0)
+                .indexer
+                .total_cached_blocks
+                == 1)
+        );
+
+        let mut stale = replica_placement(0.0);
+        <KvRouterPlacement as PlacementPolicy<DirectRequest>>::observe(
+            &mut stale,
+            RouterEventBatch(vec![event]),
+            0.0,
+        )
+        .unwrap();
+        assert!(
+            stale.routers.iter().all(|router| router
+                .debug_snapshot(0.0)
+                .indexer
+                .total_cached_blocks
+                == 0)
+        );
+        assert_eq!(stale.replica_sync_stats().dropped, 2);
     }
 }

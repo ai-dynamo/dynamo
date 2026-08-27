@@ -197,7 +197,7 @@ impl KvReplayRouter {
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let slots = replay_slots(args, &workers_with_configs);
+        let slots = replay_slots(args, &workers_with_configs, Default::default(), false, 0);
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config)?;

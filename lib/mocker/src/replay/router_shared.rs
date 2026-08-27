@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::common::protocols::MockEngineArgs;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -14,11 +14,23 @@ use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
 };
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct ReplayNoopPublisher;
+#[derive(Clone, Debug, Default)]
+pub(super) struct ReplaySequencePublisher {
+    events: Arc<Mutex<Vec<ActiveSequenceEvent>>>,
+}
 
-impl SequencePublisher for ReplayNoopPublisher {
-    fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+impl ReplaySequencePublisher {
+    pub(super) fn drain(&self) -> Vec<ActiveSequenceEvent> {
+        std::mem::take(&mut *self.events.lock().expect("replay event queue poisoned"))
+    }
+}
+
+impl SequencePublisher for ReplaySequencePublisher {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        self.events
+            .lock()
+            .expect("replay event queue poisoned")
+            .push(event);
         Ok(())
     }
 
@@ -54,7 +66,7 @@ impl WorkerConfigLike for ReplayWorkerConfig {
 }
 
 pub(super) type ReplayScheduler =
-    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
+    LocalScheduler<ReplaySequencePublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
 
 pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
@@ -81,7 +93,10 @@ pub(super) fn replay_workers_with_configs(
 pub(super) fn replay_slots(
     args: &MockEngineArgs,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
-) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
+    publisher: ReplaySequencePublisher,
+    replica_sync: bool,
+    router_id: u64,
+) -> Arc<ActiveSequencesMultiWorker<ReplaySequencePublisher>> {
     let dp_range = workers_with_configs
         .iter()
         .map(|(&worker_id, config)| {
@@ -97,11 +112,11 @@ pub(super) fn replay_slots(
     // expiry disabled here until replay has a liveness-aware definition of a stale request; do
     // not mask replay dead ends by expiring requests that are still live in virtual time.
     Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
-        ReplayNoopPublisher,
+        publisher,
         args.block_size,
         dp_range,
-        false,
-        0,
+        replica_sync,
+        router_id,
         "replay",
     ))
 }

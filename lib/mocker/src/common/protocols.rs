@@ -470,6 +470,9 @@ struct MockEngineArgsSerde {
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
     router_queue_policy: OptionalConfigValue<String>,
+    router_replicas: OptionalConfigValue<usize>,
+    router_replica_sync_delivery_rate: OptionalConfigValue<f64>,
+    router_replica_seed: OptionalConfigValue<u64>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
     #[serde(rename = "has_perf_model")]
@@ -744,6 +747,20 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub router_queue_policy: Option<RouterQueuePolicy>,
 
+    /// Number of independent frontend/router views modeled by offline replay.
+    #[builder(default = "1")]
+    #[validate(range(min = 1))]
+    pub router_replicas: usize,
+
+    /// Probability that a replica-sync lifecycle event reaches each peer view.
+    #[builder(default = "1.0")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub router_replica_sync_delivery_rate: f64,
+
+    /// Seed for deterministic frontend assignment and best-effort delivery.
+    #[builder(default = "0")]
+    pub router_replica_seed: u64,
+
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
@@ -760,6 +777,12 @@ fn mock_engine_args_validation_error(code: &'static str, message: String) -> Val
 }
 
 fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationError> {
+    if !args.router_replica_sync_delivery_rate.is_finite() {
+        return Err(mock_engine_args_validation_error(
+            "router_replica_sync_delivery_rate_not_finite",
+            "router_replica_sync_delivery_rate must be finite".to_string(),
+        ));
+    }
     if args.block_size == 0 {
         return Err(mock_engine_args_validation_error(
             "block_size_zero",
@@ -1044,6 +1067,21 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
                 .transpose()?;
             builder = builder.router_queue_policy(router_queue_policy);
         }
+        if let Some(router_replicas) = compat.router_replicas.into_non_null("router_replicas")? {
+            builder = builder.router_replicas(router_replicas);
+        }
+        if let Some(delivery_rate) = compat
+            .router_replica_sync_delivery_rate
+            .into_non_null("router_replica_sync_delivery_rate")?
+        {
+            builder = builder.router_replica_sync_delivery_rate(delivery_rate);
+        }
+        if let Some(seed) = compat
+            .router_replica_seed
+            .into_non_null("router_replica_seed")?
+        {
+            builder = builder.router_replica_seed(seed);
+        }
         if let Some(sglang) = compat.sglang.into_nullable() {
             builder = builder.sglang(sglang);
         }
@@ -1272,6 +1310,9 @@ mod tests {
             .max_model_len(Some(32768))
             .max_num_seqs(None)
             .max_num_batched_tokens(None)
+            .router_replicas(5)
+            .router_replica_sync_delivery_rate(0.8)
+            .router_replica_seed(17)
             .reasoning(None)
             .sglang(None)
             .build()
@@ -1309,6 +1350,9 @@ mod tests {
             "zmq_replay_port": args.zmq_replay_port,
             "preemption_mode": "lifo",
             "router_queue_policy": args.router_queue_policy.map(|policy| policy.to_string()),
+            "router_replicas": args.router_replicas,
+            "router_replica_sync_delivery_rate": args.router_replica_sync_delivery_rate,
+            "router_replica_seed": args.router_replica_seed,
             "sglang": args.sglang,
             "has_perf_model": true,
         });
@@ -1320,6 +1364,9 @@ mod tests {
         assert_eq!(restored.max_model_len, Some(32768));
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(restored.router_replicas, 5);
+        assert_eq!(restored.router_replica_sync_delivery_rate, 0.8);
+        assert_eq!(restored.router_replica_seed, 17);
         assert_eq!(
             restored.kv_transfer_timing_mode,
             KvTransferTimingMode::FullPrompt
