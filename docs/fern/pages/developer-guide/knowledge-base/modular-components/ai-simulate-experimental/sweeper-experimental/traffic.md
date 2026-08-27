@@ -25,8 +25,8 @@ fixed number of requests are kept in flight; a new one starts as one finishes).
 
 | # | Shape | Set | Loop | Driven by |
 |---|---|---|---|---|
-| 1 | **mooncake trace** | `trace_path` | open-loop (default) | the trace's arrival timestamps, scaled by `arrival_speedup_ratio` |
-| 1c | **mooncake trace, capped** | `trace_path` + `replay_concurrency` | closed-loop | cap N in flight; **trace timestamps ignored** |
+| 1 | **timestamped trace** | `trace_path` | open-loop (default) | the trace's arrival timestamps, scaled by `arrival_speedup_ratio` |
+| 1c | **timestamped trace, capped** | `trace_path` + `replay_concurrency` | closed-loop | cap N in flight; **trace timestamps ignored** |
 | 2 | **synthetic request-rate** | `request_rate` (+ `isl`/`osl`/`num_request_ratio`) | open-loop | a fixed QPS (`synthetic_arrival_interval_ms = 1000 / request_rate`) |
 | 3 | **synthetic concurrency** | `concurrency` (+ `isl`/`osl`/`num_request_ratio`) | closed-loop | cap N in flight |
 | 4 | **synthetic KV load** | `kv_load_ratio` (+ `isl`/`osl`/`num_request_ratio`) | closed-loop | derive N from each candidate's aggregate decode/agg KV capacity |
@@ -35,6 +35,12 @@ fixed number of requests are kept in flight; a new one starts as one finishes).
 `trace_path` selects shape 1; otherwise it is synthetic and **exactly one** of
 `request_rate` (shape 2), `concurrency` (shape 3), or `kv_load_ratio` (shape 4) selects the
 sub-shape.
+
+Open-loop Mooncake and `dynamo.request.trace.v1` inputs preserve relative request arrival
+times. A request arrives when its timestamp is reached even if earlier requests are still
+running; admission can happen later when the scheduler has capacity. Replay models each
+request's prefill, decode, and terminal lifecycle, so a recorded request end time does not force
+the simulated duration.
 
 The closed-loop in-flight cap is resolved by `effective_in_flight_cap()` (`None` = open-loop):
 

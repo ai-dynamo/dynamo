@@ -2235,7 +2235,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
 mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
-    use crate::loadgen::{SessionTrace, TurnTrace};
+    use crate::loadgen::{DynamoRequestTrace, SessionTrace, TurnTrace};
     use rstest::rstest;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -2398,6 +2398,68 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("first_arrival_timestamp_ms"));
+    }
+
+    #[test]
+    fn loaded_dynamo_trace_preserves_overlapping_arrivals() {
+        let mut file = NamedTempFile::new().unwrap();
+        for (request_id, received_ms, hash) in [("first", 1_000, 11), ("second", 1_001, 22)] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": received_ms + 100,
+                    "request": {
+                        "request_id": request_id,
+                        "request_received_ms": received_ms,
+                        "output_tokens": 8,
+                        "replay": {
+                            "trace_block_size": 4,
+                            "input_length": 64,
+                            "input_sequence_hashes": vec![hash; 16],
+                        },
+                    },
+                })
+            )
+            .unwrap();
+        }
+
+        let trace =
+            DynamoRequestTrace::from_request_trace_files(&[file.path().to_path_buf()], Some(4))
+                .unwrap();
+        let DynamoRequestTrace::Standard(trace) = trace else {
+            panic!("single-turn request records must produce a standard trace");
+        };
+        let report = simulate_loaded_trace_with_router_mode_and_options(
+            MockEngineArgs::builder()
+                .block_size(4)
+                .num_gpu_blocks(256)
+                .max_num_batched_tokens(Some(64))
+                .max_num_seqs(Some(8))
+                .speedup_ratio(0.001)
+                .build()
+                .unwrap(),
+            None,
+            None,
+            trace,
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        let mut records = report.per_request;
+        records.sort_by(|left, right| left.arrival_time_ms.total_cmp(&right.arrival_time_ms));
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].arrival_time_ms, 0.0);
+        assert_eq!(records[1].arrival_time_ms, 1.0);
+        assert!(records[1].first_admit_ms.unwrap() < records[0].terminal_time_ms);
+        assert!(records[0].terminal_time_ms > 100.0);
     }
 
     #[rstest]
