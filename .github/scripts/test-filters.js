@@ -105,19 +105,19 @@ const testCases = [
     desc: 'recipe generator test triggers recipe check without core'
   },
   {
-    file: 'tests/docs/test_recipe_catalog_artifacts.py',
+    file: 'tests/docs/nested/__ci_filter_probe__',
     expect: { core: false, examples: true },
-    desc: 'recipe catalog docs test triggers recipe check without core'
+    desc: 'any tests/docs descendant triggers recipe check without core'
   },
   {
-    file: 'docs/fern/pages/recipes/_catalog/recipes/nemotron-3-ultra.yaml',
+    file: 'docs/fern/pages/recipes/_catalog/nested/__ci_filter_probe__',
     expect: { core: false, docs: true, examples: true },
-    desc: 'recipe catalog data triggers docs and recipe checks without core'
+    desc: 'any recipe catalog descendant triggers docs and recipe checks without core'
   },
   {
-    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/qwen3-32b-kv-routing.yaml',
+    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/nested/__ci_filter_probe__',
     expect: { core: false, docs: true, examples: true },
-    desc: 'feature benchmark catalog data triggers docs and recipe checks without core'
+    desc: 'any feature benchmark catalog descendant triggers docs and recipe checks without core'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',
