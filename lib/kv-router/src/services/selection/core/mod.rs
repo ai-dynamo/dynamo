@@ -1370,11 +1370,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selection_setup_uses_default_label_for_worker_type() {
+    async fn selection_setup_uses_worker_type_label() {
         for (worker_type, expected_label) in [
             (WorkerType::Prefill, "prefill"),
             (WorkerType::Decode, "decode"),
-            (WorkerType::Encode, "decode"),
+            (WorkerType::Encode, "encode"),
+            (WorkerType::Aggregated, "aggregated"),
         ] {
             let config = test_config(false);
             let tracking_hash = Arc::new(
