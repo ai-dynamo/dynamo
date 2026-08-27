@@ -114,6 +114,13 @@ spec:
                   value: "1"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
+                # GLM uses GLA/KDA not MoE; deep_gemm expert sharding inapplicable.
+                - name: VLLM_USE_DEEP_GEMM
+                  value: "0"
+                - name: VLLM_DEEP_GEMM_WARMUP
+                  value: skip
+                - name: TORCHINDUCTOR_ENABLE_PDL
+                  value: "1"
                 - name: PYTORCH_ALLOC_CONF
                   value: "expandable_segments:True"
                 - name: VLLM_ALLREDUCE_USE_FLASHINFER
@@ -136,6 +143,8 @@ spec:
                   value: eth0
                 - name: NCCL_DEBUG
                   value: WARN
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
                 # ^cuda_ipc excludes single-node IPC so UCX falls back to tcp cross-node.
                 # Required when using glm53-flash image (UCX lacks MNNVL IPC support).
                 # To enable MNNVL IPC: switch to vllm-runtime base image and use
@@ -264,6 +273,12 @@ spec:
                   value: "1"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
+                - name: VLLM_USE_DEEP_GEMM
+                  value: "0"
+                - name: VLLM_DEEP_GEMM_WARMUP
+                  value: skip
+                - name: TORCHINDUCTOR_ENABLE_PDL
+                  value: "1"
                 - name: PYTORCH_ALLOC_CONF
                   value: "expandable_segments:True"
                 - name: VLLM_ALLREDUCE_USE_FLASHINFER
@@ -286,6 +301,8 @@ spec:
                   value: eth0
                 - name: NCCL_DEBUG
                   value: WARN
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
                 - name: UCX_TLS
                   value: "cuda_copy,^cuda_ipc,tcp"
                 - name: UCX_MEMTYPE_CACHE
@@ -331,7 +348,7 @@ spec:
                     --trust-remote-code \
                     --tensor-parallel-size 4 \
                     --max-num-seqs 256 \
-                    --max-num-batched-tokens 4096 \
+                    --max-num-batched-tokens 8192 \
                     --gpu-memory-utilization 0.92 \
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
@@ -340,6 +357,7 @@ spec:
                     --limit-mm-per-prompt '{"image":1,"video":0}' \
                     --mm-encoder-tp-mode data \
                     --no-disable-hybrid-kv-cache-manager \
+                    --compilation-config '{"cudagraph_mm_encoder":true}' \
                     --disaggregation-mode decode \
                     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
               resources:
