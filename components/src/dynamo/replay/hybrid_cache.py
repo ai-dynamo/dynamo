@@ -142,34 +142,46 @@ class HybridCacheRequest:
     input_length: int
     output_length: int
     lineage: tuple[str, ...]
+    trace_block_size: int | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> HybridCacheRequest:
-        if isinstance(raw.get("request"), dict):
-            request = raw["request"]
+        event = raw.get("event", raw)
+        if not isinstance(event, dict):
+            raise TypeError("event must be an object")
+        if isinstance(event.get("request"), dict):
+            request = event["request"]
             replay = request["replay"]
             request_id = str(request["request_id"])
             input_length = int(replay["input_length"])
             output_tokens = request.get("output_tokens")
             output_length = int(output_tokens) if output_tokens is not None else 0
             lineage = replay["input_sequence_hashes"]
+            trace_block_size = replay.get("trace_block_size")
         else:
-            request_id = str(raw["request_id"])
-            input_length = int(raw["input_length"])
+            request_id = str(event["request_id"])
+            input_length = int(event["input_length"])
             output_tokens = (
-                raw["output_length"]
-                if "output_length" in raw
-                else raw.get("output_tokens")
+                event["output_length"]
+                if "output_length" in event
+                else event.get("output_tokens")
             )
             output_length = int(output_tokens) if output_tokens is not None else 0
-            lineage = raw.get("lineage", raw.get("lineage_b4"))
+            lineage = event.get("lineage", event.get("lineage_b4"))
+            trace_block_size = event.get("trace_block_size")
         if not isinstance(lineage, list):
             raise TypeError("request must contain cumulative input lineage hashes")
         canonical_lineage = tuple(
             json.dumps(value, separators=(",", ":"), sort_keys=True)
             for value in lineage
         )
-        return cls(request_id, input_length, output_length, canonical_lineage)
+        return cls(
+            request_id,
+            input_length,
+            output_length,
+            canonical_lineage,
+            int(trace_block_size) if trace_block_size is not None else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -570,6 +582,13 @@ class VllmHybridCacheSimulator:
     ) -> HybridCacheRequestResult:
         """Process one request after all earlier requests have completed."""
 
+        if (
+            request.trace_block_size is not None
+            and request.trace_block_size != self.config.hash_block_size
+        ):
+            raise ValueError(
+                "request trace_block_size must match the configured hash_block_size"
+            )
         gpu_hit_tokens = self._gpu_hit(request)
         cpu_hit_tokens = self._cpu_lookup(request, gpu_hit_tokens)
         combined_hit_tokens = gpu_hit_tokens + cpu_hit_tokens
@@ -629,9 +648,9 @@ def simulate_trace(
         "combined_hit_tokens": gpu_hits + cpu_hits,
         "gpu_hit_rate": gpu_hits / input_tokens if input_tokens else 0.0,
         "cpu_hit_rate": cpu_hits / input_tokens if input_tokens else 0.0,
-        "combined_hit_rate": (gpu_hits + cpu_hits) / input_tokens
-        if input_tokens
-        else 0.0,
+        "combined_hit_rate": (
+            (gpu_hits + cpu_hits) / input_tokens if input_tokens else 0.0
+        ),
         "cpu_admissions": sum(item.cpu_admissions for item in results),
         "cpu_evictions": sum(item.cpu_evictions for item in results),
         "gpu_evictions": sum(item.gpu_evictions for item in results),

@@ -173,3 +173,43 @@ def test_null_output_length_is_zero(raw) -> None:
     request = HybridCacheRequest.from_dict(raw)
 
     assert request.output_length == 0
+
+
+def test_request_parser_unwraps_event_envelope() -> None:
+    request = HybridCacheRequest.from_dict(
+        {
+            "event": {
+                "request": {
+                    "request_id": "request-1",
+                    "output_tokens": 2,
+                    "replay": {
+                        "input_length": 4,
+                        "input_sequence_hashes": ["hash"],
+                        "trace_block_size": 4,
+                    },
+                }
+            }
+        }
+    )
+
+    assert request == HybridCacheRequest(
+        request_id="request-1",
+        input_length=4,
+        output_length=2,
+        lineage=('"hash"',),
+        trace_block_size=4,
+    )
+
+
+def test_trace_block_size_must_match_hash_geometry() -> None:
+    simulator = VllmHybridCacheSimulator(_deepseek_config())
+    request = HybridCacheRequest(
+        request_id="request-1",
+        input_length=256,
+        output_length=0,
+        lineage=tuple(f"h-{index}" for index in range(64)),
+        trace_block_size=8,
+    )
+
+    with pytest.raises(ValueError, match="trace_block_size must match"):
+        simulator.process(request)
