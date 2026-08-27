@@ -187,7 +187,7 @@ runs:
         echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
 
     - name: Upload Test Results
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
       if: always()
       with:
         name: test-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
@@ -195,7 +195,7 @@ runs:
         retention-days: 7
 
     - name: Upload Pod Logs
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
       if: always()
       with:
         name: pod-logs-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
@@ -204,7 +204,7 @@ runs:
         retention-days: 7
 
     - name: Upload Allure Results
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
       if: always()
       with:
         name: allure-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
