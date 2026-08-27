@@ -208,6 +208,20 @@ subjects:
   - kind: ServiceAccount
     name: dynamo-epp
 ---
+# GAIE calls the gRPC port. EPP replicas discover each other through this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-epp
+spec:
+  selector:
+    app: dynamo-epp
+  ports:
+    - name: grpc
+      appProtocol: http2
+      port: 9002
+      targetPort: grpc
+---
 # The Dynamo EPP in standalone mode with the selector EMBEDDED in-process,
 # replicated: DYN_EPP_PEER_SERVICE turns on cross-replica active-load sync so
 # these replicas do not each under-count load and herd onto the same worker.
@@ -297,20 +311,6 @@ spec:
             capabilities:
               drop:
                 - ALL
----
-# GAIE calls the gRPC port. EPP replicas discover each other through this Service.
-apiVersion: v1
-kind: Service
-metadata:
-  name: dynamo-epp
-spec:
-  selector:
-    app: dynamo-epp
-  ports:
-    - name: grpc
-      appProtocol: http2
-      port: 9002
-      targetPort: grpc
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and

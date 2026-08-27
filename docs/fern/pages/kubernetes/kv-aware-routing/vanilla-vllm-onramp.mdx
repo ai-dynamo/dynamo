@@ -322,8 +322,12 @@ corresponding URL for the existing Service you reuse.
 
 Create a ServiceAccount with namespaced `get`, `list`, and `watch` access to pods, `InferencePool`
 resources, and `EndpointSlice` resources. When you set `DYN_EPP_PEER_SERVICE`, also grant `get`
-access to Services. Then create the replacement Deployment with the Dynamo EPP image. The environment
-variables belong to the EPP container in
+access to Services. Create the replacement `dynamo-epp` Service with gRPC port `9002` before its
+Deployment. The complete ServiceAccount, RBAC, Deployment, and Service definitions are available in
+the [`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
+
+Then create the replacement Deployment with the Dynamo EPP image. The environment variables belong
+to the EPP container in
 `spec.template.spec.containers[].env`:
 
 ```yaml
@@ -379,11 +383,6 @@ configuration.
 
 The model name, block size, event port, and maximum batched-token values in the example are one
 coherent configuration. Change them together when adapting another model or vLLM deployment.
-
-Create the replacement `dynamo-epp` Service with gRPC port `9002`. The complete ServiceAccount, RBAC,
-Deployment, and Service definitions are
-available in the
-[`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
 ### Connect the InferencePool
 
