@@ -512,9 +512,20 @@ COPY --from=runtime_full / /
 #
 # Every match is checked, not just the first: the whole point is catching the
 # case where more than one exists.
+#
+# PyNvVideoCodec is checked by the same guard. The TRT-LLM release image ships
+# pynvvideocodec 2.1.0 in system site-packages with a vendored ffmpeg (rc22
+# carried no such package). codec_policy.yaml waives those libraries because
+# the vendored libavcodec registers vp9 only, with h264/hevc/aac absent -- but
+# that waiver matches on path, so without this probe a future base image could
+# reintroduce the excluded decoders silently. enumerate_bundled_decoders.py
+# exits 1 when any of them is registered, so `set -eu` fails the build.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done
 
