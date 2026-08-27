@@ -461,44 +461,72 @@ navigation:
               - section: Router
                 collapsed: true
                 contents:
-                  - page: Overview
-                    path: pages/developer-guide/knowledge-base/modular-components/router/overview.md
-                  - page: Router Guide
-                    path: pages/developer-guide/knowledge-base/modular-components/router/router-guide.md
-                  - page: Routing Concepts
-                    path: pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
-                  - page: Router Filtering
-                    path: pages/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
-                  - page: Configuration and Tuning
-                    path: pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
-                  - page: Deficit Round Robin
-                    path: pages/developer-guide/knowledge-base/modular-components/router/deficit-round-robin.md
-                  - page: Disaggregated Serving
-                    path: pages/developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md
-                  - page: Offloading Support Matrix
-                    path: pages/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
-                  - page: Topology-Aware KV Transfer
-                    path: pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
-                  - page: Multi-DC KV Routing
-                    path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
-                  - page: Router Operations
-                    path: pages/developer-guide/knowledge-base/modular-components/router/router-operations.md
-                  - page: Router Testing
-                    path: pages/developer-guide/knowledge-base/modular-components/router/router-testing.md
-                  - page: Router Examples
-                    path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
-                  - page: Global Router Configuration
-                    path: pages/reference/components/global-router-configuration.mdx
-                  - page: Standalone Indexer
-                    path: pages/developer-guide/knowledge-base/modular-components/router/standalone-indexer.md
-                  - page: Standalone Slot Tracker
-                    path: pages/developer-guide/knowledge-base/modular-components/router/standalone-slot-tracker.md
-                  - page: Standalone Selection
-                    path: pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md
-                  - page: KV Event Replay Comparison
-                    path: pages/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md
-                  - page: Router Design
-                    path: pages/developer-guide/knowledge-base/modular-components/router/router-design.md
+                  - section: Get Started
+                    skip-slug: true
+                    collapsed: open-by-default
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/router/overview.md
+                      - page: Router Guide
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-guide.md
+                  - section: Understand Routing
+                    skip-slug: true
+                    collapsed: true
+                    contents:
+                      - page: Routing Concepts
+                        path: pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
+                      - page: Router Filtering
+                        path: pages/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
+                      - page: Deficit Round Robin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/deficit-round-robin.md
+                  - section: Configure and Operate
+                    skip-slug: true
+                    collapsed: true
+                    contents:
+                      - page: Configuration and Tuning
+                        path: pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
+                      - page: Router Operations
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-operations.md
+                      - page: KV Event Replay Comparison
+                        path: pages/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md
+                      - page: Global Router Configuration
+                        path: pages/reference/components/global-router-configuration.mdx
+                  - section: Distributed Deployments
+                    skip-slug: true
+                    collapsed: true
+                    contents:
+                      - page: Disaggregated Serving
+                        path: pages/developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md
+                      - page: Topology-Aware KV Transfer
+                        path: pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
+                      - page: Offloading Support Matrix
+                        path: pages/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
+                      - page: Multi-DC KV Routing (Experimental)
+                        slug: multi-dc-kv-routing
+                        path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+                  - section: Standalone Services
+                    skip-slug: true
+                    collapsed: true
+                    contents:
+                      - page: Standalone Indexer
+                        path: pages/developer-guide/knowledge-base/modular-components/router/standalone-indexer.md
+                      - page: Standalone Slot Tracker
+                        path: pages/developer-guide/knowledge-base/modular-components/router/standalone-slot-tracker.md
+                      - page: Standalone Selection
+                        path: pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md
+                  - section: Develop the Router
+                    skip-slug: true
+                    collapsed: true
+                    contents:
+                      - page: Write Custom Routing Strategies
+                        slug: write-custom-routing-strategies
+                        path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
+                      - page: Router Examples
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
+                      - page: Router Testing
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-testing.md
+                      - page: Router Design
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-design.md
               - section: Planner
                 collapsed: true
                 contents:
@@ -525,8 +553,6 @@ navigation:
         slug: advanced-customizations
         icon: sliders
         contents:
-          - page: Write Custom Routing Strategies
-            path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Conditional Disaggregation
             path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
           - page: Building from Source

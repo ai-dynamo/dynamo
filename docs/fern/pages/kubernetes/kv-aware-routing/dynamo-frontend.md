@@ -8,7 +8,7 @@ subtitle: Configure the Dynamo Frontend to select the worker most likely to have
 
 In this topology, the Dynamo Frontend receives each request and selects the worker most likely to already hold the prompt's KV cache prefix. Use it when clients send requests directly to a Dynamo Frontend Service. If a Kubernetes Gateway receives requests first, use [GAIE with Dynamo](gateway-api.mdx) instead.
 
-Turning it on in a DynamoGraphDeployment (DGD) takes two steps: switch the **Frontend** into KV mode, and have the **workers** publish KV cache events so the router knows what each worker has cached. This is a [how-to](../model-deployment/deploy-with-dgd.md) for an existing deployment. For the routing cost model and concepts, see [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md); for the full flag and env reference, see the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md).
+Turning it on in a DynamoGraphDeployment (DGD) takes two steps: switch the **Frontend** into KV mode, and have the **workers** publish KV cache events so the router knows what each worker has cached. This is a [how-to](../model-deployment/deploy-with-dgd.md) for an existing deployment. For the routing cost model and concepts, see [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md); for the full flag and environment-variable reference, see the [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx#router).
 
 <Steps toc={true} tocDepth={2}>
 
@@ -60,7 +60,7 @@ For the router to track which blocks each worker holds, workers must publish KV 
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
-This is the half that the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) does not show. Without it, the router falls back to load-only decisions even in `kv` mode.
+Setting the Frontend to `kv` mode alone does not provide worker cache state. Without worker KV events, the router falls back to load-only decisions.
 
 The Frontend and worker snippets above are drawn from the [disagg-kv-router recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml), where six prefill workers publish KV events and the Frontend routes across them.
 
@@ -104,6 +104,7 @@ In a disaggregated graph, the router operates over prefill and decode workers se
 
 - [KV-Aware Routing on Kubernetes](overview.md) — compare the Frontend and GAIE topologies.
 - [Using GAIE with Dynamo](gateway-api.mdx) — place endpoint selection in the Dynamo EPP.
-- [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) — deployment modes, full CLI and env reference.
+- [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) — deployment topologies and worker-set configuration.
+- [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx#router) — canonical flags, environment variables, and defaults.
 - [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md) — cost model and worker selection.
 - [Router with Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md) — prefill/decode routing.
