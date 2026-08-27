@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-session-classifier-example"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Session classifier example for Dynamo"
+
+[dependencies]
+dynamo-kv-router.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

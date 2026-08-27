@@ -74,6 +74,7 @@
 /components/src/dynamo/router/                                               @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/scheduling/                                               @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
+/examples/router/session-classifier/                                         @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/kv_state_agent/                                       @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-router-codeowners

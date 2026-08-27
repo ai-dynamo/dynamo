@@ -2998,6 +2998,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-session-classifier-example"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "dynamo-sglang-mocker"
 version = "1.5.0"
 dependencies = [

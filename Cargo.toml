@@ -18,6 +18,7 @@ members = [
     "examples/router/custom-policy-example/disagg-filter-score-pick",
     "examples/router/custom-policy-example/epp",
     "examples/router/custom-policy-example/simple-stacked-score-pick",
+    "examples/router/session-classifier",
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
@@ -213,4 +214,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
