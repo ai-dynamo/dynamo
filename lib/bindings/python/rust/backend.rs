@@ -154,8 +154,8 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::from_args(cli_argv))
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))

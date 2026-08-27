@@ -10,7 +10,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
     LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
@@ -61,9 +61,13 @@ impl TrtllmSidecarEngine {
     }
 
     pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)
-            .map_err(|err| client::invalid_argument(err.to_string()))?;
-        Self::from_parsed(args)
+        Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo)
+    }
+
+    /// Parse explicit arguments without terminating the process on Clap exits.
+    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::from_parsed(args).map_err(Into::into)
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
