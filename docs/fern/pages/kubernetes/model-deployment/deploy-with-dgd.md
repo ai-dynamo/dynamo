@@ -205,7 +205,7 @@ spec:
 Substitute `Qwen/Qwen3-32B` with your model, `hf-token-secret` with your Secret name if you changed it. Keeping the namespace, image, and token in the environment means the same YAML file works across clusters — you change the exports, not the spec.
 
 > [!TIP]
-> **Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See [Model Caching](model-loading/model-caching.mdx) (and [ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) for fleet-scale distribution).
+> **Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See the [Model Storage Overview](../installation/model-storage/overview.md).
 
 </Step>
 
@@ -337,7 +337,7 @@ The fastest way to start is to copy a ready-to-apply Kubernetes template rather 
 For disaggregation-specific configuration — RDMA resources, UCX environment variables, and prefill/decode scaling — see [Disaggregated Serving](../disaggregated-serving/overview.md).
 
 > [!IMPORTANT]
-> Disaggregated serving moves KV cache between workers over the network. For acceptable performance the cluster needs RDMA — see the [Disaggregated Communication Guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md). Without it, transfers fall back to TCP with severe latency penalties.
+> Disaggregated serving moves KV cache between workers over the network. For acceptable performance the cluster needs RDMA — see [RDMA Setup](../installation/rdma-setup/overview.md). Without it, transfers fall back to TCP with severe latency penalties.
 
 </Step>
 
@@ -455,7 +455,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 
 **Mixture-of-Experts.** MoE models — DeepSeek-R1, Qwen3-235B, Kimi-K2 — add **expert parallelism (EP)** on top of the knobs above, and expose it as **two** sizes: how experts are split (EP) and how the non-expert (attention) weights are split (a tensor-parallel size for the MoE layers). In vLLM, enable EP with `--enable-expert-parallel`, typically alongside `--data-parallel-size` for the attention layers. In SGLang, use `--ep-size` with `--enable-dp-attention`. In TensorRT-LLM, set both `moe_expert_parallel_size` and `moe_tensor_parallel_size` in the engine config. Wide-EP deployments usually pair this with multinode and a fast all-to-all backend (for example `VLLM_ALL2ALL_BACKEND=deepep_low_latency`). For a worked multinode wide-EP example, see the [DeepSeek-R1 recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml).
 
-**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. See [Multinode Deployments](multinode-deployments.md) and the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
+**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. See [Multinode Deployments](../installation/multinode-orchestration.md) and the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
 
 > [!WARNING]
 > **Leave room for the KV cache.** The weights are only part of GPU memory — the KV cache grows with context length and concurrency, and if it has no room the worker OOMs at load or under traffic. Each engine caps the fraction of GPU memory it will use: `--gpu-memory-utilization` (vLLM, default 0.90), `--mem-fraction-static` (SGLang), or `free_gpu_memory_fraction` in the engine config (TensorRT-LLM). If you hit OOM, lower the fraction, add a GPU (raise TP), or reduce max context length.
@@ -751,4 +751,4 @@ These are independent capabilities you opt into per workload. None are required 
 </CardGroup>
 
 > [!IMPORTANT]
-> **The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../../developer-guide/knowledge-base/modular-components/planner/overview.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](../auto-deployment/auto-deploy-with-dgdr.md). For HPA/KEDA scaling of a DGD service, see [Autoscaling](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md). For the full field reference, see the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx).
+> **The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../../developer-guide/knowledge-base/modular-components/planner/overview.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](../auto-deployment/auto-deploy-with-dgdr.md). For HPA/KEDA scaling of a DGD service, see the [DynamoGraphDeploymentScalingAdapter API](../../reference/kubernetes-api/full-api-reference.mdx#dynamographdeploymentscalingadapter). For the full field reference, see the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx).

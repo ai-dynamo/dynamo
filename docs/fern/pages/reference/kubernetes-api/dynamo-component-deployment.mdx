@@ -5,14 +5,14 @@ title: DynamoComponentDeployment (DCD) Reference
 subtitle: Field reference for the DynamoComponentDeployment custom resource — the single Dynamo component that a DynamoGraphDeployment reconciles into pods.
 ---
 
-A `DynamoComponentDeployment` (DCD) describes one component of a Dynamo inference graph — a frontend, a worker, a prefill or decode worker, a planner, or an EPP. The [operator](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md) reconciles each DCD into a Kubernetes Deployment (or Grove workload) plus its Services, ConfigMaps, and pods.
+A `DynamoComponentDeployment` (DCD) describes one component of a Dynamo inference graph — a frontend, a worker, a prefill or decode worker, a planner, or an EPP. The [operator](../../kubernetes/installation/install-dynamo.md) reconciles each DCD into a Kubernetes Deployment (or Grove workload) plus its Services, ConfigMaps, and pods.
 
 A DCD is rarely authored on its own. Each entry in a [`DynamoGraphDeployment`](dynamo-graph-deployment.mdx) `spec.components` list is a `DynamoComponentDeploymentSharedSpec`, the same shape documented here under [Shared component spec](#shared-component-spec). The operator creates one child DCD per component. Author a standalone DCD only when you want to manage a single component's lifecycle independently; otherwise define components inside a DGD.
 
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
 <Info>
-  This reference covers user-configurable spec fields. For operator-injected defaults (images, ports, probes, resources) and environment variables, see the [Dynamo Operator](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md) guide.
+  This reference covers user-configurable spec fields. For platform installation and operator configuration, see [Install Dynamo](../../kubernetes/installation/install-dynamo.md).
 </Info>
 
 ## Minimal example
@@ -58,7 +58,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-  Desired number of pods for this component. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md) and should not be modified directly.
+  Desired number of pods for this component. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
@@ -68,7 +68,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-  Configures a multinode component. See [Multinode Deployments](../../kubernetes/model-deployment/multinode-deployments.md).
+  Configures a multinode component. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
 <Indent>
@@ -101,7 +101,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-  Opts the component into a [DynamoGraphDeploymentScalingAdapter](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md) (DGDSA). Set it — even as an empty object, `scalingAdapter: {}` — to create a DGDSA that owns `replicas` so external autoscalers (HPA, KEDA, Planner) can drive scaling through the Scale subresource. Omit the field to opt out.
+  Opts the component into a [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) (DGDSA). Set it — even as an empty object, `scalingAdapter: {}` — to create a DGDSA that owns `replicas` so external autoscalers (HPA, KEDA, Planner) can drive scaling through the Scale subresource. Omit the field to opt out.
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
@@ -137,7 +137,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="topologyConstraint" type="TopologyConstraint">
-  Component-level topology placement. See [Topology-Aware Scheduling](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-scheduling.md).
+  Component-level topology placement. See the [SpecTopologyConstraint API](full-api-reference.mdx#spectopologyconstraint).
 </ParamField>
 
 <Indent>
@@ -229,7 +229,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-  Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore an existing [DynamoCheckpoint](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md).
+  Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore an existing [DynamoCheckpoint API resource](full-api-reference.mdx#dynamocheckpoint).
 </ParamField>
 
 <Indent>
@@ -329,7 +329,7 @@ kubectl get dcd my-worker -n $NAMESPACE \
   <Card title="Deploy with DGD" icon="rocket" href="../../kubernetes/model-deployment/deploy-with-dgd.md">
     Task-oriented walkthrough of authoring a graph deployment.
   </Card>
-  <Card title="Dynamo Operator" icon="gears" href="../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md">
-    Operator-injected defaults, environment variables, and reconciliation.
+  <Card title="Install Dynamo" icon="gears" href="../../kubernetes/installation/install-dynamo.md">
+    Install and configure the Dynamo platform and operator.
   </Card>
 </CardGroup>

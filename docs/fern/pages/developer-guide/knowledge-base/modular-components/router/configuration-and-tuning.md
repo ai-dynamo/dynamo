@@ -234,7 +234,7 @@ For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size
 Topology-aware KV transfer is configured on workers through runtime metadata, not with frontend router flags. In Kubernetes, use `spec.experimental.kvTransferPolicy` on the `DynamoGraphDeployment`; the operator injects the worker environment and topology files. Outside Kubernetes, set `DYN_TOPOLOGY_ENABLED`, `DYN_TOPOLOGY_MOUNT_PATH`, `DYN_KV_TRANSFER_DOMAIN`, and `DYN_KV_TRANSFER_ENFORCEMENT` on workers. Set `DYN_KV_TRANSFER_PREFERRED_WEIGHT` only when enforcement is `preferred`.
 
 For the full runtime contract and routing behavior, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
-For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](../../kubernetes/multinode/topology-aware-kv-transfer.md).
+For the Kubernetes configuration fields, see the [KvTransferPolicy API](../../../../reference/kubernetes-api/full-api-reference.mdx#kvtransferpolicy).
 
 ## Block Tracking
 

@@ -162,7 +162,6 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 **Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment is multinode and requires a gang scheduler. Install an orchestrator first — the operator returns a hard error otherwise:
 
 - [Multinode Orchestration](../installation/multinode-orchestration.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
-- [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md) (default) and [LWS](../../developer-guide/knowledge-base/kubernetes/multinode/lws.md) — the two orchestration backends.
 
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#support-matrix).
 
@@ -191,9 +190,9 @@ spec:
 
 The operator mounts the PVC read-only into the profiling job and passes it through to the generated DGD, so both profiling and serving use the cached weights.
 
-`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision. See [Model Caching — Find the Snapshot Path](../model-deployment/model-loading/model-caching.mdx#find-the-snapshot-path) for how to look it up.
+`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision.
 
-**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See [Model Caching](../model-deployment/model-loading/model-caching.mdx) for the full walkthrough.
+**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See the [Model Storage Overview](../installation/model-storage/overview.md) to choose a storage backend.
 
 For gated models, create the token secret the profiler and pods read automatically:
 

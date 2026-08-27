@@ -154,7 +154,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
 | **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
 
-本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../../../pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)。
+本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)。
 
 ### 验证安装（可选）
 
@@ -207,7 +207,7 @@ python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &
     是预期行为（没有正在运行的 ModelExpress server），可以安全忽略。在配置了 `MODEL_EXPRESS_URL` 的 Kubernetes 部署中，
     此警告，或相关的 `Failed to resolve local model path after server download`，
     表示已配置 ModelExpress，但它实际上没有提供缓存模型；
-请参阅 [Kubernetes 中的模型缓存](../../../../../pages/kubernetes/model-deployment/model-loading/model-caching.mdx#option-2-modelexpress-p2p-distribution)
+请参阅 [Kubernetes 模型存储](../../../../../pages/kubernetes/installation/model-storage/overview.md)
     了解正确配置。
 
     **vLLM**

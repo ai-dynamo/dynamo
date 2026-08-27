@@ -168,7 +168,7 @@ NIXL 通过优化跨异构内存的 worker 间传输行为，降低分布式服�
 - [Planner 设计](modular-components/planner/planner-design.md)
 - [Simulation](../../../../../pages/developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md)
 - [Fault Tolerance](../../../../../pages/kubernetes/fault-tolerance/introduction.md)
-- [Grove](../../../../../pages/developer-guide/knowledge-base/kubernetes/multinode/grove.md)
+- [多节点编排](../../../../../pages/kubernetes/installation/multinode-orchestration.md)
 
 ## 致谢
 

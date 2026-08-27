@@ -7,7 +7,7 @@ subtitle: Cut cold-start weight-load time on shared PVC storage with a concurren
 
 Loading a large checkpoint from a shared PVC into GPU memory can dominate cold start. A 1T-parameter model is hundreds of GiB on disk; with the wrong loader and the wrong filesystem layout it can take over an hour, even on storage that advertises multiple GB/s. This page explains the two independent bottlenecks and how to fix both, with a measured end-to-end example.
 
-This is complementary to [Model Caching](model-caching.mdx): caching gets the weights onto a shared PVC once; this page makes each worker *read* them fast. It applies to the **PVC + Download Job** path, not the ModelExpress object-storage path (which streams from S3/GCS/Azure Blob instead — see [ModelExpress](../../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md)).
+Use the [Model Storage Overview](../../installation/model-storage/overview.md) to choose and provision shared storage. This page covers the next step: making each worker read model weights from that storage efficiently.
 
 ## TL;DR
 
@@ -83,7 +83,7 @@ Check the live OST count on any Lustre mount with `lfs df` (see [Inspecting and 
 | **SGLang** | ❌ not in SGLang's `--load-format` choices | ✅ |
 | **TensorRT-LLM** | ❌ no streaming loader, but parallel weight loading is on by default | ✅ |
 
-For SGLang and TensorRT-LLM, the striping fix alone still helps; there is no `runai_streamer` equivalent to add. (SGLang's fast-distribution path is ModelExpress `remote_instance` — a P2P pull from an already-loaded worker, not a faster first read from storage. See [Model Caching](model-caching.mdx#option-2-modelexpress-p2p-distribution).)
+For SGLang and TensorRT-LLM, the striping fix alone still helps; there is no `runai_streamer` equivalent to add.
 
 ## Runbook: a new model on Lustre storage
 
@@ -110,7 +110,7 @@ If your downloader image lacks the `lfs` client (for example `python:3.12-slim`)
   </Step>
   <Step title="Download the model">
 
-Run the normal [PVC + Download Job](model-caching.mdx#step-2-download-the-model). Because the directory default is now wide, every shard lands striped across all OSTs.
+Run your normal PVC download Job. Because the directory default is now wide, every shard lands striped across all OSTs.
 
   </Step>
   <Step title="Enable the streaming loader in the DGD">
@@ -221,7 +221,7 @@ The larger share of the win came from the loader flag (the access pattern was th
 
 ## See also
 
-- [Model Caching](model-caching.mdx) — get the weights onto a shared PVC once (download Job, mount config, ModelExpress)
+- [Model Storage Overview](../../installation/model-storage/overview.md) — choose storage for model weights and shared caches
 - [Azure Lustre CSI Driver](../../installation/model-storage/azure-lustre-csi-driver.mdx) — provision AMLFS and the striping recommendation for it
 - [Storage for Model Caching on AKS](../../installation/model-storage/aks-storage.md) — choosing a storage class per cache type
-- [Snapshotting GPU Workers](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md) — checkpoint/restore and warm-start options for repeated restarts
+- [DynamoCheckpoint API](../../../reference/kubernetes-api/full-api-reference.mdx#dynamocheckpoint) — checkpoint and restore configuration

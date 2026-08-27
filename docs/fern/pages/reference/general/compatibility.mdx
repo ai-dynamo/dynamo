@@ -46,9 +46,9 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **LoRA**                  | <span className="dynref-badge dynref-badge--green">✓</span> | Dynamic load/unload; KV-aware routing supports adapter affinity                                                                              |
 | **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> | Eagle3 ([Source][vllm-spec])                                                                                                                 |
-| **[GPU Memory Service](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md#gpu-memory-service)** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
-| **[Shadow Engine Failover](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md)** | <span className="dynref-badge dynref-badge--amber">!</span> | Software-process failover only; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress |
+| **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
+| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--amber">!</span> | Software-process failover only; no KV-cache reuse or hardware fault tolerance |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#dynamocheckpoint)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress |
 
   </Tab>
   <Tab title="SGLang">
@@ -69,9 +69,9 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                         |
 | **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--wip">WIP</span> | Code hooks exist; no examples or docs yet                                                                                             |
-| **[GPU Memory Service](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md#gpu-memory-service)** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
-| **[Shadow Engine Failover](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU and multinode remain in progress |
+| **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
+| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#dynamocheckpoint)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU and multinode remain in progress |
 
   </Tab>
   <Tab title="TensorRT-LLM">
@@ -92,9 +92,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                                                                 |
 | **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **[GPU Memory Service](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md#gpu-memory-service)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Weights only; multinode and upstream integration remain in progress |
-| **[Shadow Engine Failover](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental single-GPU aggregated text-worker path only |
+| **GPU Memory Service** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Weights only; multinode and upstream integration remain in progress |
+| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#dynamocheckpoint)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental single-GPU aggregated text-worker path only |
 
   </Tab>
 </Tabs>

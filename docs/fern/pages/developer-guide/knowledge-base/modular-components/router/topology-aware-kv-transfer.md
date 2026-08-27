@@ -7,8 +7,8 @@ subtitle: Runtime metadata and decode routing semantics for topology-aware prefi
 
 **Experimental.** Topology-aware KV transfer in NVIDIA Dynamo constrains or biases decode worker selection after a prefill worker has been selected. The router derives standard `RoutingConstraints` from the selected prefill worker's published topology metadata, then merges those constraints into the decode request.
 
-Use the Kubernetes operator path when possible.
-For deployment examples, see [Kubernetes Topology-Aware KV Transfer](../../kubernetes/multinode/topology-aware-kv-transfer.md).
+Use the Kubernetes operator path when possible. For the Kubernetes configuration fields, see the
+[KvTransferPolicy API](../../../../reference/kubernetes-api/full-api-reference.mdx#kvtransferpolicy).
 
 ## Runtime Contract
 
@@ -157,5 +157,5 @@ User-provided constraints still apply. A decode worker must satisfy all required
 | Preferred policy still routes cross-domain | Matching domain is overloaded or unavailable, or weight is too low relative to load. | Increase `preferredWeight`, add same-domain decode capacity, or switch to `required`. |
 | Router sees no topology metadata | Worker did not publish topology fields. | Backend startup logs and runtime config metrics/discovery data. |
 
-For Kubernetes-specific verification commands, see
-[Verify the Deployment](../../kubernetes/multinode/topology-aware-kv-transfer.md#verify-the-deployment).
+For the operator field definitions, see the
+[KvTransferPolicy API](../../../../reference/kubernetes-api/full-api-reference.mdx#kvtransferpolicy).

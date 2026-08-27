@@ -198,7 +198,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     # customer-support-lora   2       2       30s
     ```
 
-    See [Managing Models with DynamoModel](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamomodel.md) for the full CRD workflow.
+    See the [DynamoModel API reference](../../reference/kubernetes-api/full-api-reference.mdx#dynamomodel) for the CRD fields.
 
     <AccordionGroup>
       <Accordion title="Load imperatively with the worker system API">

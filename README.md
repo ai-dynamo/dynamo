@@ -260,7 +260,7 @@ This writes to `docs/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 
-Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)) handle service discovery. External services are optional for most deployments:
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
