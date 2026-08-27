@@ -55,3 +55,8 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# The Dynamo Enterprise NGC collection is not published on the public catalog
+# yet, so the canonical collection URL 404s from CI. The org and team segments
+# are correct; only the collection is missing. Remove once it is live.
+^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise
