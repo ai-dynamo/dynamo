@@ -512,9 +512,21 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Per-request perf metrics feed `prompt_tokens_details.cached_tokens` and the
+    # KV-transfer histograms, but TRT-LLM fills `request_perf_metrics` on every
+    # decode step while Dynamo only reads it on finish. Follow the engine flag
+    # instead of forcing it on: `arg_map` is fully resolved here, so this also
+    # honours `--trtllm.return_perf_metrics false` and `override_engine_args`.
+    request_perf_metrics = bool(arg_map.get("return_perf_metrics", False))
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+        default_sampling_params.return_perf_metrics = request_perf_metrics
+    if not request_perf_metrics:
+        logging.info(
+            "Per-request perf metrics are disabled (return_perf_metrics=False); "
+            "usage.prompt_tokens_details.cached_tokens will not be reported. "
+            "Enable --publish-kv-events, or set return_perf_metrics: true in "
+            "extra engine args, to turn them back on."
+        )
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
