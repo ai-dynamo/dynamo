@@ -200,6 +200,10 @@ pub type ClassifyFuture =
     Pin<Box<dyn Future<Output = Result<ClassifyRequest, Box<ClassifyError>>> + Send + 'static>>;
 
 /// User-provided request classifier.
+///
+/// A panic fails the current request, but the router retains the classifier and may
+/// invoke it again. Implementations that unwind must therefore remain valid for a
+/// subsequent [`Self::classify`] or [`Self::on_event`] call.
 pub trait RequestClassifier: Send + 'static {
     /// Return the same logical request immediately or after a classifier-specific wait.
     fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
@@ -268,6 +272,7 @@ impl RequestClassifierRuntime {
                 .map_err(KvSchedulerError::RequestClassifierFailed)?,
         };
 
+        // Reject a classifier swapping request values between overlapping futures.
         if classified_request.classification_id != classification_id {
             return Err(KvSchedulerError::RequestClassifierReplacedRequest);
         }
@@ -515,6 +520,153 @@ mod tests {
     struct PassThrough;
 
     impl RequestClassifier for PassThrough {}
+
+    struct SynchronousPanicOnce {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for SynchronousPanicOnce {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                panic!("synchronous classifier panic");
+            }
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    #[tokio::test]
+    async fn synchronous_panic_fails_one_request_and_retains_the_classifier() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(SynchronousPanicOnce {
+                calls: Arc::clone(&calls),
+            }),
+            CancellationToken::new(),
+        );
+
+        let error = runtime
+            .classify_with(None, || ClassifyRequest::new(1, 0))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(message)
+                if message == "synchronous classifier panic"
+        ));
+        runtime
+            .classify_with(None, || ClassifyRequest::new(2, 0))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    struct FuturePanicOnce {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for FuturePanicOnce {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            let should_panic = self.calls.fetch_add(1, Ordering::Relaxed) == 0;
+            Box::pin(async move {
+                assert!(!should_panic, "classifier future panic");
+                Ok(request)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn future_panic_fails_one_request_and_retains_the_classifier() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(FuturePanicOnce {
+                calls: Arc::clone(&calls),
+            }),
+            CancellationToken::new(),
+        );
+
+        let error = runtime
+            .classify_with(None, || ClassifyRequest::new(1, 0))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(message)
+                if message == "classifier future panic"
+        ));
+        runtime
+            .classify_with(None, || ClassifyRequest::new(2, 0))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("classifier rejected request")]
+    struct TestClassifierError;
+
+    struct FailingClassifier;
+
+    impl RequestClassifier for FailingClassifier {
+        fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+            Box::pin(async { Err(Box::new(TestClassifierError) as Box<ClassifyError>) })
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_error_is_preserved_as_scheduler_error() {
+        let runtime =
+            RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
+
+        let error = runtime
+            .classify_with(None, || ClassifyRequest::new(1, 0))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::RequestClassifierFailed(source)
+                if source.to_string() == "classifier rejected request"
+        ));
+    }
+
+    struct ReplacingClassifier;
+
+    impl RequestClassifier for ReplacingClassifier {
+        fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+            Box::pin(async { Ok(ClassifyRequest::new(2, 0)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_cannot_replace_the_logical_request() {
+        let runtime =
+            RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
+
+        let error = runtime
+            .classify_with(None, || ClassifyRequest::new(1, 0))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::RequestClassifierReplacedRequest
+        ));
+    }
+
+    #[test]
+    fn duplicate_live_request_id_is_rejected_until_lifecycle_ends() {
+        let runtime =
+            RequestClassifierRuntime::new(Box::new(PassThrough), CancellationToken::new());
+        let lifecycle = runtime.begin_request("request-1").unwrap();
+
+        let error = runtime.begin_request("request-1").unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::DuplicateClassificationRequestId(request_id)
+                if request_id == "request-1"
+        ));
+
+        drop(lifecycle);
+        runtime.begin_request("request-1").unwrap();
+    }
 
     #[tokio::test]
     async fn default_classifier_returns_the_same_request_without_overrides() {

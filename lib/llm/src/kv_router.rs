@@ -2592,6 +2592,46 @@ mod tests {
         make_test_router_with_workers(selector, shared_cache, workers).await
     }
 
+    struct PassThroughClassifier;
+
+    impl RequestClassifier for PassThroughClassifier {}
+
+    #[tokio::test]
+    async fn classifier_fails_closed_on_the_legacy_router_entrypoint() {
+        let router = make_test_router(LoadOnlySelector, None)
+            .await
+            .with_request_classifier(PassThroughClassifier)
+            .unwrap();
+
+        let result = router
+            .find_best_match_details(
+                None,
+                &[1],
+                None,
+                None,
+                false,
+                false,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("legacy entrypoint unexpectedly accepted a classifier"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "request-classifier routers must be driven through RoutingHost"
+        );
+    }
+
     fn router_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
         router_hint_runtime_config_with_worker_type(endpoint, "prefill")
     }
