@@ -32,6 +32,7 @@ impl RequestIndex {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn set_request(
         &self,
         request_id: RequestId,

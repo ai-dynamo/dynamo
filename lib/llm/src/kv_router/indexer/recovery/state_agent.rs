@@ -24,7 +24,8 @@ use dynamo_kv_router::{
     },
     protocols::{
         KvCacheEvent, KvCacheEventData, ResetScope, ResidencyDomain, ResidencyProjection,
-        RouterEvent, StorageTier, WorkerWithDpRank,
+        ResidencyRoutingSnapshot, RouterEvent, RouterHintSourceMetadata, StorageTier,
+        WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{
@@ -62,13 +63,16 @@ const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONCILE_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const RECONCILE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct OwnerRuntime {
     publisher_id: Option<u64>,
     recovered_cursor: u64,
     attachment_generation: Option<u64>,
     last_worker: Option<WorkerWithDpRank>,
     ready: bool,
+    attached_worker: Option<WorkerWithDpRank>,
+    router_hint_source: Option<RouterHintSourceMetadata>,
+    hint_ready: bool,
     recovery_required: bool,
 }
 
@@ -290,12 +294,12 @@ async fn start_observation_fence(
                 tracing::error!("KV state observation fence lost a discovery watch");
                 let _commit = projection_commit.lock().await;
                 let next = advance_observation_revision(&revision);
-                indexer.set_residency_projection(ResidencyProjection::default());
+                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
                 revision_tx.send_replace(next);
                 break;
             }
             let _commit = projection_commit.lock().await;
-            indexer.set_residency_projection(ResidencyProjection::default());
+            indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
             let next = advance_observation_revision(&revision);
             revision_tx.send_replace(next);
         }
@@ -492,7 +496,7 @@ async fn run_state_agent_router(
             },
             Input::Source(None) | Input::Attachment(None) => {
                 tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
-                indexer.set_residency_projection(ResidencyProjection::default());
+                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
                 // Keep the recognized sender alive so the derived legacy view
                 // continues forwarding membership for unrecognized ranks.
                 cancel.cancelled().await;
@@ -528,7 +532,7 @@ async fn run_state_agent_router(
             }
             Input::Events(None) => {
                 tracing::error!(%endpoint, "V2 KV state event stream ended");
-                indexer.set_residency_projection(ResidencyProjection::default());
+                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
                 // V2 stays fail-closed, but unrelated legacy ranks must keep
                 // receiving membership updates until the router shuts down.
                 cancel.cancelled().await;
@@ -598,7 +602,7 @@ async fn run_state_agent_router(
                     }
                     Err(error) => {
                         tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
-                        indexer.set_residency_projection(ResidencyProjection::default());
+                        indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
                         recognized_tx
                             .send_replace(membership.borrow().sources.keys().copied().collect());
                         if let Some(fence) = source_retry_fence(
@@ -654,7 +658,7 @@ async fn run_state_agent_router(
         }
     }
     recovery_lane.cancel_all().await;
-    indexer.set_residency_projection(ResidencyProjection::default());
+    indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
 }
 
 async fn wait_for_retry_deadline(deadline: Option<Instant>) {
@@ -928,6 +932,8 @@ async fn schedule_state_sources(
     for owner in &known_owners {
         if let Some(state) = runtime.get_mut(owner) {
             state.ready = false;
+            state.attached_worker = None;
+            state.hint_ready = false;
         }
     }
     // Reconciliation performs asynchronous clears and recovery. Withdraw the
@@ -949,6 +955,8 @@ async fn schedule_state_sources(
                 state.publisher_id = None;
                 state.attachment_generation = None;
                 state.ready = false;
+                state.attached_worker = None;
+                state.hint_ready = false;
                 state.recovery_required = true;
             }
             tracing::warn!(%owner, "Ambiguous KV state-source incarnations; retaining exact ownership unprojected");
@@ -998,12 +1006,12 @@ async fn schedule_state_sources(
             }
         }
 
-        let previous = runtime.get(&owner).copied();
+        let previous = runtime.get(&owner).cloned();
         let expected_generation = attachment.map(|value| value.attachment_generation);
         let last_worker = attachment
             .map(|value| value.worker)
-            .or_else(|| previous.and_then(|value| value.last_worker));
-        if let Some(previous) = previous
+            .or_else(|| previous.as_ref().and_then(|value| value.last_worker));
+        if let Some(previous) = previous.as_ref()
             && (previous.publisher_id != Some(source.publisher_id)
                 || previous.attachment_generation != expected_generation)
             && let Some(worker) = previous.last_worker
@@ -1012,7 +1020,9 @@ async fn schedule_state_sources(
         }
         if let Some(worker) = last_worker
             && !live_workers.contains(&worker)
-            && previous.is_some_and(|value| value.last_worker == Some(worker))
+            && previous
+                .as_ref()
+                .is_some_and(|value| value.last_worker == Some(worker))
         {
             clear_worker(indexer, worker, owner).await?;
         }
@@ -1023,9 +1033,10 @@ async fn schedule_state_sources(
             clear_worker(indexer, worker, owner).await?;
         }
         let previous_cursor = previous
+            .as_ref()
             .filter(|value| value.publisher_id == Some(source.publisher_id))
             .map_or(0, |value| value.recovered_cursor);
-        let recovery_required = previous.is_none_or(|value| {
+        let recovery_required = previous.as_ref().is_none_or(|value| {
             value.publisher_id != Some(source.publisher_id)
                 || value.attachment_generation != expected_generation
                 || value.recovery_required
@@ -1044,6 +1055,11 @@ async fn schedule_state_sources(
                 attachment_generation: expected_generation,
                 last_worker: recognized_worker,
                 ready: false,
+                attached_worker: attachment
+                    .map(|value| value.worker)
+                    .filter(|worker| live_workers.contains(worker)),
+                router_hint_source: source.router_hint_source.clone(),
+                hint_ready: false,
                 recovery_required,
             },
         );
@@ -1142,11 +1158,7 @@ impl OwnerRecoveryResult {
             source: plan.source.clone(),
             attachment: plan.attachment.clone(),
             observation_revision: plan.observation_revision,
-            activation_expected: plan
-                .attachment
-                .as_ref()
-                .is_some_and(|attachment| attachment.cache_readable)
-                && plan.recognized_worker.is_some(),
+            activation_expected: plan.attachment.is_some() && plan.recognized_worker.is_some(),
         }
     }
 }
@@ -1471,6 +1483,9 @@ async fn apply_recovery_tail(
             .map(|value| value.attachment_generation),
         last_worker: plan.recognized_worker,
         ready: false,
+        attached_worker: plan.attachment.as_ref().map(|attachment| attachment.worker),
+        router_hint_source: plan.source.router_hint_source.clone(),
+        hint_ready: false,
         recovery_required: false,
     });
     state.recovered_cursor = recovered_cursor;
@@ -1493,14 +1508,17 @@ fn finish_owner_readiness(
 ) {
     let membership = membership.borrow();
     let live_workers = &membership.sources;
+    let identity_matches = status.identity == plan.expected;
+    let hint_ready = identity_matches
+        && status.cache_owner_ready
+        && recovered_cursor >= status.outbound_cursor
+        && plan.source.router_hint_source.is_some();
     let ready = plan.attachment.as_ref().is_some_and(|attachment| {
-        attachment.cache_readable
-            && live_workers.contains_key(&attachment.worker)
+        live_workers.contains_key(&attachment.worker)
             && status.cache_owner_ready
-            && status.identity.publisher_id == plan.source.publisher_id
+            && identity_matches
             && status.attachment.as_ref().is_some_and(|status_attachment| {
                 status_attachment.ready
-                    && status_attachment.cache_readable
                     && status_attachment.generation == attachment.attachment_generation
                     && status_attachment.worker == attachment.worker
                     && status_attachment.ready_at_outbound_cursor
@@ -1519,6 +1537,13 @@ fn finish_owner_readiness(
                 .map(|value| value.attachment_generation),
             last_worker: plan.recognized_worker,
             ready,
+            attached_worker: plan
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.worker)
+                .filter(|worker| live_workers.contains_key(worker)),
+            router_hint_source: plan.source.router_hint_source.clone(),
+            hint_ready,
             recovery_required: false,
         },
     );
@@ -1535,6 +1560,8 @@ fn fail_owner_recovery(
 ) {
     if let Some(state) = runtime.get_mut(&owner) {
         state.ready = false;
+        state.attached_worker = None;
+        state.hint_ready = false;
         state.recovery_required = true;
     }
     tails.remove(&owner);
@@ -1645,9 +1672,9 @@ async fn apply_live_events(
     else {
         return false;
     };
-    let was_ready = state.ready;
+    let was_published = (state.ready, state.hint_ready);
     apply_events_for_owner(indexer, *owner, publisher_id, events, state).await;
-    was_ready != state.ready
+    was_published != (state.ready, state.hint_ready)
 }
 
 async fn apply_events_for_owner(
@@ -1700,6 +1727,7 @@ async fn apply_events_for_owner(
                 "Ignoring incorrectly attributed KV state event"
             );
             state.ready = false;
+            state.hint_ready = false;
             state.recovery_required = true;
             break;
         }
@@ -1708,6 +1736,7 @@ async fn apply_events_for_owner(
             tracing::warn!(publisher_id, event_id, %error, "Failed to apply advisory KV state event");
             if is_clear {
                 state.ready = false;
+                state.hint_ready = false;
                 state.recovery_required = true;
                 break;
             }
@@ -1725,7 +1754,15 @@ fn publish_projection(indexer: &Indexer, runtime: &HashMap<CacheOwnerId, OwnerRu
             .map(|worker| (*owner, worker))
     }))
     .unwrap_or_default();
-    indexer.set_residency_projection(projection);
+    let hint_sources = runtime.iter().filter_map(|(owner, state)| {
+        state.hint_ready.then(|| {
+            state
+                .router_hint_source
+                .clone()
+                .map(|metadata| (*owner, metadata, state.attached_worker))
+        })?
+    });
+    indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(projection, hint_sources));
 }
 
 async fn clear_worker(
@@ -1776,19 +1813,25 @@ mod tests {
         StableDpSlotId,
     };
     use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateRecoveryReceipt, LowerTierIndexers,
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
+        KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+        query_lower_tiers_with_options,
     };
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash, WorkerWithDpRank,
+        LocalBlockHash, ResidencyOwner, RouterHintSourceMetadata, WorkerWithDpRank,
     };
+    use dynamo_kv_router::router_hint::RouterHintCandidateSource;
     use dynamo_runtime::{component::TransportType, protocols::EndpointId};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::discovery::{
         KvEventSource, KvSourceMembershipView, KvStateEndpointResolution,
-        kv_state_agent::KvStateIngressProtocol,
+        kv_state_agent::{
+            KvStateIngressProtocol, KvStateProjectionResolution, KvStateUnknownReason,
+            resolve_kv_state_projection,
+        },
     };
 
     fn owner(slot: u8) -> CacheOwnerId {
@@ -1845,6 +1888,7 @@ mod tests {
             protocol_version: KvStateProtocolVersion::V2,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: instance(17),
+            router_hint_source: None,
         }
     }
 
@@ -1864,7 +1908,6 @@ mod tests {
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             raw_zmq_endpoint: "tcp://worker:5557".to_string(),
             raw_topic: String::new(),
-            cache_readable: true,
             ready_at_outbound_cursor: 9,
         }
     }
@@ -1913,6 +1956,241 @@ mod tests {
             &attachments,
             &revision,
         ));
+    }
+
+    #[tokio::test]
+    async fn attachment_recovers_pre_advertisement_tail_without_readability_toggle() {
+        let owner = owner(4);
+        let worker = WorkerWithDpRank::new(17, 3);
+        let source = source_advertisement(owner);
+        let attachment = attachment_advertisement(owner, 7);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: owner,
+            publisher_id: source.publisher_id,
+            protocol_version: source.protocol_version,
+        };
+        let plan = OwnerRecoveryPlan {
+            owner,
+            source,
+            attachment: Some(attachment),
+            expected: identity.clone(),
+            recognized_worker: Some(worker),
+            previous_publisher_id: None,
+            previous_cursor: 0,
+            recovery_required: true,
+            observation_revision: 1,
+            schedule_generation: 1,
+        };
+        let mut rank = RankState::default();
+        rank.buffer_recovery_tail(RouterEvent::with_cache_owner(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id: 10,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(10),
+                        tokens_hash: LocalBlockHash(10),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            },
+            StorageTier::HostPinned,
+            owner,
+        ));
+        let mut tails = HashMap::from([(
+            owner,
+            OwnerRecoveryTail {
+                publisher_id: 41,
+                attachment_generation: Some(7),
+                schedule_generation: 1,
+                rank,
+            },
+        )]);
+        let mut runtime = HashMap::from([(
+            owner,
+            OwnerRuntime {
+                publisher_id: Some(41),
+                recovered_cursor: 0,
+                attachment_generation: Some(7),
+                last_worker: Some(worker),
+                ready: false,
+                attached_worker: Some(worker),
+                router_hint_source: None,
+                hint_ready: false,
+                recovery_required: true,
+            },
+        )]);
+
+        let status = KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: Some(KvStateAttachmentStatus {
+                generation: 7,
+                worker,
+                ready: true,
+                ready_at_outbound_cursor: 9,
+            }),
+            cache_owner_ready: true,
+            outbound_cursor: 10,
+        };
+        let live_workers = HashSet::from([worker]);
+        let receipt_before_tail = KvStateRecoveryReceipt {
+            identity: identity.clone(),
+            attachment_generation: Some(7),
+            recovered_through_cursor: 8,
+        };
+        assert_eq!(
+            resolve_kv_state_projection(
+                true,
+                owner,
+                std::slice::from_ref(&plan.source),
+                std::slice::from_ref(plan.attachment.as_ref().unwrap()),
+                &live_workers,
+                Some(&status),
+                Some(&receipt_before_tail),
+            ),
+            KvStateProjectionResolution::Unknown(KvStateUnknownReason::RecoveryBehindBarrier)
+        );
+
+        let recovered_cursor =
+            apply_recovery_tail(&Indexer::None, &plan, 9, &mut runtime, &mut tails)
+                .await
+                .unwrap();
+        assert_eq!(recovered_cursor, 10);
+        assert_eq!(runtime[&owner].recovered_cursor, 10);
+
+        let receipt_after_tail = KvStateRecoveryReceipt {
+            identity,
+            attachment_generation: Some(7),
+            recovered_through_cursor: recovered_cursor,
+        };
+        assert!(matches!(
+            resolve_kv_state_projection(
+                true,
+                owner,
+                std::slice::from_ref(&plan.source),
+                std::slice::from_ref(plan.attachment.as_ref().unwrap()),
+                &live_workers,
+                Some(&status),
+                Some(&receipt_after_tail),
+            ),
+            KvStateProjectionResolution::Ready { worker: ready, .. } if ready == worker
+        ));
+    }
+
+    #[tokio::test]
+    async fn detached_owner_remains_hint_source_without_scheduling_projection() {
+        let owner = owner(4);
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let worker = WorkerWithDpRank::new(17, 3);
+        let primary = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let lower_tiers = LowerTierIndexers::new(1, 4);
+        let indexer = Indexer::KvIndexer {
+            primary,
+            lower_tier: lower_tiers.clone(),
+            approx: None,
+            primary_records_routing_decisions: false,
+        };
+        lower_tiers
+            .get_or_create(StorageTier::HostPinned)
+            .apply_event_and_wait(RouterEvent::with_cache_owner(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id: 1,
+                    dp_rank: worker.dp_rank,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: None,
+                        blocks: vec![
+                            KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(101),
+                                tokens_hash: LocalBlockHash(11),
+                                mm_extra_info: None,
+                            },
+                            KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(102),
+                                tokens_hash: LocalBlockHash(12),
+                                mm_extra_info: None,
+                            },
+                        ],
+                    }),
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        let mut runtime = HashMap::from([(
+            owner,
+            OwnerRuntime {
+                publisher_id: Some(41),
+                recovered_cursor: 2,
+                attachment_generation: Some(7),
+                last_worker: Some(worker),
+                ready: true,
+                attached_worker: Some(worker),
+                router_hint_source: Some(RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                }),
+                hint_ready: true,
+                recovery_required: false,
+            },
+        )]);
+        let lookup = || {
+            query_lower_tiers_with_options(
+                &lower_tiers,
+                &[LocalBlockHash(11), LocalBlockHash(12)],
+                &MatchDetails::default(),
+                LowerTierQueryOptions {
+                    retain_router_hint_chain: true,
+                },
+            )
+        };
+
+        publish_projection(&indexer, &runtime);
+        let attached = lookup();
+        assert_eq!(
+            attached[&StorageTier::HostPinned].hits.get(&worker),
+            Some(&2)
+        );
+
+        let state = runtime.get_mut(&owner).unwrap();
+        state.ready = false;
+        state.attached_worker = None;
+        state.attachment_generation = None;
+        publish_projection(&indexer, &runtime);
+        let detached = lookup();
+        let details = &detached[&StorageTier::HostPinned];
+        assert!(details.hits.is_empty());
+        let candidates = details.router_hint_root_candidates.as_ref().unwrap();
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(RouterHintCandidateSource::CacheOwner(owner_key), 2)]
+        );
+        assert_eq!(
+            candidates
+                .routing_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.router_hint_source(owner_key))
+                .and_then(|source| source.attached_worker),
+            None
+        );
+
+        runtime.get_mut(&owner).unwrap().hint_ready = false;
+        publish_projection(&indexer, &runtime);
+        let cleared = lookup();
+        assert!(
+            cleared[&StorageTier::HostPinned]
+                .router_hint_root_candidates
+                .is_none()
+        );
     }
 
     #[test]
@@ -2011,6 +2289,9 @@ mod tests {
                 attachment_generation: None,
                 last_worker: Some(worker),
                 ready: false,
+                attached_worker: None,
+                router_hint_source: None,
+                hint_ready: false,
                 recovery_required: false,
             },
         )]);
@@ -2045,7 +2326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incorrectly_attributed_live_event_withdraws_projection_eligibility() {
+    async fn incorrectly_attributed_live_event_withdraws_detached_hint_eligibility() {
         let selected = owner(4);
         let other = owner(5);
         let worker = WorkerWithDpRank::new(17, 3);
@@ -2054,9 +2335,12 @@ mod tests {
             OwnerRuntime {
                 publisher_id: Some(41),
                 recovered_cursor: 0,
-                attachment_generation: Some(2),
+                attachment_generation: None,
                 last_worker: Some(worker),
-                ready: true,
+                ready: false,
+                attached_worker: None,
+                router_hint_source: None,
+                hint_ready: true,
                 recovery_required: false,
             },
         )]);
@@ -2076,6 +2360,7 @@ mod tests {
         assert!(apply_live_events(&Indexer::None, 41, vec![event], &mut runtime).await);
         let state = runtime.get(&selected).unwrap();
         assert!(!state.ready);
+        assert!(!state.hint_ready);
         assert!(state.recovery_required);
         assert_eq!(state.recovered_cursor, 0);
     }

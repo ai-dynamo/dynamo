@@ -17,7 +17,7 @@ fn executable_exposes_native_grpc_configuration() {
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
     for flag in [
-        "--vllm-endpoint",
+        "--grpc-endpoint",
         "--grpc-connections",
         "--disaggregation-mode",
         "--grpc-connect-attempt-timeout-secs",
@@ -27,6 +27,7 @@ fn executable_exposes_native_grpc_configuration() {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
     for env in [
+        "DYN_SIDECAR_GRPC_ENDPOINT",
         "DYN_SIDECAR_GRPC_CONNECTIONS",
         "DYN_SIDECAR_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS",
         "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",

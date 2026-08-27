@@ -429,13 +429,6 @@ fn is_valid_trace_flags(trace_flags: &str) -> bool {
     trace_flags.len() == 2 && trace_flags.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Validate the traceparent version field according to W3C Trace Context.
-/// A valid version is a 2-character hex string other than `ff` (forbidden);
-/// `00`-`fe` parse, matching the OTel propagator and preserving forward-compat.
-fn is_valid_version(version: &str) -> bool {
-    version.len() == 2 && matches!(u8::from_str_radix(version, 16), Ok(v) if v != 0xff)
-}
-
 fn normalize_trace_flags(trace_flags: &str) -> String {
     if is_valid_trace_flags(trace_flags) {
         trace_flags.to_ascii_lowercase()
@@ -464,27 +457,11 @@ fn current_otel_trace_flags() -> Option<String> {
 
 /// Parse a traceparent string into its components
 pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let pieces: Vec<_> = traceparent.split('-').collect();
-    if pieces.len() != 4 {
-        return (None, None, None);
-    }
-    let version = pieces[0];
-    let trace_id = pieces[1];
-    let parent_id = pieces[2];
-    let trace_flags = pieces[3];
-
-    if !is_valid_version(version)
-        || !is_valid_trace_id(trace_id)
-        || !is_valid_span_id(parent_id)
-        || !is_valid_trace_flags(trace_flags)
-    {
-        return (None, None, None);
-    }
-
+    let (trace_parent, _) = extract_trace_parent(&TraceparentHeader(traceparent));
     (
-        Some(trace_id.to_string()),
-        Some(parent_id.to_string()),
-        Some(trace_flags.to_ascii_lowercase()),
+        trace_parent.trace_id,
+        trace_parent.parent_id,
+        trace_parent.trace_flags,
     )
 }
 
@@ -502,6 +479,14 @@ pub trait GenericHeaders {
     fn get(&self, key: &str) -> Option<&str>;
 }
 
+struct TraceparentHeader<'a>(&'a str);
+
+impl GenericHeaders for TraceparentHeader<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        (key == "traceparent").then_some(self.0)
+    }
+}
+
 impl GenericHeaders for async_nats::HeaderMap {
     fn get(&self, key: &str) -> Option<&str> {
         async_nats::HeaderMap::get(self, key).map(|value| value.as_str())
@@ -514,43 +499,85 @@ impl GenericHeaders for http::HeaderMap {
     }
 }
 
-impl TraceParent {
-    pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
-        let mut trace_id = None;
-        let mut parent_id = None;
-        let mut trace_flags = None;
-        let mut tracestate = None;
-        let mut x_request_id = None;
-        let mut request_id = None;
+impl GenericHeaders for std::collections::HashMap<String, String> {
+    fn get(&self, key: &str) -> Option<&str> {
+        std::collections::HashMap::get(self, key).map(String::as_str)
+    }
+}
 
-        if let Some(header_value) = headers.get("traceparent") {
-            (trace_id, parent_id, trace_flags) = parse_traceparent(header_value);
-        }
+struct GenericHeaderExtractor<'a, H>(&'a H);
 
-        if let Some(header_value) = headers.get("x-request-id") {
-            x_request_id = Some(header_value.to_string());
-        }
+impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key)
+    }
 
-        if let Some(header_value) = headers.get("tracestate") {
-            tracestate = Some(header_value.to_string());
-        }
+    fn keys(&self) -> Vec<&str> {
+        ["traceparent", "tracestate"]
+            .into_iter()
+            .filter(|key| self.0.get(key).is_some())
+            .collect()
+    }
+}
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
-        if let Some(header_value) = headers.get("request-id") {
-            request_id = Some(header_value.to_string());
-        } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
-            request_id = Some(header_value.to_string());
-        }
+fn extract_trace_parent<H: GenericHeaders>(
+    headers: &H,
+) -> (TraceParent, Option<opentelemetry::Context>) {
+    let valid_widths = headers.get("traceparent").is_some_and(|header| {
+        let mut fields = header.trim().split('-');
+        let version_field = fields.next();
+        matches!(
+            (version_field, fields.next(), fields.next(), fields.next()),
+            (Some(version), Some(trace_id), Some(span_id), Some(flags))
+                if version.len() == 2
+                    && trace_id.len() == 32
+                    && span_id.len() == 16
+                    && flags.len() == 2
+        ) && (version_field != Some("00") || fields.next().is_none())
+    });
+    let context = if valid_widths {
+        TRACE_PROPAGATOR.extract_with_context(
+            &opentelemetry::Context::new(),
+            &GenericHeaderExtractor(headers),
+        )
+    } else {
+        opentelemetry::Context::new()
+    };
+    let span = context.span();
+    let span_context = span.span_context();
+    let (trace_id, parent_id, trace_flags, context) = if span_context.is_valid() {
+        (
+            Some(span_context.trace_id().to_string()),
+            Some(span_context.span_id().to_string()),
+            Some(format!("{:02x}", span_context.trace_flags().to_u8())),
+            Some(context),
+        )
+    } else {
+        (None, None, None, None)
+    };
 
-        let request_id = request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
+    let request_id = headers
+        .get("request-id")
+        .or_else(|| headers.get("x-dynamo-request-id"))
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(str::to_string);
+
+    (
         TraceParent {
             trace_id,
             parent_id,
             trace_flags,
-            tracestate,
-            x_request_id,
+            tracestate: headers.get("tracestate").map(str::to_string),
+            x_request_id: headers.get("x-request-id").map(str::to_string),
             request_id,
-        }
+        },
+        context,
+    )
+}
+
+impl TraceParent {
+    pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
+        extract_trace_parent(headers).0
     }
 }
 
@@ -563,9 +590,7 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
     let version = format!("{:?}", req.version());
-    let trace_parent = TraceParent::from_headers(req.headers());
-
-    let otel_context = extract_otel_context_from_http_headers(req.headers());
+    let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
     // Ensure every inference request has a request_id on the span.
     // This is the single source of truth — workers and get_or_create_request_id
@@ -615,8 +640,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
     let version = format!("{:?}", req.version());
-    let trace_parent = TraceParent::from_headers(req.headers());
-    let otel_context = extract_otel_context_from_http_headers(req.headers());
+    let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
     // Ensure every system request has a request_id on the span.
     let request_id = trace_parent
@@ -653,42 +677,6 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Extract OpenTelemetry context from HTTP headers for distributed tracing
-fn extract_otel_context_from_http_headers(
-    headers: &http::HeaderMap,
-) -> Option<opentelemetry::Context> {
-    let traceparent_value = headers.get("traceparent")?.to_str().ok()?;
-
-    struct HttpHeaderExtractor<'a>(&'a http::HeaderMap);
-
-    impl<'a> Extractor for HttpHeaderExtractor<'a> {
-        fn get(&self, key: &str) -> Option<&str> {
-            self.0.get(key).and_then(|v| v.to_str().ok())
-        }
-
-        fn keys(&self) -> Vec<&str> {
-            vec!["traceparent", "tracestate"]
-                .into_iter()
-                .filter(|&key| self.0.get(key).is_some())
-                .collect()
-        }
-    }
-
-    // Early return if traceparent is empty
-    if traceparent_value.is_empty() {
-        return None;
-    }
-
-    let extractor = HttpHeaderExtractor(headers);
-    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
-
-    if otel_context.span().span_context().is_valid() {
-        Some(otel_context)
-    } else {
-        None
-    }
-}
-
 /// Create a handle_payload span from NATS headers with component context
 pub fn make_handle_payload_span(
     headers: &async_nats::HeaderMap,
@@ -697,10 +685,11 @@ pub fn make_handle_payload_span(
     namespace: &str,
     instance_id: u64,
 ) -> Span {
-    let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
-    let trace_parent = TraceParent::from_headers(headers);
+    let (trace_parent, otel_context) = extract_trace_parent(headers);
+    let trace_id = trace_parent.trace_id.as_ref();
+    let parent_span_id = trace_parent.parent_id.as_ref();
 
-    if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
+    if let (Some(trace_id), Some(parent_id)) = (trace_id, parent_span_id) {
         let span = tracing::info_span!(
             target: "request_span",
             "handle_payload",
@@ -746,30 +735,22 @@ pub fn make_handle_payload_span_from_tcp_headers(
     namespace: &str,
     instance_id: u64,
 ) -> Span {
-    let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_tcp_headers(headers);
-    let x_request_id = headers.get("x-request-id").cloned();
-    let request_id = headers
-        .get("request-id")
-        .or_else(|| headers.get("x-dynamo-request-id"))
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .cloned();
-    let tracestate = headers.get("tracestate").cloned();
-    let trace_flags = headers.get("traceparent").and_then(|value| {
-        let (_, _, flags) = parse_traceparent(value);
-        flags
-    });
+    let (trace_parent, otel_context) = extract_trace_parent(headers);
 
-    if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
+    if let (Some(trace_id), Some(parent_id)) = (
+        trace_parent.trace_id.as_ref(),
+        trace_parent.parent_id.as_ref(),
+    ) {
         let span = tracing::info_span!(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
-            trace_flags = trace_flags,
-            x_request_id = x_request_id,
-            request_id = request_id,
-            tracestate = tracestate,
+            trace_flags = trace_parent.trace_flags,
+            x_request_id = trace_parent.x_request_id,
+            request_id = trace_parent.request_id,
+            tracestate = trace_parent.tracestate,
             component = component,
             endpoint = endpoint,
             namespace = namespace,
@@ -785,58 +766,16 @@ pub fn make_handle_payload_span_from_tcp_headers(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
-            trace_flags = trace_flags,
-            x_request_id = x_request_id,
-            request_id = request_id,
-            tracestate = tracestate,
+            trace_flags = trace_parent.trace_flags,
+            x_request_id = trace_parent.x_request_id,
+            request_id = trace_parent.request_id,
+            tracestate = trace_parent.tracestate,
             component = component,
             endpoint = endpoint,
             namespace = namespace,
             instance_id = instance_id,
         )
     }
-}
-
-/// Extract OpenTelemetry trace context from TCP/HashMap headers for distributed tracing
-fn extract_otel_context_from_tcp_headers(
-    headers: &std::collections::HashMap<String, String>,
-) -> (
-    Option<opentelemetry::Context>,
-    Option<String>,
-    Option<String>,
-) {
-    let traceparent_value = match headers.get("traceparent") {
-        Some(value) => value.as_str(),
-        None => return (None, None, None),
-    };
-
-    let (trace_id, parent_span_id, _) = parse_traceparent(traceparent_value);
-
-    struct TcpHeaderExtractor<'a>(&'a std::collections::HashMap<String, String>);
-
-    impl<'a> Extractor for TcpHeaderExtractor<'a> {
-        fn get(&self, key: &str) -> Option<&str> {
-            self.0.get(key).map(|s| s.as_str())
-        }
-
-        fn keys(&self) -> Vec<&str> {
-            vec!["traceparent", "tracestate"]
-                .into_iter()
-                .filter(|&key| self.0.get(key).is_some())
-                .collect()
-        }
-    }
-
-    let extractor = TcpHeaderExtractor(headers);
-    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
-
-    let context_with_trace = if otel_context.span().span_context().is_valid() {
-        Some(otel_context)
-    } else {
-        None
-    };
-
-    (context_with_trace, trace_id, parent_span_id)
 }
 
 /// Extract OpenTelemetry trace context from NATS headers for distributed tracing
@@ -847,38 +786,8 @@ pub fn extract_otel_context_from_nats_headers(
     Option<String>,
     Option<String>,
 ) {
-    let traceparent_value = match headers.get("traceparent") {
-        Some(value) => value.as_str(),
-        None => return (None, None, None),
-    };
-
-    let (trace_id, parent_span_id, _) = parse_traceparent(traceparent_value);
-
-    struct NatsHeaderExtractor<'a>(&'a async_nats::HeaderMap);
-
-    impl<'a> Extractor for NatsHeaderExtractor<'a> {
-        fn get(&self, key: &str) -> Option<&str> {
-            self.0.get(key).map(|value| value.as_str())
-        }
-
-        fn keys(&self) -> Vec<&str> {
-            vec!["traceparent", "tracestate"]
-                .into_iter()
-                .filter(|&key| self.0.get(key).is_some())
-                .collect()
-        }
-    }
-
-    let extractor = NatsHeaderExtractor(headers);
-    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
-
-    let context_with_trace = if otel_context.span().span_context().is_valid() {
-        Some(otel_context)
-    } else {
-        None
-    };
-
-    (context_with_trace, trace_id, parent_span_id)
+    let (trace_parent, context) = extract_trace_parent(headers);
+    (context, trace_parent.trace_id, trace_parent.parent_id)
 }
 
 /// Inject OpenTelemetry trace context into NATS headers using W3C Trace Context propagation
@@ -2399,19 +2308,6 @@ pub mod tests {
     // not the per-field rules.
 
     #[test]
-    fn is_valid_version_accepts_00_to_fe_rejects_ff_and_malformed() {
-        assert!(is_valid_version("00"));
-        assert!(is_valid_version("01"));
-        assert!(is_valid_version("fe")); // highest valid version
-        assert!(!is_valid_version("ff")); // forbidden by W3C
-        assert!(!is_valid_version("FF")); // uppercase ff is still 0xff
-        assert!(!is_valid_version("zz")); // non-hex
-        assert!(!is_valid_version("0")); // too short
-        assert!(!is_valid_version("000")); // too long
-        assert!(!is_valid_version("")); // empty
-    }
-
-    #[test]
     fn is_valid_trace_id_requires_32_hex() {
         assert!(is_valid_trace_id(&"a".repeat(32)));
         assert!(is_valid_trace_id("0123456789abcdefABCDEF0123456789")); // case-insensitive
@@ -2442,19 +2338,18 @@ pub mod tests {
 
     #[test]
     fn parse_traceparent_happy_path() {
-        // Fields extracted by position; trace_flags is lowercased.
         assert_eq!(
-            parse_traceparent("00-11111111111111111111111111111111-2222222222222222-0A"),
+            parse_traceparent("00-11111111111111111111111111111111-2222222222222222-01"),
             (
                 Some("11111111111111111111111111111111".to_string()),
                 Some("2222222222222222".to_string()),
-                Some("0a".to_string()), // lowercased
+                Some("01".to_string()),
             )
         );
 
-        // A future, same-shape version (00-fe) still parses (forward-compat).
+        // Future versions are accepted and unsupported flag bits are cleared.
         let (trace_id, _, trace_flags) =
-            parse_traceparent("01-11111111111111111111111111111111-2222222222222222-01");
+            parse_traceparent("01-11111111111111111111111111111111-2222222222222222-09");
         assert_eq!(
             trace_id.as_deref(),
             Some("11111111111111111111111111111111")
