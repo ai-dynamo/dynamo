@@ -1653,18 +1653,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-data-gen"
-version = "1.5.0"
-dependencies = [
- "anyhow",
- "dynamo-kv-hashing",
- "flate2",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "dynamo-kv-hashing"
 version = "1.5.0"
 dependencies = [
@@ -1832,7 +1820,6 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
- "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
