@@ -75,6 +75,7 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
 opentelemetry-proto = { workspace = true }
+tonic = { version = "0.14", default-features = false, features = ["transport"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
@@ -125,6 +126,10 @@ temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
 jsonschema = {version = "0.17"}
 tempfile = { workspace = true }
+
+[[bench]]
+name = "metrics_collection"
+harness = false
 
 [[bench]]
 name = "compute_pool_overhead"

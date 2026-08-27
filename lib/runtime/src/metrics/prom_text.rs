@@ -83,9 +83,14 @@ pub fn parse_exposition(text: &str) -> anyhow::Result<Vec<MetricFamily>> {
 
     // Samples with no TYPE line are untyped; a gauge is the conservative
     // reading since untyped carries no aggregation semantics.
+    //
+    // A declared name is skipped even when its sample went unclaimed -- e.g. a
+    // histogram's bare `<name>` line with no `le`. Emitting it here would
+    // produce a second family with a declared family's name, and the merger
+    // rejects that pair for inconsistent type, costing the whole export tick.
     let mut untyped: HashMap<&str, MetricFamily> = HashMap::new();
     for (idx, sample) in samples.iter().enumerate() {
-        if claimed[idx] {
+        if claimed[idx] || types.contains_key(sample.name.as_str()) {
             continue;
         }
         let family = untyped.entry(&sample.name).or_insert_with(|| {
@@ -475,17 +480,21 @@ d_pause_seconds_count 300
     }
 
     /// Suffixes are only claimed by a declared parent, so a plain gauge named
-    /// `*_sum` survives. Untyped samples fall back to gauge.
+    /// `*_sum` survives, and untyped samples fall back to gauge. A declared
+    /// name never yields a second family: a bare `<name>` line under a
+    /// histogram TYPE must not become a gauge alongside it, or the merger
+    /// rejects the pair and the whole export tick is lost.
     #[test]
-    fn unclaimed_suffixes_and_untyped_samples_survive() {
+    fn untyped_fallback_never_shadows_a_declared_family() {
         let fs = parse_exposition(
-            "# TYPE d_batch_sum gauge\nd_batch_sum 42\nd_stray_metric{a=\"b\"} 7\n",
+            "# TYPE d_batch_sum gauge\nd_batch_sum 42\nd_stray_metric{a=\"b\"} 7\n\
+             # TYPE d_lat histogram\nd_lat_bucket{le=\"1\"} 2\nd_lat 99\n",
         )
         .expect("parse");
 
-        assert_eq!(names(&fs), vec!["d_batch_sum", "d_stray_metric"]);
+        assert_eq!(names(&fs), vec!["d_batch_sum", "d_lat", "d_stray_metric"]);
         assert_eq!(fs[0].get_metric()[0].get_gauge().value(), 42.0);
-        assert_eq!(fs[1].get_field_type(), MetricType::GAUGE);
-        assert_eq!(fs[1].get_metric()[0].get_gauge().value(), 7.0);
+        assert_eq!(fs[1].get_field_type(), MetricType::HISTOGRAM);
+        assert_eq!(fs[2].get_field_type(), MetricType::GAUGE);
     }
 }

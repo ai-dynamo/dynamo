@@ -160,7 +160,7 @@ pub(crate) enum OtlpProtocol {
 }
 
 impl OtlpProtocol {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Grpc => "grpc",
             Self::HttpProtobuf => "http/protobuf",

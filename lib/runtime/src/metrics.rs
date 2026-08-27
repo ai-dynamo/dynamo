@@ -738,19 +738,6 @@ pub struct MetricsRegistry {
     /// - warn/drop exact duplicate series, while allowing same metric name with different labels.
     child_registries: Arc<std::sync::RwLock<Vec<MetricsRegistry>>>,
 
-    /// Last structured collection, for [`MetricsRegistry::metric_families_cached`].
-    /// Shared via `Arc` so clones observe one cache rather than each paying the
-    /// GIL cost of its own collection.
-    #[allow(clippy::type_complexity)]
-    metric_families_cache: Arc<
-        std::sync::RwLock<
-            Option<(
-                std::time::Instant,
-                std::sync::Arc<Vec<prometheus::proto::MetricFamily>>,
-            )>,
-        >,
-    >,
-
     /// Update callbacks invoked before metrics are scraped.
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
@@ -791,7 +778,6 @@ impl MetricsRegistry {
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
-            metric_families_cache: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -881,8 +867,8 @@ impl MetricsRegistry {
     /// engine metric, so this parses the callback text back into families and
     /// merges both through the same dedup rules the text path uses.
     ///
-    /// Prefer [`Self::metric_families_cached`] on any periodic path: each call
-    /// here re-executes the expfmt callbacks, which take the Python GIL.
+    /// Each call re-executes the expfmt callbacks, which cross into Python and
+    /// take the GIL, so callers should collect on a deliberate cadence.
     pub fn metric_families_combined(&self) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
@@ -897,36 +883,6 @@ impl MetricsRegistry {
         }
 
         Ok(merger.into_sorted())
-    }
-
-    /// [`Self::metric_families_combined`] behind a short TTL.
-    ///
-    /// Collection is not free: expfmt callbacks cross into Python and take the
-    /// GIL. With `/metrics` scraped every 5s (see the platform chart's
-    /// PodMonitors) and an OTLP exporter polling independently, an uncached
-    /// second consumer adds GIL pressure on the worker's hot path for data that
-    /// has not changed. The TTL collapses near-simultaneous collections into
-    /// one.
-    pub fn metric_families_cached(
-        &self,
-        ttl: std::time::Duration,
-    ) -> anyhow::Result<std::sync::Arc<Vec<prometheus::proto::MetricFamily>>> {
-        {
-            let cache = self.metric_families_cache.read().unwrap();
-            if let Some((collected_at, families)) = cache.as_ref()
-                && collected_at.elapsed() < ttl
-            {
-                return Ok(families.clone());
-            }
-        }
-
-        let families = std::sync::Arc::new(self.metric_families_combined()?);
-
-        let mut cache = self.metric_families_cache.write().unwrap();
-        // A concurrent caller may have refreshed while we collected; either
-        // value is within the TTL, so keep ours and let the other be dropped.
-        *cache = Some((std::time::Instant::now(), families.clone()));
-        Ok(families)
     }
 
     /// Add a callback function that receives a reference to any MetricsHierarchy
@@ -2055,25 +2011,5 @@ vllm_num_requests_running{model="llama"} 4
             help("vllm_num_requests_running").as_deref(),
             Some("Running requests")
         );
-    }
-
-    /// Collection takes the Python GIL, so a second consumer within the TTL
-    /// must reuse the first collection.
-    #[test]
-    fn cache_collapses_collections_within_ttl() {
-        let registry = MetricsRegistry::new();
-        let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = calls.clone();
-        registry.add_expfmt_callback(StdArc::new(move || {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(ENGINE_TEXT.to_string())
-        }));
-
-        let ttl = std::time::Duration::from_secs(60);
-        let first = registry.metric_families_cached(ttl).expect("first");
-        let second = registry.metric_families_cached(ttl).expect("second");
-
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(StdArc::ptr_eq(&first, &second));
     }
 }

@@ -1997,6 +1997,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.14.6",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",

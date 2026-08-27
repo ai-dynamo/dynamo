@@ -231,10 +231,21 @@ impl ExportConfig {
             env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
         );
         // Only gRPC is implemented. Failing loudly beats silently exporting
-        // over the wrong transport, or silently not exporting at all.
+        // over the wrong transport, or silently not exporting at all. Name the
+        // variable that actually supplied the value: the generic protocol is a
+        // fallback, so an operator who only set that one would otherwise see an
+        // error about a variable they never touched.
         if protocol != crate::logging::OtlpProtocol::Grpc {
+            let source = match std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL) {
+                Ok(value) if !value.trim().is_empty() => {
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
+                }
+                _ => env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
+            };
             anyhow::bail!(
-                "{}=http/protobuf is not supported for metrics; use grpc",
+                "{source}={} is not supported for metrics; only grpc is implemented. \
+                 Set {}=grpc to override.",
+                protocol.as_str(),
                 env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
             );
         }
@@ -269,14 +280,6 @@ fn export_interval() -> Duration {
 /// logged and retried on the next tick: metrics are resendable, so a
 /// transient collector outage should not tear down the task.
 pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: CancellationToken) {
-    let mut client = match MetricsServiceClient::connect(config.endpoint.clone()).await {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(%error, endpoint = %config.endpoint, "OTLP metrics exporter failed to connect");
-            return;
-        }
-    };
-
     let attrs = vec![KeyValue {
         key: "service.name".to_string(),
         value: Some(AnyValue {
@@ -286,12 +289,10 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
     // Fixed for the process lifetime; a moving start time reads as a counter
     // reset on every export.
     let start_time = SystemTime::now();
-    // Half the interval keeps a near-simultaneous scrape from forcing a second
-    // GIL-taking collection, without serving stale data to the exporter.
-    let ttl = config.interval / 2;
 
     let mut ticker = tokio::time::interval(config.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut client: Option<MetricsServiceClient<tonic::transport::Channel>> = None;
 
     loop {
         tokio::select! {
@@ -299,7 +300,20 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
             _ = ticker.tick() => {}
         }
 
-        let families = match registry.metric_families_cached(ttl) {
+        // Connect lazily and retry on every tick. Connecting once up front
+        // would strand the exporter for the process lifetime if the collector
+        // happened to be down when this worker started.
+        if client.is_none() {
+            match MetricsServiceClient::connect(config.endpoint.clone()).await {
+                Ok(connected) => client = Some(connected),
+                Err(error) => {
+                    tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics connect failed");
+                    continue;
+                }
+            }
+        }
+
+        let families = match registry.metric_families_combined() {
             Ok(families) => families,
             Err(error) => {
                 tracing::warn!(%error, "OTLP metrics collection failed");
@@ -310,8 +324,13 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![to_resource_metrics(&families, attrs.clone(), start_time)],
         };
-        if let Err(error) = client.export(request).await {
+        if let Some(connected) = client.as_mut()
+            && let Err(error) = connected.export(request).await
+        {
             tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
+            // Drop the channel so the next tick reconnects; a broken transport
+            // will not recover on its own.
+            client = None;
         }
     }
 }
