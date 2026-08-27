@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Rolling Updates
-subtitle: Updates DGD worker images, resources, and arguments with managed rolling updates across Deployment, Grove, and LWS backends.
+subtitle: How DGD worker updates differ across Deployment, Grove, and LWS backends
 ---
 
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
 
-The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates**, while Grove and LWS-backed deployments use their native update mechanisms. Dynamo isolates Grove worker generations with hash-suffixed runtime namespaces even though Grove owns the rollout lifecycle.
+The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates**, while Grove and LWS-backed deployments use their native update mechanisms. Dynamo isolates Grove and LWS worker generations with hash-suffixed runtime namespaces even though those resources own the rollout lifecycle.
 
 ## Example
 
@@ -131,7 +131,7 @@ For DGDs backed by **Grove** (PodCliques, PodCliqueSets) or **LWS** (LeaderWorke
 
 - A modification to a pod spec triggers the rolling update behavior of the backing resource.
 - With Grove's default rolling behavior or `RollingRecreate`, PodCliques (PCLQ) and PodCliqueScalingGroups use `maxUnavailable: 1` and `maxSurge: 0`. These values do not apply when `OnDelete` is selected. LWS uses `maxUnavailable: 1` and `maxSurge: 0`.
-- Grove assigns one worker-spec hash to all worker components. A changed worker spec therefore moves prefill, decode, and other worker components to the new generation namespace together. New DGDs use hash suffixes from their first generation; existing DGDs adopt them on their next worker-generation change.
+- The operator assigns one worker-spec hash to all Grove worker components. A changed worker spec therefore moves prefill, decode, and other worker components to the new generation namespace together. New DGDs use hash suffixes from their first generation; existing DGDs adopt them on their next worker-generation change.
 - LWS also uses the DGD worker hash in worker runtime namespaces, while its underlying LeaderWorkerSets retain their native update behavior.
 
 The frontend stays on the base namespace prefix and discovers every ready worker generation. It can share incoming traffic across old and new generations while prefill/decode communication remains inside one generation:
@@ -139,8 +139,8 @@ The frontend stays on the base namespace prefix and discovers every ready worker
 ```mermaid
 flowchart LR
     C[Client traffic] --> F[Frontend<br/>base namespace prefix]
-    F -->|weighted by worker count| O[Old WorkerSet<br/>namespace-hash-a]
-    F -->|weighted by worker count| N[New WorkerSet<br/>namespace-hash-b]
+    F -->|weighted by worker count| O[Old generation namespace<br/>namespace-hash-a]
+    F -->|weighted by worker count| N[New generation namespace<br/>namespace-hash-b]
     O --> OP[Old prefill]
     O --> OD[Old decode]
     N --> NP[New prefill]

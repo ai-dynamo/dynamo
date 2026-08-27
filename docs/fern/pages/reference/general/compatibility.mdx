@@ -31,7 +31,7 @@ This guarantee covers the frontend-to-worker discovery metadata and wire protoco
 
 ### Rolling Update Behavior
 
-During a rolling update, worker spec changes create generation-specific Dynamo namespaces. The frontend watches the deployment's base namespace prefix, so it can discover overlapping generations without allowing direct worker-to-worker communication across those generations. In a disaggregated deployment, prefill and decode workers in the same generation share one namespace and remain isolated from other generations.
+In Kubernetes deployments, worker spec changes during a rolling update create generation-specific Dynamo namespaces. The frontend watches the deployment's base namespace prefix, so it can discover overlapping generations without allowing direct worker-to-worker communication across those generations. In a disaggregated deployment, prefill and decode workers in the same generation share one namespace and remain isolated from other generations.
 
 The frontend excludes incomplete or unready namespaces from routing. When multiple ready WorkerSets are available, it selects a WorkerSet at random with weight proportional to its worker count, then applies the configured routing policy within that WorkerSet.
 
