@@ -17,7 +17,8 @@ use std::env;
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
@@ -332,6 +333,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) publisher: Arc<P>,
     publish_failure_logs: SequencePublishFailureLogLimiter,
     remote_state_updates: watch::Sender<()>,
+    capacity_generation: AtomicU64,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
     pub(super) replica_sync: bool,
@@ -475,6 +477,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             publisher,
             publish_failure_logs: SequencePublishFailureLogLimiter::default(),
             remote_state_updates,
+            capacity_generation: AtomicU64::new(0),
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
@@ -633,6 +636,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub(super) fn notify_remote_state_update(&self) {
+        self.bump_capacity_generation();
         #[cfg(test)]
         self.remote_state_update_count
             .fetch_add(1, Ordering::Relaxed);
@@ -739,6 +743,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
         self.prompt_registry
             .apply_topology_change_without_cleanup(change);
+        if !change.removed.is_empty() || !change.added.is_empty() {
+            self.bump_capacity_generation();
+        }
     }
 
     fn finish_worker_topology_change(&self, change: &WorkerTopologyChange) {
@@ -844,11 +851,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 lora_name,
             });
         }
-        Ok(if state_changed.is_applied() || booking_removed {
+        let outcome = if state_changed.is_applied() || booking_removed {
             LifecycleMutationOutcome::Applied
         } else {
             LifecycleMutationOutcome::NoChange
-        })
+        };
+        if outcome.is_applied() {
+            self.bump_capacity_generation();
+        }
+        Ok(outcome)
     }
 
     /// Release `request_id`'s booking only if it is still on `worker`.
@@ -889,11 +900,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 lora_name,
             });
         }
-        Ok(if state_changed.is_applied() || booking_removed {
+        let outcome = if state_changed.is_applied() || booking_removed {
             LifecycleMutationOutcome::Applied
         } else {
             LifecycleMutationOutcome::NoChange
-        })
+        };
+        if outcome.is_applied() {
+            self.bump_capacity_generation();
+        }
+        Ok(outcome)
     }
 
     /// Mark prefill as completed for a request.
@@ -908,12 +923,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return Ok(LifecycleMutationOutcome::NoChange);
         };
-        self.mutate_request_worker_load_state_local(
+        let outcome = self.mutate_request_worker_load_state_local(
             worker,
             request_id,
             decay_now,
             |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
-        )
+        )?;
+        if outcome.is_applied() {
+            self.bump_capacity_generation();
+        }
+        Ok(outcome)
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
@@ -1108,6 +1127,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             .any_worker_matches_active_tokens(decay_now, predicate)
     }
 
+    pub(crate) fn with_active_tokens<R>(
+        &self,
+        decay_now: Instant,
+        inspect: impl FnOnce(&super::prompt_registry::ActiveTokenLookup<'_>) -> R,
+    ) -> R {
+        self.prompt_registry.with_active_tokens(decay_now, inspect)
+    }
+
+    fn bump_capacity_generation(&self) {
+        self.capacity_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Monotonically changes when tracked capacity may become available.
+    pub(crate) fn capacity_generation(&self) -> u64 {
+        self.capacity_generation.load(Ordering::Acquire)
+    }
+
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.request_index.active_lora_counts()
     }
@@ -1144,6 +1180,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
         }
         drop(table);
+        if removed_request_count > 0 {
+            self.bump_capacity_generation();
+        }
         let duration = now.elapsed();
         tracing::debug!(
             duration = duration.as_secs_f64(),
@@ -1826,6 +1865,29 @@ mod tests {
             worker,
             lora_name: None,
         }
+    }
+
+    #[test]
+    fn capacity_generation_ignores_load_growth_and_tracks_release() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "capacity-generation".to_string();
+        let initial = sequences.capacity_generation();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences.add_output_block(&request_id, None).unwrap();
+        assert_eq!(sequences.capacity_generation(), initial);
+
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        let after_prefill = sequences.capacity_generation();
+        assert!(after_prefill > initial);
+
+        sequences.free(&request_id, Instant::now()).unwrap();
+        assert!(sequences.capacity_generation() > after_prefill);
     }
 
     #[test]

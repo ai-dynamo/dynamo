@@ -1741,6 +1741,7 @@ dependencies = [
  "dynamo-truthy",
  "fastrand",
  "flume",
+ "futures-util",
  "indexmap 2.14.0",
  "once_cell",
  "ordered-float 4.6.0",

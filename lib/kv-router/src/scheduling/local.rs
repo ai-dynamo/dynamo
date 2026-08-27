@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
@@ -16,6 +16,9 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::request_classifier::{
+    ClassifyRequest, RequestClassifier, RequestClassifierRuntime, RequestLifecycle,
+};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
@@ -48,6 +51,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: Option<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -198,7 +202,89 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
     ) -> Result<Self, KvSchedulerError> {
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
+        Self::new_with_policy_profile_inner(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            None,
+            overloaded_worker_provider,
+            available_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+            None,
+        )
+    }
+
+    /// Construct a scheduler with a request classifier before policy queueing.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_profile_and_request_classifier(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        classification_overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+        request_classifier: Box<dyn RequestClassifier>,
+    ) -> Result<Self, KvSchedulerError> {
+        let request_classifier =
+            RequestClassifierRuntime::new(request_classifier, cancellation_token.clone());
+        Self::new_with_policy_profile_inner(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            classification_overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+            Some(request_classifier),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_policy_profile_inner(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        classification_overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+        request_classifier: Option<Arc<RequestClassifierRuntime>>,
+    ) -> Result<Self, KvSchedulerError> {
+        let mut queue = SchedulerQueue::new_with_policy_profile(
             Arc::clone(&slots),
             workers_with_configs.clone(),
             profile,
@@ -208,7 +294,11 @@ where
             overlap_scores_refresh,
             overloaded_worker_provider,
             available_worker_provider,
-        )?);
+        )?;
+        if request_classifier.is_some() {
+            queue.set_classification_overlap_scores_refresh(classification_overlap_scores_refresh);
+        }
+        let queue = Arc::new(queue);
 
         let (queue_updates, _) = watch::channel(());
 
@@ -303,6 +393,7 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier,
             track_prefill_tokens_default,
             worker_type,
         })
@@ -312,15 +403,64 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_request_with_ingress_at(request, StdInstant::now())
+            .await
+    }
+
+    /// Schedule a request using a router-owned ingress timestamp.
+    ///
+    /// This is an internal cross-crate integration point for router layers that
+    /// perform variable work before entering the policy queue. It is not part of the
+    /// request classifier contract.
+    #[doc(hidden)]
+    pub async fn schedule_request_with_ingress_at(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: StdInstant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let classified_request = self.classify_request(&request).await?;
+        self.schedule_classified_request_with_ingress_at(request, classified_request, ingress_at)
+            .await
+    }
+
+    async fn classify_request(
+        &self,
+        request: &ScheduleRequest,
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
+        if matches!(request.mode, ScheduleMode::QueryOnly { .. }) {
+            return Ok(None);
+        }
+        let Some(request_classifier) = self.request_classifier.as_ref() else {
+            return Ok(None);
+        };
+        request_classifier
+            .classify_with(request.mode.request_id(), |inputs| {
+                self.queue.classify_request(request, inputs)
+            })
+            .await
+            .map(Some)
+    }
+
+    async fn schedule_classified_request_with_ingress_at(
+        &self,
+        request: ScheduleRequest,
+        classified_request: Option<ClassifyRequest>,
+        ingress_at: StdInstant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
         let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
-
         let mut lifecycle_lease = self
             .queue
-            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
+            .enqueue_classified_with_block_hashes_and_lease(
+                request,
+                block_hashes,
+                lifecycle_lease,
+                classified_request,
+                ingress_at,
+            )
             .await;
 
         let response = resp_rx
@@ -330,6 +470,23 @@ where
             lease.disarm();
         }
         response
+    }
+
+    /// Begin response-path lifecycle tracking when a classifier is configured.
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .as_ref()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
+    }
+
+    #[doc(hidden)]
+    pub fn has_request_classifier(&self) -> bool {
+        self.request_classifier.is_some()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -793,14 +950,17 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
 
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-    use crate::scheduling::PrefillLoadEstimator;
     use crate::scheduling::selector::DefaultWorkerSelector;
+    use crate::scheduling::{
+        ClassifyFuture, ClassifyRequest, PrefillLoadEstimator, RequestClassifier,
+    };
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -816,6 +976,20 @@ mod tests {
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
+    }
+
+    struct InspectingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for InspectingClassifier {
+        fn classify(&self, mut request: ClassifyRequest) -> ClassifyFuture {
+            assert_eq!(request.request_id(), Some("classified"));
+            assert_eq!(request.scheduling_cost_tokens(), 64);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            request.set_scheduling_cost_tokens(7);
+            Box::pin(async move { request })
+        }
     }
 
     impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
@@ -940,6 +1114,62 @@ mod tests {
             retain_router_hint_chain: false,
             shared_cache_hits: None,
         }
+    }
+
+    #[tokio::test]
+    async fn schedule_request_runs_classifier_before_scheduling() {
+        let workers = HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        )]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(workers);
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scheduler: LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig> =
+            LocalScheduler::new_with_policy_profile_and_request_classifier(
+                slots,
+                cfg_rx,
+                PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+                64,
+                DefaultWorkerSelector::new(None, "test"),
+                None,
+                None,
+                Some(Arc::new(NoopOverlapScoresRefresh)),
+                None,
+                None,
+                Duration::from_secs(60),
+                true,
+                cancel.clone(),
+                "test",
+                false,
+                Box::new(InspectingClassifier {
+                    calls: Arc::clone(&calls),
+                }),
+            )
+            .unwrap();
+        assert!(scheduler.supports_overlap_refresh());
+
+        let response = scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "classified".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response.best_worker.worker_id, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        cancel.cancel();
     }
 
     #[tokio::test]

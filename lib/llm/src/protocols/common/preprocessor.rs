@@ -484,6 +484,14 @@ impl PreprocessedRequest {
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
     }
+
+    /// Return the unpadded prompt size seen by the model.
+    pub(crate) fn input_token_count(&self) -> usize {
+        self.mm_routing_info
+            .as_ref()
+            .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
+            .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
+    }
 }
 
 fn extra_args_object(

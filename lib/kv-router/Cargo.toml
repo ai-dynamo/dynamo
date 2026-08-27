@@ -40,6 +40,7 @@ ordered-float = { workspace = true }
 once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"
+futures-util = { workspace = true }
 prometheus = { workspace = true, optional = true }
 seqlock = { workspace = true }
 serde = { workspace = true }

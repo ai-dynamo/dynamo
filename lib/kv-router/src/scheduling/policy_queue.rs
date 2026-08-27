@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::time::Instant;
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -10,8 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::WorkerPlacement;
 use crate::protocols::WorkerWithDpRank;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPlacement {
+    Any,
+    Exact(WorkerWithDpRank),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -75,7 +81,18 @@ pub struct PolicyQueueStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueuePriority {
     strict_priority: u32,
+    due_at: Option<Instant>,
     policy_score: OrderedFloat<f64>,
+}
+
+#[inline]
+fn cmp_due_time(lhs: Option<Instant>, rhs: Option<Instant>) -> Ordering {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => rhs.cmp(&lhs),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 #[inline]
@@ -85,9 +102,12 @@ fn cmp_queue_order(
     rhs_priority: QueuePriority,
     rhs_enqueue_seq: u64,
 ) -> Ordering {
-    lhs_priority
-        .strict_priority
-        .cmp(&rhs_priority.strict_priority)
+    cmp_due_time(lhs_priority.due_at, rhs_priority.due_at)
+        .then_with(|| {
+            lhs_priority
+                .strict_priority
+                .cmp(&rhs_priority.strict_priority)
+        })
         .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
         .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
 }
@@ -107,6 +127,10 @@ impl<T> PolicyQueueEntry<T> {
 
     pub fn snapshot(&self) -> QueueSnapshot {
         self.snapshot
+    }
+
+    pub(crate) fn due_at(&self) -> Option<Instant> {
+        self.priority.due_at
     }
 
     pub fn payload(&self) -> &T {
@@ -132,11 +156,12 @@ impl<T> PartialEq for PolicyQueueEntry<T> {
 
 impl<T> Ord for PolicyQueueEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .strict_priority
-            .cmp(&other.priority.strict_priority)
-            .then_with(|| self.priority.policy_score.cmp(&other.priority.policy_score))
-            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
+        cmp_queue_order(
+            self.priority,
+            self.enqueue_seq,
+            other.priority,
+            other.enqueue_seq,
+        )
     }
 }
 
@@ -473,6 +498,21 @@ impl<T> PolicyQueue<T> {
         })
     }
 
+    pub(crate) fn next_due_at(&self) -> Option<Instant> {
+        self.classes
+            .iter()
+            .flat_map(|class| {
+                class.pending.peek().into_iter().chain(
+                    class
+                        .ready_by_worker
+                        .values()
+                        .filter_map(|ready| ready.peek()),
+                )
+            })
+            .filter_map(PolicyQueueEntry::due_at)
+            .min()
+    }
+
     pub fn class_count(&self) -> usize {
         self.classes.len()
     }
@@ -527,6 +567,32 @@ impl<T> PolicyQueue<T> {
         placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_due_at(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            None,
+            placement,
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_with_due_at(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        due_at: Option<Instant>,
+        placement: WorkerPlacement,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -538,6 +604,7 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
+            due_at,
             class.config.queue_policy,
             self.next_enqueue_seq,
             payload,
@@ -747,6 +814,7 @@ fn make_entry<T>(
     arrival_offset_secs: f64,
     priority_jump: f64,
     strict_priority: u32,
+    due_at: Option<Instant>,
     queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
@@ -757,6 +825,7 @@ fn make_entry<T>(
         class_index,
         priority: QueuePriority {
             strict_priority,
+            due_at,
             policy_score: OrderedFloat(policy_score),
         },
         enqueue_seq,
@@ -965,6 +1034,80 @@ policy_classes:
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "keep"
+        );
+    }
+
+    #[test]
+    fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(20)),
+                WorkerPlacement::Any,
+                "later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(10)),
+                WorkerPlacement::Any,
+                "earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "earlier-due"
+        );
+    }
+
+    #[test]
+    fn earliest_due_request_precedes_strict_priority_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                10,
+                Some(now + std::time::Duration::from_secs(20)),
+                WorkerPlacement::Any,
+                "high-priority-later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(10)),
+                WorkerPlacement::Any,
+                "low-priority-earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "low-priority-earlier-due"
         );
     }
 

@@ -28,7 +28,8 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
+        CacheHitEstimates, ClassifyEvent, ClassifyFuture, ClassifyInputs, ClassifyRequest,
+        OverlapAnalysis, OverloadedWorkerProvider, RequestClassifier, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
@@ -388,6 +389,25 @@ pub(super) enum FindBestMatchInnerOutcome {
     WithoutAdmission(FindBestMatchAdvisoryOutcome),
 }
 
+struct DeclaredInputsClassifier {
+    classifier: Box<dyn RequestClassifier>,
+    required_inputs: ClassifyInputs,
+}
+
+impl RequestClassifier for DeclaredInputsClassifier {
+    fn required_inputs(&self) -> ClassifyInputs {
+        self.required_inputs
+    }
+
+    fn classify(&self, request: ClassifyRequest) -> ClassifyFuture {
+        self.classifier.classify(request)
+    }
+
+    fn on_event(&mut self, event: ClassifyEvent<'_>) {
+        self.classifier.on_event(event);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkerCacheHitEstimate {
     pub effective_overlap_blocks: f64,
@@ -434,10 +454,9 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
-    // Keep the two overload cases apart. A single overloaded worker can be
-    // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. A filter rejection is unavailable,
-    // not overload, and becomes HTTP 503.
+    // A single overloaded worker can be retried elsewhere; pool-wide and
+    // admission-control overloads cannot. A filter rejection is unavailable, not
+    // overload, and becomes HTTP 503.
     let (error_type, overloaded) = match error {
         scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)
@@ -445,6 +464,8 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::ClassifyPendingLimit { .. }
+        | scheduling::KvSchedulerError::DueTimeExpired => (ErrorType::ResourceExhausted, true),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -618,10 +639,103 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        Self::new_with_worker_role_inner(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            None,
+        )
+        .await
+    }
+
+    /// Construct a KV router with an optional classifier before policy queueing.
+    ///
+    /// Drive the returned router through [`RoutingHost`] so response lifecycle
+    /// events reach the classifier.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_request_classifier(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        request_classifier: impl RequestClassifier,
+    ) -> Result<Self> {
+        Self::new_with_worker_role_inner(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            Some(Box::new(request_classifier)),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_with_worker_role_inner(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        request_classifier: Option<Box<dyn RequestClassifier>>,
+    ) -> Result<Self> {
         let required_worker_inputs = selector.required_worker_inputs();
+        let required_classify_inputs = request_classifier
+            .as_ref()
+            .map_or(ClassifyInputs::NONE, |classifier| {
+                classifier.required_inputs()
+            });
+        let request_classifier = request_classifier.map(|classifier| {
+            Box::new(DeclaredInputsClassifier {
+                classifier,
+                required_inputs: required_classify_inputs,
+            }) as Box<dyn RequestClassifier>
+        });
+        let cache_inputs_required = required_worker_inputs.contains(WorkerInputs::CACHE)
+            || required_classify_inputs.contains(ClassifyInputs::CACHE);
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
-        let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
+        let shared_cache = if cache_inputs_required {
             shared_cache
         } else {
             None
@@ -633,7 +747,7 @@ where
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &kv_router_config);
-        let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
+        let cache_required = cache_inputs_required
             || kv_router_config.serve_indexer
             || matches!(
                 kv_event_source_requirement,
@@ -708,6 +822,18 @@ where
                 block_size,
             ))
         });
+        let classification_overlap_scores_refresh =
+            if request_classifier.is_some() && indexer.supports_classifier_overlap_refresh() {
+                overlap_scores_refresh.clone().or_else(|| {
+                    Some(Arc::new(TieredOverlapRefresher::new(
+                        indexer.clone(),
+                        kv_router_config.clone(),
+                        block_size,
+                    )))
+                })
+            } else {
+                None
+            };
         let client_for_overload = client.clone();
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
@@ -716,21 +842,44 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let scheduler = KvScheduler::start(
-            endpoint.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            selector,
-            &kv_router_config,
-            prefill_load_estimator.clone(),
-            overlap_scores_refresh,
-            Some(overloaded_worker_provider),
-            Some(available_worker_provider),
-            model_name.as_deref(),
-            metric_worker_type,
-            cancellation_token.child_token(),
-        )
-        .await?;
+        let scheduler = match request_classifier {
+            Some(request_classifier) => {
+                KvScheduler::start_with_request_classifier(
+                    endpoint.clone(),
+                    block_size,
+                    workers_with_configs.clone(),
+                    selector,
+                    &kv_router_config,
+                    prefill_load_estimator.clone(),
+                    overlap_scores_refresh,
+                    classification_overlap_scores_refresh,
+                    Some(overloaded_worker_provider),
+                    Some(available_worker_provider),
+                    model_name.as_deref(),
+                    metric_worker_type,
+                    cancellation_token.child_token(),
+                    request_classifier,
+                )
+                .await?
+            }
+            None => {
+                KvScheduler::start(
+                    endpoint.clone(),
+                    block_size,
+                    workers_with_configs.clone(),
+                    selector,
+                    &kv_router_config,
+                    prefill_load_estimator.clone(),
+                    overlap_scores_refresh,
+                    Some(overloaded_worker_provider),
+                    Some(available_worker_provider),
+                    model_name.as_deref(),
+                    metric_worker_type,
+                    cancellation_token.child_token(),
+                )
+                .await?
+            }
+        };
         // Start KV event subscription if needed — skip when using a remote indexer.
         let kv_event_subscription = if cache_required
             && kv_event_source_requirement.should_subscribe(&kv_router_config)
@@ -1166,10 +1315,15 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        if self.scheduler.has_request_classifier() {
+            anyhow::bail!("request-classifier routers must be driven through RoutingHost");
+        }
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
                 block_mm_infos,
                 router_config_override,
                 update_states,
@@ -1219,7 +1373,9 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
                 block_mm_infos,
                 router_config_override,
                 false,
@@ -1249,7 +1405,9 @@ where
     async fn find_best_match_details_with_policy_class_inner(
         &self,
         context_id: Option<&str>,
+        ingress_at: Instant,
         tokens: &[u32],
+        input_tokens: usize,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
@@ -1289,7 +1447,7 @@ where
                 request_id: context_id.map(str::to_string),
             },
         };
-        let isl_tokens = tokens.len();
+        let isl_tokens = input_tokens;
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
@@ -1408,7 +1566,7 @@ where
         let (response, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request(schedule_request)
+                .schedule_request_with_ingress_at(schedule_request, ingress_at)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {
@@ -2065,6 +2223,21 @@ mod tests {
     }
 
     #[test]
+    fn classifier_rejections_map_to_resource_exhausted() {
+        for error in [
+            KvSchedulerError::ClassifyPendingLimit { limit: 8 },
+            KvSchedulerError::DueTimeExpired,
+        ] {
+            let error = map_scheduler_error(error);
+            let dynamo_error = error
+                .downcast_ref::<DynamoError>()
+                .expect("classifier rejection should produce a DynamoError");
+
+            assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
+        }
+    }
+
+    #[test]
     fn worker_selection_receives_complete_session_context() {
         use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
         use dynamo_kv_router::WorkerSelectionInputTrigger;
@@ -2340,6 +2513,14 @@ mod tests {
         }
     }
 
+    struct CacheClassifier;
+
+    impl RequestClassifier for CacheClassifier {
+        fn required_inputs(&self) -> ClassifyInputs {
+            ClassifyInputs::CACHE
+        }
+    }
+
     async fn make_test_component(name: &str) -> dynamo_runtime::component::Component {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
@@ -2441,6 +2622,48 @@ mod tests {
             router.dump_events().await,
             Err(KvRouterError::Unsupported(message)) if message == "event dumping requires a KV indexer"
         ));
+    }
+
+    #[tokio::test]
+    async fn classifier_cache_inputs_retain_cache_providers() {
+        let component = make_test_component("classifier-cache-capability").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_event_threads: 1,
+            ..Default::default()
+        };
+
+        let router = KvRouter::new_with_request_classifier(
+            endpoint,
+            client,
+            workers,
+            None,
+            16,
+            LoadOnlySelector,
+            Some(config),
+            None,
+            Some(WorkerType::Prefill),
+            "prefill",
+            None,
+            false,
+            Some(Box::new(FakeSharedCache {
+                hits: None,
+                should_error: false,
+            })),
+            None,
+            CacheClassifier,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
+        assert!(!matches!(router.indexer, Indexer::None));
+        assert!(router.shared_cache.is_some());
     }
 
     async fn make_test_router_with_workers(

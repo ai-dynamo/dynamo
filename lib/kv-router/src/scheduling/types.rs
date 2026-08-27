@@ -95,13 +95,35 @@ pub enum KvSchedulerError {
 
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
+
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier returned a different logical request")]
+    RequestClassifierReplacedRequest,
+
+    #[error("request classifier already has a live request with ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("request-classifier pending limit reached (limit={limit})")]
+    ClassifyPendingLimit { limit: usize },
+
+    #[error("request due time expired")]
+    DueTimeExpired,
+
+    #[error("invalid classifier scheduling metadata: {0}")]
+    InvalidClassificationMetadata(String),
 }
 
 impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
-            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
+            Self::AllEligibleWorkersOverloaded
+                | Self::PinnedWorkerOverloaded { .. }
+                | Self::QueueRejected(_)
+                | Self::ClassifyPendingLimit { .. }
+                | Self::DueTimeExpired
         )
     }
 }
@@ -267,7 +289,7 @@ impl WorkerSelectionKvHints {
     }
 }
 
-/// Session metadata supplied to a custom worker-selection policy.
+/// Session metadata supplied to request classifiers and worker-selection policies.
 ///
 /// The internal request protocol supplies these values. Optional values remain
 /// absent when the request does not include them.
@@ -281,7 +303,7 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
-    /// Create the session metadata available to worker selection.
+    /// Create the session metadata available to routing extensions.
     pub fn new(
         session_id: String,
         parent_session_id: Option<String>,
@@ -347,6 +369,33 @@ pub struct ScheduleRequest {
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
+}
+
+impl ScheduleRequest {
+    pub(crate) fn eligibility(&self) -> RoutingEligibility<'_> {
+        RoutingEligibility::new(
+            self.allowed_worker_ids.as_ref(),
+            None,
+            self.pinned_worker,
+            &self.routing_constraints,
+        )
+    }
+
+    pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        self.overlap
+            .effective_cached_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
+        self.overlap
+            .effective_overlap_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(0.0)
+    }
 }
 
 /// Actor-owned admission request.

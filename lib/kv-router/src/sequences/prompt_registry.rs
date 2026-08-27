@@ -3,7 +3,7 @@
 
 use dynamo_tokens::SequenceHash;
 use indexmap::IndexMap;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
@@ -119,6 +119,21 @@ struct WorkerLoadTable {
     // IndexMap gives us the dense full-worker scan plus point lookup shape that was previously
     // hand-rolled as Vec<WorkerLoadSlot> + FxHashMap<WorkerWithDpRank, usize>.
     entries: IndexMap<WorkerWithDpRank, WorkerLoadSlot, FxBuildHasher>,
+}
+
+pub(crate) struct ActiveTokenLookup<'a> {
+    loads: RwLockReadGuard<'a, WorkerLoadTable>,
+    decay_now: Instant,
+}
+
+impl ActiveTokenLookup<'_> {
+    pub(crate) fn get(&self, worker: WorkerWithDpRank) -> usize {
+        self.loads
+            .entries
+            .get(&worker)
+            .map(|slot| slot.snapshot().active_tokens(self.decay_now))
+            .unwrap_or(0)
+    }
 }
 
 impl Default for WorkerLoadTable {
@@ -387,6 +402,17 @@ impl PromptRegistry {
             .read()
             .iter()
             .any(|(worker, load)| predicate(worker, load.active_tokens(decay_now)))
+    }
+
+    pub(super) fn with_active_tokens<R>(
+        &self,
+        decay_now: Instant,
+        inspect: impl FnOnce(&ActiveTokenLookup<'_>) -> R,
+    ) -> R {
+        inspect(&ActiveTokenLookup {
+            loads: self.loads.read(),
+            decay_now,
+        })
     }
 
     #[cfg(test)]

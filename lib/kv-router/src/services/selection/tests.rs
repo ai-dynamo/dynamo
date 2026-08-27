@@ -1096,7 +1096,7 @@ async fn explicit_replay_preserves_disabled_prefill_tracking() {
 }
 
 #[tokio::test]
-async fn standalone_policy_classes_apply_header_thresholds_and_structured_rejection() {
+async fn standalone_policy_classes_apply_header_limits_and_structured_rejection() {
     let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
     std::fs::write(
         policy_file.path(),
@@ -1136,29 +1136,20 @@ policy_classes:
     let reserved = post_with_policy_class(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"latency-active"}"#,
-        Some("latency"),
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"batch-active"}"#,
+        Some("batch"),
     )
     .await;
     assert_eq!(reserved.status(), StatusCode::OK);
 
-    let batch = post_with_policy_class(
-        app.clone(),
-        "/select",
-        r#"{"model_name":"model","token_ids":[5,6,7,8]}"#,
-        Some("batch"),
-    )
-    .await;
-    assert_eq!(batch.status(), StatusCode::OK);
-
     let rejected = post_with_policy_class(
         app,
         "/select",
-        r#"{"model_name":"model","token_ids":[9,10,11,12]}"#,
+        r#"{"model_name":"model","token_ids":[5,6,7,8]}"#,
         Some("latency"),
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = response_json(rejected).await;
     assert_eq!(body["details"]["policy_class"], "latency");
     assert_eq!(body["details"]["limit_kind"], "requests");

@@ -155,6 +155,10 @@ impl Indexer {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
+    pub(crate) fn supports_classifier_overlap_refresh(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
     pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
         matches!(
             self,
@@ -631,10 +635,16 @@ mod tests {
     }
 
     #[test]
-    fn overlap_refresh_is_limited_to_local_indexers() {
-        assert!(make_test_indexer().supports_overlap_refresh());
-        assert!(make_test_concurrent_indexer().supports_overlap_refresh());
+    fn overlap_refresh_capabilities_distinguish_queue_and_classifier_refresh() {
+        let local = make_test_indexer();
+        let concurrent = make_test_concurrent_indexer();
+
+        assert!(local.supports_overlap_refresh());
+        assert!(concurrent.supports_overlap_refresh());
         assert!(!Indexer::None.supports_overlap_refresh());
+        assert!(local.supports_classifier_overlap_refresh());
+        assert!(concurrent.supports_classifier_overlap_refresh());
+        assert!(!Indexer::None.supports_classifier_overlap_refresh());
     }
 
     #[test]
