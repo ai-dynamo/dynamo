@@ -368,25 +368,35 @@ impl Runtime {
     /// (cancelling the primary token) run on the primary runtime;
     /// [`Runtime::shutdown_complete`] resolves once phase 3 has run.
     ///
-    /// When this [`Runtime`] owns its Tokio runtime, that runtime is kept alive until the
-    /// phases reach that point even if the last [`Runtime`] handle is dropped first —
-    /// without that, dropping the last handle from an async context calls Tokio's
-    /// `shutdown_background` and discards the queued coordinator. Externally owned
-    /// runtimes are never torn down here.
+    /// When this [`Runtime`] owns its Tokio runtime, dropping the last [`Runtime`] handle
+    /// no longer destroys that runtime before the phases reach that point — without this,
+    /// dropping the last handle from an async context calls Tokio's `shutdown_background`
+    /// and discards the queued coordinator.
+    ///
+    /// That keep-alive guarantee holds against a *drop*, which is what this fixes; it is
+    /// not a guarantee against process exit. The thread that holds the owned runtime open
+    /// is detached, so a `main` that returns immediately after calling this still
+    /// terminates with the phases in flight. A caller that has to wait for them should
+    /// await [`Runtime::shutdown_complete`] or observe
+    /// [`Runtime::shutdown_complete_token`]. Externally owned runtimes are never torn
+    /// down here.
     ///
     /// Calling this more than once is a no-op after the first call.
     pub fn shutdown(&self) {
+        // Phase 1 runs here rather than in the coordinator task so that it cannot be lost
+        // along with that task, and ahead of the `initiated` latch so that the
+        // postcondition also holds for a second caller that races the first one between
+        // the latch and this line. `CancellationToken::cancel` is idempotent, so the
+        // repeat costs a redundant call and nothing else.
+        self.endpoint_shutdown_token.cancel();
+
         if self.shutdown_state.initiated.swap(true, Ordering::SeqCst) {
             tracing::debug!("Runtime shutdown already initiated; ignoring repeat request");
             return;
         }
 
         tracing::info!("Runtime shutdown initiated");
-
-        // Phase 1 runs here rather than in the coordinator task so that it cannot be lost
-        // along with that task, and so that callers get an unconditional postcondition.
-        tracing::info!("Phase 1: Cancelling endpoint shutdown token");
-        self.endpoint_shutdown_token.cancel();
+        tracing::info!("Phase 1: Cancelled endpoint shutdown token");
 
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
@@ -449,10 +459,6 @@ impl Runtime {
     /// a `shutdown` call — `transports::etcd` and `storage::kv::etcd` both build one,
     /// `block_on` it and drop it — must keep the plain drop behaviour.
     fn spawn_owned_teardown(&self, coordinator_done: std::sync::mpsc::Receiver<()>) {
-        if std::env::var("REVERT_TEARDOWN").is_ok() {
-            drop(coordinator_done);
-            return;
-        }
         // Holding these clones is what keeps `Arc::get_mut` in `Drop for RuntimeType` from
         // succeeding on the caller's thread, so a drop from an async context short-circuits
         // instead of calling `shutdown_background` on the executor the coordinator is
@@ -655,30 +661,68 @@ mod tests {
         .await;
     }
 
-    /// Keeping the executor alive forever would also make the two tests above pass, so
-    /// check that the teardown thread really does let go of it afterwards.
+    /// Regression coverage for the executor-lifetime half of the fix, i.e. for
+    /// `owns_executor`, the `coordinator_alive`/`coordinator_done` channel, and
+    /// [`Runtime::spawn_owned_teardown`].
+    ///
+    /// The two tests above only observe phase 1, which is why this one exists: it looks at
+    /// the owned executor *while the shutdown phases are still in flight* rather than
+    /// after they have finished. The graceful guard is what creates that window — phase 2
+    /// parks on it, so the coordinator cannot reach phase 3 and the teardown thread cannot
+    /// let go of the executor while the probe runs.
+    ///
+    /// Without `spawn_owned_teardown`, `Arc::get_mut` in `Drop for RuntimeType` succeeds on
+    /// the last handle, the drop happens in an async context, and `shutdown_background()`
+    /// destroys that executor right there — so the probe task is never polled and this test
+    /// is red. Observing the executor only *after* completion cannot tell the two apart:
+    /// the executor is dead by then either way, and under the bug it died sooner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_executor_is_torn_down_once_shutdown_completes() {
+    async fn owned_executor_outlives_the_drop_while_phases_are_in_flight() {
+        const PROBE: &str = "polled by the owned executor";
+
         let runtime = Runtime::single_threaded().unwrap();
-        let stale_handle = runtime.primary();
+        let tracker = runtime.graceful_shutdown_tracker();
+
+        // Held across the drop and the probe below, so phase 2 has something to wait for.
+        let guard = tracker.register_task();
+
+        let main_token = runtime.primary_token();
         let shutdown_complete = runtime.shutdown_complete_token();
+        // A `Handle` does not keep its runtime alive, so spawning on this after the drop
+        // observes the executor's real lifetime rather than extending it.
+        let owned_executor = runtime.primary();
 
         runtime.shutdown();
+
+        // The last owner, dropped from an async context with no intervening yield: the
+        // exact motion from the issue.
         drop(runtime);
 
+        assert!(
+            !main_token.is_cancelled(),
+            "phase 3 must not have run yet, or the window this test needs does not exist"
+        );
+
+        // The load-bearing observation. Queue work on the owned executor *now*, with the
+        // phases still in flight, and require that the executor is alive enough to run it.
+        let probe = owned_executor.spawn(async { PROBE });
+        match tokio::time::timeout(Duration::from_secs(10), probe).await {
+            Ok(Ok(value)) => assert_eq!(value, PROBE),
+            Ok(Err(join_error)) => panic!(
+                "the owned executor was torn down while the shutdown phases were still in \
+                 flight: {join_error}"
+            ),
+            Err(_) => panic!(
+                "the owned executor never polled work queued after the last handle was \
+                 dropped, so it is no longer running the shutdown phases"
+            ),
+        }
+
+        // Release phase 2 and confirm the coordinator did survive to phase 3.
+        drop(guard);
         tokio::time::timeout(Duration::from_secs(30), shutdown_complete.cancelled())
             .await
             .expect("shutdown coordinator never reached phase 3");
-
-        // The teardown thread drops the executor just after the completion signal fires, so
-        // poll until a task spawned on the stale handle comes back cancelled.
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while stale_handle.spawn(async {}).await.is_ok() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the owned executor was never torn down"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        assert!(main_token.is_cancelled());
     }
 }
