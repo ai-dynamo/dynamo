@@ -59,6 +59,12 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
     ResponseStream::new(Box::pin(stream::empty()), Arc::new(controller))
 }
 
+async fn bind(coordinator: &AffinityCoordinator, target: AffinityTarget) {
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = operation.into_stream(target, response_stream(1)).unwrap();
+    while stream.next().await.is_some() {}
+}
+
 async fn assert_binding_expires_after_refreshed_ttl(coordinator: &AffinityCoordinator) {
     tokio::time::advance(Duration::from_secs(9)).await;
     assert_eq!(
@@ -655,6 +661,137 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
             .into_stream(target(7, Some(3)), response_stream(1))
             .is_err()
     );
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn soft_affinity_rebinds_only_after_dispatch_succeeds() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let replacement = target(8, Some(1));
+    bind(&coordinator, original).await;
+
+    let failed_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(failed_attempt);
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original)
+    );
+
+    let successful_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = successful_attempt
+        .into_rebinding_stream(replacement, response_stream(1))
+        .unwrap();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original)
+    );
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replacement)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_or_cancelled_soft_stream_preserves_binding() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let replacement = target(8, Some(1));
+    bind(&coordinator, original).await;
+
+    let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut failed = attempt
+        .into_rebinding_stream(replacement, error_response_stream())
+        .unwrap();
+    while failed.next().await.is_some() {}
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original)
+    );
+
+    let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut cancelled = attempt
+        .into_rebinding_stream(replacement, cancelled_response_stream())
+        .unwrap();
+    assert!(cancelled.next().await.is_none());
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_soft_rebind_uses_observed_version_cas() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let winner = target(8, Some(0));
+    let stale = target(9, Some(0));
+    bind(&coordinator, original).await;
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let second = coordinator.acquire(&session_id(), None).await.unwrap();
+
+    let mut first_stream = first
+        .into_rebinding_stream(winner, response_stream(1))
+        .unwrap();
+    let mut second_stream = second
+        .into_rebinding_stream(stale, response_stream(1))
+        .unwrap();
+    while first_stream.next().await.is_some() {}
+    while second_stream.next().await.is_some() {}
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(winner)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replica_applies_only_newer_affinity_versions() {
+    let coordinator = coordinator();
+    let first = target(7, Some(0));
+    let newer = target(8, Some(0));
+    let stale = target(9, Some(0));
+
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", first, 3, 10),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", newer, 4, 10),
+        ReplicaApplyOutcome::ReplacedNewer
+    );
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", stale, 3, 11),
+        ReplicaApplyOutcome::IgnoredConflict
+    );
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("ordered"), None)
+            .unwrap(),
+        Some(newer)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_lease_cannot_invalidate_or_refresh_newer_replica_binding() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let replacement = target(8, Some(0));
+    bind(&coordinator, original).await;
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    coordinator.apply_versioned_replica_update_for_test(session_id().as_str(), replacement, 10, 1);
+    stale.invalidate();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replacement)
+    );
+
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
+    coordinator.apply_versioned_replica_update_for_test(session_id().as_str(), replacement, 11, 1);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    drop(stale);
+    tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
 }
 

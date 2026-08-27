@@ -18,7 +18,7 @@ use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::PromptMembershipTrie;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{DpRank, WorkerId, WorkerWithDpRank};
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -340,6 +340,36 @@ impl PromptRegistry {
             );
         }
 
+        projections
+    }
+
+    pub(super) fn project_affinity_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        worker_id: WorkerId,
+        dp_ranks: std::ops::Range<DpRank>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let query_len = token_sequence.map_or(0, |query| query.len());
+        let matched_depth = self.membership.compute_overlap_depths(token_sequence);
+        let loads = self.loads.read();
+        let mut projections = FxHashMap::default();
+        for dp_rank in dp_ranks {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let Some(load) = loads.entries.get(&worker).map(WorkerLoadSlot::snapshot) else {
+                continue;
+            };
+            let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
+            projections.insert(
+                worker,
+                WorkerLoadProjection {
+                    active_prefill_tokens: load.active_tokens(decay_now),
+                    active_decode_blocks: load.active_blocks,
+                    active_requests: load.active_requests,
+                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                },
+            );
+        }
         projections
     }
 

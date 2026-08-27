@@ -9,7 +9,9 @@ use super::{
     DefaultWorkerPicker, LogitWeights, MaterializedSelectionInput, WorkerSelectionInput,
     WorkerSelector, select_worker_with_policy,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{
@@ -172,6 +174,14 @@ impl WorkerSelectionContext<'_> {
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.request.session_context.as_ref()
+    }
+
+    /// Return the session-affinity target resolved by the request host.
+    ///
+    /// This is a preference, not an eligibility constraint. It may be absent
+    /// from the candidate set when the target is unavailable or filtered out.
+    pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
+        self.request.affinity_target
     }
 
     /// Return the expected output length, if the request supplies one.
@@ -968,6 +978,60 @@ mod tests {
                 16,
             ))
             .unwrap();
+    }
+
+    #[test]
+    fn custom_picker_receives_affinity_target_without_narrowing_candidates() {
+        struct AffinityPicker;
+
+        impl WorkerPicker for AffinityPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let target = context.affinity_target().expect("affinity target");
+                assert_eq!(input.candidates().len(), 2);
+                input
+                    .candidates()
+                    .iter()
+                    .position(|candidate| {
+                        candidate.worker().worker_id == target.worker_id
+                            && target
+                                .dp_rank
+                                .is_none_or(|rank| candidate.worker().dp_rank == rank)
+                    })
+                    .ok_or_else(|| {
+                        WorkerSelectionPolicyError::failed("affinity target unavailable")
+                    })
+            }
+        }
+
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.affinity_target = Some(worker1.into());
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(AffinityPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, worker1);
+        assert_ne!(selected.worker, worker0);
     }
 
     #[test]

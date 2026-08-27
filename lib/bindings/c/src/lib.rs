@@ -858,6 +858,8 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             None,
+            None,
+            dynamo_llm::session_affinity::SessionAffinityMode::Hard,
             model_name.clone(),
             actual_namespace.clone(),
             decode_router.load_context().load_thresholds(),

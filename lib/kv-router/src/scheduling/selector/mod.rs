@@ -32,6 +32,11 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
+    /// Whether an eligible affinity target is selected before considering other workers.
+    fn retains_eligible_affinity_target(&self) -> bool {
+        false
+    }
+
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,
@@ -508,6 +513,7 @@ mod test_support {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),

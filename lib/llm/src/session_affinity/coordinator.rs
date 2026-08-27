@@ -2,22 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    pin::Pin,
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
     time::Duration,
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_runtime::{
-    engine::{AsyncEngineContext, AsyncEngineContextProvider},
+    engine::AsyncEngineContext,
     error::{DynamoError, ErrorType},
-    pipeline::{Error, ManyOut, ResponseStream},
+    pipeline::{Error, ManyOut},
 };
-use futures::Stream;
 use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +32,15 @@ use crate::{
     },
 };
 
+mod stream;
+
 pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct AffinityVersion {
+    pub(super) sequence: u64,
+    pub(super) writer_id: u64,
+}
 
 enum AffinityEntry {
     Initializing {
@@ -45,6 +50,7 @@ enum AffinityEntry {
     Bound {
         target: AffinityTarget,
         revision: u64,
+        version: AffinityVersion,
         active_leases: usize,
         idle_deadline: Instant,
     },
@@ -57,6 +63,8 @@ pub(super) struct AffinityCoordinatorInner {
     max_session_id_bytes: usize,
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
+    next_sequence: AtomicU64,
+    pub(super) writer_id: AtomicU64,
     cancel: CancellationToken,
     replica: OnceLock<ReplicaSyncRuntime>,
     #[cfg(test)]
@@ -79,6 +87,7 @@ pub(super) enum ReplicaApplyOutcome {
     Inserted,
     Refreshed,
     ReplacedExpired,
+    ReplacedNewer,
     IgnoredInitializing,
     IgnoredConflict,
     RejectedSessionId,
@@ -118,6 +127,8 @@ impl AffinityCoordinator {
             max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
+            next_sequence: AtomicU64::new(1),
+            writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
             #[cfg(test)]
@@ -254,6 +265,7 @@ impl AffinityCoordinator {
                         revision,
                         active_leases,
                         idle_deadline,
+                        ..
                     } if *active_leases == 0 && *idle_deadline <= now => {
                         tracing::debug!(
                             session_id = %session_id,
@@ -278,6 +290,7 @@ impl AffinityCoordinator {
                     AffinityEntry::Bound {
                         target,
                         revision,
+                        version,
                         active_leases,
                         ..
                     } => {
@@ -294,6 +307,7 @@ impl AffinityCoordinator {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
                             revision: *revision,
+                            version: *version,
                             active: true,
                         };
                         return Ok(AffinityAcquire::Bound {
@@ -386,7 +400,8 @@ impl AffinityCoordinator {
         router_id: u64,
         capacity: usize,
     ) -> tokio::sync::mpsc::Receiver<SessionAffinityUpdate> {
-        let (replica, rx) = ReplicaSyncRuntime::for_test(router_id, capacity);
+        self.inner.writer_id.store(router_id, Ordering::Relaxed);
+        let (replica, rx) = ReplicaSyncRuntime::for_test(capacity);
         self.inner
             .replica
             .set(replica)
@@ -400,7 +415,32 @@ impl AffinityCoordinator {
         session_id: impl Into<String>,
         target: AffinityTarget,
     ) -> ReplicaApplyOutcome {
-        self.inner.apply_replica_update(session_id.into(), target)
+        self.inner.apply_replica_update(
+            session_id.into(),
+            target,
+            AffinityVersion {
+                sequence: 0,
+                writer_id: 0,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_versioned_replica_update_for_test(
+        &self,
+        session_id: impl Into<String>,
+        target: AffinityTarget,
+        sequence: u64,
+        writer_id: u64,
+    ) -> ReplicaApplyOutcome {
+        self.inner.apply_replica_update(
+            session_id.into(),
+            target,
+            AffinityVersion {
+                sequence,
+                writer_id,
+            },
+        )
     }
 
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
@@ -430,9 +470,21 @@ impl AffinityCoordinatorInner {
             .is_ok()
     }
 
-    fn publish_replica_update(&self, session_id: &str, target: AffinityTarget) {
+    fn publish_replica_update(
+        &self,
+        session_id: &str,
+        target: AffinityTarget,
+        version: AffinityVersion,
+    ) {
         if let Some(replica) = self.replica.get() {
-            replica.publish(session_id, target);
+            replica.publish(session_id, target, version);
+        }
+    }
+
+    fn next_version(&self) -> AffinityVersion {
+        AffinityVersion {
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            writer_id: self.writer_id.load(Ordering::Relaxed),
         }
     }
 
@@ -440,10 +492,13 @@ impl AffinityCoordinatorInner {
         &self,
         session_id: String,
         target: AffinityTarget,
+        version: AffinityVersion,
     ) -> ReplicaApplyOutcome {
         if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
         }
+        self.next_sequence
+            .fetch_max(version.sequence.saturating_add(1), Ordering::Relaxed);
 
         let now = Instant::now();
         match self.entries.entry(session_id) {
@@ -455,6 +510,7 @@ impl AffinityCoordinatorInner {
                 entry.insert(AffinityEntry::Bound {
                     target,
                     revision,
+                    version,
                     active_leases: 0,
                     idle_deadline: now + self.ttl,
                 });
@@ -471,6 +527,7 @@ impl AffinityCoordinatorInner {
                     *entry.get_mut() = AffinityEntry::Bound {
                         target,
                         revision,
+                        version,
                         active_leases: 0,
                         idle_deadline: now + self.ttl,
                     };
@@ -478,11 +535,24 @@ impl AffinityCoordinatorInner {
                 }
                 AffinityEntry::Bound {
                     target: existing,
+                    version: existing_version,
                     idle_deadline,
                     ..
-                } if *existing == target => {
+                } if *existing == target && version >= *existing_version => {
+                    *existing_version = version;
                     *idle_deadline = now + self.ttl;
                     ReplicaApplyOutcome::Refreshed
+                }
+                AffinityEntry::Bound {
+                    target: existing,
+                    version: existing_version,
+                    idle_deadline,
+                    ..
+                } if version > *existing_version => {
+                    *existing = target;
+                    *existing_version = version;
+                    *idle_deadline = now + self.ttl;
+                    ReplicaApplyOutcome::ReplacedNewer
                 }
                 AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
             },
@@ -544,6 +614,23 @@ impl AffinityAcquire {
         dispatched_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
     ) -> Result<ManyOut<LlmResponse>, Error> {
+        self.into_stream_inner(dispatched_target, stream, false)
+    }
+
+    pub(crate) fn into_rebinding_stream(
+        self,
+        dispatched_target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+    ) -> Result<ManyOut<LlmResponse>, Error> {
+        self.into_stream_inner(dispatched_target, stream, true)
+    }
+
+    fn into_stream_inner(
+        self,
+        dispatched_target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+        allow_rebind: bool,
+    ) -> Result<ManyOut<LlmResponse>, Error> {
         match self {
             Self::Initialize(initialization) => {
                 let lease = initialization.commit(dispatched_target)?;
@@ -551,13 +638,13 @@ impl AffinityAcquire {
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
+                if allow_rebind && target != dispatched_target {
+                    return Ok(lease.into_rebinding_stream(stream, target, dispatched_target));
+                }
                 if let Err(error) = validate_dispatch_target("session", target, dispatched_target) {
                     lease.invalidate();
                     return Err(error);
                 }
-                // TODO: Revisit this split with the DP-rank-routing design. Decide whether a
-                // session binds at worker or rank scope; changing persisted scope requires an
-                // ordered replica-migration protocol, not conversion of a dispatch target.
                 lease.publish(target);
                 Ok(lease.into_stream(stream))
             }
@@ -597,9 +684,11 @@ impl AffinityInitialization {
         ) {
             return Err(invalid_argument("session affinity initialization changed"));
         }
+        let version = inner.next_version();
         *entry = AffinityEntry::Bound {
             target,
             revision: self.revision,
+            version,
             active_leases: 1,
             idle_deadline: Instant::now() + inner.ttl,
         };
@@ -610,6 +699,7 @@ impl AffinityInitialization {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
             revision: self.revision,
+            version,
             active: true,
         })
     }
@@ -640,25 +730,53 @@ pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
+    version: AffinityVersion,
     active: bool,
 }
 
 impl AffinityLease {
     fn publish(&self, target: AffinityTarget) {
         if let Some(inner) = self.coordinator.upgrade() {
-            inner.publish_replica_update(&self.session_id, target);
+            inner.publish_replica_update(&self.session_id, target, self.version);
         }
     }
 
+    fn rebind(&mut self, expected: AffinityTarget, target: AffinityTarget) {
+        let Some(inner) = self.coordinator.upgrade() else {
+            return;
+        };
+        let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
+            return;
+        };
+        let AffinityEntry::Bound {
+            target: current,
+            revision,
+            version,
+            ..
+        } = entry.value_mut()
+        else {
+            return;
+        };
+        if *revision != self.revision || *version != self.version || *current != expected {
+            return;
+        }
+        let next_version = inner.next_version();
+        *current = target;
+        *version = next_version;
+        self.version = next_version;
+    }
+
     pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
-        let context = stream.context();
-        ResponseStream::new(
-            Box::pin(AffinityTrackedStream {
-                stream,
-                lease: Some(self),
-            }),
-            context,
-        )
+        stream::track(stream, self, None)
+    }
+
+    fn into_rebinding_stream(
+        self,
+        stream: ManyOut<LlmResponse>,
+        expected: AffinityTarget,
+        target: AffinityTarget,
+    ) -> ManyOut<LlmResponse> {
+        stream::track(stream, self, Some((expected, target)))
     }
 
     fn release(&mut self) {
@@ -669,13 +787,14 @@ impl AffinityLease {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
-        let target = {
+        let (target, version) = {
             let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
                 return;
             };
             let AffinityEntry::Bound {
                 target,
                 revision,
+                version,
                 active_leases,
                 idle_deadline,
             } = entry.value_mut()
@@ -686,28 +805,36 @@ impl AffinityLease {
                 return;
             }
             *active_leases -= 1;
+            if *version != self.version {
+                return;
+            }
             *idle_deadline = Instant::now() + inner.ttl;
-            *target
+            (*target, *version)
         };
-        inner.publish_replica_update(&self.session_id, target);
+        inner.publish_replica_update(&self.session_id, target, version);
     }
 
     fn invalidate(&mut self) {
         if !self.active {
             return;
         }
-        self.active = false;
         let Some(inner) = self.coordinator.upgrade() else {
+            self.active = false;
             return;
         };
         let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
             matches!(
                 entry,
-                AffinityEntry::Bound { revision, .. } if *revision == self.revision
+                AffinityEntry::Bound { revision, version, .. }
+                    if *revision == self.revision && *version == self.version
             )
         });
         if removed.is_some() {
+            self.active = false;
             inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            drop(inner);
+            self.release();
         }
     }
 }
@@ -715,26 +842,6 @@ impl AffinityLease {
 impl Drop for AffinityLease {
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-struct AffinityTrackedStream {
-    stream: ManyOut<LlmResponse>,
-    lease: Option<AffinityLease>,
-}
-
-impl Stream for AffinityTrackedStream {
-    type Item = LlmResponse;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(None) => {
-                drop(self.lease.take());
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-            poll => poll,
-        }
     }
 }
 

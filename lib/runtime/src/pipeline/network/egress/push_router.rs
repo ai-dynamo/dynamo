@@ -869,7 +869,8 @@ where
             .client
             .routing_instances()
             .routable_ids()
-            .contains(&instance_id)
+            .binary_search(&instance_id)
+            .is_ok()
         {
             return Ok(());
         }

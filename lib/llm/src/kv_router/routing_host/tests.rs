@@ -219,6 +219,7 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         inner,
         load_context,
         None,
+        crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
 
@@ -301,6 +302,7 @@ async fn builtin_direct_dispatch_ignores_local_inhibition() {
         inner,
         load_context,
         None,
+        crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
 
@@ -362,6 +364,7 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
         inner,
         load_context,
         None,
+        crate::session_affinity::SessionAffinityMode::Hard,
         Some((filter, Arc::clone(&estimator))),
     )
     .unwrap();
@@ -439,6 +442,7 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
             inner,
             load_context,
             Some(affinity.clone()),
+            crate::session_affinity::SessionAffinityMode::Hard,
         )
         .unwrap();
         let session_id = format!("session-{index}");
@@ -465,6 +469,50 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
             &[worker_id; 2]
         );
     }
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-affinity-modes".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let fallback_worker_id = worker_id + 1;
+    client.override_instance_avail(vec![worker_id, fallback_worker_id]);
+    client.set_overloaded_instances(&[worker_id]);
+    let load_context = test_load_context(&client).await;
+    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let request = Context::new(request());
+
+    let hard = host
+        .select_hosted_worker(&request, Some(AffinityTarget::worker(worker_id)), None)
+        .unwrap();
+    let soft = host
+        .select_hosted_worker(&request, None, Some(AffinityTarget::worker(worker_id)))
+        .unwrap();
+
+    assert_eq!(hard.initial_worker, worker_id);
+    assert_eq!(
+        hard.target_constraint,
+        Some(AffinityTarget::worker(worker_id))
+    );
+    assert_eq!(soft.initial_worker, fallback_worker_id);
+    assert_eq!(soft.target_constraint, None);
 
     runtime.shutdown();
 }
@@ -501,6 +549,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
         inner,
         load_context,
         Some(affinity.clone()),
+        crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
 
@@ -1050,7 +1099,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
 }
 
 #[tokio::test]
-async fn session_affinity_post_selection_cancellation_preserves_binding() {
+async fn session_affinity_post_selection_failures_preserve_binding() {
     let (router, runtime) = router(Some(Duration::from_secs(10))).await;
     let affinity = router.affinity.as_ref().unwrap();
     let session_id = SessionAffinityId::new("cancelled-after-selection");
@@ -1065,21 +1114,19 @@ async fn session_affinity_post_selection_cancellation_preserves_binding() {
     };
     drop(initializer.commit(original_target).unwrap());
 
-    let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
-    let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
-    invalidate_on_non_cancellation(&mut operation, &cancellation);
-    assert!(operation.is_some());
+    let operation = Some(affinity.acquire(&session_id, None).await.unwrap());
     drop(operation);
     assert_eq!(
         affinity.query_target(&session_id, None).unwrap(),
         Some(original_target)
     );
 
-    let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
-    let failure = anyhow::anyhow!("dispatch failed");
-    invalidate_on_non_cancellation(&mut operation, &failure);
-    assert!(operation.is_none());
-    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+    let operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+    drop(operation);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(original_target)
+    );
 
     drop(router);
     runtime.shutdown();
@@ -1552,8 +1599,14 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
             .unwrap();
     let chooser = Arc::new(chooser);
     let kv_router = Arc::new(
-        RoutingHost::new_with_load_context(push_router, chooser.clone(), load_context, None)
-            .unwrap(),
+        RoutingHost::new_with_load_context(
+            push_router,
+            chooser.clone(),
+            load_context,
+            None,
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap(),
     );
     let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = kv_router;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));

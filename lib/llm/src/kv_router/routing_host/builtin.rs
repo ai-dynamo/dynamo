@@ -165,11 +165,20 @@ where
         }))
     }
 
-    fn select_hosted_worker(
+    pub(super) fn select_hosted_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         target_constraint: Option<AffinityTarget>,
+        affinity_target: Option<AffinityTarget>,
     ) -> Result<HostedSelection, Error> {
+        let preferred_worker = match affinity_target {
+            Some(target) => self.inner.with_selectable_worker_ids(|ids| {
+                ids.binary_search(&target.worker_id)
+                    .ok()
+                    .map(|_| target.worker_id)
+            })?,
+            None => None,
+        };
         match &self.policy {
             RoutingPolicy::Kv(_) => unreachable!("hosted selection called for KV routing"),
             RoutingPolicy::Direct => {
@@ -196,7 +205,9 @@ where
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
                         selector,
-                        target_constraint.map(|target| target.worker_id),
+                        target_constraint
+                            .map(|target| target.worker_id)
+                            .or(preferred_worker),
                     )?;
                     Ok(HostedSelection {
                         initial_worker: selection.worker_id,
@@ -212,18 +223,19 @@ where
                             self.inner.ensure_routable(target.worker_id)?;
                             target.worker_id
                         }
-                        None => {
-                            self.inner
-                                .with_selectable_worker_ids(|ids| {
-                                    selector.select_worker(
+                        None => self.inner.with_selectable_worker_ids(|ids| {
+                            if let Some(worker_id) = preferred_worker {
+                                Ok(worker_id)
+                            } else {
+                                selector
+                                    .select_worker(
                                         dynamo_kv_router::selector::WorkerSelectionInput::hosted(
                                             ids, None,
                                         ),
                                     )
-                                })??
-                                .worker
-                                .worker_id
-                        }
+                                    .map(|selection| selection.worker.worker_id)
+                            }
+                        })??,
                     };
                     Ok(HostedSelection {
                         initial_worker: worker_id,
@@ -238,7 +250,9 @@ where
             RoutingPolicy::DeviceAwareWeighted => {
                 let selection = self.inner.select_device_aware_and_reserve(
                     request.content(),
-                    target_constraint.map(|target| target.worker_id),
+                    target_constraint
+                        .map(|target| target.worker_id)
+                        .or(preferred_worker),
                 )?;
                 let initial_worker = selection.worker_id();
                 let candidate_count = selection.candidate_count();
@@ -303,7 +317,15 @@ where
             )
         } else {
             self.select_with_session_affinity(&request, phase, is_query_only, |target| {
-                ready(self.select_hosted_worker(&request, target.or(explicit)))
+                let pinned_target = explicit.or(match self.session_affinity_mode {
+                    SessionAffinityMode::Hard => target,
+                    SessionAffinityMode::Soft => None,
+                });
+                let affinity_target = match (explicit, self.session_affinity_mode) {
+                    (None, SessionAffinityMode::Soft) => target,
+                    _ => None,
+                };
+                ready(self.select_hosted_worker(&request, pinned_target, affinity_target))
             })
             .await?
         };
@@ -315,6 +337,19 @@ where
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
+        let soft_affinity_target = (self.session_affinity_mode == SessionAffinityMode::Soft)
+            .then(|| operation.as_ref().and_then(AffinityAcquire::target))
+            .flatten();
+        let target_for_worker = |worker_id| {
+            AffinityTarget::new(
+                worker_id,
+                soft_affinity_target
+                    .filter(|target| target.worker_id == worker_id)
+                    .and_then(|target| target.dp_rank),
+            )
+        };
+        let expected_target =
+            target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
@@ -362,7 +397,6 @@ where
                 Ok(metadata) => metadata,
                 Err(error) => {
                     guard.abort().await;
-                    invalidate_on_non_cancellation(&mut operation, &error);
                     return Err(error);
                 }
             };
@@ -381,8 +415,8 @@ where
                     initial_worker,
                     |request, worker_id| {
                         let occupancy = guard.retarget_worker(worker_id);
-                        let target = AffinityTarget::worker(worker_id);
-                        request.routing_mut().dp_rank = None;
+                        let target = target_for_worker(worker_id);
+                        request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     },
                 ),
@@ -399,8 +433,8 @@ where
                     lora_fallback.as_ref(),
                     |request, worker_id| {
                         let occupancy = guard.retarget_worker(worker_id);
-                        let target = AffinityTarget::worker(worker_id);
-                        request.routing_mut().dp_rank = None;
+                        let target = target_for_worker(worker_id);
+                        request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     },
                 ),
@@ -413,12 +447,17 @@ where
         let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_routable(expected_target)
+                    && let Some(operation) = operation.take()
+                {
+                    operation.invalidate();
+                }
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -459,7 +498,10 @@ where
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
         match operation {
-            Some(operation) => Ok((metadata, operation.into_stream(target, stream)?)),
+            Some(operation) => Ok((
+                metadata,
+                self.track_session_affinity(operation, target, stream)?,
+            )),
             None => Ok((metadata, stream)),
         }
     }

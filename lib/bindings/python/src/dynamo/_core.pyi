@@ -1713,6 +1713,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a RouterConfig.
@@ -1725,6 +1726,7 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
         """
         ...
 
@@ -2880,6 +2882,7 @@ class KvRouter:
         session_affinity_ttl_secs: Optional[int] = None,
         *,
         load_threshold_config: Optional[LoadThresholdConfig] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2891,6 +2894,7 @@ class KvRouter:
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
         """
         ...
 
