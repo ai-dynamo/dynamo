@@ -86,12 +86,12 @@ FROM debian:bookworm-slim AS runtime
 
 # ca-certificates supports tokenizer downloads and TLS connections to Dynamo
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
-# needed in this image. The dynamo user is created with a home directory
-# because the Hugging Face tokenizer cache lives there.
+# needed in this image. The dynamo user uses group 0 for OpenShift
+# compatibility and has a home directory for the Hugging Face tokenizer cache.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --user-group dynamo
+    && useradd --create-home --uid 1000 --gid 0 dynamo
 
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
