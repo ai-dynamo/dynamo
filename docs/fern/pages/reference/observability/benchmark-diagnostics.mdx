@@ -1,0 +1,165 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Capture Benchmark Diagnostics
+subtitle: Collect request traces, metrics, and structured logs for a Dynamo benchmark
+---
+
+Capture this diagnostic bundle for every benchmark that needs performance analysis or support. The same bundle works for local, SLURM, and Kubernetes deployments. It contains request-level behavior, time-series system state, and the router decisions that connect the two.
+
+## Diagnostic Bundle
+
+Keep the benchmark configuration and these artifacts in one run directory. Use a unique `run_id` for every repetition.
+
+```text
+<run_id>/
+├── benchmark/                 # Load-generator configuration and results
+├── deployment/                # Applied deployment manifest, image digests, and pod descriptions
+├── request-traces/            # One rotating JSONL.GZ sequence per frontend
+├── metrics/
+│   └── final.parquet          # Tachometer output, when used
+└── logs/                      # Timestamped JSONL stdout, one file per Pod
+```
+
+Do not capture request payloads unless the investigation requires them. The default `request_end` trace record captures request metadata without prompts or generated text.
+
+| Signal | Required baseline | Use it to answer |
+| --- | --- | --- |
+| Request trace | `DYN_REQUEST_TRACE=1` on every frontend | Which worker served a request, KV reuse, queueing, Time To First Token (TTFT), and Inter-Token Latency (ITL) |
+| Metrics | Prometheus or Tachometer | Whether latency corresponds to saturation, queue growth, GPU state, or a routing trend |
+| Logs | JSONL at `INFO` on frontends and routers | What changed during the run and whether Dynamo reported failures or retries |
+
+Use router `DEBUG` logs only for a short, lower-rate reproduction. They record candidate scoring and selection detail, but their volume grows with request rate and worker count.
+
+## Enable Request Traces and Structured Logs
+
+Mount a scratch volume in every frontend Pod, then add the following environment variables to the frontend component in the existing `DynamoGraphDeployment` (DGD). Copy the trace directory after the benchmark and before deleting or replacing the Pod.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: <dgd-name>
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          volumes:
+            - name: benchmark-artifacts
+              emptyDir: {}
+          containers:
+            - name: main
+              env:
+                - name: DYN_REQUEST_TRACE
+                  value: "1"
+                - name: DYN_REQUEST_TRACE_SINKS
+                  value: file
+                - name: DYN_REQUEST_TRACE_FILE_PATH
+                  value: /var/lib/dynamo-benchmark/request-trace
+                - name: DYN_REQUEST_TRACE_FILE_FORMAT
+                  value: jsonl_gz
+                - name: DYN_LOGGING_CONSOLE_FORMAT
+                  value: jsonl
+                - name: DYN_LOG
+                  value: info
+              volumeMounts:
+                - name: benchmark-artifacts
+                  mountPath: /var/lib/dynamo-benchmark
+```
+
+Set the same logging variables on an EPP or other router component when it routes traffic independently of the frontend. Set `DYN_LOG=debug` on the routing component only while reproducing a routing decision. `DYN_LOG` controls Dynamo logging; configure backend-engine logging separately. See [Logging Reference](logging.mdx) for the supported log fields and filters.
+
+<Warning>
+The `emptyDir` in this example survives container restarts but not Pod deletion. Copy its contents before cleanup. Use a PVC or object-store trace sink when the deployment can be removed before collection.
+</Warning>
+
+## Collect Metrics on Kubernetes with Tachometer
+
+Use Prometheus when it is already part of the cluster. For a bounded benchmark without a metrics backend, run the [Tachometer benchmark collector](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/tachometer-benchmark-capture.yaml). It has an explicit endpoint list so you can see exactly which frontend and worker metrics it captures.
+
+Before applying the manifest, set the Tachometer image, an existing output PersistentVolumeClaim (PVC), a run ID, and the host name or Pod IP for every frontend and worker. Copy the `[[endpoints]]` worker block for each additional worker. The sample uses `8000` for frontend metrics and `9090` for worker metrics; update an endpoint URL if your deployment overrides either port. The Tachometer image is not bundled with Dynamo.
+
+<Steps>
+<Step title="Prepare the collector manifest">
+
+Download the manifest, edit its documented replacements, then apply it in the DGD namespace.
+
+```bash
+curl --fail --location --remote-name https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/observability/tachometer-benchmark-capture.yaml
+kubectl apply --namespace <namespace> --filename tachometer-benchmark-capture.yaml
+```
+
+</Step>
+<Step title="Verify the metrics targets">
+
+Wait for the collector to start and check that it can scrape each configured endpoint.
+
+```bash
+kubectl logs --namespace <namespace> deployment/tachometer-benchmark --container tachometer
+```
+
+</Step>
+<Step title="Stop the collector and retrieve metrics">
+
+After the benchmark, delete the collector Deployment. Kubernetes sends `SIGTERM`; Tachometer compacts the samples into `final.parquet` under the configured run ID on the output PVC. Retrieve that file with the normal procedure for your storage class.
+
+```bash
+kubectl delete --namespace <namespace> deployment/tachometer-benchmark
+```
+
+The output path is `/data/<run-id>/final.parquet` in the collector and `<run-id>/final.parquet` on the PVC.
+
+</Step>
+</Steps>
+
+Start the collector after the DGD reaches its planned replica count. Update its endpoint list after any scale-up, scale-down, or rolling replacement.
+
+## Save Kubernetes Logs and Request Traces
+
+After the benchmark, but before cleanup, collect the structured logs and request-trace directories from every DGD Pod. The commands retain the Pod name, container name, and timestamp in each log line.
+
+```bash
+RUN_ID=<run-id>
+NAMESPACE=<namespace>
+DGD_NAME=<dgd-name>
+ARTIFACT_DIR="${RUN_ID}"
+
+mkdir -p "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/request-traces" "${ARTIFACT_DIR}/deployment"
+
+for POD in $(kubectl get pods --namespace "${NAMESPACE}" \
+  --selector "nvidia.com/dynamo-graph-deployment-name=${DGD_NAME}" \
+  --output jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  kubectl logs --namespace "${NAMESPACE}" "${POD}" --all-containers \
+    --prefix --timestamps > "${ARTIFACT_DIR}/logs/${POD}.log"
+done
+
+for POD in $(kubectl get pods --namespace "${NAMESPACE}" \
+  --selector "nvidia.com/dynamo-graph-deployment-name=${DGD_NAME},nvidia.com/dynamo-component-type=frontend" \
+  --output jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  mkdir -p "${ARTIFACT_DIR}/request-traces/${POD}"
+  kubectl cp --namespace "${NAMESPACE}" --container main \
+    "${POD}:/var/lib/dynamo-benchmark/." \
+    "${ARTIFACT_DIR}/request-traces/${POD}"
+done
+
+kubectl get dynamographdeployment "${DGD_NAME}" --namespace "${NAMESPACE}" --output yaml \
+  > "${ARTIFACT_DIR}/deployment/dgd.yaml"
+kubectl get pods --namespace "${NAMESPACE}" \
+  --selector "nvidia.com/dynamo-graph-deployment-name=${DGD_NAME}" --output yaml \
+  > "${ARTIFACT_DIR}/deployment/pods.yaml"
+```
+
+If a Pod restarted, also collect its previous container logs with `kubectl logs --previous` before the replacement logs expire.
+
+## Share the Bundle
+
+Include the benchmark command, load-generator result, model and image identifiers, DGD manifest, and the complete run directory when requesting help. State the suspected symptom and the run interval in UTC. This lets an investigation join a slow request with its worker, router decision, and metrics sample without reconstructing the deployment.
+
+## Related
+
+- [Request Trace Reference](request-traces.mdx)
+- [Logging Reference](logging.mdx)
+- [Metrics Catalog](metrics-catalog.mdx)
+- [Kubernetes Observability](../../kubernetes/operations/observability.mdx)

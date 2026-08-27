@@ -935,6 +935,8 @@ navigation:
         icon: rocket
         collapsed: open-by-default
         contents:
+          - page: Benchmark Diagnostics
+            path: pages/reference/observability/benchmark-diagnostics.mdx
           - page: Kubernetes
             path: pages/kubernetes/operations/observability.mdx
           - page: Install the Local Stack
