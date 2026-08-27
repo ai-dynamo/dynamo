@@ -94,7 +94,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 ## Communication planes
 
 <ParamField path="--discovery-backend" type="string" default="etcd">
-  Service discovery backend. `kubernetes` uses the K8s API; `etcd` uses a distributed key-value store (configured via `ETCD_*` env vars such as `ETCD_ENDPOINTS`); `file` uses the local filesystem (path from `DYN_FILE_KV`, defaulting to `$TMPDIR/dynamo_store_kv`); `mem` uses an in-memory store suitable for single-process development. See [Discovery Plane](../../developer-guide/knowledge-base/concepts/communication-planes/discovery-plane.md) for design details.
+  Service discovery backend. `kubernetes` uses the K8s API; `etcd` uses a distributed key-value store (configured via `ETCD_*` env vars such as `ETCD_ENDPOINTS`); `file` uses the local filesystem (path from `DYN_FILE_KV`, defaulting to `$TMPDIR/dynamo_store_kv`); `mem` uses an in-memory store suitable for single-process development. See [Discovery Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane) for design details.
 
   On Kubernetes the operator sets this automatically to `kubernetes`; override only deliberately.
 
@@ -104,7 +104,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
-  Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. See [Request Plane](../../developer-guide/knowledge-base/concepts/communication-planes/request-plane.md) for design details.
+  Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. See [Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#request-plane) for design details.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge></span>
 
@@ -125,7 +125,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
-  explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/communication-planes/event-plane.md) for design details.
+  explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane) for design details.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 

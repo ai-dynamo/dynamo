@@ -432,9 +432,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&  \
-    git checkout $NIXL_UCX_REF &&	 \
+    : "${NIXL_UCX_REF:?}" && \
+    git init -q ucx && cd ucx && \
+    git remote add origin https://github.com/openucx/ucx.git && \
+    git fetch --depth 1 origin "${NIXL_UCX_REF}" && \
+    git checkout -q FETCH_HEAD && \
     # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
     # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
     # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
@@ -500,9 +502,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone "${NIXL_LIBFABRIC_REPO}" && \
-    cd libfabric && \
-    git checkout $NIXL_LIBFABRIC_REF && \
+    : "${NIXL_LIBFABRIC_REF:?}" && \
+    git init -q libfabric && cd libfabric && \
+    git remote add origin "${NIXL_LIBFABRIC_REPO}" && \
+    git fetch --depth 1 origin "${NIXL_LIBFABRIC_REF}" && \
+    git checkout -q FETCH_HEAD && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
@@ -534,7 +538,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
-    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+    git clone --recurse-submodules --shallow-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION}" \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
     cd /tmp/aws-sdk-cpp/build && \
@@ -569,6 +573,7 @@ COPY components/ /opt/dynamo/components/
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
 ARG ENABLE_NVTX
+ARG TARGETARCH
 {% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
 {% endif %}
@@ -598,7 +603,27 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$ENABLE_NVTX" = "true" ]; then NVTX_FEATURE=",nvtx"; fi && \
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist; \
+        # Skip maturin's built-in repair: it would graft the in-tree libav* into the
+        # wheel, which the codec gate rejects. Repair with those sonames excluded so
+        # they stay external and resolve to the image's /usr/local/lib copies. This
+        # media-enabled wheel is intentionally image-only and non-self-contained.
+        case "${TARGETARCH}" in \
+            amd64) ARCH_ALT=x86_64 ;; \
+            arm64) ARCH_ALT=aarch64 ;; \
+            *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
+        esac && \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --auditwheel skip --out target/wheels && \
+        auditwheel repair \
+            --exclude 'libavcodec.so.*' \
+            --exclude 'libavdevice.so.*' \
+            --exclude 'libavfilter.so.*' \
+            --exclude 'libavformat.so.*' \
+            --exclude 'libavutil.so.*' \
+            --exclude 'libswresample.so.*' \
+            --exclude 'libswscale.so.*' \
+            --plat manylinux_2_28_${ARCH_ALT} \
+            --wheel-dir /opt/dynamo/dist \
+            target/wheels/ai_dynamo_runtime-*.whl; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist; \
     fi && \
@@ -744,9 +769,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone "https://github.com/ai-dynamo/nixl.git" && \
-    cd nixl && \
-    git checkout ${NIXL_REF} && \
+    : "${NIXL_REF:?}" && \
+    git init -q nixl && cd nixl && \
+    git remote add origin https://github.com/ai-dynamo/nixl.git && \
+    git fetch --depth 1 origin "${NIXL_REF}" && \
+    git checkout -q FETCH_HEAD && \
     if [ "$DEVICE" = "cuda" ]; then \
         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
     else \

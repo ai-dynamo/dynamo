@@ -469,6 +469,7 @@ impl WorkerConfig {
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
                 enable_rl: false,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -580,12 +581,10 @@ impl Worker {
         let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let runtime = rs::Worker::runtime_from_existing()
-                .or_else(|_| {
-                    let worker = rs::Worker::from_settings()?;
-                    Ok::<_, anyhow::Error>(worker.runtime().clone())
-                })
-                .map_err(to_pyerr)?;
+            // No fallback: `runtime_from_existing` creates the process runtime when there isn't
+            // one, so it only fails when the settings themselves are bad. Retrying through
+            // `Worker::from_settings` would read those same settings and fail the same way.
+            let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
             // Initialize logging now that tokio context is available. Mirrors
             // the DistributedRuntime init path — required so workers using

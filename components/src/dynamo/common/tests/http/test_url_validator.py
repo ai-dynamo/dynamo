@@ -9,12 +9,16 @@ the media loaders, so they run quickly with no network and no vLLM imports.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import socket
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from dynamo.common.http import url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -37,6 +41,36 @@ PERMISSIVE = UrlValidationPolicy(
     allow_http=True,
     allow_private_ips=True,
 )
+
+_RUST_STRING_LITERAL = re.compile(r'"([^"\\]+)"')
+
+
+def _find_rust_media_loader_source() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = (
+            parent / "lib" / "llm" / "src" / "preprocessor" / "media" / "loader.rs"
+        )
+        if candidate.is_file():
+            return candidate
+    raise AssertionError("Could not locate the Rust media loader source")
+
+
+def _rust_static_strings(source: str, name: str) -> set[str]:
+    marker = f"static {name}:"
+    declaration = source.find(marker)
+    assert declaration >= 0, f"Rust {name} declaration not found"
+
+    initializer = source.find("LazyLock::new(|| {", declaration)
+    assert initializer >= 0, f"Rust {name} LazyLock initializer not found"
+    array_start = source.find("[", initializer)
+    array_end = source.find("]", array_start)
+    assert (
+        array_start >= 0 and array_end >= 0
+    ), f"Rust {name} initializer is no longer a string array"
+
+    values = set(_RUST_STRING_LITERAL.findall(source[array_start:array_end]))
+    assert values, f"Rust {name} contains no string literals"
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +114,19 @@ def test_is_blocked_ip_allows_public(ip: str) -> None:
 def test_is_blocked_ip_non_ip_literal_returns_false() -> None:
     # A hostname, not an IP — is_blocked_ip only classifies literals.
     assert is_blocked_ip("example.com") is False
+
+
+def test_python_and_rust_policy_constants_match() -> None:
+    """Test that the production blocklists are synchronized."""
+    rust_source = _find_rust_media_loader_source().read_text(encoding="utf-8")
+    rust_networks = {
+        ipaddress.ip_network(network)
+        for network in _rust_static_strings(rust_source, "BLOCKED_IP_NETWORKS")
+    }
+    rust_hosts = _rust_static_strings(rust_source, "BLOCKED_HOSTS")
+
+    assert set(url_validator._BLOCKED_IP_NETWORKS) == rust_networks
+    assert set(url_validator._BLOCKED_HOSTS) == rust_hosts
 
 
 # ---------------------------------------------------------------------------

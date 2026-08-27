@@ -13,6 +13,12 @@ status: experimental
 artifacts:
   recipe_specific_images:
   - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+    source_revision: 73aa2073d12c8cbd5c955f618aed251be920b8cd
+    source_kind: github-release
+    release_tag: v1.4.0-inkling-dev.1
+    release_state: prerelease
 targets:
 - id: agg-b200
   recommended: true

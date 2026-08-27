@@ -1728,6 +1728,22 @@ class RouterConfig:
         """
         ...
 
+class LoadThresholdConfig:
+    """Overload-admission thresholds shared by all policies in one routing load context."""
+
+    active_decode_blocks_threshold: Optional[float]
+    active_prefill_tokens_threshold: Optional[int]
+    active_prefill_tokens_threshold_frac: Optional[float]
+
+    def __init__(
+        self,
+        *,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+    ) -> None:
+        ...
+
 class AicPerfConfig:
     def __init__(
         self,
@@ -2861,6 +2877,9 @@ class KvRouter:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        load_threshold_config: Optional[LoadThresholdConfig] = None,
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2870,6 +2889,8 @@ class KvRouter:
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
+            load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
         """
         ...
 

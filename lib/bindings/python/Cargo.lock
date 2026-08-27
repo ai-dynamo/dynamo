@@ -1697,6 +1697,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
+ "url",
 ]
 
 [[package]]
@@ -1813,6 +1814,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "libc",
+ "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
  "lru",
@@ -2130,6 +2132,7 @@ dependencies = [
  "futures",
  "prost 0.13.5",
  "rand 0.9.4",
+ "reqwest 0.12.28",
  "serde_json",
  "tokio",
  "tokio-util",

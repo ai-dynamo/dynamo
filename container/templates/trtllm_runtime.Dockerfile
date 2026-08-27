@@ -69,6 +69,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssh-server \
+        libturbojpeg \
         librdmacm1 \
         rdma-core && \
     test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
@@ -82,6 +83,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0' && \
     rm -f \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
@@ -649,6 +651,29 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         echo "       base image's copy came back alongside the upgraded one -- the" >&2; \
         echo "       /usr/local/external/ffmpeg whiteout entry is missing." >&2; \
         find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
+        exit 1; \
+    fi
+
+# The Nsight Systems CLI in the CUDA base ships an optional efa_metrics sampler
+# for EFA network counters. Nothing in the Dynamo tree references it, and AWS
+# EFA confirmed on 2026-08-18 that they do not use it. It is a static Go binary,
+# so it carries its own copy of the Go standard library and is the sole carrier
+# for 17 of this image's Critical and High findings.
+#
+# Removed after the overlay rather than in the rm -rf above, for the same reason
+# that block documents in the other direction: COPY --from=runtime_full / /
+# reinstates whatever the base holds, so a pre-overlay whiteout here would just
+# be undone. The glob spans the CUDA version, the Nsight version and both target
+# architectures, all of which move with the base image.
+#
+# The guard is the point of the change, not decoration: a glob that silently
+# matches nothing after a base bump would leave the finding in place while the
+# build stayed green.
+RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics; \
+    if find /usr/local -type d -name efa_metrics 2>/dev/null | grep -q .; then \
+        echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
+        echo "       longer matches the base image's Nsight layout." >&2; \
+        find /usr/local -type d -name efa_metrics >&2; \
         exit 1; \
     fi
 
