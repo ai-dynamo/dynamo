@@ -591,7 +591,10 @@ where
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
 
-        let lifecycle = LifecycleTrace::from_environment();
+        let lifecycle = request_id
+            .as_ref()
+            .map(|id| LifecycleTrace::from_request_id(id.clone()))
+            .unwrap_or_else(LifecycleTrace::from_environment);
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {

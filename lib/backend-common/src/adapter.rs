@@ -216,7 +216,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
-        let lifecycle = LifecycleTrace::from_environment();
+        let lifecycle = LifecycleTrace::from_request_id(ctx.id().to_string());
         let worker_operation = if self.mode.is_prefill() {
             lifecycle.start(LifecycleStage::WorkerOperationPrefill)
         } else if self.mode.is_decode() {
