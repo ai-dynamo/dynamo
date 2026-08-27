@@ -40,7 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.10.0",
     "matplotlib",
     "networkx",

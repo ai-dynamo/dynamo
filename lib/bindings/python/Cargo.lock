@@ -33,35 +33,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "aiconfigurator-core"
-version = "0.11.0-dev20260728"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cf8f276632b8ac72c60d0a0e0747926f0719c3b7a784412c026cd9d46f0f7b8"
-dependencies = [
- "bincode 1.3.3",
- "parquet",
- "pyo3",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "aisimulate-core"
-version = "0.1.0-dev.1"
+version = "0.1.0-dev.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ec4febc5409e1597811a8ac6abbe2d193eb71bf2f9757c401a3813b48ac715e"
+checksum = "3aa0422f239fd9b9ca92d4a57fe7069771e158293d266e05a20fde477d15b9af"
 dependencies = [
  "anyhow",
+ "bincode 1.3.3",
  "blake3",
  "ddsketchy",
  "derive_builder",
+ "flate2",
  "indicatif 0.18.4",
+ "parquet",
+ "pep440_rs",
+ "pyo3",
+ "quick_cache",
  "rand 0.9.4",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
  "slotmap",
  "thiserror 2.0.18",
  "tracing",
@@ -1975,7 +1968,7 @@ dependencies = [
 name = "dynamo-py3"
 version = "1.5.0"
 dependencies = [
- "aiconfigurator-core",
+ "aisimulate-core",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -5500,6 +5493,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pep440_rs"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31095ca1f396e3de32745f42b20deef7bc09077f918b085307e8eab6ddd8fb9c"
+dependencies = [
+ "once_cell",
+ "serde",
+ "unicode-width",
+ "unscanny",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6103,6 +6108,18 @@ checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
 dependencies = [
  "memchr",
  "serde",
+]
+
+[[package]]
+name = "quick_cache"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "403c1a912fec895cafb223201e368234842acb9220aaf08ab042ae89ba5f135c"
+dependencies = [
+ "equivalent",
+ "foldhash 0.2.0",
+ "hashbrown 0.17.1",
+ "parking_lot",
 ]
 
 [[package]]
@@ -8659,6 +8676,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "unscanny"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9df2af067a7953e9c3831320f35c1cc0600c30d44d9f7a12b01db1cd88d6b47"
 
 [[package]]
 name = "untrusted"

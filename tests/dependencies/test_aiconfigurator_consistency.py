@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,11 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[2]
 LEGACY_DISTRIBUTIONS = {"aiconfigurator", "aiconfigurator-core"}
+CARGO_LOCKFILES = (
+    ROOT / "Cargo.lock",
+    ROOT / "lib/bindings/python/Cargo.lock",
+    ROOT / "lib/bindings/kvbm/Cargo.lock",
+)
 
 
 def _requirement_names(requirements: list[str]) -> set[str]:
@@ -49,9 +55,6 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         benchmark_project = tomllib.load(handle)["project"]
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
-    with (ROOT / "lib/bindings/python/Cargo.lock").open("rb") as handle:
-        bindings_lock = tomllib.load(handle)
-
     requirement_sets = [
         _requirement_names(root_project["dependencies"]),
         *(
@@ -67,12 +70,13 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     features = bindings_cargo["features"]
     dependencies = bindings_cargo["dependencies"]
     assert "aiconfigurator-core" not in dependencies
-    assert all(
-        package["name"] != "aiconfigurator-core" for package in bindings_lock["package"]
-    )
+    for lockfile in CARGO_LOCKFILES:
+        with lockfile.open("rb") as handle:
+            packages = tomllib.load(handle)["package"]
+        assert all(package["name"] != "aiconfigurator-core" for package in packages)
     assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.12.0",
+        "version": "=0.1.0-dev.2",
         "optional": True,
         "features": ["python"],
     }
@@ -81,6 +85,14 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
 def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
+
+    release = metadata.distribution("aisimulate")
+    release_requirements = _requirement_names(release.requires or [])
+    release_files = {str(path) for path in release.files or []}
+
+    assert not (release_requirements & LEGACY_DISTRIBUTIONS)
+    assert "aiconfigurator/__init__.py" in release_files
+    assert "aiconfigurator_core/__init__.py" in release_files
 
     import aiconfigurator
     import aiconfigurator_core
