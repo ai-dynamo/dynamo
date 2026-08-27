@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity,
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -61,6 +61,7 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -88,6 +89,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::ErrorObject;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -241,6 +243,14 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
+}
+
+fn responses_error_code(status_code: StatusCode) -> &'static str {
+    match status_code {
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
+        code if code.is_client_error() => "invalid_prompt",
+        _ => "server_error",
     }
 }
 
@@ -2254,6 +2264,8 @@ impl BackendErrorInfo {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
+    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
+
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2351,6 +2363,30 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
             });
+        }
+
+        // Some adapter paths encode a typed backend error into the message of
+        // a generic DynamoError. Recover only the exact stable discriminator;
+        // unknown errors without it remain sanitized as 500s.
+        let serialized_invalid_argument = match event.error.as_ref() {
+            Some(error)
+                if matches!(
+                    error.error_type(),
+                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
+                ) =>
+            {
+                error
+                    .message()
+                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
+            }
+            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
+            _ => None,
+        };
+        if let Some(message) = serialized_invalid_argument {
+            return Some(BackendErrorInfo::from_status(
+                message.to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         return Some(BackendErrorInfo::from_status(
@@ -2849,7 +2885,12 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -2868,10 +2909,7 @@ async fn chat_completions(
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
     let stream_can_defer_all_output =
-        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
-            parsing_options.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
-        );
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3131,6 +3169,17 @@ fn normalize_chat_reasoning_template_args(
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+fn request_stream_can_defer_all_output(
+    parsing_options: &ParsingOptions,
+    chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+) -> bool {
+    crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        chat_template_args,
+    )
 }
 
 /// Validates that required fields are present and valid in the chat completion request
@@ -3451,7 +3500,12 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // Responses requests share the chat-completions aggregator for the unary
     // path. Thread this option through so its post-parse fallback also caps a
@@ -3478,6 +3532,12 @@ async fn responses(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Responses streams use
+    // the same force-nonempty deferral as chat completions and therefore need
+    // the same fallback keep-alive when every data frame may be withheld.
+    let stream_can_defer_all_output =
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3531,6 +3591,8 @@ async fn responses(
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -3540,8 +3602,8 @@ async fn responses(
                 yield event.map_err(axum::Error::new);
             }
 
-            // Track whether the backend sent an error event during the stream.
-            let mut saw_error = false;
+            // Preserve the first backend error for the terminal Responses event.
+            let mut backend_error = None;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
                 process_chat_response_and_observe_metrics(
@@ -3550,8 +3612,16 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                if extract_backend_error_if_present(&annotated_chunk).is_some() {
-                    saw_error = true;
+                if let Some(backend_error_info) =
+                    extract_backend_error_if_present(&annotated_chunk)
+                {
+                    let error_response = backend_error_response(backend_error_info);
+                    producer_error_signal
+                        .set(extract_error_type_from_response(&error_response));
+                    backend_error.get_or_insert_with(|| ErrorObject {
+                        code: responses_error_code(error_response.0).to_string(),
+                        message: error_response.1.message.clone(),
+                    });
                     continue;
                 }
 
@@ -3565,22 +3635,37 @@ async fn responses(
                 }
             }
 
-            if saw_error {
-                converter.append_error_events(&mut events);
+            if let Some(error) = backend_error {
+                let terminal_event = converter.append_error_events(error, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    // From this yield onward, response.failed is sufficient for
+                    // a client to stop consuming without being a disconnect.
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
-            }
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
             }
         };
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_error_signal(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -5348,6 +5433,38 @@ mod tests {
             nvext: None,
             chat_template_args: None,
         }
+    }
+
+    #[test]
+    fn responses_force_nonempty_request_requires_fallback_keep_alive() {
+        let parsing_options = ParsingOptions::new(Some("qwen3_coder".into()), Some("qwen3".into()));
+        let mut chat_template_args = HashMap::new();
+
+        assert!(!request_stream_can_defer_all_output(&parsing_options, None));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(!request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
+        assert!(request_stream_can_defer_all_output(
+            &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]

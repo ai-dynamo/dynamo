@@ -13,7 +13,10 @@ use dynamo_kv_router::{
         KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, ThreadPoolIndexer,
         record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -134,6 +137,15 @@ impl Indexer {
         match self {
             Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
                 lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_routing_snapshot(snapshot)
             }
             Self::Remote { .. } | Self::None => {}
         }
@@ -321,11 +333,9 @@ impl Indexer {
                 ..
             } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => {
-                panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
-                );
-            }
+            Self::None => Err(KvRouterError::Unsupported(
+                "event dumping requires a KV indexer".to_string(),
+            )),
         }
     }
 
