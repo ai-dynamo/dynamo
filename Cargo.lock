@@ -2440,6 +2440,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2696,6 +2697,7 @@ dependencies = [
  "json-five",
  "lazy_static",
  "libc",
+ "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",
@@ -2868,9 +2870,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.3.1"
+version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
+checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -3030,6 +3032,7 @@ dependencies = [
  "futures",
  "prost 0.13.5",
  "rand 0.9.4",
+ "reqwest 0.12.28",
  "serde_json",
  "tokio",
  "tokio-util",

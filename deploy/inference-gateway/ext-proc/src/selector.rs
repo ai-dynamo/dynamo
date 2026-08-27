@@ -13,12 +13,13 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 
-use dynamo_kv_router::config::{KvRouterConfig, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
-    WorkerSelectionPolicyFactory,
+    WorkerSelectionPolicyRegistry, warn_for_unserved_worker_selection_policies,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -100,10 +101,46 @@ struct ReconcileState {
 }
 
 impl Selector {
-    fn validate_queueing_requirements(
+    pub async fn new(
         cfg: &EppStandaloneConfig,
-        queueing_enabled: bool,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<Self> {
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        Self::new_with_kv_router_config(cfg, kv_router_config, policy_registry).await
+    }
+
+    async fn new_with_kv_router_config(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<Self> {
+        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
+
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
+        let replication = Self::replication(cfg).await?;
+        let mut builder =
+            SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
+                .indexer_threads(cfg.selector_threads);
+        if let Some((_, peer_sync_port)) = &replication {
+            builder = builder.replica_sync(*peer_sync_port, Vec::new());
+        }
+        let service = Arc::new(
+            builder
+                .build()
+                .await
+                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
+        );
+        Self::from_service_with_replication(cfg, service, replication).await
+    }
+
+    fn validate_queueing_worker_capacity(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: &KvRouterConfig,
     ) -> Result<()> {
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
             anyhow::bail!(
                 "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
@@ -113,78 +150,6 @@ impl Selector {
             );
         }
         Ok(())
-    }
-
-    pub async fn new(cfg: &EppStandaloneConfig) -> Result<Self> {
-        Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
-    }
-
-    /// Build a selection service using the custom policy compiled into this EPP image.
-    pub(crate) async fn build_selection_service_with_worker_selection_policy_factory(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: KvRouterConfig,
-        factory: WorkerSelectionPolicyFactory,
-    ) -> Result<SelectionService> {
-        Self::build_selection_service(cfg, kv_router_config, Some(factory)).await
-    }
-
-    async fn new_with_kv_router_config(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: KvRouterConfig,
-    ) -> Result<Self> {
-        let service = Self::build_selection_service(cfg, kv_router_config, None).await?;
-        Self::from_service(cfg, service).await
-    }
-
-    async fn build_selection_service(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: KvRouterConfig,
-        factory: Option<WorkerSelectionPolicyFactory>,
-    ) -> Result<SelectionService> {
-        // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
-        // Done once at startup to avoid validating on every reconcile.
-        let queueing_enabled = kv_router_config
-            .queueing_enabled(Some(&cfg.model_name))
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        Self::validate_queueing_requirements(cfg, queueing_enabled)?;
-
-        let mut builder = SelectionServiceBuilder::new(kv_router_config)
-            .indexer_threads(cfg.selector_threads)
-            .resolved_worker_selection_policy_factory(factory);
-        let replication = Self::replication(cfg).await?;
-
-        if let Some((_, peer_sync_port)) = &replication {
-            builder = builder.replica_sync(*peer_sync_port, Vec::new());
-        }
-
-        builder
-            .build()
-            .await
-            .map_err(|e| anyhow!("building embedded selection service: {e}"))
-    }
-
-    /// Wrap a prebuilt selection service for use by a custom EPP image.
-    pub(crate) async fn from_service(
-        cfg: &EppStandaloneConfig,
-        service: SelectionService,
-    ) -> Result<Self> {
-        let service = Arc::new(service);
-        let queueing_enabled = service
-            .queueing_enabled(&cfg.model_name)
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        Self::validate_queueing_requirements(cfg, queueing_enabled)?;
-        let replication = match &cfg.peer_service {
-            Some(name) => Some((
-                name.clone(),
-                service.replica_sync_port().ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
-                    )
-                })?,
-            )),
-            None => None,
-        };
-        Self::from_service_with_replication(cfg, service, replication).await
     }
 
     async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
@@ -414,25 +379,15 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyParameters;
     use dynamo_kv_router::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyError,
+        WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
     };
 
     use super::*;
-
-    struct FirstEligiblePicker;
-
-    impl WorkerPicker for FirstEligiblePicker {
-        fn pick(
-            &mut self,
-            _context: &WorkerSelectionContext<'_>,
-            input: WorkerInputView<'_>,
-        ) -> Result<usize, WorkerSelectionPolicyError> {
-            assert!(!input.candidates().is_empty());
-            Ok(0)
-        }
-    }
 
     fn model_policy_file() -> tempfile::NamedTempFile {
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
@@ -553,7 +508,7 @@ models:
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
     /// core admitted it (so the reserve paths below actually book).
     async fn selector_with_schedulable_worker() -> Selector {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -568,28 +523,75 @@ models:
     }
 
     #[tokio::test]
-    async fn prebuilt_service_runs_custom_policy_through_reservation() {
-        let service = Selector::build_selection_service(
+    async fn registered_policy_runs_through_reservation() {
+        struct FirstEligiblePicker;
+
+        impl WorkerPicker for FirstEligiblePicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(!input.candidates().is_empty());
+                Ok(0)
+            }
+        }
+
+        let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: first-eligible
+  instances:
+    - name: first-eligible
+      type: first-eligible
+      parameters: {}
+"#,
+        )
+        .expect("write policy file");
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "first-eligible",
+                Arc::new({
+                    let provider_calls = Arc::clone(&provider_calls);
+                    let factory_calls = Arc::clone(&factory_calls);
+                    move |_parameters: &WorkerSelectionPolicyParameters| {
+                        provider_calls.fetch_add(1, Ordering::Relaxed);
+                        let factory_calls = Arc::clone(&factory_calls);
+                        let factory: WorkerSelectionPolicyFactory =
+                            Arc::new(move |config, worker_type, _partition| {
+                                factory_calls.fetch_add(1, Ordering::Relaxed);
+                                assert_eq!(worker_type, WorkerType::Aggregated);
+                                WorkerSelectionPolicy::new(
+                                    config.clone(),
+                                    worker_type.as_str(),
+                                    Vec::new(),
+                                    Box::new(FirstEligiblePicker),
+                                )
+                            });
+                        Ok(factory)
+                    }
+                }),
+            )
+            .expect("register policy provider");
+        let selector = Selector::new_with_kv_router_config(
             &test_config(),
-            KvRouterConfig::default(),
-            Some(Arc::new(|config, worker_type, _partition| {
-                WorkerSelectionPolicy::new(
-                    config.clone(),
-                    worker_type.as_str(),
-                    Vec::new(),
-                    Box::new(FirstEligiblePicker),
-                )
-            })),
+            router_config_with_policy(&policy_file),
+            registry,
         )
         .await
         .expect("custom selection service should build");
-        let selector = Selector::from_service(&test_config(), service)
-            .await
-            .expect("selector should accept a prebuilt service");
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
         selector
             .reconcile(&[schedulable_registration(1)])
             .await
             .expect("worker should register");
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
 
         let response = selector
             .select_and_reserve(select_request("custom-policy"))
@@ -723,7 +725,7 @@ models:
     /// so a worker exists in the catalog but is never schedulable.
     #[tokio::test]
     async fn select_and_reserve_errors_without_a_schedulable_worker() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -749,7 +751,7 @@ models:
     /// `prefill_complete` treat an unknown id as success (NotFound → Ok).
     #[tokio::test]
     async fn free_and_prefill_of_unknown_reservation_are_noops() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -764,7 +766,7 @@ models:
 
     #[tokio::test]
     async fn incomplete_worker_is_not_cached_as_reconciled() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -800,7 +802,7 @@ models:
 
     #[tokio::test]
     async fn stale_incomplete_worker_is_deleted() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -826,17 +828,21 @@ models:
     }
 
     #[tokio::test]
-    async fn queueing_model_requires_max_num_batched_tokens_at_startup() {
+    async fn queueing_model_rejects_missing_capacity_before_peer_discovery() {
         let policy_file = model_policy_file();
         let mut cfg = test_config();
         cfg.model_name = "queueing-model".to_string();
         cfg.max_num_batched_tokens = None;
+        cfg.peer_service = Some("unreachable-peer-service".to_string());
 
-        let error =
-            Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
-                .await
-                .err()
-                .expect("queueing model must reject missing capacity");
+        let error = Selector::new_with_kv_router_config(
+            &cfg,
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .err()
+        .expect("queueing model must reject missing capacity");
         assert!(
             error
                 .to_string()
@@ -852,61 +858,18 @@ models:
         cfg.model_name = "threshold-free-model".to_string();
         cfg.max_num_batched_tokens = None;
 
-        Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
-            .await
-            .expect("threshold-free model should allow missing capacity");
-    }
-
-    #[tokio::test]
-    async fn prebuilt_service_rejects_missing_queue_capacity() {
-        let policy_file = model_policy_file();
-        let router_config = router_config_with_policy(&policy_file);
-        let service = SelectionServiceBuilder::new(router_config)
-            .indexer_threads(1)
-            .build()
-            .await
-            .expect("selection service should build");
-        let mut cfg = test_config();
-        cfg.model_name = "queueing-model".to_string();
-        cfg.max_num_batched_tokens = None;
-
-        let error = Selector::from_service(&cfg, service)
-            .await
-            .err()
-            .expect("queueing model must reject missing capacity");
-        assert!(
-            error
-                .to_string()
-                .contains("DYN_EPP_MAX_NUM_BATCHED_TOKENS is required"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn prebuilt_service_rejects_peer_discovery_without_replica_sync() {
-        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
-            .indexer_threads(1)
-            .build()
-            .await
-            .expect("selection service should build");
-        let mut cfg = test_config();
-        cfg.peer_service = Some("does-not-exist".to_string());
-
-        let error = Selector::from_service(&cfg, service)
-            .await
-            .err()
-            .expect("peer discovery must require replica sync");
-        assert!(
-            error
-                .to_string()
-                .contains("SelectionService with replica sync enabled"),
-            "{error}"
-        );
+        Selector::new_with_kv_router_config(
+            &cfg,
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .expect("threshold-free model should allow missing capacity");
     }
 
     #[tokio::test]
     async fn duplicate_worker_ids_are_rejected_before_reconciliation() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         let duplicate = incomplete_registration(1);

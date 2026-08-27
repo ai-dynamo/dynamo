@@ -13,7 +13,7 @@ Keep Dynamo agent artifacts reproducible and easy to inspect.
   `inputs/user_provided_dgd.yaml`.
 - `recipe-deployer` creates `DEPLOY_ROOT=${EXP_ROOT}/artifacts/deploy-iter-<NNN>/` for each new candidate.
 - Keep retries and compatibility patches for one candidate in the same `DEPLOY_ROOT`.
-- Keep every previous iteration directory and its successful YAML unchanged after retiring its DGD.
+- Keep every previous iteration directory and its successful YAML unchanged after retiring its DGD, except for the retiring role writing `torn_down_at` into that iteration's `deployment_ledger.json`.
 
 ## Records
 

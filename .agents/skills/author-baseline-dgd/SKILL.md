@@ -67,7 +67,16 @@ prefer aggregated unless the user's SLOs demand otherwise).
 3. **Scaffold from the nearest recipe**: copy its structure (components, probes, service wiring, image versions
    for the chosen backend) and replace model, parallelism, resources, and any hardware-bound fields, naming every
    replacement. Never carry a hardware-bound topology, transport, or checkpoint choice across without evidence it
-   fits the target.
+   fits the target. A manifest expresses REQUIREMENTS (GPU type, count, memory), never observed cluster state:
+   do not pin node names or encode which nodes happen to be free, and preserve the recipe's scheduling
+   MECHANISMS (tolerations, product-label node selectors) while retargeting their VALUES to the contract's
+   hardware (a selector naming the recipe's GPU product is itself a hardware-bound field to replace). Before
+   copying service wiring, check the recipe's INFRASTRUCTURE PREREQUISITES against the stated target the same
+   way rung-2 adaptation does (gateway/service-mesh routing, referenced secrets, CRDs, storage classes):
+   strip or replace machinery the target cannot satisfy, name each removal, and keep a supported direct client
+   route to the workers; a prerequisite only the user can provide goes back to `user-interviewer` as a
+   blocking question. Offline YAML parsing and dry-runs cannot verify these, so this check is part of
+   authoring, not validation.
 4. **Set knobs to the backend guide's defaults**, deviating only where the sizing arithmetic requires it
    (e.g. `gpu_memory_utilization`, `max_model_len` capped to the workload). Leave optimization headroom alone.
 5. **Validate the draft**: parse as YAML, exactly one `DynamoGraphDeployment` document, no secret values, and

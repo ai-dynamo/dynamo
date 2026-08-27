@@ -1136,6 +1136,70 @@ class TestDeferredAbort:
 
         handler.engine_client.abort.assert_awaited_once_with("req-6")
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_waitables_after_normal_completion(self):
+        handler = _make_handler()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async with handler._abort_monitor(context, "req-cleanup"):
+            for _ in range(10):
+                if handler.shutdown_event._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_preserves_engine_shutdown_during_cleanup(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        real_gather = asyncio.gather
+        gather_entered = asyncio.Event()
+        gather_release = asyncio.Event()
+
+        async def delayed_gather(*args, **kwargs):
+            gather_entered.set()
+            await gather_release.wait()
+            return await real_gather(*args, **kwargs)
+
+        with patch.object(mod.asyncio, "gather", side_effect=delayed_gather):
+            with pytest.raises(mod.EngineShutdown):
+                async with handler._abort_monitor(
+                    context, "req-shutdown"
+                ) as monitor_task:
+                    for _ in range(10):
+                        if handler.shutdown_event._waiters:
+                            break
+                        await asyncio.sleep(0)
+                    assert len(handler.shutdown_event._waiters) == 1
+
+                    handler.shutdown_event.set()
+                    for _ in range(10):
+                        if monitor_task.done() or gather_entered.is_set():
+                            break
+                        await asyncio.sleep(0)
+                    assert monitor_task.done() or gather_entered.is_set()
+
+        handler.engine_client.abort.assert_awaited_once_with("req-shutdown")
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+        assert not gather_entered.is_set()
+
     # close() cleanup tests: case 1b safety
 
     @pytest.mark.asyncio
@@ -1399,6 +1463,22 @@ class TestEmbeddingWorkerHandlerCancellation:
             asyncio.get_event_loop().create_future()
         )
         return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_up_all_waiters(self):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        context = self._make_context()
+        killed_or_stopped = context.async_killed_or_stopped.return_value
+
+        async with handler._abort_monitor(context, "test-req"):
+            while not handler.shutdown_event._waiters:
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_or_stopped.cancelled()
+        assert not handler.shutdown_event._waiters
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

@@ -22,9 +22,36 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-08-25";
+export const GENERATED_ON = "2026-08-27";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [];
+export const UPCOMING_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo Community Demos",
+    "start": "2026-09-04T16:00:00.000Z",
+    "month": "Sep",
+    "day": "4",
+    "year": "2026",
+    "dateLabel": "Fri, Sep 4, 2026",
+    "timeLabel": "9:00 AM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Community+Demos&dates=20260904T160000Z%2F20260904T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fgsv-tkfy-bqi%0AOr+dial%3A+%28US%29+%2B1+484-800-1908+PIN%3A+479201144%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fgsv-tkfy-bqi%3Fpin%3D3402175147371%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "Baseten x Dynamo x SGLang RL post training meetup",
+    "start": "2026-09-11T01:00:00.000Z",
+    "month": "Sep",
+    "day": "10",
+    "year": "2026",
+    "dateLabel": "Thu, Sep 10, 2026",
+    "timeLabel": "6:00 PM",
+    "isPast": false,
+    "location": "Luma",
+    "locationUrl": "https://luma.com/BaseDynSGL",
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL"
+  }
+];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {

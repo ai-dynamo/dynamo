@@ -395,6 +395,11 @@ overrides:
   - { ecosystem: python, name: triton,                    license: "MIT",       source: "OpenAI Triton — https://github.com/openai/triton/blob/main/LICENSE" }
   - { ecosystem: python, name: vsa,                       license: "Apache-2.0",  source: "vsa (visual self-attention, sglang component) — Apache-2.0" }
 
+  # --- Sglang v0.5.18 — Python packages with missing license metadata ---
+  - { ecosystem: python, name: omegaconf,                  license: "BSD-3-Clause", source: "OmegaConf upstream — https://github.com/omry/omegaconf/blob/main/LICENSE" }
+  - { ecosystem: python, name: sgl-deep-ep,                license: "MIT",          source: "SGLang DeepEP — https://github.com/sgl-project/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: webencodings,               license: "BSD-3-Clause", source: "webencodings upstream — https://github.com/gsnedders/python-webencodings/blob/master/LICENSE" }
+
   # --- Sglang cuda12.9 — Go module additions (UNKNOWN from syft) ---
   # All well-known projects; syft can't run go-license-detector against
   # compiled binaries so license comes back UNKNOWN.

@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity,
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -89,6 +89,9 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::{
+    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -242,6 +245,14 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
+}
+
+fn responses_error_code(status_code: StatusCode) -> &'static str {
+    match status_code {
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
+        code if code.is_client_error() => "invalid_prompt",
+        _ => "server_error",
     }
 }
 
@@ -2255,6 +2266,8 @@ impl BackendErrorInfo {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
+    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
+
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2352,6 +2365,30 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
             });
+        }
+
+        // Some adapter paths encode a typed backend error into the message of
+        // a generic DynamoError. Recover only the exact stable discriminator;
+        // unknown errors without it remain sanitized as 500s.
+        let serialized_invalid_argument = match event.error.as_ref() {
+            Some(error)
+                if matches!(
+                    error.error_type(),
+                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
+                ) =>
+            {
+                error
+                    .message()
+                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
+            }
+            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
+            _ => None,
+        };
+        if let Some(message) = serialized_invalid_argument {
+            return Some(BackendErrorInfo::from_status(
+                message.to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         return Some(BackendErrorInfo::from_status(
@@ -3226,6 +3263,25 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+/// OpenAI Responses input-token counting handler.
+///
+/// Handles `POST /v1/responses/input_tokens` and returns an estimated input
+/// token count using a len/3 heuristic.
+///
+/// Like the Anthropic `/v1/messages/count_tokens` handler, this deliberately
+/// performs neither a readiness nor a model-serving check: clients routinely
+/// send routing names this frontend does not serve, and a pre-flight estimate
+/// does not need a live model.
+async fn handler_responses_input_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
+    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -3556,6 +3612,8 @@ async fn responses(
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -3565,8 +3623,8 @@ async fn responses(
                 yield event.map_err(axum::Error::new);
             }
 
-            // Track whether the backend sent an error event during the stream.
-            let mut saw_error = false;
+            // Preserve the first backend error for the terminal Responses event.
+            let mut backend_error = None;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
                 process_chat_response_and_observe_metrics(
@@ -3575,8 +3633,16 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                if extract_backend_error_if_present(&annotated_chunk).is_some() {
-                    saw_error = true;
+                if let Some(backend_error_info) =
+                    extract_backend_error_if_present(&annotated_chunk)
+                {
+                    let error_response = backend_error_response(backend_error_info);
+                    producer_error_signal
+                        .set(extract_error_type_from_response(&error_response));
+                    backend_error.get_or_insert_with(|| ErrorObject {
+                        code: responses_error_code(error_response.0).to_string(),
+                        message: error_response.1.message.clone(),
+                    });
                     continue;
                 }
 
@@ -3590,19 +3656,34 @@ async fn responses(
                 }
             }
 
-            if saw_error {
-                converter.append_error_events(&mut events);
+            if let Some(error) = backend_error {
+                let terminal_event = converter.append_error_events(error, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    // From this yield onward, response.failed is sufficient for
+                    // a client to stop consuming without being a disconnect.
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
-            }
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
             }
         };
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_error_signal(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
@@ -4184,7 +4265,8 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoints
+/// (`/v1/responses` and `/v1/responses/input_tokens`).
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
     state: Arc<service_v2::State>,
@@ -4192,13 +4274,23 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    // Derive the subroute from the parent with any trailing slash trimmed.
+    // `DYN_HTTP_SVC_RESPONSES_PATH=/custom/` is a working configuration for the
+    // parent — axum matches `POST /custom/` — but naively appending would
+    // register `/custom//input_tokens`, and axum does not treat that as
+    // equivalent to the `/custom/input_tokens` a client would actually call.
+    // The parent is registered verbatim, so trimming here changes only the
+    // derived path and leaves existing configurations behaving as they do now.
+    let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&input_tokens_path, post(handler_responses_input_tokens))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, input_tokens_doc], router)
 }
 
 async fn images(

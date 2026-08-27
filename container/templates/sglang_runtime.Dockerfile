@@ -24,11 +24,12 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
 
 {% if device == "cuda" %}
-# Bring base-image OS packages up to the current patch releases published in
-# the distro archives. --only-upgrade skips anything not already installed, so
-# no new packages are added; versions are left unpinned so a cache-busted
-# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+# Install the TurboJPEG runtime used by frontend JPEG decoding and bring
+# base-image OS packages up to the current patch releases. --only-upgrade skips
+# anything not already installed while keeping both operations in one layer.
 RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libturbojpeg && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
         dirmngr \
         gnupg \
@@ -42,7 +43,17 @@ RUN apt-get update && \
         keyboxd \
         libssl3t64 \
         openssl && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0'
+{% else %}
+# Install the TurboJPEG runtime used by frontend JPEG decoding.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libturbojpeg && \
+    rm -rf /var/lib/apt/lists/* && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -230,6 +241,18 @@ RUN set -eux; \
     ldconfig
 {% endif %}
 
+# Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler
+# nothing in the serving path loads. On this image it arrives under Nsight
+# Compute rather than Nsight Systems, and both roots move with every base bump,
+# so the paths are globbed and the removal is asserted rather than pinned. This
+# stage has no overlay rebase -- `runtime` is FROM pre_runtime -- so one
+# deletion here ships.
+RUN rm -rf \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
+    [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
+
 {% if device == "cuda" %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
@@ -271,7 +294,8 @@ ENV IMAGEIO_FFMPEG_EXE=
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified.
+# modified. The same script registers NIXL's C API directory with the runtime
+# linker so the Rust bindings can dlopen it.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat

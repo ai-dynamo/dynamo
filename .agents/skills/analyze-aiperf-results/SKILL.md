@@ -41,6 +41,9 @@ candidate audits and summaries, and the profile-export documentation matching th
 
 ## Audit And Normalize
 
+- Require the run's `benchmark_execution.json` to exist before auditing: it is the execution record the audit
+  chain and budget accounting bind to. A benchmark whose raw exports exist but whose execution record was never
+  written is an audit blocker — return it to `run-aiperf-benchmark` to write the record; do not audit around it.
 - Parse per-request `profile_export.jsonl` with AIPerf's native Pydantic models when available. Record the parser and
   runtime version used.
 - Parse `profile_export_aiperf.json` and multi-run aggregate/search artifacts when configured.
@@ -110,7 +113,8 @@ Cross-series results may provide context but never a gain, loss, or Pareto calcu
    history table.
 6. Calculate signed percent change as `(current - prior) / prior * 100`. Also state whether the value is higher or
    lower and whether that direction is an improvement or regression.
-6a. When the series has no measured noise floor and the decision at hand rests on a small delta, return
+6a. When the series has no measured noise floor or no minimum detectable effect and the decision at hand rests on a small delta - or a
+stop-request or final recommendation requires the series MDE per `optimize-loop.md` section 6 - return
    `repeat_decision: necessary` with the rationale "series noise-floor pilot (n=3 total)"; after the pilot,
    derive the run-to-run spread and minimum detectable effect and record both in `performance_analysis.json`
    (fields `series_noise_floor`, `minimum_detectable_effect`); copy both forward into every later same-series
