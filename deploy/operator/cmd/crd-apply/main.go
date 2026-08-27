@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -26,6 +27,11 @@ import (
 const (
 	fieldManager      = "dynamo-crd-apply"
 	versionAnnotation = "dynamo.nvidia.com/operator-version"
+	dgdrV1Beta2Gate   = "DGDRV1Beta2"
+
+	dgdrCRDName      = "dynamographdeploymentrequests.nvidia.com"
+	dgdrRunCRDName   = "dynamographdeploymentruns.nvidia.com"
+	dgdrCandidateCRD = "dynamographdeploymentcandidates.nvidia.com"
 )
 
 func main() {
@@ -41,7 +47,18 @@ func main() {
 		"",
 		"Service namespace for CRD conversion webhooks",
 	)
+	featureGates := flag.String(
+		"feature-gates",
+		"",
+		"Comma-separated feature gates in Name=true|false form",
+	)
 	flag.Parse()
+
+	gates, err := parseFeatureGates(*featureGates)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid feature gates: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("crd-apply")
@@ -83,6 +100,10 @@ func main() {
 		if err := yaml.Unmarshal(data, crd); err != nil {
 			log.Error(err, "unable to unmarshal CRD", "file", filePath)
 			os.Exit(1)
+		}
+		if !gates[dgdrV1Beta2Gate] && !configureDGDRV1Beta2CRD(crd) {
+			log.Info("Skipped CRD disabled by feature gate", "crd", crd.Name, "featureGate", dgdrV1Beta2Gate)
+			continue
 		}
 
 		if *version != "" {
@@ -131,6 +152,45 @@ func main() {
 	}
 
 	log.Info("CRD apply complete", "applied", applied)
+}
+
+func parseFeatureGates(value string) (map[string]bool, error) {
+	gates := map[string]bool{dgdrV1Beta2Gate: false}
+	if value == "" {
+		return gates, nil
+	}
+	for _, item := range strings.Split(value, ",") {
+		name, rawValue, found := strings.Cut(item, "=")
+		if !found || name == "" {
+			return nil, fmt.Errorf("%q must use Name=true|false format", item)
+		}
+		if _, known := gates[name]; !known {
+			return nil, fmt.Errorf("unknown feature gate %q", name)
+		}
+		switch rawValue {
+		case "true":
+			gates[name] = true
+		case "false":
+			gates[name] = false
+		default:
+			return nil, fmt.Errorf("feature gate %q must be true or false", name)
+		}
+	}
+	return gates, nil
+}
+
+// configureDGDRV1Beta2CRD removes experimental API discovery when the gate is disabled.
+// Existing standalone CRDs are skipped, not deleted, to avoid destructive upgrades.
+func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool {
+	switch crd.Name {
+	case dgdrRunCRDName, dgdrCandidateCRD:
+		return false
+	case dgdrCRDName:
+		crd.Spec.Versions = slices.DeleteFunc(crd.Spec.Versions, func(version apiextensionsv1.CustomResourceDefinitionVersion) bool {
+			return version.Name == "v1beta2"
+		})
+	}
+	return true
 }
 
 func configureConversionWebhookService(

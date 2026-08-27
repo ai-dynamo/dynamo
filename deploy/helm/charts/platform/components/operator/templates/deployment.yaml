@@ -76,6 +76,7 @@ spec:
           - "--version={{ .Chart.AppVersion }}"
           - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
           - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
+          - "--feature-gates=DGDRV1Beta2={{ .Values.featureGates.DGDRV1Beta2 }}"
       {{- end }}
       containers:
       - args:
