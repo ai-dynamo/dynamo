@@ -1,104 +1,105 @@
-# GLM-5.3-Flash — vLLM Recipes
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-Dynamo serving recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) on GB200.
-GLM-5.3-Flash is a hybrid GLA/KDA attention model with multimodal support (image/video inputs
-disabled in these recipes for text-only serving).
+# GLM-5.3-Flash Recipes
 
-## Recipes
+Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash).
 
-| Recipe | Hardware | Mode | GPUs | KV dtype | Notes |
-|--------|----------|------|------|----------|-------|
-| `vllm/agg-gb200-agentic` | GB200 | Aggregated | 4 (TP=4, 1 node) | fp8 | Prefix caching; high throughput |
-| `vllm/disagg-gb200-agentic` | GB200 | Disaggregated 1P1D | 8 (TP=4 × 2 workers) | bf16 | NIXL KV transfer; prefill/decode specialization |
+## Configurations
 
-Benchmark workload: agentic coding, 90% KV reuse, SSP=57600 / ISL=6400 / OSL=400 (64K context).
+Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
-## Measured performance (dynamo-gcp-dev-02, 2026-08-27)
+|                          | GB200 aggregated agentic        | GB200 disaggregated agentic              | H200 aggregated agentic | H200 disaggregated agentic |
+| ------------------------ | ------------------------------- | ---------------------------------------- | ----------------------- | -------------------------- |
+| **GPU** (per worker)     | 4x GB200                        | 4x GB200 prefill + 4x GB200 decode       | TBD                     | TBD                        |
+| **Mode**                 | Aggregated                      | Prefill/decode disaggregated             | Aggregated              | Prefill/decode disaggregated |
+| **Framework**            | vLLM                            | vLLM                                     | vLLM                    | vLLM                       |
+| **Precision**            | bf16 + fp8 KV                   | bf16 + bf16 KV                           | TBD                     | TBD                        |
+| **Parallelism**          | TP4                             | TP4 prefill / TP4 decode                 | TBD                     | TBD                        |
+| **Routing**              | KV-aware                        | KV-aware                                 | KV-aware                | KV-aware                   |
+| **Speculative decoding** | None                            | None                                     | None                    | None                       |
+| **Context length**       | 128,000                         | 128,000                                  | TBD                     | TBD                        |
+| **KV transfer**          | N/A                             | NIXL/UCX over tcp (MNNVL upgrade: see README) | N/A              | TBD                        |
 
-| Recipe | Concurrency | Server throughput | tok/s/GPU | TTFT p50 |
-|--------|-------------|-------------------|-----------|----------|
-| agg-gb200-agentic | 4 | 258 tok/s | 64.5 | 2.9 s |
-| agg-gb200-agentic | 6 | ~300 tok/s (peak) | ~75 | 4.8 s |
-| disagg-gb200-agentic | 4 | 103 tok/s | 12.9 | 10.8 s |
-| disagg-gb200-agentic | 16 | 173 tok/s | 21.6 | 32 s |
-| disagg-gb200-agentic | 24 | 206 tok/s (peak) | 25.8 | 47 s |
 
-Disagg TTFT is transport-dominated over cuda_copy+tcp (~3–4 GB KV per 64K request over ethernet).
-See [MNNVL transport upgrade](#mnnvl-transport-upgrade) below for the path to NVLink KV transfer.
+## Supported features
 
-## Image
-
-These recipes use `vllm/vllm-openai:glm53-flash`, a GLM-specific vLLM build that includes:
-
-- GLA/KDA attention kernels (`gla_cuda`, `kda_cache`)
-- `sitecustomize.py` cudnn workaround (WAR for segfault in `_kpool_*` kernels on GB200)
-- Standard vLLM with `--trust-remote-code` model support
-
-`ai-dynamo==1.4.1` is pip-installed at pod startup. Expect ~60–90 s additional startup time
-for the pip install on first run (subsequent runs pull from layer cache if unchanged).
+- Modalities: Text (multimodal inputs present in model but disabled in these recipes)
+- Reasoning
+- Tool calling
 
 ## Prerequisites
 
-- A `model-cache` PersistentVolumeClaim with the model weights at:
-  `models--zai-org--GLM-5.3-Flash/snapshots/<sha>/`
-  (populated by `huggingface-cli download zai-org/GLM-5.3-Flash`)
-- Dynamo operator installed in the cluster
-- GB200 nodes with `nvidia.com/gpu.product: NVIDIA-GB200` label
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
+2. **GLM-5.3-Flash image**: `vllm/vllm-openai:glm53-flash` — a GLM-specific vLLM build with
+   GLA/KDA attention kernels. `ai-dynamo` is pip-installed at pod startup.
+3. **Hugging Face access** to `zai-org/GLM-5.3-Flash`.
 
-## Deployment
+## Quick Start
 
-```bash
-# Aggregated
-kubectl apply -f recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml
-
-# Disaggregated 1P1D
-kubectl apply -f recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml
-```
-
-Watch startup (workers take 15–25 min on first run for CUDA graph capture):
+### 1. Create namespace and secret
 
 ```bash
-kubectl get dgd -w
-kubectl logs -f deployment/glm53-flash-agg-gb200-agentic-vllmworker
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
 ```
 
-## Disagg: ComputeDomain requirements
+### 2. Create storage
 
-The disagg recipe requires `numNodes: 0` in the ComputeDomain spec. This creates an
-on-demand domain that spans the full NVL72 rack (all 72 GPUs), ensuring MNNVL fabric
-handles are valid between any pair of nodes. Using `numNodes: 2` creates a partial
-domain that causes C-level crashes (`cudaErrorInvalidValue` / SIGBUS) when prefill and
-decode workers land on different nodes.
+> [!NOTE]
+> Edit `model-cache/model-cache.yaml` and set `storageClassName` to a
+> ReadWriteMany storage class available on the target cluster.
 
-**ComputeDomain spec is immutable.** To change `numNodes`, delete the DGD first
-(releases resource claim references), then delete the ComputeDomain, then re-apply.
+```bash
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
 
-## MNNVL transport upgrade
+### 3. Download the model
 
-The disagg recipe ships with `UCX_TLS: cuda_copy,^cuda_ipc,tcp` (KV transfer over TCP).
-The `^cuda_ipc` excludes single-host IPC to prevent a C-level crash when the generic
-`glm53-flash` UCX library attempts MNNVL IPC handles cross-node.
+```bash
+kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
 
-To enable MNNVL NVLink KV transfer (~10x lower TTFT):
-1. Rebuild `vllm/vllm-openai:glm53-flash` on `nvcr.io/nvidia/ai-dynamo/vllm-runtime` base
-   (the vllm-runtime image has a UCX build with MNNVL IPC support)
-2. In `deploy.yaml`, replace:
-   ```yaml
-   - {name: UCX_TLS, value: "cuda_copy,^cuda_ipc,tcp"}
-   ```
-   with:
-   ```yaml
-   - {name: UCX_TLS,                   value: "cuda_copy,cuda_ipc,tcp"}
-   - {name: UCX_CUDA_IPC_ENABLE_MNNVL, value: "y"}
-   ```
+### 4. Deploy the DGD
 
-## Key environment variables
+```bash
+SKU=gb200   # or h200
+MODE=agg    # or disagg
+kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
+```
 
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `VLLM_SSM_CONV_STATE_LAYOUT` | `DS` | GLM SSM conv state memory layout (disagg only) |
-| `VLLM_KV_CACHE_LAYOUT` | `HND` | KV cache layout compatible with NIXL transfer (disagg only) |
-| `VLLM_NIXL_SIDE_CHANNEL_PORT` | `5560` (prefill) / `5558` (decode) | NIXL handshake ZMQ ports |
-| `VLLM_ALLREDUCE_USE_FLASHINFER` | `1` | FlashInfer all-reduce for MNNVL bandwidth |
-| `VLLM_FLASHINFER_ALLREDUCE_BACKEND` | `mnnvl` | Use MNNVL NVLink for intra-worker all-reduce |
-| `NCCL_MNNVL_ENABLE` | `1` | Enable MNNVL in NCCL collective ops |
+### 5. Benchmark
+
+See [perf/README.md](perf/README.md) for the full benchmark workflow.
+
+## Optimization targets
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| -------- | ---------- | ---------- | ----------------- | ----------------- |
+| Agentic  | 64k        | 400        | 90%               | TBD               |
+
+## Performance results
+
+| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
+| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
+|          |        |     |             |                         |                         |               |
+
+## Limitations
+
+- GB200 disagg KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The image's UCX
+  build does not support MNNVL IPC, so `^cuda_ipc` is required to prevent a C-level crash at
+  `uct_cuda_ipc_ep_get_zcopy`. To enable MNNVL NVLink KV transfer, rebuild the image on
+  `nvcr.io/nvidia/ai-dynamo/vllm-runtime` base and switch to
+  `UCX_TLS: cuda_copy,cuda_ipc,tcp` + `UCX_CUDA_IPC_ENABLE_MNNVL: "y"`.
+- A cudnn workaround (`torch.backends.cudnn.enabled = False` via `sitecustomize.py`) is required
+  in the disagg recipe to prevent a segfault in GLM `_kpool_*` kernels on GB200.
+- `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
+  decode workers; mismatching these produces silent garbage output.
+- H200 recipes are in progress.
+- `n>1` requests are not supported with the disaggregated recipe.
