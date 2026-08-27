@@ -132,16 +132,7 @@ jobs:
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
           docs/fern/scripts/tests/test_api_reference_regressions.py \
-          docs/fern/scripts/tests/test_api_freshness.py \
-          docs/fern/scripts/tests/test_check_rl_clean_room_record.py \
-          docs/fern/scripts/tests/test_check_rl_evidence.py \
-          docs/fern/scripts/tests/test_check_rl_program_record.py \
-          docs/fern/scripts/tests/test_check_rl_product_gaps.py \
-          docs/fern/scripts/tests/test_check_rl_validation_record.py \
-          docs/fern/scripts/tests/test_rl_artifact_bundle.py \
-          docs/fern/scripts/tests/test_rl_environment_preflight.py \
-          docs/fern/scripts/tests/test_rl_ops_report.py \
-          docs/fern/scripts/tests/test_rl_trace_join.py
+          docs/fern/scripts/tests/test_api_freshness.py
     - name: Generate API references from source
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
@@ -206,8 +197,6 @@ jobs:
         python3 docs/fern/scripts/gen_rust_api.py
     - name: Install Fern CLI
       run: npm install -g fern-api
-    - name: Audit RL documentation evidence
-      run: python3 docs/fern/scripts/check_rl_evidence.py
     - name: Validate Fern configuration
       working-directory: docs/fern
       run: fern check

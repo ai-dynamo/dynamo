@@ -101,37 +101,11 @@ Field extraction syntax depends on the trace store. Validate the join with count
 
 A missing join can indicate that the framework reached a different frontend, tracing started late, headers were not allowlisted, payload capture was disabled, the process did not flush, or an attempt never emitted a terminal record.
 
-### Run the checked synthetic join
+### Summarize the Join Before Diagnosing
 
-The repository includes a dependency-free correlation example and safe synthetic inputs. Use it to verify the file format and join logic before handling a real run:
+Create a body-free summary of the joined rows before interpreting individual requests. Report join and framework terminal status, accepted and rejected counts, target and observed policy-header counts, finish reasons, per-worker activity, field coverage, and min/mean/p50/p95/max for available token, queue, prefill, decode, KV, transfer-estimate, and latency fields. Treat missing optional fields as missing, never as measured zero.
 
-```bash
-python3 docs/fern/scripts/rl_trace_join.py \
-  --framework-attempts docs/fern/scripts/fixtures/rl_trace_join/framework-attempts.jsonl \
-  --request-trace docs/fern/scripts/fixtures/rl_trace_join/request-trace.jsonl \
-  --joined-jsonl /tmp/rl-trace-join/joined.jsonl \
-  --summary-json /tmp/rl-trace-join/summary.json \
-  --strict
-```
-
-The example joins opaque rollout and attempt headers case-insensitively, uses the Dynamo request ID to find `request_end`, checks the captured policy header against the framework target, preserves compact terminal metrics, and excludes captured request and response bodies from its output. It accepts `.jsonl` and `.jsonl.gz` trace shards. Strict mode fails for a missing payload join, a missing required terminal, an unexpected terminal, or a missing/mismatched policy header.
-
-The checked fixture contains two completed requests and one intentionally incomplete timed-out attempt. Its repeated sequence hashes, different KV hit rates, queue depths, and timing values are synthetic signals for exercising a query—not measurements and not evidence that a framework integration works. Replace both inputs with a real framework ledger and trace, inspect the joined rows, and preserve the resulting summary with the run record. The [join script](../../../scripts/rl_trace_join.py), [framework-attempt fixture](../../../scripts/fixtures/rl_trace_join/framework-attempts.jsonl), and [trace fixture](../../../scripts/fixtures/rl_trace_join/request-trace.jsonl) are maintained with this guide.
-
-### Generate a checked request-plane operations report
-
-Turn the body-free joined rows into a compact operations artifact before interpreting individual requests:
-
-```bash
-python3 docs/fern/scripts/rl_ops_report.py \
-  --joined-jsonl /tmp/rl-trace-join/joined.jsonl \
-  --report-json /tmp/rl-trace-join/operations-report.json \
-  --strict
-```
-
-The `dynamo.rl.operations-report.v1` artifact reports join and framework terminal status, accepted/rejected counts, target and observed policy-header counts, finish reasons, per-worker activity, and field coverage plus min/mean/p50/p95/max for the current request-trace token, queue, prefill, decode, KV, transfer-estimate, and latency fields. Percentiles use linear interpolation over the observed terminal rows. Missing optional fields have zero coverage and null statistics; they are never imputed as measured zero. Strict mode requires at least one terminal, accepts only complete or expected-incomplete joins, and rejects policy-header mismatches.
-
-This report contains no captured request or response body and does not invent diagnosis thresholds. It also does not join aggregate Prometheus series. Most importantly, the current request trace has no standardized weight-update phase, duration, result, or served-content event; preserve update lifecycle timing and content verification in the framework/control ledger and review it beside this report. The checked [report script](../../../scripts/rl_ops_report.py) and [expected synthetic report](../../../scripts/fixtures/rl_trace_join/expected-operations-report.json) define the maintained request-plane query artifact.
+Require at least one terminal row and investigate every missing required terminal, unexpected terminal, incomplete join, or policy-header mismatch. Keep aggregate Prometheus series separate unless clocks and aggregation windows are demonstrably aligned. Most importantly, the current request trace has no standardized weight-update phase, duration, result, or served-content event; preserve update lifecycle timing and content verification in the framework/control ledger and review it beside the request-plane summary.
 
 ## Diagnose the Live Run
 
@@ -211,7 +185,7 @@ A useful dashboard or query pack should answer:
 
 Do not use one generic “RL throughput” chart without defining its numerator, denominator, freshness, and phase boundaries.
 
-Use the checked request-plane operations report for joined terminal, policy-header, trace timing, KV, and worker data. Add the framework/update-control ledger for acceptance, trainer, and weight lifecycle semantics, and use the current metrics catalog for bounded aggregate router and backend series. Do not merge those sources by timestamp without clock-synchronization evidence.
+Use the request-plane summary for joined terminal, policy-header, trace timing, KV, and worker data. Add the framework/update-control ledger for acceptance, trainer, and weight lifecycle semantics, and use the current metrics catalog for bounded aggregate router and backend series. Do not merge those sources by timestamp without clock-synchronization evidence.
 
 ## Capture a Replayable Request Plane
 
@@ -311,17 +285,9 @@ For each simulated configuration that informs a decision:
 
 State whether results are directional, calibrated predictions, or live measurements. Include repeated-run spread and disclose material error instead of presenting a simulation point estimate as hardware truth.
 
-## Finalize the Cross-Cutting Program Record
+## Complete the Cross-Cutting Validation Report
 
-Use one checked record to close the program-level routing, weight-transfer, observability, replay, and simulation gates. Copy the template before running the experiments, keep it in `planned` state while evidence is missing, and store the completed record beside the immutable artifacts it references:
-
-```bash
-cp docs/fern/scripts/rl_program_record.template.json \
-  /approved/artifacts/rl-program-record.json
-
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json
-```
+Use one report to connect the program-level routing, weight-transfer, observability, replay, and simulation evidence. Create it before running the experiments, mark missing sections as `not run`, and store the completed report beside the immutable artifacts it references.
 
 The combined operations section must include:
 
@@ -331,19 +297,11 @@ The combined operations section must include:
 - at least three repetitions of both live replay and the matching DynoSim configuration
 - live and simulated values for each decision metric, with mathematically consistent absolute and relative error, a predeclared material-error threshold, disclosure, and conclusion
 
-After all cross-cutting sections are backed by artifacts, set `record_state` and each section status to `passed`, record an independent clean-room reviewer, and run:
-
-```bash
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json \
-  --publication-gate
-```
-
-The checker validates completeness and arithmetic; it does not inspect the truth of external artifact URIs or replace human review. A planned template passing the structure check is not performance or compatibility evidence. Keep the completed record out of the repository when its artifacts contain customer data, prompts, credentials, or restricted logs; link an approved durable location from the evidence ledger instead.
+After all cross-cutting sections are backed by artifacts, mark each section passed only after a reviewer checks completeness, arithmetic, source provenance, and conclusion boundaries. Keep the completed report out of the repository when its artifacts contain customer data, prompts, credentials, or restricted logs; store it in an approved durable location.
 
 ## Prioritized Product Gaps and Closed-Loop Decision
 
-These are issue-ready proposals, not committed roadmap items or assigned owners. The checked [product-gap register](../../../scripts/rl_product_gaps.json) records the source assertions, dependencies, acceptance evidence, owner teams, documentation behavior, and expiration trigger behind each summary:
+These are issue-ready proposals, not committed roadmap items or assigned owners. Each proposal still needs a named DRI, accepted vehicle, source links, dependencies, acceptance evidence, and an expiration trigger before it becomes program work:
 
 | Gap | Priority | Vehicle | Contract needed | Documentation boundary until accepted |
 |---|---|---|---|---|
@@ -353,6 +311,6 @@ These are issue-ready proposals, not committed roadmap items or assigned owners.
 | DYN-RL-GAP-004: RL lifecycle replay event contract | P1 | Implementation issue | Optional framework-owned phase, transition, update-window, sample-terminal, and acceptance events with deterministic lowering | Replay the request plane only; do not claim trainer, reward, acceptance, or policy-transition reproduction. |
 | DYN-RL-GAP-005: closed-loop simulator ownership and package | P2 | DEP after gaps 001–004 | Package/DRI decision, semantic ownership, deterministic artifact, security model, fidelity metrics, and live calibration | Keep closed-loop simulation outside the shipped RL docs surface. |
 
-The recorded decision is **request plane now; closed loop as a follow-on DEP**. Capture, live replay, and DynoSim request-plane workflows remain in this documentation goal. Do not preassign the future package to DynoSim, AI simulation, or a new project before the DEP resolves semantic ownership and all four prerequisite contracts have implementation evidence. Validate the register with `python3 docs/fern/scripts/check_rl_product_gaps.py`; the check fails when the pinned source or documented limitation changes, a dependency becomes cyclic or lower priority than its dependent, acceptance evidence becomes incomplete, or the closed-loop decision is weakened.
+The current recommendation is **request plane now; closed loop as a follow-on DEP**. Capture, live replay, and DynoSim request-plane workflows remain in scope. Do not preassign the future package to DynoSim, AI simulation, or a new project before the DEP resolves semantic ownership and all four prerequisite contracts have implementation evidence.
 
 Until the gaps close, keep framework semantics in the framework ledger, use current Dynamo trace/header capabilities for correlation, require current weight lifecycle evidence, and limit replay/simulation claims to the serving request plane.

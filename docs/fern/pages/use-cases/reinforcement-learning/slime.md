@@ -91,7 +91,7 @@ When an accepted upstream implementation is available, validate in this order:
 8. Kill one rollout engine during generation and one during update; verify membership and recovery behavior.
 9. Capture a trace and join one SLIME rollout/attempt to frontend, router, worker, and update evidence.
 
-Record commands, expected output, failure output, and artifacts in a public maintained recipe. PR comments alone are not the long-term validation record.
+Record commands, expected output, failure output, and artifacts in a public maintained recipe. PR comments alone are not a durable validation report.
 
 ## Known Unsupported or Unsettled Areas
 
@@ -104,6 +104,6 @@ Record commands, expected output, failure output, and artifacts in a public main
 
 ## Graduation Gate
 
-Change this page to experimental only after an upstream runnable artifact is accepted and pinned. Change it to supported only after a maintained clean-room record completes one training iteration, token/logprob verification, policy refresh, post-update generation, failure recovery, topology qualification, and observability correlation with named SLIME and Dynamo owners.
+Change this page to experimental only after an upstream runnable artifact is accepted and pinned. Change it to supported only after an independently reviewed clean-room run completes one training iteration, token/logprob verification, policy refresh, post-update generation, failure recovery, topology qualification, and observability correlation with named SLIME and Dynamo owners.
 
 Until then, use the [RL integration and compatibility reference](integration-reference.md) to review the contract and the [SLIME upstream project](https://github.com/THUDM/slime) for framework-owned training behavior.

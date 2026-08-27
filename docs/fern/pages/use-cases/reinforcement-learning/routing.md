@@ -178,27 +178,9 @@ When publishing a result, state the causal mechanism. For example: “the varian
 
 ## Record the Cross-Cutting Program Evidence
 
-Use the checked program-record template for the routing experiment and the linked weight, observability, replay, and simulation work. The template starts in `planned`/`not_run` state so it can be prepared before the run without inventing evidence:
+Before the experiment, record immutable pins, named owners, the headline metric's numerator, denominator, and freshness rule, complete workload shape, fixed controls, and the full router configuration for the baseline and variant. Preserve at least three measured repetitions per variant plus immutable links for the raw requests, configuration, and computed metrics. Label a routing claim as a live measurement only after those artifacts demonstrate the declared mechanism.
 
-```bash
-cp docs/fern/scripts/rl_program_record.template.json \
-  /approved/artifacts/rl-program-record.json
-
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json
-```
-
-Before the experiment, fill the immutable pins, named owners, headline numerator/denominator/freshness rule, complete workload shape, fixed controls, and full router configuration for the baseline and variant. Preserve at least three measured repetitions per variant and artifact URIs for the raw requests, configuration, and computed metrics. Set `routing.status` to `passed` and `routing.claim_boundary` to `live_measurement` only after the artifacts demonstrate the declared mechanism.
-
-The publication check is intentionally fail-closed:
-
-```bash
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json \
-  --publication-gate
-```
-
-It rejects a single-configuration result, fewer than three repetitions, a missing or nonnumeric headline metric, multiple/no baselines, empty matched controls, missing mechanism evidence, or a simulation-only routing claim. The same record cannot publish until the required weight paths and [operations, replay, and simulation evidence](operations-and-simulation.md#finalize-the-cross-cutting-program-record) also pass.
+Do not publish a recommendation based on a single configuration, fewer than three repetitions, a missing or nonnumeric headline metric, multiple or absent baselines, unmatched controls, missing mechanism evidence, or simulation alone. Review the routing result together with the required weight paths and the [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report) so the claim refers to one pinned program rather than unrelated demonstrations.
 
 ## Diagnose Common Routing Failures
 
@@ -221,4 +203,4 @@ Use traces for high-cardinality request/session/rollout joins and metrics for bo
 
 ## Validation Gate
 
-A routing recommendation is publication-ready only when the workload, topology, baseline, variant, repetitions, serving metrics, RL goodput metric, and causal mechanism are recorded and the cross-cutting program record passes `--publication-gate`. Simulated results must be labeled directional and calibrated against a live run before they become performance claims. See [Replay and simulate the request plane](operations-and-simulation.md#replay-and-simulate-the-request-plane) for the fidelity boundary.
+A routing recommendation is publication-ready only when the workload, topology, baseline, variant, repetitions, serving metrics, RL goodput metric, and causal mechanism are recorded and independently reviewed. Simulated results must be labeled directional and calibrated against a live run before they become performance claims. See [Replay and simulate the request plane](operations-and-simulation.md#replay-and-simulate-the-request-plane) for the fidelity boundary.

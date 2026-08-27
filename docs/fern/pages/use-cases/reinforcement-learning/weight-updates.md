@@ -223,7 +223,7 @@ There is no general rollback route that reconstructs a previous in-memory policy
 
 ## Verify an Update End to End
 
-For every published integration, capture one validation record with:
+For every published integration, capture one validation report with:
 
 - target policy ID and immutable checkpoint/transfer identity
 - pre-update generation and worker-version evidence
@@ -238,24 +238,13 @@ For every published integration, capture one validation record with:
 
 Do not label an update path supported when only transfer bandwidth was measured. Readiness, atomicity, failure, retry, cache, version, and sample-freshness semantics are part of the product contract.
 
-## Record Both Required Update Paths
+## Validate Both Required Update Paths
 
-Fill `weight_paths` in the checked [cross-cutting program-record template](../../../scripts/rl_program_record.template.json). The publication gate requires at least two distinct passed records across the program: one path with `placement: colocated` and a different path with `serving_mode: disaggregated`. Those paths may use different framework/backend combinations, so every path independently pins its framework commit, backend version, container image digest, model revision, transport, model class, and source/target TP, PP, DP, and EP layout.
+Before making broad support claims, validate at least two distinct paths across the program: one colocated path and a different disaggregated serving path. Those paths may use different framework/backend combinations, so every path must independently pin its framework commit, backend version, container image digest, model revision, transport, model class, and source and target TP, PP, DP, and EP layouts.
 
 For each path, preserve evidence that all targeted workers were verified, cache handling completed, the requested version was read back, the output changed or a numerical tensor validation passed, a partial failure recovered under the declared policy, and generation succeeded after the update. A transport benchmark or one-worker success cannot satisfy this record.
 
-Check the planned record while assembling the run, then require the publication gate before using “supported” language:
-
-```bash
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json
-
-python3 docs/fern/scripts/check_rl_program_record.py \
-  /approved/artifacts/rl-program-record.json \
-  --publication-gate
-```
-
-The gate also requires the matched routing experiment and [combined observability/replay/simulation evidence](operations-and-simulation.md#finalize-the-cross-cutting-program-record), keeping deployment claims tied to the same pinned program run rather than unrelated demonstrations.
+Have an independent reviewer confirm the two path reports before using “supported” language. The same review must cover the matched routing experiment and [combined observability, replay, and simulation evidence](operations-and-simulation.md#complete-the-cross-cutting-validation-report), keeping deployment claims tied to one pinned program rather than unrelated demonstrations.
 
 ## Observe Update Time
 

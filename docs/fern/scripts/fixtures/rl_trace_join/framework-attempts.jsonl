@@ -1,3 +1,0 @@
-{"accepted":true,"attempt_id":"attempt-1","dispatched_at_unix_ms":1777312800000,"framework_status":"completed","rollout_id":"rollout-7","run_id":"run-42","target_policy_version":"policy-2","terminal_expected":true,"trainer_step":2}
-{"accepted":false,"attempt_id":"attempt-1","dispatched_at_unix_ms":1777312800100,"framework_status":"completed","rollout_id":"rollout-8","run_id":"run-42","target_policy_version":"policy-2","terminal_expected":true,"trainer_step":2}
-{"accepted":false,"attempt_id":"attempt-1","dispatched_at_unix_ms":1777312800200,"framework_status":"timed_out","rollout_id":"rollout-9","run_id":"run-42","target_policy_version":"policy-2","terminal_expected":false,"trainer_step":2}

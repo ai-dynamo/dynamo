@@ -5,7 +5,7 @@ title: Integrate with verl
 subtitle: Run the public verl-recipe Dynamo rollout backend and understand its ownership boundaries
 ---
 
-**Experimental.** verl-recipe contains a first-class async Dynamo rollout backend, but this Dynamo page is not labeled supported until a clean environment independently completes the validation record below. Treat the pinned upstream recipe as the implementation source of truth and this page as the Dynamo-side architecture, workflow, and verification guide.
+**Experimental.** verl-recipe contains a first-class async Dynamo rollout backend, but this Dynamo page is not labeled supported until a clean environment independently completes the validation checklist below. Treat the pinned upstream recipe as the implementation source of truth and this page as the Dynamo-side architecture, workflow, and verification guide.
 
 ## Validated Artifact and Current Gate
 
@@ -97,50 +97,15 @@ sed -n '1,120p' dynamo/REQUIRED_VERL.txt
 
 Run subsequent commands from the resulting `verl` checkout, where the compatible recipe is available as `recipe/dynamo`. Record the resulting core verl and recipe submodule commits in the run artifact; do not record only the branch name.
 
-## Prepare the Validation Record
+## Prepare the Validation Run
 
-Copy the checked template before the run and fill planned environment, topology, ownership, and artifact destinations without changing any gate to passed:
-
-```bash
-cp docs/fern/scripts/rl_validation_record.template.json \
-  /tmp/verl-dynamo-validation.json
-
-python3 docs/fern/scripts/check_rl_validation_record.py \
-  /tmp/verl-dynamo-validation.json
-```
-
-Structural validation means the record is well formed; it is not publication evidence. As commands run, preserve exact commands and immutable software/model/image pins, link artifacts for each gate, and record failures rather than deleting them.
+Before allocating GPUs, create a validation report in your approved artifact store. Record the planned environment, topology, owners, artifact destinations, and each gate as `not run`. As commands run, preserve exact commands and immutable software, model, image, dataset, and hardware pins; link artifacts for each gate; and retain failures rather than deleting them.
 
 ## Verify the GPU Host Before the Run
 
-After installing the pinned environment but before launching the smoke, fill the record's expected commits, backend/CUDA/driver versions, image digest, GPU model/count, interconnect, and network. Keep the three source checkouts clean and store artifacts outside them. Obtain `IMAGE_DIGEST` from the scheduler, container runtime, or registry resolution used for this allocation, then run:
+After installing the pinned environment but before launching the smoke, record all three clean Git heads, the installed backend version, PyTorch's compiled CUDA version, required binary versions, image digest, visible GPU count and model, driver version, `nvidia-smi topo -m`, interconnect, and network. Keep the three source checkouts clean and store artifacts outside them. Obtain the image digest from the scheduler, container runtime, or registry resolution used for the allocation and preserve that provenance beside the hardware inventory.
 
-```bash
-python3 /work/dynamo/docs/fern/scripts/rl_environment_preflight.py \
-  /approved/artifacts/verl-run-001/records/framework-validation.json \
-  --dynamo-repo /work/dynamo \
-  --recipe-repo /work/verl-recipe \
-  --core-repo /work/verl \
-  --observed-image-digest "$IMAGE_DIGEST" \
-  --require-binary etcd \
-  --require-binary nats-server \
-  --output-json /approved/artifacts/verl-run-001/artifacts/environment-preflight.json \
-  --strict
-```
-
-Strict mode compares the validation record with all three clean Git heads, Linux, required binaries, installed backend version, PyTorch's compiled CUDA version, visible GPU count and accelerator family, driver version, the operator-supplied image digest, and `nvidia-smi topo -m`. It writes the JSON artifact even when a machine-checkable comparison fails so the failed allocation remains reviewable. The report intentionally does not capture the hostname or process environment.
-
-The image digest remains an operator-supplied observation, not a registry attestation; preserve the scheduler or deployment record that proves it. Likewise, a reviewer must interpret the captured GPU topology and separate scheduler/fabric inventory to verify the declared interconnect and network. Reference the preflight plus image-resolution evidence in `environment.artifacts`, and reference the preflight plus allocation/fabric evidence in `hardware.artifacts`. A passing preflight proves the launch host and pins match the record; it does not prove generation, training, correctness, performance, failure recovery, or ownership.
-
-After an independent reviewer has reproduced the path, run:
-
-```bash
-python3 docs/fern/scripts/check_rl_validation_record.py \
-  /tmp/verl-dynamo-validation.json \
-  --publication-gate
-```
-
-The publication gate requires a real generation smoke; exact completion token IDs and aligned log probabilities; at least one optimizer step through rollout, reward/advantage, actor update, weight synchronization, and post-update rollout; consistent per-worker update verification and cache handling; retry/cancellation behavior; recovery from request, worker, and update failures; a complete framework-to-trace join with measured overhead; immutable environment and topology pins; named framework and Dynamo owners; and a distinct clean-room reviewer. The blank template intentionally fails this gate. Do not copy a passing test fixture or mark a field true without linking its run artifact.
+Host and pin agreement is only a precondition. It does not prove generation, training, correctness, performance, failure recovery, or ownership. Before a support claim, an independent reviewer must reproduce a real generation smoke; exact completion token IDs and aligned log probabilities; at least one optimizer step through rollout, reward/advantage, actor update, weight synchronization, and post-update rollout; consistent per-worker update verification and cache handling; retry/cancellation behavior; recovery from request, worker, and update failures; a complete framework-to-trace join with measured overhead; immutable environment and topology pins; and named framework and Dynamo owners. Do not mark an item complete without linking its run artifact.
 
 ## Understand the Configuration Surface
 
@@ -295,7 +260,7 @@ Scale one dimension at a time. A successful single-worker generation smoke does 
 
 ## Graduation Checklist
 
-This page can move from experimental to supported only when a clean-room record includes:
+This page can move from experimental to supported only when an independently reviewed run includes:
 
 - the exact verl core, recipe, Dynamo, vLLM, container/CUDA, model, dataset, hardware, and topology pins
 - successful validation-only smoke and one complete training iteration
@@ -310,9 +275,7 @@ Until that record exists, the public recipe is usable experimental evidence, not
 
 ## Complete an Independent Clean-Room Review
 
-After the framework validation record and cross-cutting program record each pass their publication gate, assign an independent reviewer to execute this guide from a fresh workspace. Start from the checked [clean-room review template](../../../scripts/rl_clean_room_record.template.json) and validate the completed record with the [clean-room publication-gate checker](../../../scripts/check_rl_clean_room_record.py). The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have artifacts, and every blocking or major finding is resolved. See the [evidence ledger](evidence-ledger.md#independent-clean-room-review-required-for-release) for the complete owner, independence, broken-link, waiver, and approval contract.
-
-After approval, close the three records and their referenced files into one digest-verified local bundle using the [artifact bundle procedure](evidence-ledger.md#close-and-verify-the-publication-artifact-bundle). Bundle verification proves byte integrity and record linkage; it does not replace the independent review of what each artifact demonstrates.
+After the framework-specific and cross-cutting validation checklists are complete, assign a reviewer who did not author the integration or its evidence to execute this guide from a fresh workspace. The review must establish that the guide is reachable in no more than two navigation clicks, every executed command is documented, no tribal setup or recovery step was required, all seven user-journey gates have immutable artifacts, and every blocking or major finding is resolved. Preserve the reviewed guide commit, framework and Dynamo pins, image digest, model revision, hardware description, reviewer identity, findings, waivers, and final decision in the approved artifact store.
 
 ## Upstream References
 

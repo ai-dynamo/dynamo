@@ -733,9 +733,6 @@ navigation:
           - page: RL Implementation Guide
             path: pages/use-cases/reinforcement-learning/implementation-guide.md
             hidden: true
-          - page: RL Evidence Ledger
-            path: pages/use-cases/reinforcement-learning/evidence-ledger.md
-            hidden: true
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film

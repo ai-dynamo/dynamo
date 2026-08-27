@@ -55,7 +55,7 @@ Framework maturity is evidence-based, not a statement that any OpenAI-compatible
 
 | Framework | Start here | Maturity | What the label means |
 |---|---|---|---|
-| verl | [Integrate with verl](verl.md) | Experimental | A public recipe exists and includes smoke, training, routing, and weight-update paths. The Dynamo guide remains experimental until its pinned clean-room validation record is complete. |
+| verl | [Integrate with verl](verl.md) | Experimental | A public recipe exists and includes smoke, training, routing, and weight-update paths. The Dynamo guide remains experimental until the pinned path is independently reproduced and reviewed. |
 | SLIME | [Review SLIME integration status](slime.md) | Integration in progress | Public prototype PRs demonstrate the intended streaming and discovery contracts, but the accepted upstream path is not settled. |
 | Prime-RL | [Review Prime-RL integration status](prime-rl.md) | Integration in progress | Discovery, recipes, and sidecar work remain in open PRs. The page documents architecture and graduation gates, not a supported launch procedure. |
 | NeMo RL | [Compatibility status](integration-reference.md#framework-compatibility) | Design research | NeMo RL exposes compatible generation and lifecycle concepts, but this documentation set has no validated public Dynamo adapter or recipe. |
@@ -105,4 +105,4 @@ No framework path in this documentation set is labeled supported yet. This is de
 
 ## Next Step
 
-If you are implementing an adapter, start with the [RL integration and compatibility reference](integration-reference.md). If you are running an existing integration, open the matching framework page and check its maturity and validation record before using its commands.
+If you are implementing an adapter, start with the [RL integration and compatibility reference](integration-reference.md). If you are running an existing integration, open the matching framework page and check its maturity, exact version pins, and validation status before using its commands.
