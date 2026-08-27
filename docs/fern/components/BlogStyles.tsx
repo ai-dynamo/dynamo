@@ -76,6 +76,26 @@ article:has(.dynamo-blog-home) {
   padding: 0 clamp(0.25rem, 2vw, 1.5rem) 5rem;
 }
 
+/* Wide-screen centering for TOC-less Blog pages. Fern centers the content
+   column between two sticky asides: the sidebar absorbs the viewport's left
+   overflow past --page-width and the table-of-contents aside the right one,
+   both boxes --sticky-aside-width wide. The publication pages set hide-toc,
+   so no TOC aside renders, the content wrapper stretches into the freed
+   width, and the capped article above centers inside the stretched wrapper,
+   sitting right of the viewport center by half the freed width. Reserve the
+   TOC box again so the column lands where a TOC-bearing page puts it -- the
+   same geometry the digest landing gets from its empty TOC aside. Scoped by
+   requiring the aside to be absent, so the digest (aside present, empty) and
+   the article pages (aside with entries) keep Fern's default, and by the
+   80rem breakpoint, which is where Fern lays the TOC column out at all;
+   below it the wrapper is already full-width on TOC-bearing pages too. No
+   backticks in this comment: it sits inside the BLOG_CSS literal. */
+@media (min-width: 80rem) {
+  body:has(.dynamo-blog-home):not(:has(#fern-toc)) .fern-layout-content-wrapper {
+    margin-inline-end: var(--sticky-aside-width);
+  }
+}
+
 article:has(.dynamo-blog-home) > header {
   display: none;
 }
