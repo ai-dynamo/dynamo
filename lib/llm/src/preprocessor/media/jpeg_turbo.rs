@@ -160,9 +160,8 @@ pub(crate) fn decode_jpeg(
     // SAFETY:
     // - TurboJpegHandle owns the non-null handle and destroys it on every exit.
     // - `bytes` is a valid immutable input buffer for the duration of each C call.
-    // - `buf` is allocated to exactly width * height * channels after checked
-    //   arithmetic and configured allocation limits; the selected TurboJPEG
-    //   pixel format with pitch 0 writes that layout.
+    // - `buf` reserves width * height * channels after checked arithmetic and
+    //   configured limits; a successful decode initializes that full layout.
     unsafe {
         let Some(handle) = TurboJpegHandle::new(tj) else {
             return Ok(None);
@@ -224,7 +223,6 @@ pub(crate) fn decode_jpeg(
         if let Err(err) = buf.try_reserve_exact(nbytes) {
             bail!("Image allocation {nbytes} bytes could not be reserved: {err:?}");
         }
-        buf.resize(nbytes, 0);
         let rc = (tj.decompress)(
             handle.as_ptr(),
             bytes.as_ptr(),
@@ -239,6 +237,7 @@ pub(crate) fn decode_jpeg(
         if rc != 0 {
             return Ok(None);
         }
+        buf.set_len(nbytes);
 
         Ok(Some(DecodedJpeg {
             width,
