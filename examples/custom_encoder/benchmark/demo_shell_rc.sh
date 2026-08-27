@@ -29,4 +29,7 @@ demo-aiperf() {
 PS1="\[\033[${DYN_DEMO_COLOR}m\][${DYN_DEMO_LABEL}]\[\033[0m\] \w \\$ "
 
 printf '\n\033[%sm%s READY\033[0m\n' "$DYN_DEMO_COLOR" "$DYN_DEMO_LABEL"
+printf 'GPU: %s  Endpoint: %s\n' \
+    "${DYN_DEMO_GPU_INDEX:-unset}" \
+    "${DYN_DEMO_URL:-http://127.0.0.1:8000}"
 printf 'Run the live benchmark with: \033[1mdemo-aiperf\033[0m\n\n'

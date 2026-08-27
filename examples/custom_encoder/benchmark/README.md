@@ -42,7 +42,7 @@ Override `DYN_BENCH_WORKLOAD_ROOT` if the workload is not at the default audited
 
 ## Run a Live AIPerf Demo
 
-For a side-by-side demo, start one launcher on each of two matching H100 nodes, warm both servers with the same workload, and run the AIPerf command in separate terminals:
+For a side-by-side demo, run both implementations either on one two-GPU H100 node or on two statically matched one-GPU H100 nodes. Pin each server to one GPU and, when sharing a node, give the sides distinct HTTP, system-metrics, KV-event, namespace, and cache settings. Start the side-specific AIPerf commands in separate terminals:
 
 ```bash
 ./examples/custom_encoder/benchmark/run_qwen2_5_vl_demo_aiperf.sh control
@@ -52,9 +52,13 @@ For a side-by-side demo, start one launcher on each of two matching H100 nodes, 
 ./examples/custom_encoder/benchmark/run_qwen2_5_vl_demo_aiperf.sh dynamo-vllm
 ```
 
-The demo runner verifies the H100 model, memory, power limit, maximum SM clock, visible-device count, and workload hash before it starts. It discovers the served model ID through `/v1/models`, displays the live AIPerf dashboard with metrics refreshed every five seconds, and writes each side to a timestamped artifact directory. Set `DYN_DEMO_CONVERSATIONS`, `DYN_DEMO_CONCURRENCY`, `DYN_DEMO_UI`, or `DYN_DEMO_STATS_INTERVAL` to override the default 1000 requests, concurrency 64, `dashboard` UI, or five-second metrics refresh.
+The demo runner verifies its selected GPU's model, memory, power limit, maximum SM clock, visible-device count, and workload hash. It executes 20 excluded warmups, waits for the other terminal at a shared-filesystem barrier, then starts both live measurements together. Each side records one-second GPU telemetry and writes to a timestamped artifact directory; both terminals finish with the paired throughput and latency comparison. Set `DYN_DEMO_CONVERSATIONS`, `DYN_DEMO_CONCURRENCY`, `DYN_DEMO_UI`, or `DYN_DEMO_STATS_INTERVAL` to override the default 1000 requests, concurrency 64, lightweight live UI, or five-second metrics refresh.
 
-For a recording-ready terminal, start an interactive Bash shell with the side selected and this directory's `demo_shell_rc.sh` as its rcfile. The shell displays a labeled prompt and provides `demo-aiperf` as the only command needed to start that side's run.
+For the most controlled recording layout, co-locate both warm servers on one H100 with distinct ports and namespaces, set `DYN_VLLM_GPU_MEMORY_UTILIZATION=0.2`, and export `DYN_DEMO_SERIAL_SIDES=1` in both panels. The user still enters `demo-aiperf` once in each terminal. The control panel runs first; the optimized panel visibly waits, then starts automatically after control has released the GPU. This avoids cross-node performance variance while retaining live AIPerf output in both terminals.
+
+For a recording-ready terminal, run `run_qwen2_5_vl_demo_panel.sh` with `control` or `dynamo-vllm`. It starts the server, waits for `/v1/models`, then opens an interactive Bash shell using `demo_shell_rc.sh`. The shell displays a labeled prompt and provides `demo-aiperf` as the only command needed to start that side's run.
+
+Use `run_qwen2_5_vl_demo_server.sh` to start the isolated server processes. The defaults are control on GPU 0 and port 8000, and `dynamo.vllm` on GPU 1 and port 8001. `demo_same_node_layout.py` divides the SLURM CPU allocation symmetrically between the two arms.
 
 Use the launchers directly for a smoke test:
 
