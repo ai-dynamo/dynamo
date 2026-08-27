@@ -134,3 +134,4 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 - `media_io_kwargs` is an overloaded term; at the time of writing (08/26/2026), it is only meant
   to be used when frontend decoding is enabled. When it is disabled, it is not passed properly to
   the frameworks.
+- For multimodal items, only public URLs are supported.
