@@ -12,7 +12,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ### Core Components
 
-- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
+- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang, Triton Inference Server) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
 
 - **`run.sh`** - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
 
@@ -249,6 +249,13 @@ docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)
 container/render.py --framework=sglang --device=xpu --target=runtime
 docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+
+# Build Triton runtime image (prebuilt Dynamo wheels from PyPI on the upstream
+# Triton release image). --network=host lets the build reach PyPI.
+# The Triton release is selected with --build-arg RUNTIME_IMAGE_TAG=<tag>
+# (defaults to 26.07-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
+container/render.py --framework=triton --target=runtime --output-short-filename
+docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.07-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
@@ -576,4 +583,3 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 - **vLLM**: `--gpu-memory-utilization 0.20` (use 20% GPU memory), `--enforce-eager` (disable CUDA graphs), `--no-enable-prefix-caching` (save memory), `--max-num-seqs 64` (max concurrent sequences)
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
-

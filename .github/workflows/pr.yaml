@@ -37,6 +37,7 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
@@ -149,6 +150,9 @@ jobs:
       - trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
+      - triton-build
+      - triton-test
+      - triton-qa-test
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
@@ -190,7 +194,7 @@ jobs:
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
       - deploy-cleanup-checkpoint-trtllm
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Check all deploy test jobs
         run: |
@@ -558,6 +562,20 @@ jobs:
         USER_GID=1000
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.triton == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '["13.2"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [changed-files]
@@ -881,6 +899,43 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  triton-test:
+    name: triton-runtime
+    needs: [changed-files, triton-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '["13.2"]'
+      platform: '["amd64"]'
+      run_sanity_check: false # skip for absence of torch
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and triton and gpu_0
+      run_gpu_tests: false
+    secrets: inherit
+
+  triton-qa-test:
+    name: triton-runtime
+    needs: [changed-files, triton-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      test_type: QA Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '["13.2"]'
+      platform: '["amd64"]'
+      run_sanity_check: false # skip for absence of torch
+      run_gpu_tests: true
+      gpu_test_markers: pre_merge and triton_qa
+      gpu_test_timeout_minutes: 180
+      verify_gpu: false # skip for absence of torch
+    secrets: inherit
+
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
@@ -937,6 +992,7 @@ jobs:
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.triton == 'true' ||
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
@@ -1875,7 +1931,7 @@ jobs:
     name: vLLM DynamoCheckpoint Cleanup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true')
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]

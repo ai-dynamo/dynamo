@@ -18,6 +18,10 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_triton:
+        description: 'Build and push triton image, tagged with branch name'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
@@ -91,6 +95,20 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime # This name overlaps with other triton jobs to group them in the UI
+    needs: [init]
+    if: inputs.build_triton
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '["13.2"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
@@ -121,6 +139,9 @@ jobs:
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  # Triton images are published to AWS ECR only (no Azure ACR mirror), so there
+  # is no triton-copy-to-acr job.
 
   # ============================================================================
   # OPERATOR (build-only)
@@ -197,7 +218,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

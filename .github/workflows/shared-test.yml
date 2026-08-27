@@ -93,6 +93,11 @@ on:
         required: false
         type: string
         default: ''
+      verify_gpu:
+        description: 'Check the GPU through torch before the GPU stages. Set false for runtime images that ship without torch, leaving the suite to check the GPU it needs.'
+        required: false
+        type: boolean
+        default: true
       source_ref:
         description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
         required: false
@@ -128,6 +133,10 @@ on:
         required: false
       DD_API_KEY:
         required: true
+      TRITON_ARTIFACTORY_USER:
+        required: false
+      TRITON_ARTIFACTORY_TOKEN:
+        required: false
 
 jobs:
   test:
@@ -168,6 +177,9 @@ jobs:
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
+        ports:
+          - 9000:9000
+          - 9001:9001
     steps:
       - name: Checkout repository
         id: checkout
@@ -237,6 +249,7 @@ jobs:
           max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
+          verify_gpu: ${{ inputs.verify_gpu }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results,
@@ -253,6 +266,9 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          triton_artifactory_user: ${{ secrets.TRITON_ARTIFACTORY_USER }}
+          triton_artifactory_token: ${{ secrets.TRITON_ARTIFACTORY_TOKEN }}
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
+          verify_gpu: ${{ inputs.verify_gpu }}

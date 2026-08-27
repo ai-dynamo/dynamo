@@ -13,7 +13,7 @@ on:
       framework:
         description: 'Framework to validate'
         type: choice
-        options: [all, vllm, sglang, trtllm]
+        options: [all, vllm, sglang, trtllm, triton]
         default: all
 
 permissions:
@@ -36,13 +36,14 @@ jobs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
       run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+      run_triton: ${{ steps.flags.outputs.run_triton }}
     steps:
       - id: flags
         shell: bash
         env:
           FW: ${{ github.event.inputs.framework || 'all' }}
         run: |
-          for f in vllm sglang trtllm; do
+          for f in vllm sglang trtllm triton; do
             if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
               echo "run_$f=true" >> "$GITHUB_OUTPUT"
             else
@@ -365,6 +366,23 @@ jobs:
       archive_sources: false
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '["13.2"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-triton-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-triton-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     if: github.event_name != 'workflow_dispatch'
@@ -450,7 +468,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -590,6 +608,43 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       run_gpu_tests: false
+    secrets: inherit
+
+  triton-test:
+    name: triton-runtime
+    needs: [config, triton-build]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '["13.2"]'
+      platform: '["amd64"]'
+      run_sanity_check: false # skip for absence of torch
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and triton and gpu_0'
+      run_gpu_tests: false
+    secrets: inherit
+
+  triton-qa-test:
+    name: triton-runtime
+    needs: [config, triton-build]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      test_type: QA Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '["13.2"]'
+      platform: '["amd64"]'
+      run_sanity_check: false # skip for absence of torch
+      run_gpu_tests: true
+      gpu_test_markers: '(pre_merge or post_merge) and triton_qa'
+      gpu_test_timeout_minutes: 180
+      verify_gpu: false # skip for absence of torch
     secrets: inherit
 
   planner-test:
@@ -1490,11 +1545,11 @@ jobs:
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
       - deploy-cleanup-checkpoint-trtllm
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: "Check all deploy test jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # CLEANUP JOBS
@@ -1522,6 +1577,7 @@ jobs:
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
   ############################## SLACK NOTIFICATION ##############################
+
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]

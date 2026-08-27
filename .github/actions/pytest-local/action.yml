@@ -34,6 +34,12 @@ inputs:
     default: 'true'
   hf_token:
     required: false
+  triton_artifactory_user:
+    description: 'Artifactory username, for the Triton suites that download QA models from it'
+    required: false
+  triton_artifactory_token:
+    description: 'Artifactory token, for the Triton suites that download QA models from it'
+    required: false
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
@@ -62,6 +68,10 @@ inputs:
     description: 'Is this a GPU test job?'
     required: false
     default: 'false'
+  verify_gpu:
+    description: 'Check the GPU through torch before running GPU tests. Set false for images without torch (Triton), leaving the suite to check the GPU it needs.'
+    required: false
+    default: 'true'
 
 runs:
   using: "composite"
@@ -72,7 +82,7 @@ runs:
         STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
         echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
     - name: verify minio
-      if: inputs.gpu_tests == 'true' # only gpu tests require minio
+      if: inputs.gpu_tests == 'true' && !contains(inputs.pytest_marks, 'triton_qa')
       shell: bash
       run: |
         # Wait for MinIO to be ready
@@ -92,7 +102,7 @@ runs:
           sleep 1
         done
     - name: Verify GPU visibility
-      if: inputs.gpu_tests == 'true'
+      if: inputs.gpu_tests == 'true' && inputs.verify_gpu != 'false'
       shell: python
       run: |
         import sys
@@ -113,6 +123,8 @@ runs:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_TOKEN: ${{ inputs.hf_token }}
+        TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
+        TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
         DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
         DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
@@ -280,8 +292,6 @@ runs:
         fi
 
         exit ${TEST_EXIT_CODE}
-
-
 
     - name: Upload Test Results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

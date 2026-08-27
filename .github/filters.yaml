@@ -12,6 +12,7 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   triton   -> triton build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
@@ -123,6 +124,8 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
+  - 'container/templates/local_dev.Dockerfile'
+  - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
@@ -266,6 +269,7 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
+
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
@@ -307,6 +311,12 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+triton:
+  - 'components/src/dynamo/triton/**'
+  - 'container/templates/triton_*'
   - '!**/*.md'
   - '!**/*.rst'
 

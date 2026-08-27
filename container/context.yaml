@@ -159,3 +159,24 @@ trtllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
+
+triton:
+  # The runtime image is the upstream Triton Inference Server release from NGC
+  # (nvcr.io/nvidia/tritonserver:<tag>-py3), with Dynamo's source-built wheels on
+  # top. base_image (cuda-dl-base) builds the dynamo_base and wheel_builder helper
+  # stages. Override --build-arg RUNTIME_IMAGE_TAG for a different Triton release.
+  cuda13.2:
+    base_image: nvcr.io/nvidia/cuda-dl-base
+    runtime_image: nvcr.io/nvidia/tritonserver
+    # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects
+    # 13.2 at build time. The wheels load CUDA dynamically, so they run on the
+    # 13.2 runtime image regardless.
+    base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
+    runtime_image_tag: 26.07-py3
+  enable_media_ffmpeg: "false"
+  enable_gpu_memory_service: "true"
+  # KVBM is disabled: it is an LLM KV-cache feature whose Python NIXL path
+  # (nixl -> nixl_cu13 -> import torch) needs PyTorch, which the Triton py3
+  # release image does not ship. The Triton runtime serves generic Triton models
+  # over KServe, so KVBM/NIXL does not apply (mirrors the sglang runtime).
+  enable_kvbm: "false"
