@@ -129,5 +129,12 @@ mod tests {
             SelectionError::Scheduler(KvSchedulerError::DueTimeExpired).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
+        assert_eq!(
+            SelectionError::Scheduler(KvSchedulerError::RequestClassifierPanicked(
+                "test panic".to_string(),
+            ))
+            .status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16()
+        );
     }
 }
