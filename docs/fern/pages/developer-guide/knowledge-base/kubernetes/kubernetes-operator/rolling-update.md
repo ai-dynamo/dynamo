@@ -7,7 +7,7 @@ subtitle: How DGD worker updates differ across Deployment, Grove, and LWS backen
 
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
 
-The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates**, while Grove and LWS-backed deployments use their native update mechanisms. Dynamo isolates Grove and LWS worker generations with hash-suffixed runtime namespaces even though those resources own the rollout lifecycle.
+The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments use **operator-managed rolling updates**, while Grove and LWS-backed deployments use their native update mechanisms. All three backing types isolate worker generations with hash-suffixed Dynamo runtime namespaces (service-discovery scopes, not Kubernetes namespaces); the difference is which controller owns the rollout lifecycle.
 
 ## Example
 
@@ -376,8 +376,8 @@ This provides a holistic view of the deployment's health during the transition.
 | Aspect | Grove | LWS | Deployments (Managed) |
 |--------|-------|-----|----------------------|
 | Update mechanism | Native Grove rollout | Native LWS rollout | Operator-managed with DCD lifecycle |
-| Worker-generation namespace | Shared hash suffix across all worker components | Shared hash suffix across all worker components | Hash-based separation |
-| Direct cross-generation worker discovery | Prevented by namespace | Prevented by namespace | Prevented by namespace |
+| Worker-generation runtime namespace | Shared hash suffix across all worker components | Shared hash suffix across all worker components | Hash-based separation |
+| Direct cross-generation worker discovery | Prevented by runtime namespace isolation | Prevented by runtime namespace isolation | Prevented by runtime namespace isolation |
 | Update strategy | Grove native strategy; `OnDelete` can require manual pod deletion | LWS native strategy | `RollingUpdate` or component-scoped `Recreate` |
 | maxSurge / maxUnavailable | Determined by Grove | Determined by LWS | Configurable per component when using `RollingUpdate` |
 | Status tracking | Native resource status | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
