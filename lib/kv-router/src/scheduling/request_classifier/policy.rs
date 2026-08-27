@@ -85,14 +85,14 @@ impl ClassifyRequest {
         self.request_id.as_deref()
     }
 
-    /// Return the effective policy class.
+    /// Return the requested policy family or explicit class.
     pub fn policy_class(&self) -> Option<&str> {
         self.policy_class_override
             .as_deref()
             .or(self.policy_class.as_deref())
     }
 
-    /// Override the policy class used by the router-owned queue.
+    /// Override the policy family or explicit class used by the router-owned queue.
     pub fn set_policy_class(&mut self, policy_class: impl Into<String>) {
         self.policy_class_override = Some(policy_class.into());
     }

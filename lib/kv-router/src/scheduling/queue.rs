@@ -678,10 +678,11 @@ impl<
             return Err(KvSchedulerError::DueTimeExpired);
         }
 
+        let snapshot = QueueSnapshot::new(request.isl_tokens, initial_cached_tokens);
         let class_index_override = policy_class
             .map(|policy_class| {
                 self.profile
-                    .class_index_by_name(&policy_class)
+                    .resolve_class_index_strict(&policy_class, snapshot.uncached_tokens)
                     .ok_or_else(|| {
                         KvSchedulerError::InvalidClassificationMetadata(format!(
                             "unknown policy class {policy_class:?}"
@@ -690,7 +691,6 @@ impl<
             })
             .transpose()?;
 
-        let snapshot = QueueSnapshot::new(request.isl_tokens, initial_cached_tokens);
         let class_index = class_index_override.unwrap_or_else(|| {
             self.profile
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens)
@@ -2128,38 +2128,83 @@ mod tests {
 default_policy_family: latency
 uncached_isl_buckets:
   - min_tokens: 0
-    bucket: all
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
 policy_classes:
-  - name: latency
+  - name: latency_cached
     policy_family: latency
-    cache_bucket: all
+    cache_bucket: cached
     quantum: 1
-  - name: bulk
+  - name: latency_uncached
+    policy_family: latency
+    cache_bucket: uncached
+    quantum: 1
+  - name: bulk_cached
     policy_family: bulk
-    cache_bucket: all
+    cache_bucket: cached
+    quantum: 1
+  - name: bulk_uncached
+    policy_family: bulk
+    cache_bucket: uncached
+    quantum: 1
+  - name: custom_priority
     quantum: 1
 "#,
         );
         let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
-        let (request, _rx) = make_request("classified", 64);
+        let (mut request, _rx) = make_request("classified", 16);
+        request.policy_class = Some("latency".to_string());
         let ingress_at = StdInstant::now();
         let due_at = ingress_at + Duration::from_secs(20);
 
         let mut classified = queue.classify_request(&classify_source(&request));
-        classified.set_policy_class("bulk");
+        let initial_policy_class = classified.policy_class().unwrap().to_string();
+        classified.set_policy_class(initial_policy_class);
         classified.set_due_at(due_at);
         classified.set_scheduling_cost_tokens(7);
         let metadata = queue
             .validate_classification(&request, classified, ingress_at)
             .unwrap();
-        assert_eq!(queue.profile.class(metadata.class_index).name, "bulk");
+        assert_eq!(
+            queue.profile.class(metadata.class_index).name,
+            "latency_cached"
+        );
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at.map(Instant::into_std), Some(due_at));
+
+        let (request, _rx) = make_request("bulk", 64);
+        let mut bulk = queue.classify_request(&classify_source(&request));
+        bulk.set_policy_class("bulk");
+        let metadata = queue
+            .validate_classification(&request, bulk, ingress_at)
+            .unwrap();
+        assert_eq!(
+            queue.profile.class(metadata.class_index).name,
+            "bulk_uncached"
+        );
+
+        let mut explicit = queue.classify_request(&classify_source(&request));
+        explicit.set_policy_class("custom_priority");
+        let metadata = queue
+            .validate_classification(&request, explicit, ingress_at)
+            .unwrap();
+        assert_eq!(
+            queue.profile.class(metadata.class_index).name,
+            "custom_priority"
+        );
 
         let mut unknown_class = queue.classify_request(&classify_source(&request));
         unknown_class.set_policy_class("missing");
         assert!(matches!(
             queue.validate_classification(&request, unknown_class, ingress_at),
+            Err(KvSchedulerError::InvalidClassificationMetadata(_))
+        ));
+
+        let mut physical_class = queue.classify_request(&classify_source(&request));
+        physical_class.set_policy_class("latency_cached");
+        assert!(matches!(
+            queue.validate_classification(&request, physical_class, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
