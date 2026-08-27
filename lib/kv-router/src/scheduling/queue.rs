@@ -1159,8 +1159,7 @@ impl<
                 decay_now,
             )
             .await;
-            let admit_now = Instant::now();
-            if queued.due_at.is_some_and(|due_at| due_at <= admit_now) {
+            if queued.due_at.is_some_and(|due_at| due_at <= Instant::now()) {
                 let mut request = popped.into_payload().request;
                 request.respond(Err(KvSchedulerError::DueTimeExpired));
                 continue;
@@ -1179,6 +1178,7 @@ impl<
                     None
                 };
             }
+            let admit_now = Instant::now();
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
