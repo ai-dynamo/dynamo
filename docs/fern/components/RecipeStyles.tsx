@@ -2191,7 +2191,16 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
    the picker never offers a combination that has no content behind it. A label
    with no data-needs-* attribute is always shown, which is every existing
    option, so this is additive. Same :has() mechanism as the content rules
-   below -- no JavaScript.                                                     */
+   below -- no JavaScript.
+
+   Known limitation: CSS can hide a label but cannot uncheck its radio. If the
+   reader changes an upstream selection and that leaves an already-checked
+   option hidden (gpt-oss-120b: flipping GPU from B200 to GB200 keeps the
+   agentic workload and vLLM backend checked while both labels hide), the row
+   renders with no visible selection until the reader clicks a shown option.
+   Page content is unaffected -- the conditional content divs key off the
+   selection values, not off label visibility -- so this is cosmetic. Fixing it
+   needs JavaScript, which this component deliberately avoids.                 */
 body:has(input[name="recipe-sku"][value="b200"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="b200"]),
 body:has(input[name="recipe-sku"][value="h200"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="h100"]),

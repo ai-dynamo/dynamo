@@ -435,7 +435,7 @@ Aggregated leads on both SKUs at the same SLA: 1173.2 against 916.6 output tok/s
 
 <div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
 
-- MTP on B200 NVFP4 aggregation is also not shipped. Output is *correct* in isolation — aggregated plus MTP stays coherent even on a forced Mamba prefix-cache hit, because the prefill-to-decode transfer garbage above cannot occur without disaggregation — but MTP plus prefix caching forces `mamba_cache_mode='align'`, whose conv-state copy path crashes under real concurrent long-context traffic ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898) / PR [#40454](https://github.com/vllm-project/vllm/pull/40454); NVBug 6442165). Even with DS unset to sidestep that crash, MTP-heavy decode starves prefill on the shared GPU, with TTFT regressions, for no throughput win.
+- MTP on B200 NVFP4 aggregation is also not shipped. Output is *correct* in isolation — aggregated plus MTP stays coherent even on a forced Mamba prefix-cache hit, because the prefill-to-decode transfer garbage above cannot occur without disaggregation — but MTP plus prefix caching forces `mamba_cache_mode='align'`, whose conv-state copy path crashes under real concurrent long-context traffic ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898) / PR [#40454](https://github.com/vllm-project/vllm/pull/40454)). Even with DS unset to sidestep that crash, MTP-heavy decode starves prefill on the shared GPU, with TTFT regressions, for no throughput win.
 
 </div>
 

@@ -101,6 +101,7 @@ targets:
   topology: aggregated
   techniques:
   - kv-aware-routing
+  - mtp-speculative-decode
   workload:
     type: chat
     traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
@@ -119,6 +120,7 @@ targets:
   techniques:
   - disaggregated-prefill-decode
   - kv-aware-routing
+  - mtp-speculative-decode
   workload:
     type: chat
     traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)

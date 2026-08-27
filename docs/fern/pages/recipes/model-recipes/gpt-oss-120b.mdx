@@ -445,7 +445,7 @@ Per-GPU throughput = `output_token_throughput` / 8 (all variants run on 8 GPUs);
 | --- | --- | --- |
 | `ENDPOINT` | `turbo-gptoss-120b-agg-b200-agentic-frontend:8000` | Frontend service:port — change per variant (see the table above) |
 | `TRACE_FILE` | agentic 15% subset | Swap to the full trace, the chat flavour, or a smaller subset |
-| `CONCURRENCY` | `384` | B200 agentic ~50-tps floor; H200 ~128. See the concurrency sweep below |
+| `CONCURRENCY` | `384` | Starting point only — use the measured per-variant value from the table above (B200 agg `512`, H200 agg `256`, both disagg `256`) to reproduce the published results. See the concurrency sweep below |
 | `TARGET_MODEL` | `openai/gpt-oss-120b` | Must match `--served-model-name` |
 
 **Running a concurrency sweep.** `perf.yaml` runs a **single** `CONCURRENCY` value. To measure multiple concurrencies you must clear server state between runs — otherwise residual KV cache / prefix-cache hits from the previous run skew results. For each concurrency value you want to measure:
