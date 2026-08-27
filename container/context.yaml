@@ -99,7 +99,7 @@ vllm:
   transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
-  enable_media_ffmpeg: "false"
+  enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"
@@ -112,10 +112,10 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.17-cu130-runtime
+    runtime_image_tag: v0.5.18-cu130-runtime
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
-    # nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.1,
-    # cuDNN 9.13.0.50, ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
+    # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
+    # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
     # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
     # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
@@ -123,7 +123,7 @@ sglang:
     # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
     # ffmpeg is copied in (CUDA, for the video-generation encode path) and the
     # Dynamo Rust wheel is built without media-ffmpeg.
-    baseline_sbom: cuda@8b2705ea
+    baseline_sbom: cuda@0230b7f2
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
@@ -140,7 +140,7 @@ sglang:
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: v1.3.2
+  nixl_ref: v1.4.0
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"

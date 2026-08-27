@@ -203,6 +203,12 @@ repos:
       language: system
       files: ^scripts/check_action_pins\.py$
       pass_filenames: false
+    - id: validate-agent-instructions
+      name: Validate AGENTS.md and CLAUDE.md pairs
+      entry: python3 scripts/validate_agent_instructions.py
+      language: python
+      pass_filenames: false
+      always_run: true
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py
