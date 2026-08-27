@@ -60,12 +60,7 @@ impl TrtllmSidecarEngine {
         Self::from_parsed(<Args as clap::Parser>::parse())
     }
 
-    pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo)
-    }
-
-    /// Parse explicit arguments without terminating the process on Clap exits.
-    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+    pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::from_parsed(args).map_err(Into::into)
     }
