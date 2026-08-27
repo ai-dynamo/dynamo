@@ -14,6 +14,7 @@ subtitle: Run the public verl-recipe Dynamo rollout backend and understand its o
 | verl-recipe snapshot reviewed | [`461b830cfee4f5a67c21edc300c24373230babc7`](https://github.com/verl-project/verl-recipe/tree/461b830cfee4f5a67c21edc300c24373230babc7/dynamo) |
 | Latest Dynamo recipe content change in that snapshot | [`52cdedf7e0cfbc3b7d518faefcb2035b12f689f4`](https://github.com/verl-project/verl-recipe/commit/52cdedf7e0cfbc3b7d518faefcb2035b12f689f4) |
 | Canonical verl core pin | Read [`dynamo/REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/REQUIRED_VERL.txt); at review time it selected `d82d2777b5dc3e96a8a45168d02660312707ab98` |
+| Core `recipe` gitlink at that pin | [`e7f889574b8301cc0f0fc1d57c6d67f31ffeb689`](https://github.com/verl-project/verl-recipe/commit/e7f889574b8301cc0f0fc1d57c6d67f31ffeb689), which predates the Dynamo recipe and must be replaced in the nested checkout by the reviewed recipe snapshot |
 | Recipe backend | Dynamo vLLM rollout workers behind one shared frontend |
 | Weight path | verl colocated CUDA IPC through recipe-owned Ray/ZMQ control; not ModelExpress |
 | Source review | 2026-08-27 by Dynamo RL documentation maintainers |
@@ -74,7 +75,9 @@ Use the upstream `REQUIRED_VERL.txt` rather than guessing a compatible verl rele
 
 ## Select a Reproducible Environment
 
-The reviewed recipe snapshot pins the core verl commit, but it does not pin a complete Dynamo runtime image, a native-path Dynamo commit, the CUDA/driver pair, or the resulting vLLM dependency set. Its `install_verl.sh` installs verl only; the clone and installer commands below are therefore not a complete environment bootstrap. Before using them, choose one variant, start from a clean Linux GPU environment, pin a Dynamo source commit, and install its vLLM backend using [Building from Source](../../developer-guide/advanced-customizations/building-from-source.md). Ensure `etcd` and `nats-server` are installed separately.
+The reviewed recipe snapshot pins the core verl commit, but it does not pin a complete Dynamo runtime image, a native-path Dynamo commit, the CUDA/driver pair, or the resulting vLLM dependency set. The two recorded repository pins are also not self-closing: core verl commit `d82d2777` records recipe submodule `e7f88957`, and that older recipe snapshot does not contain `dynamo/`. The recipe installer clones the correct core commit but initializes its recorded submodule, so the nested recipe checkout must then be advanced explicitly to the reviewed `461b830c` snapshot. This is a documented gitlink override, not proof that the upstream pin pair is intrinsically reproducible.
+
+The clone and installer commands below are therefore not a complete environment bootstrap. Before using them, choose one variant, start from a clean Linux GPU environment, pin a Dynamo source commit, and install its vLLM backend using [Building from Source](../../developer-guide/advanced-customizations/building-from-source.md). Ensure `etcd` and `nats-server` are installed separately.
 
 Do not assume that a stable verl image or the latest Dynamo vLLM image satisfies both projects merely because each works independently. Resolve the combined environment, preserve its immutable image digest and package inventory, and require the host inventory below to match the validation report before treating the smoke as evidence. The missing upstream end-to-end image pin is one reason this page remains experimental.
 
@@ -85,17 +88,19 @@ git clone https://github.com/verl-project/verl-recipe.git
 git -C verl-recipe checkout 461b830cfee4f5a67c21edc300c24373230babc7
 
 cd verl-recipe
-./install_verl.sh --recipe dynamo --method git --dest ../verl
-```
-
-Before installing GPU packages or launching a job, inspect the exact command and pin:
-
-```bash
-./install_verl.sh --recipe dynamo --show
 sed -n '1,120p' dynamo/REQUIRED_VERL.txt
+./install_verl.sh --recipe dynamo --method git --dest ../verl --show
+./install_verl.sh --recipe dynamo --method git --dest ../verl
+
+git -C ../verl/recipe fetch origin 461b830cfee4f5a67c21edc300c24373230babc7
+git -C ../verl/recipe checkout 461b830cfee4f5a67c21edc300c24373230babc7
+
+test "$(git -C ../verl rev-parse HEAD)" = d82d2777b5dc3e96a8a45168d02660312707ab98
+test "$(git -C ../verl/recipe rev-parse HEAD)" = 461b830cfee4f5a67c21edc300c24373230babc7
+test -f ../verl/recipe/dynamo/main_dynamo.py
 ```
 
-Run subsequent commands from the resulting `verl` checkout, where the compatible recipe is available as `recipe/dynamo`. Record the resulting core verl and recipe submodule commits in the run artifact; do not record only the branch name.
+Run subsequent commands from the resulting `verl` checkout, where the explicitly overridden nested recipe is available as `recipe/dynamo`. Record the core verl commit, its original recipe gitlink, the actual nested recipe commit, and the reason for the override in the run artifact; do not record only branch names. `git -C ../verl status --short` should report the expected recipe gitlink change, while `git -C ../verl/recipe status --short` must remain clean. Treat any other source modification as an undocumented patch that invalidates the clean-room run.
 
 ## Prepare the Validation Run
 
@@ -103,7 +108,7 @@ Before allocating GPUs, create a validation report in a durable location appropr
 
 ## Verify the GPU Host Before the Run
 
-After installing the pinned environment but before launching the smoke, record all three clean Git heads, the installed backend version, PyTorch's compiled CUDA version, required binary versions, image digest, visible GPU count and model, driver version, `nvidia-smi topo -m`, interconnect, and network. Keep the three source checkouts clean and store artifacts outside them. Obtain the image digest from the scheduler, container runtime, or registry resolution used for the allocation and preserve that provenance beside the hardware inventory.
+After installing the pinned environment but before launching the smoke, record the Dynamo head, core verl head, original core recipe gitlink, and actual nested recipe head; the installed backend version; PyTorch's compiled CUDA version; required binary versions; image digest; visible GPU count and model; driver version; `nvidia-smi topo -m`; interconnect; and network. Keep Dynamo and the nested recipe checkout clean. In the core checkout, allow only the documented recipe gitlink override and store artifacts outside every source tree. Obtain the image digest from the scheduler, container runtime, or registry resolution used for the allocation and preserve that provenance beside the hardware inventory.
 
 Host and pin agreement is only a precondition. It does not prove generation, training, correctness, performance, failure recovery, or ownership. Before a support claim, an independent reviewer must reproduce a real generation smoke; exact completion token IDs and aligned log probabilities; at least one optimizer step through rollout, reward/advantage, actor update, weight synchronization, and post-update rollout; consistent per-worker update verification and cache handling; retry/cancellation behavior; recovery from request, worker, and update failures; a complete framework-to-trace join with measured overhead; immutable environment and topology pins; and named framework and Dynamo owners. Do not mark an item complete without linking its run artifact.
 
@@ -263,6 +268,7 @@ Scale one dimension at a time. A successful single-worker generation smoke does 
 This page can move from experimental to supported only when an independently reviewed run includes:
 
 - the exact verl core, recipe, Dynamo, vLLM, container/CUDA, model, dataset, hardware, and topology pins
+- either an upstream-consistent core/recipe gitlink or the explicitly recorded nested-recipe override documented above
 - successful validation-only smoke and one complete training iteration
 - exact token ID and logprob verification
 - a successful policy update and post-update generation
