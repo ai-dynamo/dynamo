@@ -300,6 +300,13 @@ where
         response
     }
 
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.inner.begin_request_lifecycle(request_id)
+    }
+
     pub(crate) fn has_request_classifier(&self) -> bool {
         self.inner.has_request_classifier()
     }

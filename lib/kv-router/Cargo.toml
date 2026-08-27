@@ -98,3 +98,7 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
+
+[[bench]]
+name = "request_classifier"
+harness = false

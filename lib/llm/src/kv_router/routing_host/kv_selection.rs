@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, time::Instant};
-
 use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
@@ -12,6 +10,8 @@ use dynamo_kv_router::{
     selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
+use std::collections::HashSet;
+use std::time::Instant;
 
 use crate::{
     kv_router::{
@@ -34,6 +34,7 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
+    pub(super) lifecycle: Option<dynamo_kv_router::scheduling::RequestLifecycle>,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +133,7 @@ where
                 cached_tokens,
                 routing_hashes,
                 router_hint,
+                lifecycle: None,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

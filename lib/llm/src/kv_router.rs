@@ -992,6 +992,13 @@ where
         self.required_worker_inputs
     }
 
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.scheduler.begin_request_lifecycle(request_id)
+    }
+
     /// Cancel background work and wait for KV event ingestion to stop.
     pub async fn shutdown(mut self) {
         self.cancellation_token.cancel();

@@ -60,7 +60,7 @@ impl HasTokenIds for LLMEngineOutput {
 }
 
 /// Check if an error chain indicates the request should be migrated.
-fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     const MIGRATABLE: &[ErrorType] = &[
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
@@ -369,6 +369,11 @@ where
                         continue;
                     }
                 }
+                if let Some(error) = response.error.as_ref()
+                    && let Some(state) = self.request.migration_state.as_ref()
+                {
+                    state.abort_request_lifecycle(Some(error));
+                }
                 self.track_response(&response);
                 return Some(response);
             }
@@ -437,6 +442,12 @@ where
                 Ok(())
             }
             Some(Err(err)) => {
+                let typed_error = err
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<DynamoError>());
+                if let Some(state) = self.request.migration_state.as_ref() {
+                    state.abort_request_lifecycle(typed_error);
+                }
                 let outcome =
                     if error::match_error_chain(err.as_ref(), &[ErrorType::Cancelled], &[]) {
                         frontend_service::migration_outcome::CANCELLED
@@ -495,16 +506,16 @@ where
         if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
             self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
-        for token_id in token_ids.iter() {
-            self.request.token_ids.push(*token_id);
-        }
+        self.request.append_migration_output_tokens(token_ids);
     }
 
     /// Returns `true` if the tracked request token length plus `new_output_len`
     /// exceeds the configured max_seq_len, in which case migration is disabled.
     fn exceed_max_seq_len(&mut self, new_output_len: u32) -> bool {
         if let Some(max_seq_len) = self.max_seq_len {
-            let total_len = self.request.token_ids.len() as u32 + new_output_len;
+            let total_len = u32::try_from(self.request.input_token_count())
+                .unwrap_or(u32::MAX)
+                .saturating_add(new_output_len);
             if total_len > max_seq_len {
                 tracing::warn!(
                     "Sequence length {} exceeds migration max_seq_len {}, \
@@ -528,7 +539,8 @@ mod tests {
     use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
-        preprocessor::RoutingHints, timing::RequestTracker,
+        preprocessor::{MmRoutingInfo, RoutingHints},
+        timing::RequestTracker,
     };
     use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
@@ -2126,7 +2138,12 @@ mod tests {
             }
         }
 
-        let request = create_mock_request(3);
+        let mut request = create_mock_request(3);
+        request.mm_routing_info = Some(MmRoutingInfo {
+            routing_token_ids: vec![10, 11, 12, 13, 14, 15, 0, 0],
+            block_mm_infos: Vec::new(),
+            expanded_prompt_len: 6,
+        });
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(LlmEngineMock(context_id.clone()));
 
@@ -2155,6 +2172,17 @@ mod tests {
             retry_manager.request.token_ids,
             vec![1, 2, 3, 200, 201, 202]
         );
+        let mm = retry_manager
+            .request
+            .mm_routing_info
+            .as_ref()
+            .expect("multimodal routing context should be retained");
+        assert_eq!(mm.expanded_prompt_len, 9);
+        assert_eq!(
+            mm.routing_token_ids,
+            vec![10, 11, 12, 13, 14, 15, 200, 201, 202]
+        );
+        assert_eq!(retry_manager.request.input_token_count(), 9);
     }
 
     /// 2-hop migration: A → fail → B → fail → C. Each retry's

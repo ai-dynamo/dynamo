@@ -46,10 +46,53 @@ where
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(request, phase, is_query_only, target)
-        })
-        .await
+        let mut request_lifecycle = if is_query_only {
+            None
+        } else {
+            request
+                .migration_state
+                .as_ref()
+                .and_then(|state| state.take_request_lifecycle())
+        };
+        if !is_query_only && request_lifecycle.is_none() {
+            request_lifecycle = self
+                .kv_router()
+                .begin_request_lifecycle(request.context().id())
+                .map_err(anyhow::Error::from)?;
+        }
+
+        let selection_result = self
+            .select_with_session_affinity(request, phase, is_query_only, |target| {
+                self.select_request(request, phase, is_query_only, target)
+            })
+            .await;
+        let (mut selection, affinity_acquire) = match selection_result {
+            Ok(selection) => selection,
+            Err(error) => {
+                if let Some(mut lifecycle) = request_lifecycle.take() {
+                    if crate::migration::is_migratable(error.as_ref())
+                        && let Some(state) = request.migration_state.as_ref()
+                    {
+                        lifecycle.prepare_retry();
+                        state.store_request_lifecycle(lifecycle);
+                    } else {
+                        let typed_error = error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<DynamoError>());
+                        lifecycle
+                            .abort(typed_error.map(|error| {
+                                error as &dynamo_kv_router::scheduling::ClassifyError
+                            }));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.selected(selection.worker);
+        }
+        selection.lifecycle = request_lifecycle;
+        Ok((selection, affinity_acquire))
     }
 
     pub(super) async fn track_selection(
@@ -71,6 +114,7 @@ where
             selected_worker,
             request,
             !is_query_only,
+            selection.lifecycle.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -149,7 +193,10 @@ where
         .await;
 
         if let Err(error) = record_result {
-            guard.abort().await;
+            let typed_error = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
+            guard.abort_with_error(typed_error.as_ref()).await;
             return Err(error);
         }
         Ok(guard)
@@ -225,8 +272,12 @@ where
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
-                guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                guard.record_migration_failure(typed_error.clone());
+                if !crate::migration::is_migratable(error.as_ref())
+                    || !guard.release_for_retry().await
+                {
+                    guard.abort_with_error(typed_error.as_ref()).await;
+                }
                 return Err(error);
             }
         };
