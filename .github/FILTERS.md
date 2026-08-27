@@ -25,7 +25,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks in addition to the dedicated sidecar job. Markdown under `lib/sidecar/**` is excluded from `sidecar` so a docs edit doesn't trigger an image build; it sits in `ignore` because it is not part of the Fern docs site either.
+> **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks in addition to the dedicated sidecar job.
 
 ## Fixing "Uncovered Files" Errors
 

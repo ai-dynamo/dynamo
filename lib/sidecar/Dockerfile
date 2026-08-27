@@ -117,8 +117,7 @@ FROM ${BASE_IMAGE} AS runtime
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
 # needed in this image. The dynamo user uses group 0 for OpenShift
 # compatibility and has a home directory for the Hugging Face tokenizer cache.
-# The Ubuntu base ships its own uid-1000 `ubuntu` user, so drop it first to
-# free the uid; tolerate its absence in case a future base tag omits it.
+# The base ships its own uid-1000 `ubuntu` user, so drop it to free the uid.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
