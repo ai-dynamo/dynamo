@@ -16,7 +16,7 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 | **GPU** (per worker)     | 4x GB200                        | 4x GB200 prefill + 4x GB200 decode       | TBD                     | TBD                        |
 | **Mode**                 | Aggregated                      | Prefill/decode disaggregated             | Aggregated              | Prefill/decode disaggregated |
 | **Framework**            | vLLM                            | vLLM                                     | vLLM                    | vLLM                       |
-| **Precision**            | bf16 + fp8 KV                   | bf16 + bf16 KV                           | TBD                     | TBD                        |
+| **Precision**            | bf16 + bf16 KV                  | bf16 + bf16 KV                           | TBD                     | TBD                        |
 | **Parallelism**          | TP4                             | TP4 prefill / TP4 decode                 | TBD                     | TBD                        |
 | **Routing**              | KV-aware                        | KV-aware                                 | KV-aware                | KV-aware                   |
 | **Speculative decoding** | None                            | None                                     | None                    | None                       |

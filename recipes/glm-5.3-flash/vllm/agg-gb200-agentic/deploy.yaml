@@ -53,7 +53,7 @@ spec:
                     --http-host 0.0.0.0 \
                     --http-port 8000 \
                     --router-kv-events \
-                    --kv-cache-block-size 64
+                    --kv-cache-block-size 16
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
@@ -178,8 +178,6 @@ spec:
                     --served-model-name zai-org/GLM-5.3-Flash \
                     --trust-remote-code \
                     --tensor-parallel-size 4 \
-                    --kv-cache-dtype fp8 \
-                    --block-size 64 \
                     --max-num-seqs 256 \
                     --max-num-batched-tokens 8192 \
                     --gpu-memory-utilization 0.92 \
