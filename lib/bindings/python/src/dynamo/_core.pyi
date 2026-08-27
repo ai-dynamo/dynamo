@@ -3336,6 +3336,11 @@ class backend:
         """Run the native SGLang sidecar with CLI-style arguments."""
         ...
 
+    @staticmethod
+    def _run_vllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native vLLM sidecar with CLI-style arguments."""
+        ...
+
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;
