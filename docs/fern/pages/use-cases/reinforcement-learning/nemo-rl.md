@@ -87,14 +87,19 @@ cd RL
 Build the opt-in Dynamo image layer from that checkout:
 
 ```bash
+export IMAGE=registry.example.com/nemo-rl:dynamo-6ae03578
 docker buildx build \
   --build-context nemo-rl=. \
   --build-arg BUILD_DYNAMO=1 \
   --target release \
   --file docker/Dockerfile \
-  --tag registry.example.com/nemo-rl:dynamo-6ae03578 \
+  --tag "$IMAGE" \
+  --push \
   .
+docker buildx imagetools inspect "$IMAGE"
 ```
+
+Replace `registry.example.com` with a writable registry that the Slurm site's image-conversion path can read. [`--push`](https://docs.docker.com/reference/cli/docker/buildx/build/#push) is part of the reproducible build boundary: a non-Docker Buildx driver can otherwise finish without exporting an image that the conversion step can consume. If the site explicitly converts from a local Docker daemon, use [`--load`](https://docs.docker.com/reference/cli/docker/buildx/build/#load) instead of `--push`. Record the resolved image digest either way; a mutable tag alone is not a run pin.
 
 The standard image remains unchanged when `BUILD_DYNAMO` is not set. The opt-in layer creates an isolated Python 3.12 environment at `/opt/dynamo_venv`; it does not replace NeMo RL's normal actor environments. The normal NeMo RL vLLM environment and the managed Dynamo vLLM environment intentionally use different vLLM releases while sharing the exact NCCL release.
 
@@ -142,7 +147,9 @@ Convert the image to the format required by the Slurm site, then submit the pinn
 ```bash
 export CONTAINER=/shared/images/nemo-rl-dynamo-6ae03578.sqsh
 export MOUNTS="$PWD:$PWD"
-export GPUS_PER_NODE=2
+# Use the partition's full physical GPU count per node. This example assumes
+# an eight-GPU node; use 2 only on a partition whose nodes have two GPUs.
+export GPUS_PER_NODE=8
 export BASE_LOG_DIR="$PWD/results/dynamo-smoke/logs"
 printf -v COMMAND '%q ' \
   /opt/nemo_rl_venv/bin/python -u "$PWD/examples/run_grpo.py" \
@@ -151,14 +158,14 @@ export COMMAND
 
 sbatch \
   --nodes=1 \
-  --gres=gpu:2 \
+  --gres="gpu:${GPUS_PER_NODE}" \
   --exclusive \
   --account=<account> \
   --partition=<partition> \
   ray.sub
 ```
 
-The recipe assigns one GPU to training and one to a TP1 Dynamo vLLM engine. Two steps are intended to cover pre-update generation, training, a policy refit, cache invalidation, and post-update generation. Preserve the Ray driver log, trainer metrics, Dynamo frontend log, every worker log, image digest, GPU inventory, model revision, and final process inventory.
+The recipe assigns one GPU to training and one to a TP1 Dynamo vLLM engine; additional GPUs in a full-node allocation remain unused. The pinned `ray.sub` launches with `--exclusive` and rejects `GPUS_PER_NODE` when it differs from the partition's detected full-node GRES count. Therefore `GPUS_PER_NODE=2` and `--gres=gpu:2` are valid only on a two-GPU node, not as a partial request on a larger node. Two training steps are intended to cover pre-update generation, training, a policy refit, cache invalidation, and post-update generation. Preserve the Ray driver log, trainer metrics, Dynamo frontend log, every worker log, image digest, GPU inventory, model revision, and final process inventory.
 
 The upstream functional check uses the same recipe with `Qwen/Qwen3-0.6B` model and tokenizer overrides. It is the authoritative assertion source for the current integration:
 
