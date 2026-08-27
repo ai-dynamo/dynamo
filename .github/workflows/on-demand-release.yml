@@ -12,8 +12,9 @@ name: On-Demand Release
 # fold any new knob into an existing input.
 on:
   # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
-  # test flow as release_version 1.4.1 on the existing release/1.4.1 branch, rc0,
-  # all artifacts (containers/wheels/crates/helm=all). REVERT before merge.
+  # flow as release_version 1.4.2 from release/1.4.1 onto the existing
+  # release/1.4.2 branch (reused: the stamp lands on top of its cherry-picks),
+  # rc0, all artifacts (containers/wheels/crates/helm=all). REVERT before merge.
   push:
     branches:
       # copy-pr-bot's reviewed-copy branch. Velonix job admission only admits
@@ -102,9 +103,9 @@ jobs:
         env:
           # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
           # to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.1' }}
-          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.1' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.4.2' }}
+          SOURCE_REF: ${{ inputs.source_ref || 'release/1.4.1' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.2' || '') }}
           RC_ROUND: ${{ inputs.rc_round || '0' }}
         run: |
           set -euo pipefail
@@ -255,7 +256,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # TEMPORARY(test): || 'main' covers inputless push events. REVERT.
-          ref: ${{ inputs.source_ref || 'main' }}
+          ref: ${{ inputs.source_ref || 'release/1.4.1' }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
@@ -263,8 +264,8 @@ jobs:
         id: bump
         env:
           # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.1' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.1' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.4.2' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.2' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -528,7 +529,7 @@ jobs:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
       # TEMPORARY(test): || fallback for inputless push events. REVERT.
-      release_version: ${{ inputs.release_version || '1.4.1' }}
+      release_version: ${{ inputs.release_version || '1.4.2' }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection.
