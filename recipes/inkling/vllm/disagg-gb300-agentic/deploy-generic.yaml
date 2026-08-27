@@ -148,7 +148,6 @@ spec:
               --gpu-memory-utilization 0.92 \
               --kv-cache-memory-bytes 109521666048 \
               --enable-prefix-caching \
-              --prefix-cache-retention-interval 0 \
               --kernel-config.enable_flashinfer_autotune=False \
               --kv-events-config '{"enable_kv_cache_events": true}' \
               --disaggregation-mode prefill \
@@ -167,6 +166,8 @@ spec:
             value: "1"
           - name: FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED
             value: "1"
+          - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+            value: "0"
           - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
             value: "1800"
           - name: NCCL_SOCKET_IFNAME
@@ -281,7 +282,6 @@ spec:
               --gpu-memory-utilization 0.92 \
               --kv-cache-memory-bytes 109521666048 \
               --enable-prefix-caching \
-              --prefix-cache-retention-interval 0 \
               --kernel-config.enable_flashinfer_autotune=False \
               --kv-events-config '{"enable_kv_cache_events": true}' \
               --disaggregation-mode decode \
@@ -300,6 +300,8 @@ spec:
             value: "1"
           - name: FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED
             value: "1"
+          - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+            value: "0"
           - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
             value: "1800"
           - name: NCCL_SOCKET_IFNAME

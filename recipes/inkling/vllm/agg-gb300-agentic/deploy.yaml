@@ -110,8 +110,6 @@ spec:
                 - --kv-cache-memory-bytes
                 - "109521666048"
                 - --enable-prefix-caching
-                - --prefix-cache-retention-interval
-                - "0"
                 - --kernel-config.enable_flashinfer_autotune=False
                 # KV events feed the frontend's KV-aware router.
                 - --kv-events-config
@@ -124,6 +122,9 @@ spec:
                 - {name: TRANSFORMERS_OFFLINE, value: "1"}
                 - {name: VLLM_USE_V2_MODEL_RUNNER, value: "1"}
                 - {name: FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED, value: "1"}
+                # Retain only the latest completed prompt boundary. Env-only in
+                # vLLM; there is no equivalent CLI flag.
+                - {name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL, value: "0"}
                 # A 1M-token forward pass can exceed the default worker timeout.
                 - {name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, value: "1800"}
               ports: [{name: system, containerPort: 9090, protocol: TCP}]
