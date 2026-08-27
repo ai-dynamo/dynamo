@@ -825,6 +825,8 @@ navigation:
             slug: glm-5-nvfp4
           - page: DeepSeek-V4-Pro
             path: pages/recipes/model-recipes/deepseek-v4-pro.mdx
+          - page: DeepSeek-V4-Pro-0813
+            path: pages/recipes/model-recipes/deepseek-v4-pro-0813.mdx
             slug: deepseek-v4-pro
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx

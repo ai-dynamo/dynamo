@@ -1,0 +1,253 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DeepSeek-V4-Pro-0813"
+subtitle: "Serve DeepSeek-V4-Pro-0813 with Dynamo and vLLM on GB200 or H200, aggregated or disaggregated, with 1M context."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + vLLM deployment of DeepSeek-V4-Pro-0813 — a 1.6T-parameter MoE model with MXFP4-packed routed experts and hybrid sparse attention — with KV-aware routing, FP8 KV cache and prefix caching, running aggregated or with prefill/decode disaggregation. Every target serves the model's full 1,048,576-token context without CPU KV offload. Pick your GPU architecture and serving topology; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro-0813</span>
+<span><b>Precision</b> MXFP4 experts, FP8 KV</span>
+<span><b>GPUs</b> 8x GB200 (2 nodes)</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro-0813</span>
+<span><b>Precision</b> MXFP4 experts, FP8 KV</span>
+<span><b>GPUs</b> 8x GB200 prefill + 8x GB200 decode (1P1D)</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro-0813</span>
+<span><b>Precision</b> MXFP4 experts, FP8 KV</span>
+<span><b>GPUs</b> 8x H200, one worker</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro-0813</span>
+<span><b>Precision</b> MXFP4 experts, FP8 KV</span>
+<span><b>GPUs</b> 8x H200 prefill + 8x H200 decode (1P1D)</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+</div>
+</div>
+
+## Prerequisites
+
+- A Dynamo Platform install on your Kubernetes cluster — see the [Kubernetes quickstart](/dynamo/kubernetes/getting-started/quickstart).
+- A Hugging Face token with access to `deepseek-ai/DeepSeek-V4-Pro-0813`.
+- A ReadWriteMany storage class. The checkpoint is ~832 GiB; the PVC in this recipe requests 1200 Gi.
+
+<div data-sku="h200" data-variant="agg">
+
+Eight H200 GPUs on a single node.
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+Sixteen H200 GPUs across two nodes — one prefill worker and one decode worker, eight GPUs each.
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+Eight GB200 GPUs across two nodes, connected over NVLink (MNNVL) using a Kubernetes ComputeDomain.
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+Sixteen GB200 GPUs — eight for prefill and eight for decode, each spanning two nodes over NVLink (MNNVL) using Kubernetes ComputeDomains.
+
+</div>
+
+## Deploy
+
+Create the namespace and Hugging Face secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+Create the model cache and download the checkpoint. Edit `storageClassName` in `model-cache.yaml` to a ReadWriteMany class available on your cluster:
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+Deploy the graph:
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-h200-agentic -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-disagg-h200-agentic -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv4-0813-disagg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+Loading the 832 GiB checkpoint takes roughly 15–20 minutes on first start.
+
+## Smoke Test
+
+Port-forward the frontend and send one request:
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv4-pro-0813-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv4-pro-0813-disagg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv4-pro-0813-agg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv4-0813-disagg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
+    "messages": [{"role": "user", "content": "What is 17 * 23?"}],
+    "max_tokens": 256
+  }' | jq -r '.choices[0].message.content'
+```
+
+This is a reasoning model. The chain of thought is returned in `reasoning_content` and the answer in `content`; a small `max_tokens` can leave `content` empty because the budget is consumed by reasoning.
+
+## Benchmark
+
+See [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf/README.md) for the full workflow — staging the Mooncake trace on the PVC, running the AIPerf trace-replay Job, sweeping concurrency, and fetching artifacts.
+
+## Expected Performance
+
+Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is user output ≥ 50 tok/s.
+
+<div data-sku="gb200" data-variant="agg">
+
+| Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
+| --- | --- | --- | --- |
+| 8 | 64.88 | 55.9 | 383 ms |
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+| Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
+| --- | --- | --- | --- |
+| 12 | 50.31 | 50.0 | 2.37 s |
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+Not yet validated on the shared trace. A synthetic 64K / 400 / 90%-reuse profile measures 25.0 system tok/s/GPU at user output 53.0 tok/s (concurrency 4, single run).
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+Not yet validated on the shared trace. A synthetic 64K / 400 / 90%-reuse profile puts the SLA crossing near concurrency 6, at 19.9 system tok/s/GPU (single run).
+
+</div>
+
+## Compare All Targets
+
+| Target | GPUs | Topology | Context | Status |
+| --- | --- | --- | --- | --- |
+| `agg-gb200-agentic` | 8x GB200 | Aggregated | 1,048,576 | Trace-validated |
+| `disagg-gb200-agentic` | 16x GB200 | 1P1D | 1,048,576 | Trace-validated |
+| `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Synthetic only |
+| `disagg-h200-agentic` | 16x H200 | 1P1D | 1,048,576 | Synthetic only |
+
+## Notes
+
+- **One config per topology serves both workloads.** The 64K agentic workload and 1M-context requests use the same deployment; GPU KV holds roughly 3.1M tokens, about 3x a full 1M request, so no CPU KV offload is needed. At 1M context, time-to-first-token is minutes — treat it as a batch capability, not an interactive one.
+- **FP8 KV cache is required, not a tuning choice.** vLLM asserts `DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache`; the routed experts ship MXFP4 in the checkpoint. Serving precision is fixed by the model.
+- **Speculative decoding is not enabled** on the H200 targets. It measured a large regression on this checkpoint.
+- **Different checkpoint from `DeepSeek-V4-Pro`.** See the [DeepSeek-V4-Pro recipe](/dynamo/recipes/model-recipes/deepseek-v4-pro) for that model. The two use different Hugging Face repositories and must not share a model cache.
+
+## Source
+
+- Recipe: [`recipes/deepseek-v4/deepseek-v4-pro-0813`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813)
+- Benchmark: [`perf/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf)

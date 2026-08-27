@@ -150,6 +150,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>8–32x B200/H200</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-pro.mdx" aria-label="Open the DeepSeek-V4-Pro recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="gb200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="agentic">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4-Pro-0813</h3><p>DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM agentic recipe — MoE 1.6T, MXFP4 experts + FP8 KV, GB200 and H200, aggregated or disaggregated with KV-aware routing. Full 1M context with no CPU KV offload.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8–16x GB200/H200</span><span>Agentic</span><span>1M ctx</span></div>
+  <a className="dynamo-card-link" href="deepseek-v4-pro-0813.mdx" aria-label="Open the DeepSeek-V4-Pro-0813 recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />

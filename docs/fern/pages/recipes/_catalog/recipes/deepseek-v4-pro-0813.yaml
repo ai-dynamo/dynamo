@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: deepseek-v4-pro-0813
+title: DeepSeek-V4-Pro-0813
+page: pages/recipes/model-recipes/deepseek-v4-pro-0813.mdx
+provider: deepseek
+model:
+  name: DeepSeek-V4-Pro-0813
+  hf_id: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: MXFP4 experts + FP8 KV
+status: experimental
+targets:
+- id: agg-gb200-agentic
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+  topology: aggregated
+  techniques:
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
+    sla: user output >= 50 tok/s
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c8 = 64.88 system tok/s/GPU @ user 55.9 tok/s, TTFT p50 383 ms.
+- id: disagg-gb200-agentic
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 16
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D'
+    sla: user output >= 50 tok/s
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c12 = 50.31 system tok/s/GPU @ user 50.0 tok/s, TTFT p50 2.37 s.
+- id: agg-h200-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+  topology: aggregated
+  techniques:
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  workload:
+    type: synthetic
+    traffic: '64K ISL / 400 OSL, 90% prefix reuse; TP8 + EP, Marlin MoE, max_model_len 1048576'
+    sla: user output >= 50 tok/s
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
+  expected_performance:
+    available: false
+    summary: Not yet validated on the shared trace. Synthetic 64K/400/90%-reuse measurement gives c4 = 25.0 system tok/s/GPU @ user 53.0 tok/s (N=1).
+- id: disagg-h200-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  workload:
+    type: synthetic
+    traffic: '64K ISL / 400 OSL, 90% prefix reuse; 1P1D (TP8 + EP per worker), NIXL KV transfer'
+    sla: user output >= 50 tok/s
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
+  expected_performance:
+    available: false
+    summary: Not yet validated on the shared trace. Synthetic measurement puts the SLA crossing near c6 (19.9 system tok/s/GPU @ user 50), N=1.
+related_benchmarks: []
+maintainer: null
+gaps:
+- 'H200 targets are not yet validated on the shared Mooncake trace; the published H200 figures come from a synthetic 64K/400/90%-reuse profile and are N=1 against a measured 17% run-to-run variance.'
+- 'A partial H200 aggregated trace run (93% of the 15% subset, c6) measured user output 43.5 tok/s -- below the 50 tok/s SLA -- with prompt-cache read of only 42.5% against the trace''s ~94% shared-block potential. The reuse shortfall is not yet explained and should be understood before comparing H200 and GB200 trace numbers.'
+- 'This is a different checkpoint from deepseek-ai/DeepSeek-V4-Pro (see the deepseek-v4-pro recipe); the two must not share a model cache.'
+- maintainer unknown
