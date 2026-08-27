@@ -77,8 +77,8 @@ Dynamo ***不是为供应商锁定而设计的***。Dynamo 旨在赋能更广泛
 | :--- | :--- |
 | 推理引擎 | SGLang、TensorRT-LLM、vLLM |
 | Kubernetes | Inference gateway |
-| 内存管理 | Dynamo KV Block Manager、[LMCache](/dynamo/dev/cli/kv-cache-offloading/overview)、[SGLang HiCache](/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/hi-cache)、[FlexKV](/dynamo/dev/cli/kv-cache-offloading/overview) |
-| 网络和存储 | Mooncake、DOCA NetIO、GDS、POSIX、S3、3FS（[通过 NIXL 支持](/dynamo/dev/knowledge-base/modular-components/kvbm/kvbm-design)） |
+| 内存管理 | Dynamo KV Block Manager、[LMCache](/dynamo/dev/cli/kv-cache-offloading/overview)、[SGLang HiCache](/dynamo/dev/backends/sg-lang/hi-cache)、[FlexKV](/dynamo/dev/cli/kv-cache-offloading/overview) |
+| 网络和存储 | Mooncake、DOCA NetIO、GDS、POSIX、S3、3FS（[通过 NIXL 支持](https://github.com/ai-dynamo/nixl)） |
 | Multi-HW | Intel XPU、AMD |
 
 ## 性能
@@ -87,7 +87,7 @@ Dynamo 通过组合三项核心技术实现先进的 LLM 性能：分离式服�
 
 - [KV cache-aware routing](/dynamo/dev/knowledge-base/modular-components/router/router-design) 根据 worker 负载和现有缓存命中情况智能路由请求。通过复用预先计算的 KV 对，它绕过 prefill 计算，立即开始 decode 阶段。[Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo) 应用 Dynamo KV 缓存感知路由后，在 Qwen3 Coder 480B A35B 上实现了 2 倍更快的 TTFT 和 1.6 倍吞吐量。
 
-- [KV cache offloading](/dynamo/dev/knowledge-base/modular-components/kvbm/kvbm-design) 通过将 KV 缓存从 HBM 移动到主机内存、本地磁盘或远程存储等成本更低的存储层，扩展可用上下文窗口。复用预计算状态可改善 TTFT、降低总体拥有成本（TCO），并支持更长上下文处理。
+- [KV cache offloading](/dynamo/dev/kubernetes/kv-cache-offloading/overview) 通过将 KV 缓存从 HBM 移动到主机内存、本地磁盘或远程存储等成本更低的存储层，扩展可用上下文窗口。复用预计算状态可改善 TTFT、降低总体拥有成本（TCO），并支持更长上下文处理。
 
 - [分离式服务](/dynamo/zh-CN/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) 在“设计原则”部分，我们介绍了分离式服务的概念。[InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs) 展示了它的性能。借助分离式服务和大规模专家并行，DeepSeek V3 可以达到约 7 倍吞吐量/GPU。
 此外，当这三项技术组合在一起时，会产生如下图所示的叠加收益。
@@ -145,7 +145,7 @@ Kubernetes 自带一些容错功能，但 LLM 部署需要专门的容错和韧�
 
 ### 可观测性
 
-Dynamo 提供内置指标、分布式追踪和日志，用于监控推理部署。请参阅 [Observability Guide](https://github.com/ai-dynamo/dynamo/blob/7feb2b81be941e184314b029c7a43b8a221b5de8/docs/fern/pages/kubernetes/installation/observability.md) 了解设置详情。
+Dynamo 提供内置指标、分布式追踪和日志，用于监控推理部署。请参阅 [Observability Guide](https://github.com/ai-dynamo/dynamo/blob/25b89d8bc3c557b701732a204de1c049abeeded4/docs/fern/pages/kubernetes/installation/observability.md) 了解设置详情。
 
 ## 接下来做什么？
 
@@ -153,7 +153,7 @@ Dynamo 提供内置指标、分布式追踪和日志，用于监控推理部署�
 
 - [Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) -- 组合分离式服务、路由和卸载
 - [KV Cache-Aware Routing](/dynamo/dev/knowledge-base/modular-components/router/router-guide) -- 配置智能请求路由
-- [KV Cache Offloading](/dynamo/dev/knowledge-base/modular-components/kvbm/kvbm-guide) -- 设置多层内存管理
+- [KV Cache Offloading](/dynamo/dev/kubernetes/kv-cache-offloading/overview) -- 设置多层内存管理
 - [Planner](/dynamo/zh-CN/dev/knowledge-base/modular-components/planner/planner-guide) -- 配置基于 SLA 的自动扩缩容
 - [Kubernetes Deployment](/dynamo/dev/kubernetes/getting-started/quickstart) -- 使用 Grove 进行大规模部署
 - [Overall Architecture](/dynamo/zh-CN/dev/knowledge-base/overview) -- 完整技术设计

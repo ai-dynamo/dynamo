@@ -70,7 +70,7 @@ worker before the window expires. Direct dispatch bypasses local inhibition and 
 upstream-selected worker while that worker remains in service discovery.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#fault-tolerance) for the field
-reference and [Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md#local-worker-inhibition) for
+reference and [Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#local-worker-inhibition) for
 the routing behavior.
 
 </Step>

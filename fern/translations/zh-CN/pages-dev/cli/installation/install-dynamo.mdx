@@ -99,8 +99,8 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 - 打开第二个终端并使用 `docker exec -it <container_id> bash`
 
 如需查看可用版本，请参阅[发布产物](/dynamo/dev/reference/release-artifacts)；
-如需运行说明，请参阅各后端指南：[SGLang](/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
-[TensorRT-LLM](/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | [vLLM](/dynamo/dev/knowledge-base/modular-components/backends/v-llm/overview)
+如需运行说明，请参阅各后端指南：[SGLang](/dynamo/dev/backends/sg-lang/overview) |
+[TensorRT-LLM](/dynamo/dev/backends/tensor-rt-llm/overview) | [vLLM](/dynamo/dev/backends/v-llm/overview)
 
 ### 选项 B：从 PyPI 安装
 
@@ -154,7 +154,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
 | **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
 
-本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/service-discovery)。
+本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](/dynamo/dev/kubernetes/kubernetes-operator/service-discovery)。
 
 ### 验证安装（可选）
 
@@ -207,7 +207,7 @@ python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &
     是预期行为（没有正在运行的 ModelExpress server），可以安全忽略。在配置了 `MODEL_EXPRESS_URL` 的 Kubernetes 部署中，
     此警告，或相关的 `Failed to resolve local model path after server download`，
     表示已配置 ModelExpress，但它实际上没有提供缓存模型；
-请参阅 [Kubernetes 中的模型缓存](/dynamo/dev/knowledge-base/kubernetes/model-loading/model-caching#option-2-modelexpress-p2p-distribution)
+请参阅 [Kubernetes 中的模型缓存](/dynamo/dev/kubernetes/model-deployment/model-loading/model-caching#option-2-modelexpress-p2p-distribution)
     了解正确配置。
 
     **vLLM**
@@ -340,7 +340,7 @@ curl localhost:8000/v1/chat/completions \
 
 ## 后续步骤
 
-- [后端指南](/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) -- 后端特定配置和功能
+- [后端指南](/dynamo/dev/backends/sg-lang/overview) -- 后端特定配置和功能
 - [分离式服务](/dynamo/dev/kubernetes/disaggregated-serving/overview) -- 独立扩展 prefill 和 decode
 - [KV Cache 感知路由](/dynamo/dev/knowledge-base/modular-components/router/router-guide) -- 智能请求路由
 - [Kubernetes 部署](/dynamo/dev/kubernetes/getting-started/quickstart) -- 生产环境多节点部署

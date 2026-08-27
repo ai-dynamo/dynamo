@@ -37,7 +37,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 
 **要求：**
 - **仅支持动态 endpoint**：KV router 要求使用 `model_input=ModelInput.Tokens` 调用 `register_model()`。你的 backend handler 会接收带有 `token_ids` 的预分词请求，而不是原始文本。
-- Backend worker 必须使用 `model_input=ModelInput.Tokens` 调用 `register_model()`（请参阅 [Backend Guide](/dynamo/dev/advanced-customizations/writing-custom-backends/writing-python-workers)）
+- Backend worker 必须使用 `model_input=ModelInput.Tokens` 调用 `register_model()`（请参阅 [Backend Guide](/dynamo/dev/backends/writing-custom-backends/writing-python-workers)）
 - 使用 KV routing 时请使用动态发现，以便 router 跟踪 worker 实例及其 KV cache 状态
 
 **多模态支持：**
