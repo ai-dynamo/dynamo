@@ -1990,6 +1990,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
  "dynamo-sidecar-common",
+ "dynamo-trtllm-sidecar",
  "dynamo-vllm-sidecar",
  "dynamo-worker-selection-policy-catalog",
  "futures",
@@ -2193,6 +2194,26 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-trtllm-sidecar"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
 ]
 
 [[package]]

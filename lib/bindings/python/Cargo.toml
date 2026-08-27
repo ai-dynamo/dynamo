@@ -66,6 +66,7 @@ dynamo-parsers = { version = "8.1.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
+dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
 dynamo-vllm-sidecar = { path = "../../sidecar/vllm" }
 
 anyhow = { version = "1" }

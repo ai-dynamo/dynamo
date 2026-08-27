@@ -65,6 +65,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
     m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_trtllm_sidecar, &m)?)?;
     m.add_function(wrap_pyfunction!(_run_vllm_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
@@ -129,6 +130,32 @@ fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> 
     let (engine, config) = py
         .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
         .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
+
+fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(TRTLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native TensorRT-LLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::from_args(cli_argv))
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))

@@ -3337,6 +3337,11 @@ class backend:
         ...
 
     @staticmethod
+    def _run_trtllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native TensorRT-LLM sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
     def _run_vllm_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native vLLM sidecar with CLI-style arguments."""
         ...
