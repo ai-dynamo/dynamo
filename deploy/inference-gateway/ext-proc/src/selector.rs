@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
@@ -20,6 +20,7 @@ use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
     WorkerSelectionPolicyRegistry, warn_for_unserved_worker_selection_policies,
 };
+use kube::Client;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -114,8 +115,18 @@ impl Selector {
 
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let peer_replication = cfg.peer_replication.as_ref();
-        if let Some(peer_replication) = peer_replication {
+        let peer_client = if peer_replication.is_some() {
+            Some(
+                Client::try_default()
+                    .await
+                    .context("building Kubernetes client for EPP peer replication")?,
+            )
+        } else {
+            None
+        };
+        if let (Some(peer_client), Some(peer_replication)) = (&peer_client, peer_replication) {
             crate::peer_discovery::ensure_peer_service_exists(
+                peer_client.clone(),
                 &cfg.namespace,
                 &peer_replication.service_name,
             )
@@ -136,8 +147,9 @@ impl Selector {
         );
 
         let cancel = CancellationToken::new();
-        if let Some(peer_replication) = peer_replication {
+        if let (Some(peer_client), Some(peer_replication)) = (peer_client, peer_replication) {
             crate::peer_discovery::spawn(
+                peer_client,
                 service.clone(),
                 &cfg.namespace,
                 &peer_replication.service_name,

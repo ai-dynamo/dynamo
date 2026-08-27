@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::services::selection::SelectionService;
@@ -22,12 +23,11 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
 /// Verifies the peer Service exists before enabling replica synchronization.
-pub(crate) async fn ensure_peer_service_exists(namespace: &str, service_name: &str) -> Result<()> {
-    use kube::{Api, Client};
-
-    let client = Client::try_default()
-        .await
-        .context("building Kubernetes client for EPP peer Service validation")?;
+pub(crate) async fn ensure_peer_service_exists(
+    client: Client,
+    namespace: &str,
+    service_name: &str,
+) -> Result<()> {
     let services: Api<Service> = Api::namespaced(client, namespace);
     services
         .get(service_name)
@@ -39,6 +39,7 @@ pub(crate) async fn ensure_peer_service_exists(namespace: &str, service_name: &s
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
 /// replica-sync peers registered on `service` and excluding `self_ip`.
 pub async fn spawn(
+    client: Client,
     service: Arc<SelectionService>,
     namespace: &str,
     service_name: &str,
@@ -47,11 +48,7 @@ pub async fn spawn(
     cancel: CancellationToken,
 ) -> Result<()> {
     use futures::StreamExt;
-    use kube::{Api, Client, runtime::WatchStreamExt, runtime::reflector, runtime::watcher};
-
-    let client = Client::try_default()
-        .await
-        .context("building Kubernetes client for EPP peer discovery")?;
+    use kube::runtime::{WatchStreamExt, reflector, watcher};
     let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
     let cfg_watch =
         watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
@@ -256,13 +253,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reconcile_tracks_peer_membership_with_configured_port() {
+    async fn spawn_reconciles_initial_list_and_watch_update() {
+        use axum::extract::Request;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::{Json, Router};
         use dynamo_kv_router::WorkerType;
         use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
         use dynamo_kv_router::services::selection::{
             SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
         };
-        use kube::runtime::{reflector::store::Writer, watcher};
+        use kube::Config;
+        use tokio::net::TcpListener;
+        use tokio::sync::Notify;
+        use tokio::time::{Duration, sleep, timeout};
 
         let listener_port = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("reserve a replica-sync listener port")
@@ -286,30 +291,105 @@ mod tests {
         let peer_a = "10.0.0.2";
         let peer_b = "10.0.0.3";
         let sync_port = 9192;
-        let mut known = BTreeSet::new();
-        let mut writer = Writer::<EndpointSlice>::default();
-        let store = writer.as_reader();
-
         let mut initial = slice_with(&[self_ip, peer_a], None, "IPv4");
         initial.metadata.name = Some("epp-peers".to_string());
-        writer.apply_watcher_event(&watcher::Event::Init);
-        writer.apply_watcher_event(&watcher::Event::InitApply(initial));
-        writer.apply_watcher_event(&watcher::Event::InitDone);
-        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
-        assert_eq!(
-            service.list_replica_peers(),
-            vec![format!("tcp://{}", authority(peer_a, sync_port))]
-        );
-
         let mut updated = slice_with(&[self_ip, peer_b], None, "IPv4");
         updated.metadata.name = Some("epp-peers".to_string());
-        writer.apply_watcher_event(&watcher::Event::Apply(updated));
-        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
-        assert_eq!(
-            service.list_replica_peers(),
-            vec![format!("tcp://{}", authority(peer_b, sync_port))]
-        );
+        updated.metadata.resource_version = Some("2".to_string());
+        let list = serde_json::json!({
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSliceList",
+            "metadata": {"resourceVersion": "1"},
+            "items": [initial],
+        });
+        let release_watch_update = Arc::new(Notify::new());
+        let watch_started = Arc::new(Notify::new());
+        let router = Router::new().fallback(get({
+            let release_watch_update = Arc::clone(&release_watch_update);
+            let watch_started = Arc::clone(&watch_started);
+            move |request: Request| {
+                let list = list.clone();
+                let updated = updated.clone();
+                let release_watch_update = Arc::clone(&release_watch_update);
+                let watch_started = Arc::clone(&watch_started);
+                async move {
+                    if request
+                        .uri()
+                        .query()
+                        .is_some_and(|query| query.contains("watch=true"))
+                    {
+                        watch_started.notify_one();
+                        release_watch_update.notified().await;
+                        (
+                            StatusCode::OK,
+                            format!(
+                                "{}\n",
+                                serde_json::json!({
+                                    "type": "MODIFIED",
+                                    "object": updated,
+                                })
+                            ),
+                        )
+                            .into_response()
+                    } else {
+                        Json(list).into_response()
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Kubernetes API test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve Kubernetes API test server");
+        });
+        let client = Client::try_from(Config::new(
+            format!("http://{address}")
+                .parse()
+                .expect("parse Kubernetes API URL"),
+        ))
+        .expect("build Kubernetes API test client");
+        let cancel = CancellationToken::new();
 
+        spawn(
+            client,
+            Arc::clone(&service),
+            "test-ns",
+            "epp-peers",
+            sync_port,
+            self_ip.to_string(),
+            cancel.clone(),
+        )
+        .await
+        .expect("start peer discovery");
+
+        let peer_a_endpoint = format!("tcp://{}", authority(peer_a, sync_port));
+        timeout(Duration::from_secs(2), async {
+            while service.list_replica_peers() != [peer_a_endpoint.clone()] {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial EndpointSlice list should register the peer");
+
+        timeout(Duration::from_secs(2), watch_started.notified())
+            .await
+            .expect("EndpointSlice watch should begin after the initial list");
+        release_watch_update.notify_one();
+        let peer_b_endpoint = format!("tcp://{}", authority(peer_b, sync_port));
+        timeout(Duration::from_secs(2), async {
+            while service.list_replica_peers() != [peer_b_endpoint.clone()] {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("EndpointSlice watch update should replace the peer");
+
+        cancel.cancel();
         service.shutdown().await;
+        server.abort();
     }
 }
