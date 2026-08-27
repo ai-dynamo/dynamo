@@ -60,9 +60,15 @@ WORKDIR /workspace
 # the nightly this branch pins, and re-pin to a plain release tag once both
 # have shipped.
 #
-#   18162 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18162 (merged 2026-08-26,
-#            after this nightly's cut)
+#   18162 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18162 (merged 2026-08-26
+#            08:00 PDT, after this nightly's 2026-08-25 23:31Z cut)
 #   18274 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18274 (open)
+#   18002 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18002 (merged 2026-08-26
+#            08:05Z, ~8.5h after the cut). Gemma4 FA2 CUDA-graph decode on
+#            Hopper/SM90; without it Gemma4 hits an illegal memory access in
+#            CUDA-graph warmup. Generated as the nightly..merge diff over the two
+#            tensorrt_llm files -- nothing else touched them in that range, so it
+#            is exactly the PR's net change.
 #
 # The checked-in .patch files are the upstream PR diffs with the mail header
 # and the tests/ hunks stripped -- the release image installs only the
@@ -78,7 +84,7 @@ RUN --mount=type=bind,source=./container/patches/trtllm,target=/tmp/trtllm-patch
         git apply --check "$p" && \
         git apply "$p"; \
     done && \
-    /usr/bin/python3 -c "import ast; [ast.parse(open(f).read()) for f in ('tensorrt_llm/_torch/models/modeling_multimodal_mixin.py', 'tensorrt_llm/_torch/models/modeling_gemma4mm.py')]"
+    /usr/bin/python3 -c "import ast; [ast.parse(open(f).read()) for f in ('tensorrt_llm/_torch/models/modeling_multimodal_mixin.py', 'tensorrt_llm/_torch/models/modeling_gemma4mm.py', 'tensorrt_llm/_torch/models/modeling_gemma4.py', 'tensorrt_llm/_torch/attention_backend/flashinfer.py')]"
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
