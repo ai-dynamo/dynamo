@@ -20,11 +20,6 @@ on:
         required: false
         type: string
         default: ''
-    outputs:
-      target_tag_plain:
-        description: 'Plain sidecar image tag prefix'
-        value: ${{ jobs.build.outputs.target_tag_plain }}
-
 jobs:
   tests:
     name: Test cpu, amd64
@@ -68,8 +63,6 @@ jobs:
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     permissions:
       contents: read
-    outputs:
-      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -89,7 +82,6 @@ jobs:
         run: |
           set -euo pipefail
           target_tag_plain="dynamo-sidecar"
-          echo "target_tag_plain=${target_tag_plain}" >> "${GITHUB_OUTPUT}"
           echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}" >> "${GITHUB_OUTPUT}"
 
       - name: Initialize Dynamo Builder

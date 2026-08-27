@@ -133,7 +133,6 @@ jobs:
       - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
-      - sidecar-copy-to-acr
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -1066,20 +1065,6 @@ jobs:
   # IMAGE COPY PIPELINES
   # ============================================================================
 
-  sidecar-copy-to-acr:
-    name: dynamo-sidecar
-    needs: [changed-files, sidecar-build]
-    if: |
-      always() && !cancelled() &&
-      needs.changed-files.outputs.sidecar == 'true' &&
-      needs.sidecar-build.result == 'success'
-    uses: $/.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.sidecar-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      copy_timeout_minutes: 20
-    secrets: inherit
-
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
@@ -1966,7 +1951,6 @@ jobs:
       - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
-      - sidecar-copy-to-acr
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr

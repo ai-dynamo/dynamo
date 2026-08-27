@@ -684,20 +684,6 @@ jobs:
   # IMAGE COPY JOBS
   # ============================================================================
 
-  sidecar-copy-to-acr:
-    name: dynamo-sidecar
-    needs: [sidecar-build]
-    if: |
-      always() && !cancelled() &&
-      github.event_name != 'workflow_dispatch' &&
-      needs.sidecar-build.result == 'success'
-    uses: $/.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.sidecar-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      copy_timeout_minutes: 20
-    secrets: inherit
-
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
