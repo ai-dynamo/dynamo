@@ -28,6 +28,8 @@ Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to 
 
 For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
 
+For Kubernetes deployment, see [Deploy LMCache MP](../../../../../kubernetes/kv-cache-offloading/lmcache.mdx).
+
 ## FlexKV
 
 [FlexKV](https://github.com/taco-project/FlexKV) is a scalable, distributed KV cache runtime developed by Tencent Cloud's TACO team. It supports multi-level caching (GPU, CPU, SSD), distributed KV cache reuse across nodes, and high-performance I/O via io_uring and GPUDirect Storage.

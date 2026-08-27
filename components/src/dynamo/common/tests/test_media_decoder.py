@@ -6,12 +6,20 @@ from unittest.mock import Mock
 import pytest
 
 from dynamo.common.utils.media_decoder import (
+    DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC,
     DEFAULT_FRONTEND_VIDEO_NUM_FRAMES,
     DYN_MM_VIDEO_NUM_FRAMES,
+    build_frontend_image_decoder_options,
     enable_frontend_video_decoding,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+def test_frontend_image_decoder_options_only_set_limits():
+    assert build_frontend_image_decoder_options() == {
+        "limits": {"max_alloc": DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC}
+    }
 
 
 def test_enable_frontend_video_decoding_uses_backend_default(monkeypatch):

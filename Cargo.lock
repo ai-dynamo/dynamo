@@ -2440,6 +2440,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2696,6 +2697,7 @@ dependencies = [
  "json-five",
  "lazy_static",
  "libc",
+ "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",

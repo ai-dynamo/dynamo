@@ -40,6 +40,7 @@ Each offloading backend uses the same `--kv-transfer-config` hook with a differe
 | Backend | `kv_connector` | Sizing | Best for |
 |---|---|---|---|
 | **LMCache** | `LMCacheConnectorV1` | `lmcache.max_local_cpu_size` in `kv_connector_extra_config` | vLLM host-memory offloading |
+| **[LMCache MP](./lmcache.mdx)** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
 | **FlexKV** | `FlexKVConnectorV1` | `DYNAMO_USE_FLEXKV=1`, `FLEXKV_CPU_CACHE_GB` (env) | Distributed KV offloading runtime |
 | **SGLang HiCache** | n/a — use `--enable-hierarchical-cache` and `DYN_SHARED_CACHE_TYPE` instead | `DYN_SHARED_CACHE_MULTIPLIER` | SGLang hierarchical cache with a tier-aware router |
 
@@ -101,6 +102,7 @@ After the worker is `Running`, send repeated requests that share a long prefix. 
 
 These cover engine internals, the local-CLI workflow, and tuning for each backend:
 
+- [Deploy LMCache MP](./lmcache.mdx) — full LMCache MP deployment walkthrough (operator, `LMCacheEngine`, worker).
 - [Local KV Cache Offloading](../../cli/kv-cache-offloading/overview.mdx) — compare the available backends and run their local examples.
 - [Using HiCache](../../developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md) — SGLang hierarchical cache.
 - [Publish KV Events](../../developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md) — publish KV events from a custom engine.
