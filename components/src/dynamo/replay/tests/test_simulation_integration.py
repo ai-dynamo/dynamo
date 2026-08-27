@@ -235,7 +235,7 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
         include_router=True,
     )
 
-    candidates = Sweeper(
+    result = Sweeper(
         runner_factory=DynamoReplayRunnerFactory(),
         providers={
             "dynamo.planner": create_planner_provider(),
@@ -244,6 +244,7 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
         sampler_factory=_TwoCandidateSampler,
         show_progress=False,
     ).run(config)
+    candidates = result.selected_candidates
 
     assert len(candidates) == 2
     assert all(

@@ -151,6 +151,15 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert not (ROOT / "aisimulate").exists()
 
 
+def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
+    planner_template = (ROOT / "container/templates/planner.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "components/src/dynamo/replay/tests/e2e" in planner_template
+    assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
+
+
 def test_installed_aisimulate_matches_the_declared_release() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")

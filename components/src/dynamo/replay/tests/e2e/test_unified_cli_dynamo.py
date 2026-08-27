@@ -24,10 +24,13 @@ from aisimulate.config.cli import CorePredictionConfig
 from aisimulate.config.common import split_config_sections
 
 pytestmark = [
+    # Release-gating CPU smoke for plugin discovery, replay composition, and
+    # recommendation-to-prediction round trips in the shipped Planner image.
     pytest.mark.e2e,
     pytest.mark.pre_merge,
     pytest.mark.planner,
     pytest.mark.gpu_0,
+    pytest.mark.timeout(240),
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[6]
@@ -87,6 +90,19 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
     report = json.loads((output / "prediction.json").read_text(encoding="utf-8"))
     assert summary["completed_requests"] > 0
     assert report["summary"]["completed_requests"] == summary["completed_requests"]
+
+    expected_trace_requests = {
+        "05-trace-standard-round-robin.yaml": 2,
+        "09-trace-mooncake-speedup.yaml": 2,
+        "10-trace-mooncake-delta-concurrency.yaml": 2,
+        "11-trace-agentic-mooncake.yaml": 3,
+        "12-trace-applied-compute-agentic.yaml": 3,
+        "13-trace-dynamo-agentic.yaml": 4,
+    }
+    if config_path.name in expected_trace_requests:
+        assert (
+            summary["completed_requests"] == expected_trace_requests[config_path.name]
+        )
 
     if config_path.name == "08-synthetic-throughput-planner.yaml":
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"

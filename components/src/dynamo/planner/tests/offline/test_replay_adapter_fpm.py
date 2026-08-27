@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip(
@@ -28,6 +30,7 @@ from dynamo.planner.offline.replay_adapter import (
     _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.replay import planner as replay_planner
 from dynamo.replay.planner import _engine_caps
 
 pytestmark = [
@@ -371,6 +374,111 @@ def test_replay_engine_caps_keeps_single_rank_defaults():
 
     assert caps.max_kv_tokens == 100 * 16
     assert caps.num_gpu == 1
+
+
+def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
+    monkeypatch,
+):
+    class _Session:
+        def __init__(self, tp_size):
+            self.tp_size = tp_size
+
+        def predict_prefill(self, batch_size, isl, prefix):
+            del batch_size, isl, prefix
+            return float(self.tp_size)
+
+        def predict_decode(self, batch_size, isl, osl):
+            del batch_size, isl, osl
+            return float(self.tp_size)
+
+    class _Adapter:
+        def __init__(self):
+            self.bootstrap_metadata = None
+            self.prefill_fpms = None
+            self.decode_fpms = None
+
+        def set_bootstrap_metadata(self, metadata):
+            self.bootstrap_metadata = metadata
+
+        def _is_easy_mode(self):
+            return False
+
+        def install_benchmark_fpms(
+            self, *, agg_fpms=None, prefill_fpms=None, decode_fpms=None
+        ):
+            assert agg_fpms is None
+            self.prefill_fpms = prefill_fpms
+            self.decode_fpms = decode_fpms
+
+    adapter = _Adapter()
+    session_requests = []
+
+    def create_session(**kwargs):
+        session_requests.append(kwargs)
+        return _Session(kwargs["tp_size"])
+
+    monkeypatch.setattr(replay_planner, "create_session", create_session)
+    monkeypatch.setattr(
+        "dynamo.planner.offline.replay_adapter.create_replay_planner_adapter",
+        lambda **kwargs: adapter,
+    )
+    prefill_args = MockEngineArgs(
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        num_gpu_blocks=64,
+        block_size=16,
+    )
+    decode_args = MockEngineArgs(
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        num_gpu_blocks=64,
+        block_size=16,
+    )
+    metadata = {
+        "prefill": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 2,
+                "attention_dp_size": 1,
+            },
+        },
+        "decode": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 1,
+                "attention_dp_size": 1,
+            },
+        },
+    }
+
+    result = replay_planner.prepare_planner_replay(
+        extra_engine_args=None,
+        prefill_engine_args=prefill_args,
+        decode_engine_args=decode_args,
+        planner_config_arg=json.dumps(
+            {
+                "mode": "disagg",
+                "optimization_target": "sla",
+                "enable_throughput_scaling": True,
+                "enable_load_scaling": False,
+            }
+        ),
+        benchmark_granularity=1,
+        performance_model_metadata=metadata,
+    )
+
+    assert result is adapter
+    assert [request["tp_size"] for request in session_requests] == [2, 1]
+    assert adapter.prefill_fpms
+    assert adapter.decode_fpms
+    assert adapter.prefill_fpms[0].wall_time == pytest.approx(0.002)
+    assert adapter.decode_fpms[0].wall_time == pytest.approx(0.001)
 
 
 def test_merge_traffic_weights_ratio_fields_by_native_counts():

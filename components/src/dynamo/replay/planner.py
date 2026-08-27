@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from dynamo._internal.aic import create_session
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
@@ -109,12 +110,10 @@ def _aic_fpm_digest(
 
 
 def _aic_performance_model_config(
-    metadata: dict[str, Any] | None, mode: str
+    metadata: dict[str, Any], roles: tuple[str, ...]
 ) -> dict[str, Any] | None:
-    """Select runner-neutral AIC identity without changing runtime engine args."""
-    if not metadata:
-        return None
-    roles = ("aggregated", "agg") if mode == "agg" else ("decode", "prefill")
+    """Select one runner-neutral AIC identity from equivalent role aliases."""
+
     for role in roles:
         raw = metadata.get(role)
         if raw is None:
@@ -130,6 +129,95 @@ def _aic_performance_model_config(
             )
         return dict(config)
     return None
+
+
+def _aic_performance_model_configs(
+    metadata: dict[str, Any] | None, mode: str
+) -> dict[str, dict[str, Any]]:
+    """Return the AIC identity used for each generated Planner FPM role."""
+
+    if not metadata:
+        return {}
+    if mode == "agg":
+        config = _aic_performance_model_config(metadata, ("aggregated", "agg"))
+        return {} if config is None else {"prefill": config, "decode": config}
+
+    configs = {
+        role: config
+        for role in ("prefill", "decode")
+        if (config := _aic_performance_model_config(metadata, (role,))) is not None
+    }
+    if configs and set(configs) != {"prefill", "decode"}:
+        missing = sorted({"prefill", "decode"} - set(configs))
+        raise ValueError(
+            "disagg performance_model_metadata must provide AIC identities for "
+            f"both prefill and decode; missing {missing}"
+        )
+    return configs
+
+
+def _aic_session_kwargs(
+    perf_config: dict[str, Any] | None,
+    engine_args: MockEngineArgs,
+) -> dict[str, Any] | None:
+    """Build one role-specific AIC session request."""
+
+    backend = (
+        perf_config.get("backend")
+        if perf_config is not None
+        else engine_args.aic_backend
+    )
+    system = (
+        perf_config.get("system") if perf_config is not None else engine_args.aic_system
+    )
+    model_path = (
+        perf_config.get("model_path")
+        if perf_config is not None
+        else engine_args.aic_model_path
+    )
+    if backend is None or system is None or model_path is None:
+        return None
+    nextn = (
+        perf_config.get("nextn") if perf_config is not None else engine_args.aic_nextn
+    )
+    nextn_accept_rates = ",".join(["0"] * int(nextn)) if nextn is not None else None
+    return {
+        "backend_name": backend,
+        "system": system,
+        "model_path": model_path,
+        "tp_size": (
+            perf_config.get("tp_size", 1)
+            if perf_config is not None
+            else engine_args.aic_tp_size or 1
+        ),
+        "backend_version": (
+            perf_config.get("backend_version")
+            if perf_config is not None
+            else engine_args.aic_backend_version
+        ),
+        "moe_tp_size": (
+            perf_config.get("moe_tp_size")
+            if perf_config is not None
+            else engine_args.aic_moe_tp_size
+        ),
+        "moe_ep_size": (
+            perf_config.get("moe_ep_size")
+            if perf_config is not None
+            else engine_args.aic_moe_ep_size
+        ),
+        "attention_dp_size": (
+            perf_config.get("attention_dp_size")
+            if perf_config is not None
+            else engine_args.aic_attention_dp_size
+        ),
+        "gemm_dtype": engine_args.aic_gemm_dtype,
+        "moe_dtype": engine_args.aic_moe_dtype,
+        "fmha_dtype": engine_args.aic_fmha_dtype,
+        "kv_cache_dtype": engine_args.aic_kv_cache_dtype,
+        "comm_dtype": engine_args.aic_comm_dtype,
+        "nextn": nextn,
+        "nextn_accept_rates": nextn_accept_rates,
+    }
 
 
 def prepare_planner_replay(
@@ -189,10 +277,10 @@ def prepare_planner_replay(
     if adapter._is_easy_mode():
         return adapter
 
-    perf_config = _aic_performance_model_config(
+    perf_configs = _aic_performance_model_configs(
         performance_model_metadata, planner_config.mode
     )
-    if perf_config is not None:
+    if perf_configs:
         ref_args = (
             extra_engine_args
             or decode_engine_args
@@ -218,18 +306,14 @@ def prepare_planner_replay(
     d_args = (
         extra_engine_args if planner_config.mode == "agg" else decode_engine_args
     ) or ref_args
-    aic_backend = (
-        perf_config.get("backend") if perf_config is not None else ref_args.aic_backend
-    )
-    aic_system = (
-        perf_config.get("system") if perf_config is not None else ref_args.aic_system
-    )
-    aic_model_path = (
-        perf_config.get("model_path")
-        if perf_config is not None
-        else ref_args.aic_model_path
-    )
-    if aic_backend is None or aic_system is None or aic_model_path is None:
+    if perf_configs:
+        prefill_session_kwargs = _aic_session_kwargs(perf_configs["prefill"], p_args)
+        decode_session_kwargs = _aic_session_kwargs(perf_configs["decode"], d_args)
+    else:
+        shared_session_kwargs = _aic_session_kwargs(None, ref_args)
+        prefill_session_kwargs = shared_session_kwargs
+        decode_session_kwargs = shared_session_kwargs
+    if prefill_session_kwargs is None or decode_session_kwargs is None:
         adapter.set_bootstrap_metadata(
             {
                 "status": "not_configured_load_only",
@@ -242,52 +326,12 @@ def prepare_planner_replay(
         )
         return adapter
 
-    aic_nextn = (
-        perf_config.get("nextn") if perf_config is not None else d_args.aic_nextn
-    )
-    nextn_accept_rates = (
-        ",".join(["0"] * int(aic_nextn)) if aic_nextn is not None else None
-    )
-
     try:
-        from dynamo._internal.aic import create_session
-
-        aic_session = create_session(
-            backend_name=aic_backend,
-            system=aic_system,
-            model_path=aic_model_path,
-            tp_size=(
-                perf_config.get("tp_size", 1)
-                if perf_config is not None
-                else ref_args.aic_tp_size or 1
-            ),
-            backend_version=(
-                perf_config.get("backend_version")
-                if perf_config is not None
-                else ref_args.aic_backend_version
-            ),
-            moe_tp_size=(
-                perf_config.get("moe_tp_size")
-                if perf_config is not None
-                else ref_args.aic_moe_tp_size
-            ),
-            moe_ep_size=(
-                perf_config.get("moe_ep_size")
-                if perf_config is not None
-                else ref_args.aic_moe_ep_size
-            ),
-            attention_dp_size=(
-                perf_config.get("attention_dp_size")
-                if perf_config is not None
-                else ref_args.aic_attention_dp_size
-            ),
-            gemm_dtype=ref_args.aic_gemm_dtype,
-            moe_dtype=ref_args.aic_moe_dtype,
-            fmha_dtype=ref_args.aic_fmha_dtype,
-            kv_cache_dtype=ref_args.aic_kv_cache_dtype,
-            comm_dtype=ref_args.aic_comm_dtype,
-            nextn=aic_nextn,
-            nextn_accept_rates=nextn_accept_rates,
+        prefill_session = create_session(**prefill_session_kwargs)
+        decode_session = (
+            prefill_session
+            if decode_session_kwargs == prefill_session_kwargs
+            else create_session(**decode_session_kwargs)
         )
     except (
         ImportError,
@@ -310,10 +354,10 @@ def prepare_planner_replay(
 
     try:
         prefill_fpms = _generate_aic_prefill_fpms(
-            aic_session, p_args, benchmark_granularity
+            prefill_session, p_args, benchmark_granularity
         )
         decode_fpms = _generate_aic_decode_fpms(
-            aic_session, d_args, benchmark_granularity
+            decode_session, d_args, benchmark_granularity
         )
     except (RuntimeError, ValueError, KeyError, ArithmeticError) as exc:
         sys.stderr.write(
