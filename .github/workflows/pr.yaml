@@ -132,7 +132,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
-      - sidecar-build
+      - sidecar-ci
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -342,7 +342,7 @@ jobs:
 # Sidecar
 # ============================================================================
 
-  sidecar-build:
+  sidecar-ci:
     name: dynamo-sidecar
     needs: changed-files
     if: needs.changed-files.outputs.sidecar == 'true'
@@ -1950,7 +1950,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
-      - sidecar-build
+      - sidecar-ci
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr
