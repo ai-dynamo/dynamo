@@ -492,8 +492,14 @@ pub mod work_handler {
         /// Response stream creation error
         pub const RESPONSE_STREAM: &str = "response_stream";
 
-        /// Generation error
+        /// Generation setup error: `generate()` returned an error instead of a
+        /// response stream, so no response frame was ever produced
         pub const GENERATE: &str = "generate";
+
+        /// The engine returned a typed error after the response stream had
+        /// already opened. Counted at most once per request, and not counted
+        /// for user cancellation or worker shutdown
+        pub const ENGINE_STREAM: &str = "engine_stream";
 
         /// Response serialization error
         pub const SERIALIZATION: &str = "serialization";

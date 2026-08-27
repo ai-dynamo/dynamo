@@ -166,6 +166,9 @@ where
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        // Latch: an engine that emits several error frames before ending its
+        // stream is still one failed request.
+        let mut counted_engine_stream_error = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
@@ -186,8 +189,22 @@ where
                     break;
                 }
             };
-            let is_error = encoded.is_error;
+            let is_error = encoded.is_error();
             saw_error_response |= is_error;
+            // Counted here rather than at the engine adapter because this pump
+            // is below every backend — Rust engines, pull-mode and push-mode
+            // Python handlers all reach it — and it is where the counter this
+            // increments actually lives. `generate` covers the setup failure
+            // instead, and is emitted from a path that runs only when this one
+            // never does, so the two cannot double-count.
+            if encoded.kind == ResponseFrameKind::EngineError && !counted_engine_stream_error {
+                counted_engine_stream_error = true;
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                        .inc();
+                }
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);

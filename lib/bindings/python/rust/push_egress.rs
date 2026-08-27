@@ -40,7 +40,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::{
-    EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
+    EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
 };
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, PipelineError, ResponseStream, SingleIn,
@@ -94,7 +94,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// wrong bytes on the wire.
 pub(crate) struct PushFrame {
     bytes: Bytes,
-    is_error: bool,
+    kind: ResponseFrameKind,
     codec: RequestPlanePayloadCodec,
 }
 
@@ -102,7 +102,7 @@ impl std::fmt::Debug for PushFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PushFrame")
             .field("len", &self.bytes.len())
-            .field("is_error", &self.is_error)
+            .field("kind", &self.kind)
             .field("codec", &self.codec.name())
             .finish()
     }
@@ -123,7 +123,7 @@ impl PushFrame {
                 ))
             })?;
         let codec = RequestPlanePayloadCodec::configured();
-        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
+        let (bytes, kind) = python_payload::encode_annotated_response(codec, annotated)
             .map_err(|error| {
                 PyValueError::new_err(format!(
                     "critical error: failed serializing python response as {}: {error}",
@@ -132,7 +132,7 @@ impl PushFrame {
             })?;
         Ok(Self {
             bytes: bytes.into(),
-            is_error,
+            kind,
             codec,
         })
     }
@@ -143,14 +143,17 @@ impl PushFrame {
         let codec = RequestPlanePayloadCodec::configured();
         // An error frame is a string and three `None`s; neither codec can fail
         // on it. Degrade to an empty frame rather than panic if one somehow does.
-        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
+        // The degraded frame is an engine error: the classification the real
+        // frame would have carried was lost with it, and silently excusing it
+        // would hide the encode failure from the error counter as well.
+        let (bytes, kind) = python_payload::encode_annotated_response(codec, annotated)
             .unwrap_or_else(|error| {
                 tracing::error!(%error, "push egress: failed to encode terminal error frame");
-                (Vec::new(), true)
+                (Vec::new(), ResponseFrameKind::EngineError)
             });
         Self {
             bytes: bytes.into(),
-            is_error,
+            kind,
             codec,
         }
     }
@@ -164,7 +167,7 @@ impl PushFrame {
         if self.codec == target {
             return Ok(EncodedResponseFrame {
                 bytes: self.bytes,
-                is_error: self.is_error,
+                kind: self.kind,
                 stop_stream: false,
             });
         }
@@ -194,7 +197,7 @@ impl PushFrame {
         })?;
         Ok(EncodedResponseFrame {
             bytes: bytes.into(),
-            is_error: self.is_error,
+            kind: self.kind,
             stop_stream: false,
         })
     }
@@ -577,8 +580,12 @@ mod tests {
 
     use super::PushFrame;
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
-    use dynamo_runtime::pipeline::network::{NetworkStreamWrapper, RequestPlanePayloadCodec};
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_runtime::pipeline::network::{
+        NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
+    };
     use dynamo_runtime::protocols::annotated::Annotated;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
     use tokio::sync::mpsc;
 
     /// Decode a frame's bytes back to the wire envelope, as the caller does.
@@ -637,18 +644,45 @@ mod tests {
     // take_sender; stream end via drop) are pinned against mpsc below.
 
     /// A terminal frame must reach the caller as a decodable error frame with
-    /// no data, and must be marked `is_error` so the ingress does not treat it
-    /// as evidence the engine is healthy.
+    /// no data, and must be classified as an error so the ingress does not treat
+    /// it as evidence the engine is healthy.
     #[test]
     fn terminal_frame_encodes_an_error_with_no_data() {
         let frame = PushFrame::error(Annotated::from_error("fatal"));
-        assert!(frame.is_error, "terminal frames must be flagged is_error");
+        assert_eq!(
+            frame.kind,
+            ResponseFrameKind::EngineError,
+            "an untyped terminal error is an engine failure"
+        );
 
         let wrapper = decode(&frame.bytes, frame.codec);
         assert!(!wrapper.complete_final, "not the end-of-stream marker");
         let annotated = wrapper.data.expect("terminal frame carries data");
         assert!(annotated.error.is_some(), "expected an error field");
         assert!(annotated.data.is_none(), "error frames carry no data");
+    }
+
+    /// The push driver ends a draining worker's streams by calling
+    /// `close_with_dynamo_error(map_python_exception(..))`, which turns
+    /// `PyGeneratorExit` into `Backend(EngineShutdown)`. That classification has
+    /// to survive both the encode and the handoff to the ingress, or every
+    /// in-flight request on a rolling restart is counted as an engine failure.
+    #[test]
+    fn terminal_frame_from_engine_shutdown_is_a_cancellation() {
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine shutting down")
+            .build();
+        let frame = PushFrame::error(Annotated::from_err(shutdown));
+        assert_eq!(frame.kind, ResponseFrameKind::Cancellation);
+
+        let codec = frame.codec;
+        let encoded = frame.into_encoded(codec).expect("forward must succeed");
+        assert_eq!(encoded.kind, ResponseFrameKind::Cancellation);
+        assert!(
+            encoded.is_error(),
+            "still an error frame on the wire; only the accounting differs"
+        );
     }
 
     /// Matching codecs are the whole point: the bytes encoded under the GIL go
@@ -660,7 +694,7 @@ mod tests {
 
         let encoded = frame.into_encoded(codec).expect("forward must succeed");
         assert_eq!(encoded.bytes, expected, "bytes must not be re-encoded");
-        assert!(encoded.is_error);
+        assert!(encoded.is_error());
         assert!(!encoded.stop_stream);
     }
 
@@ -677,7 +711,7 @@ mod tests {
                 })
                 .expect("encode")
                 .into(),
-            is_error: false,
+            kind: ResponseFrameKind::Data,
             codec: RequestPlanePayloadCodec::Msgpack,
         };
 
@@ -695,7 +729,7 @@ mod tests {
             Some("hi"),
             "payload must survive the re-encode"
         );
-        assert!(!encoded.is_error, "the error flag must be preserved");
+        assert!(!encoded.is_error(), "the frame kind must be preserved");
     }
 
     /// Pins the channel-level protocol: one error frame then end-of-stream.
@@ -709,7 +743,7 @@ mod tests {
             .unwrap();
         drop(tx); // simulates send_terminal dropping the sender after the frame
         let item = rx.recv().await.expect("one error frame must arrive");
-        assert!(item.is_error, "expected an error frame");
+        assert!(item.kind.is_error(), "expected an error frame");
         assert!(
             rx.recv().await.is_none(),
             "stream must end after the error frame"
@@ -754,7 +788,7 @@ mod tests {
         let frame = PushFrame::error(Annotated::from_error("fatal"));
         let codec = frame.codec;
         let encoded = frame.into_encoded(codec).expect("forward must succeed");
-        assert!(encoded.is_error, "error frame must be flagged is_error");
+        assert!(encoded.is_error(), "error frame must be classified as one");
         assert!(
             !encoded.stop_stream,
             "push-path error frames must have stop_stream: false (stream ends when sender drops)"
@@ -774,13 +808,17 @@ mod tests {
                 })
                 .expect("encode")
                 .into(),
-            is_error: true,
+            kind: ResponseFrameKind::EngineError,
             codec: RequestPlanePayloadCodec::Msgpack,
         };
         let encoded = frame
             .into_encoded(RequestPlanePayloadCodec::Json)
             .expect("re-encode must succeed");
-        assert!(encoded.is_error, "is_error must survive re-encode");
+        assert_eq!(
+            encoded.kind,
+            ResponseFrameKind::EngineError,
+            "the frame kind must survive re-encode"
+        );
         assert!(
             !encoded.stop_stream,
             "stop_stream must remain false after re-encode"
