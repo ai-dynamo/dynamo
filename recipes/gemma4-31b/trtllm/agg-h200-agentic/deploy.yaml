@@ -82,7 +82,7 @@ spec:
             - name: main
               # x86_64 build: TensorRT-LLM 1.3.0rc25 + the Gemma 4 Hopper
               # FlashInfer fixes + flashinfer-python 0.6.16, on Dynamo runtime 1.4.0.
-              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-x86:rc25-gemma4-h200-fa2
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:046d1e1687ab61eb4c91eaee1e6a23f26dc8dda034d2d5cabad490d21d71cfc4
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -152,7 +152,7 @@ spec:
             - name: main
               # x86_64 build: TensorRT-LLM 1.3.0rc25 + the Gemma 4 Hopper
               # FlashInfer fixes + flashinfer-python 0.6.16, on Dynamo runtime 1.4.0.
-              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-x86:rc25-gemma4-h200-fa2
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:046d1e1687ab61eb4c91eaee1e6a23f26dc8dda034d2d5cabad490d21d71cfc4
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:

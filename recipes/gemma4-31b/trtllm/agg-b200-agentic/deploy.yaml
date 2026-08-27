@@ -56,7 +56,7 @@ spec:
               # image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
               # williamz/gemma4-trtllm:1.3.0-80ed499b0b + PR NVIDIA/TensorRT-LLM#18162
               # (guided decoding with one-model MTP).
-              image: nvcr.io/nvstaging/avisva/gemma4-trtllm-x86:1.3.0-80ed499b0b-guided
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:046d1e1687ab61eb4c91eaee1e6a23f26dc8dda034d2d5cabad490d21d71cfc4
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -121,7 +121,7 @@ spec:
               # image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
               # williamz/gemma4-trtllm:1.3.0-80ed499b0b + PR NVIDIA/TensorRT-LLM#18162
               # (guided decoding with one-model MTP).
-              image: nvcr.io/nvstaging/avisva/gemma4-trtllm-x86:1.3.0-80ed499b0b-guided
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:046d1e1687ab61eb4c91eaee1e6a23f26dc8dda034d2d5cabad490d21d71cfc4
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:

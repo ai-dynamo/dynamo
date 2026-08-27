@@ -62,7 +62,7 @@ spec:
               # aarch64 build: TensorRT-LLM 1.3.0rc25 + PR NVIDIA/TensorRT-LLM#17264
               # (one-model MTP KV cache accounting fix) and PR #18162 (guided
               # decoding with one-model MTP) on Dynamo runtime 1.4.0.
-              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-arm64:rc25-pr17264-mtp-guided
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:4550060d01aec470bb4a87550ec9838e0fdaa6acf062b887f08881bdb3f2f385
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -130,7 +130,7 @@ spec:
               # aarch64 build: TensorRT-LLM 1.3.0rc25 + PR NVIDIA/TensorRT-LLM#17264
               # (one-model MTP KV cache accounting fix) and PR #18162 (guided
               # decoding with one-model MTP) on Dynamo runtime 1.4.0.
-              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-arm64:rc25-pr17264-mtp-guided
+              image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:4550060d01aec470bb4a87550ec9838e0fdaa6acf062b887f08881bdb3f2f385
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
