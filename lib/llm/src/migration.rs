@@ -603,13 +603,24 @@ where
     }
 
     fn track_response(&mut self, response: &Annotated<Resp>) {
-        if self.retries_left == 0 {
-            return;
-        }
         let llm_engine_output = match response.data.as_ref() {
             Some(output) => output,
             None => return,
         };
+        let token_ids = llm_engine_output.token_ids();
+        // Pure telemetry for the migration lifecycle events, so it has to count
+        // the final allowed attempt as well. `new_stream` decrements
+        // `retries_left` *before* dispatching, so that attempt runs with the
+        // counter already at zero; keeping this behind the replay guard below
+        // would drop its tokens from `migration retries exhausted`.
+        self.completed_tokens += token_ids.len();
+
+        // Everything past this point rebuilds replay state for a *future*
+        // attempt. Once no retry can happen there is nothing to replay onto,
+        // so leave the request untouched.
+        if self.retries_left == 0 {
+            return;
+        }
         // Capture the worker's engine.generate span pointer so a future
         // migration retry can render an OTel Link back to it. The adapter
         // stamps this on the first non-empty chunk; subsequent chunks may
@@ -617,9 +628,7 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
-        let token_ids = llm_engine_output.token_ids();
         let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
-        self.completed_tokens += token_ids.len();
         if self.exceed_max_seq_len(output_len) {
             return;
         }
@@ -2704,6 +2713,164 @@ mod tests {
             captured.scheduled_attempts,
             vec![u64::from(last_dispatched)],
             "retry scheduled must name the upcoming attempt"
+        );
+    }
+
+    /// The `migration retries exhausted` event must count tokens from the
+    /// final allowed attempt.
+    ///
+    /// `new_stream` decrements `retries_left` before dispatching, so the last
+    /// attempt runs with the counter already at zero. When the token tally sat
+    /// behind that same counter's replay guard in `track_response`, tokens the
+    /// final attempt had already delivered were silently dropped from the
+    /// exhaustion event, under-reporting how much work was lost.
+    ///
+    /// Asserts on the emitted field rather than struct state so the telemetry
+    /// contract itself is covered.
+    #[tokio::test]
+    async fn test_migration_exhausted_counts_final_attempt_tokens() {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
+
+        const FIRST_ATTEMPT_TOKENS: u32 = 2;
+        const FINAL_ATTEMPT_TOKENS: u32 = 3;
+
+        #[derive(Default)]
+        struct Captured {
+            exhausted_tokens: Option<u64>,
+        }
+
+        struct TokensVisitor {
+            message: Option<String>,
+            tokens: Option<u64>,
+        }
+
+        impl Visit for TokensVisitor {
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                if field.name() == "migration.tokens_completed" {
+                    self.tokens = Some(value);
+                }
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                if field.name() == "migration.tokens_completed" {
+                    self.tokens = Some(value as u64);
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        struct CaptureLayer(Arc<Mutex<Captured>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+                let mut visitor = TokensVisitor {
+                    message: None,
+                    tokens: None,
+                };
+                event.record(&mut visitor);
+                let (Some(message), Some(tokens)) = (visitor.message, visitor.tokens) else {
+                    return;
+                };
+                if message.contains("migration retries exhausted") {
+                    self.0.lock().unwrap().exhausted_tokens = Some(tokens);
+                }
+            }
+        }
+
+        /// Delivers a different number of tokens on each attempt, then
+        /// disconnects, so retries run out with tokens owed by both attempts.
+        struct RampingDisconnectEngine {
+            context_id: String,
+            calls: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for RampingDisconnectEngine
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let tokens = if call == 0 {
+                    FIRST_ATTEMPT_TOKENS
+                } else {
+                    FINAL_ATTEMPT_TOKENS
+                };
+                let responses = async_stream::stream! {
+                    for i in 0..tokens {
+                        yield create_mock_output(100 + i);
+                    }
+                    yield Annotated::from_err(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Disconnected)
+                            .message("worker disconnected")
+                            .build(),
+                    );
+                };
+                Ok(ResponseStream::new(
+                    Box::pin(responses),
+                    Arc::new(Controller::new(self.context_id.clone())),
+                ))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let root = Arc::new(Controller::new(context_id.clone()));
+        let calls = Arc::new(AtomicU32::new(0));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(RampingDisconnectEngine {
+                context_id: context_id.clone(),
+                calls: calls.clone(),
+            });
+
+        // One retry: attempt 0 dispatches and fails, attempt 1 dispatches as
+        // the final allowed attempt and fails, exhausting the budget.
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let mut manager = RetryManager::build(
+                    root,
+                    BTreeMap::new(),
+                    create_mock_request(50),
+                    next_generate,
+                    1,
+                    None,
+                    Arc::new(TEST_MODEL.to_string()),
+                    Arc::new(Metrics::new()),
+                    None,
+                )
+                .await
+                .expect("initial stream should be created");
+                while let Some(response) = manager.next().await {
+                    if response.err().is_some() {
+                        break;
+                    }
+                }
+            })
+        });
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "both the initial attempt and its retry must dispatch"
+        );
+        assert_eq!(
+            captured.lock().unwrap().exhausted_tokens,
+            Some(u64::from(FIRST_ATTEMPT_TOKENS + FINAL_ATTEMPT_TOKENS)),
+            "exhaustion must report tokens from the final allowed attempt too"
         );
     }
 }
