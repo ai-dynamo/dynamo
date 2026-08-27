@@ -454,7 +454,7 @@ impl SelectionCore {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
                 let scoped_replica_sync =
                     setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
-                let worker_label = self.worker_type.default_selector_label();
+                let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
                     scoped_replica_sync.publisher,
                     block_size as usize,

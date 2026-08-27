@@ -436,8 +436,7 @@ impl WorkerSelectionPolicy {
 
     /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
     ///
-    /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
-    /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
+    /// `worker_label` selects the built-in scoring and logging contract.
     pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
         Self {

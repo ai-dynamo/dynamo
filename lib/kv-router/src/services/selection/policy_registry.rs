@@ -183,7 +183,7 @@ impl WorkerSelectionPolicyRegistry {
                 Some(factory) => factory(config, worker_type, partition),
                 None => WorkerSelectionPolicy::default(
                     config.clone(),
-                    worker_type.default_selector_label(),
+                    worker_type.as_str(),
                 ),
             }
         })))
