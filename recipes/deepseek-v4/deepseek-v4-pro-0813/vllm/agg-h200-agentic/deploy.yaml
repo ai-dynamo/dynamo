@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# DeepSeek-V4-Pro-0813 - aggregated, 8x H200, agentic workload (64K ISL / 400 OSL).
+# DeepSeek-V4-Pro-0813 - aggregated, 8x H200.
+# Agentic workload (64K ISL / 400 OSL) and 1M context from the same config:
+# GPU KV holds ~3.12M tokens, so 1M requests need no CPU offload.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -64,7 +66,7 @@ spec:
               --moe-backend marlin \
               --enable-prefix-caching \
               --no-enable-flashinfer-autotune \
-              --max-model-len 86016 \
+              --max-model-len 1048576 \
               --max-num-seqs 128 \
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.97 \

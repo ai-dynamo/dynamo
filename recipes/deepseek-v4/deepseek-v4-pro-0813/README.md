@@ -15,18 +15,18 @@ Recipes for [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V
 
 Dynamo + vLLM deployment profiles.
 
-|                          | H200 aggregated agentic | H200 disaggregated agentic       | H200 aggregated 1M       | H200 disaggregated 1M            | GB200 aggregated       | GB200 disaggregated |
-| ------------------------ | ----------------------- | -------------------------------- | ------------------------ | -------------------------------- | ---------------------- | ------------------- |
-| **GPU** (per worker)     | 8x H200                 | 8x H200 prefill + 8x H200 decode | 8x H200                  | 8x H200 prefill + 8x H200 decode | 8x GB200 (2 nodes)     | 8x GB200 prefill + 8x GB200 decode (2 nodes each) |
-| **Mode**                 | Aggregated              | Prefill/decode disaggregated     | Aggregated               | Prefill/decode disaggregated     | Aggregated             | Prefill/decode disaggregated |
-| **Framework**            | vLLM                    | vLLM                             | vLLM                     | vLLM                             | vLLM                   | vLLM |
-| **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV   | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV | MXFP4 experts + FP8 KV |
-| **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                  | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                | TP8/EP8 prefill / TP8/EP8 decode |
-| **Routing**              | KV-aware                | KV-aware                         | KV-aware                 | KV-aware                         | KV-aware               | KV-aware |
-| **Speculative decoding** | None                    | None                             | None                     | None                             | DSpark k=5             | DSpark k=5 (decode only) |
-| **Context length**       | 86,016                  | 86,016                           | 1,048,576                | 1,048,576                        | 1,048,576              | 1,048,576 |
-| **KV cache offloading**  | None                    | None                             | `SimpleCPUOffload` (CPU) | `SimpleCPUOffload` (CPU, decode) | None                   | None |
-| **KV transfer**          | N/A                     | NIXL                             | N/A                      | NIXL (via `MultiConnector`)      | N/A                    | NIXL |
+|                          | H200 aggregated (agentic + 1M) | H200 disaggregated agentic       | H200 disaggregated 1M            | GB200 aggregated       | GB200 disaggregated |
+| ------------------------ | ----------------------- | -------------------------------- | -------------------------------- | ---------------------- | ------------------- |
+| **GPU** (per worker)     | 8x H200                 | 8x H200 prefill + 8x H200 decode | 8x H200 prefill + 8x H200 decode | 8x GB200 (2 nodes)     | 8x GB200 prefill + 8x GB200 decode (2 nodes each) |
+| **Mode**                 | Aggregated              | Prefill/decode disaggregated     | Prefill/decode disaggregated     | Aggregated             | Prefill/decode disaggregated |
+| **Framework**            | vLLM                    | vLLM                             | vLLM                             | vLLM                   | vLLM |
+| **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV | MXFP4 experts + FP8 KV |
+| **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                | TP8/EP8 prefill / TP8/EP8 decode |
+| **Routing**              | KV-aware                | KV-aware                         | KV-aware                         | KV-aware               | KV-aware |
+| **Speculative decoding** | None                    | None                             | None                             | DSpark k=5             | DSpark k=5 (decode only) |
+| **Context length**       | 1,048,576               | 86,016                           | 1,048,576                        | 1,048,576              | 1,048,576 |
+| **KV cache offloading**  | None                    | None                             | `SimpleCPUOffload` (CPU, decode) | None                   | None |
+| **KV transfer**          | N/A                     | NIXL                             | NIXL (via `MultiConnector`)      | N/A                    | NIXL |
 
 ## Supported features
 
@@ -38,8 +38,8 @@ Dynamo + vLLM deployment profiles.
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **Hugging Face token** with access to `deepseek-ai/DeepSeek-V4-Pro-0813`.
-3. For the **1M context** recipes, worker nodes need **~1.4 TB of host RAM** for the CPU KV
-   offload tier, in addition to the 8 GPUs.
+3. The **disaggregated 1M** recipe uses a CPU KV offload tier and needs **~1.4 TB of host RAM**
+   per worker. The aggregated recipe does not — 1M fits in GPU KV.
 
 ## Quick Start
 
@@ -98,10 +98,10 @@ offloading, see [perf/README.md](perf/README.md) for details.
 
 ## Performance results
 
-| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
-| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
-| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 64.88 | 55.906 | 383.3 |
-| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 12 | 50.31 | 50.042 | 2370.3 |
+| Workload | Recipe | SKU | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
+| -------- | ------ | --- | ----------------------- | ----------------------- | ------------- |
+| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 64.88 | 55.906 | 383.3 |
+| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 50.31 | 50.042 | 2370.3 |
 
 Both GB200 rows were measured on the same 3,541-row 15% agentic trace, each at its own
 iso-SLA operating point against the joint gate of >= 50 tok/s/user and TTFT p50 < 5 s.
