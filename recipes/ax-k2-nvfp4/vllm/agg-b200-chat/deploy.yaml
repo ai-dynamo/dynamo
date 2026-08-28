@@ -127,8 +127,16 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: HF_HUB_CACHE
+                  value: /model-cache/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
                 - name: HF_XET_HIGH_PERFORMANCE
                   value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
                 - name: TRITON_CACHE_DIR
                   value: /tmp/.triton-cache
                 - name: VLLM_CONFIG_ROOT
@@ -145,7 +153,7 @@ spec:
               resources:
                 requests:
                   nvidia.com/gpu: "4"
-                  memory: 750Gi
+                  memory: 400Gi
                 limits:
                   nvidia.com/gpu: "4"
               securityContext:
