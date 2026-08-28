@@ -208,7 +208,9 @@ codegen-units = 1
 lto = "thin"
 
 # Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
-# Build: cargo build --profile profiling --features nvtx
+# Build: cargo build --profile profiling --features dynamo-runtime/nvtx
+# (not a bare `--features nvtx` — at the workspace root that also selects
+# kvbm-engine's nvtx feature, whose markers ignore DYN_NVTX.)
 [profile.profiling]
 inherits = "release"
 debug = true

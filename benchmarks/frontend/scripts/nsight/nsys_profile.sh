@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - nsys (Nsight Systems CLI) installed
-#   - Binary built with: cargo build --profile profiling --features nvtx
+#   - Binary built with: cargo build --profile profiling --features dynamo-runtime/nvtx
 #
 # Usage:
 #   ./nsys_profile.sh <binary> [args...]
@@ -36,10 +36,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --output PREFIX   Output file prefix (default: dynamo_frontend_<timestamp>)"
             echo ""
             echo "Environment:"
-            echo "  DYN_ENABLE_NVTX=1 is set automatically"
+            echo "  DYN_NVTX=1 is set automatically"
             echo ""
             echo "Build the binary first:"
-            echo "  cargo build --profile profiling --features nvtx"
+            echo "  cargo build --profile profiling --features dynamo-runtime/nvtx"
             exit 0
             ;;
         *)  break ;;
@@ -62,13 +62,28 @@ fi
 
 if ! command -v "$BINARY" &>/dev/null && [[ ! -x "$BINARY" ]]; then
     echo "ERROR: Binary not found or not executable: $BINARY"
-    echo "Build with: cargo build --profile profiling --features nvtx"
+    echo "Build with: cargo build --profile profiling --features dynamo-runtime/nvtx"
     exit 1
 fi
 
 mkdir -p "$OUTPUT_DIR"
 
-export DYN_ENABLE_NVTX=1
+# One switch for both layers: the Rust runtime (lib/runtime/src/nvtx.rs) and
+# the Python components (dynamo.common.utils.nvtx_utils) both read this.
+export DYN_NVTX=1
+
+# nvtx_utils imports the nvtx package eagerly once the switch is on, so a Python
+# target dies at startup without it. Warned rather than fatal, and checked against
+# `python3` rather than the target: BINARY is arbitrary here — it may be a Rust
+# binary that needs nothing from Python, or a launcher whose interpreter this
+# script cannot know. Treat the warning as a prompt to check the environment the
+# target actually runs in.
+if ! python3 -c "import nvtx" 2>/dev/null; then
+    echo "WARNING: the nvtx package is not importable from python3. DYN_NVTX=1 is exported"
+    echo "         above, so a Python target will raise ImportError at startup — verify the"
+    echo "         interpreter '$BINARY' runs under."
+    echo "         Install: pip install 'ai-dynamo[profiling]'"
+fi
 
 echo "Profiling: $BINARY $*"
 echo "Duration: ${DURATION}s"

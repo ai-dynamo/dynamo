@@ -218,6 +218,29 @@ echo ""
 # ─── Pre-flight: detect available tools ──────────────────────────────────────
 echo "--- Pre-flight checks ---"
 
+# One interpreter for everything Python in this script: the import checks below
+# and the frontend and mocker processes launched further down. Checking `python3`
+# while launching `python` can pass here and still fail at startup when the two
+# names resolve to different environments. Resolved to an absolute path so the
+# process that gets launched is provably the one that was checked. Override with
+# PYTHON=/path/to/python to pin a specific virtualenv.
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+    if command -v python &>/dev/null; then
+        PYTHON=python
+    elif command -v python3 &>/dev/null; then
+        PYTHON=python3
+    else
+        echo "ERROR: no Python interpreter on PATH (looked for python, then python3)."
+        exit 1
+    fi
+fi
+if ! PYTHON="$(command -v "$PYTHON")"; then
+    echo "ERROR: PYTHON=$PYTHON is not executable or not on PATH."
+    exit 1
+fi
+echo "  python:     $PYTHON ($("$PYTHON" --version 2>&1))"
+
 HAS_NSYS=false
 HAS_PERF=false
 HAS_BPF=false
@@ -267,11 +290,29 @@ if ! command -v jq &>/dev/null; then
 fi
 echo "  jq:         available"
 
-if ! command -v aiperf &>/dev/null && ! python3 -c "import aiperf" 2>/dev/null; then
+if ! command -v aiperf &>/dev/null && ! "$PYTHON" -c "import aiperf" 2>/dev/null; then
     echo "ERROR: aiperf not found. Install: pip install git+https://github.com/ai-dynamo/aiperf.git"
     exit 1
 fi
 echo "  aiperf:     available"
+
+# Checked here, not at the point of use: with nsys present this script sets
+# DYN_NVTX=1 (see below), and dynamo.common.utils.nvtx_utils imports the nvtx
+# package eagerly when that switch is on. Without the package the frontend and
+# the mocker workers raise ImportError at startup, so the run would die minutes
+# in with a traceback that says nothing about nsys. A source install satisfies
+# every other prerequisite here and still hits it.
+if [[ "$HAS_NSYS" == true ]] && ! "$PYTHON" -c "import nvtx" 2>/dev/null; then
+    echo "ERROR: nsys is present, which turns on DYN_NVTX, but the nvtx package is not"
+    echo "       installed for $PYTHON, which is the interpreter this script launches"
+    echo "       the frontend and mocker with. They import it at startup when DYN_NVTX"
+    echo "       is set."
+    echo "       Install: $PYTHON -m pip install 'ai-dynamo[profiling]'  (or --skip-nsys)"
+    exit 1
+fi
+if [[ "$HAS_NSYS" == true ]]; then
+    echo "  nvtx:       available"
+fi
 echo ""
 
 # ─── Tracked PIDs for cleanup ───────────────────────────────────────────────
@@ -409,7 +450,7 @@ for MN in "${MODEL_NAMES[@]}"; do
         fi
 
         MN_SAFE="${MN//\//_}"
-        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
+        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" "$PYTHON" -m dynamo.mocker "${MOCKER_ARGS[@]}" \
             > "$OUTPUT_DIR/logs/mocker_${MN_SAFE}_${i}.log" 2>&1 &
         ALL_PIDS+=($!)
         echo "  Worker $WORKER_IDX ($MN #$i): PID ${ALL_PIDS[-1]}, port $WORKER_PORT"
@@ -426,7 +467,6 @@ FRONTEND_ENV=(
     HF_HUB_OFFLINE=1
     DYN_HTTP_PORT="$FRONTEND_PORT"
     DYN_PERF_DIAG=1
-    DYN_ENABLE_NVTX=1
     DYN_REQUEST_PLANE="$REQUEST_PLANE"
     DYN_EVENT_PLANE="$EVENT_PLANE"
 )
@@ -445,12 +485,18 @@ fi
 
 # Enable Rust NVTX annotations when nsys profiling is active.
 # The Rust NVTX subsystem (lib/runtime/src/nvtx.rs) requires both the
-# compile-time "nvtx" feature AND this runtime env var. We only set it
-# when nsys is active to avoid the ~50ns/annotation overhead during
-# clean throughput runs.
+# compile-time "nvtx" feature AND this runtime env var. We only set it when
+# nsys is active so clean throughput runs pay nothing for the annotations.
+#
+# The env var alone is not enough: a frontend built without the feature emits
+# nothing and says nothing, so report the switch rather than the outcome.
+# Confirm the capture by looking for "NVTX annotations enabled" in the
+# frontend log, which the runtime logs only when both gates are open.
 if [[ "$HAS_NSYS" == true ]]; then
-    FRONTEND_ENV+=(DYN_ENABLE_RUST_NVTX=1)
-    echo "  Rust NVTX annotations: enabled"
+    FRONTEND_ENV+=(DYN_NVTX=1)
+    echo "  Rust NVTX annotations: DYN_NVTX=1 set"
+    echo "    (requires a build with --features dynamo-runtime/nvtx;"
+    echo "     check the frontend log for 'NVTX annotations enabled')"
 fi
 
 if [[ "$HAS_NSYS" == true ]]; then
@@ -462,7 +508,7 @@ if [[ "$HAS_NSYS" == true ]]; then
         --cpuctxsw=none \
         --output="${OUTPUT_DIR}/nsys/frontend" \
         --force-overwrite=true \
-        python -m dynamo.frontend \
+        "$PYTHON" -m dynamo.frontend \
         > "$OUTPUT_DIR/logs/frontend.log" 2>&1 &
     NSYS_WRAPPER_PID=$!
     ALL_PIDS+=($NSYS_WRAPPER_PID)
@@ -485,7 +531,7 @@ if [[ "$HAS_NSYS" == true ]]; then
     echo "  nsys wrapper PID: $NSYS_WRAPPER_PID"
     echo "  Frontend PID: $FRONTEND_PID"
 else
-    env "${FRONTEND_ENV[@]}" python -m dynamo.frontend \
+    env "${FRONTEND_ENV[@]}" "$PYTHON" -m dynamo.frontend \
         > "$OUTPUT_DIR/logs/frontend.log" 2>&1 &
     FRONTEND_PID=$!
     ALL_PIDS+=($FRONTEND_PID)
@@ -668,7 +714,7 @@ echo "  [prometheus] scraping every 1s"
         if [[ -n "$METRICS" ]]; then
             # JSONL: one line per scrape with timestamp
             TS=$(date -Iseconds)
-            printf '{"ts":"%s","metrics":%s}\n' "$TS" "$(echo "$METRICS" | python3 -c '
+            printf '{"ts":"%s","metrics":%s}\n' "$TS" "$(echo "$METRICS" | "$PYTHON" -c '
 import sys, json
 lines = sys.stdin.read().strip().split("\n")
 out = {}
@@ -942,4 +988,4 @@ find "$OUTPUT_DIR" -type f | sort | while read -r f; do
 done
 echo ""
 echo "Run analysis:"
-echo "  python3 ${SCRIPT_DIR}/analysis/create_report.py analyze $OUTPUT_DIR"
+echo "  $PYTHON ${SCRIPT_DIR}/analysis/create_report.py analyze $OUTPUT_DIR"

@@ -354,9 +354,20 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
 
+## NVTX profiling
+
+One switch controls the NVTX annotations that appear on an Nsight Systems timeline, across both the Rust runtime and the Python components. It is off by default.
+
+<ParamField path="DYN_NVTX" type="boolean" default="false">
+  Enables NVTX annotations in the Rust runtime — frontend HTTP handling, worker ingress and egress, transport, and routing — and in the Python components. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and case-insensitive; any other value raises. The Rust half additionally requires a build with the `nvtx` Cargo feature, which released builds do not have. The Python half requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises `ImportError` at startup if it is missing rather than recording nothing.
+</ParamField>
+
+See [NVTX Profiling](nvtx-profiling.mdx) for the build steps, the full list of ranges, and how to read the resulting timeline.
+
 ## Related
 
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
 - [Local Resource Monitor (Local)](local-resource-monitor-local.mdx) — host-side per-process exporter.
+- [NVTX Profiling](nvtx-profiling.mdx) — Nsight Systems annotations for the Dynamo frontend and workers.
