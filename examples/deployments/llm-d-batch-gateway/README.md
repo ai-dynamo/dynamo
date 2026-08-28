@@ -46,7 +46,7 @@ Set a namespace and apply the dedicated backend:
 
 ```bash
 cd examples/deployments/llm-d-batch-gateway
-export NAMESPACE=your-namespace
+export NAMESPACE=dynamo-batch-example
 
 kubectl apply -n "${NAMESPACE}" -f dynamo.yaml
 kubectl wait -n "${NAMESPACE}" \
@@ -155,7 +155,8 @@ helm upgrade --install async-dispatch \
   oci://ghcr.io/llm-d/charts/llm-d-async \
   --version v0.9.0 \
   --namespace "${NAMESPACE}" \
-  --values llm-d-async-values.yaml
+  --values llm-d-async-values.yaml \
+  --set-string ap.redis.gateParams.query="min(dynamo_frontend_model_ready{model=\"Qwen/Qwen3-0.6B\"\\,namespace=\"${NAMESPACE}\"})"
 
 kubectl rollout status -n "${NAMESPACE}" \
   deployment/async-dispatch-llm-d-async \
@@ -190,37 +191,47 @@ The same client validates both modes. In asynchronous mode, Batch Gateway contin
 
 This check proves that Async preserves a submitted batch while Dynamo has no routable worker, then begins dispatch after the first serving unit registers. It does not wait for every desired worker replica to become ready.
 
-Scale the worker component to zero and wait until the frontend no longer reports the model as routable. Depending on discovery teardown timing, the series can report `0` or disappear; the Async gate fails closed in both cases:
+Forward the Async Processor metrics in a third terminal. Keep this port-forward running for the rest of the check:
+
+```bash
+kubectl port-forward -n "${NAMESPACE}" \
+  deployment/async-dispatch-llm-d-async 9090:9090
+```
+
+Scale the worker component to zero:
 
 ```bash
 kubectl patch -n "${NAMESPACE}" \
   dynamographdeployment/qwen3-0-6b-batch \
   --type=json \
   --patch='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]'
-
-while curl --fail --silent http://127.0.0.1:8000/metrics \
-  | grep --quiet 'dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B"} 1'; do
-  sleep 2
-done
 ```
 
-With the Batch API port-forward still running, start a successful batch in another terminal. The client should remain in a non-terminal state while capacity is zero:
+Wait for the gate to close. This loop fails if the metrics request fails and exits successfully only after the dispatch budget is exactly `0`. The source-availability metric is diagnostic: `1` means Async read an explicit readiness value of zero, and `0` means the series was absent and Async used its fail-closed fallback:
+
+```bash
+for attempt in $(seq 1 60); do
+  metrics="$(curl --fail --silent http://127.0.0.1:9090/metrics)" || exit 1
+  if printf '%s\n' "${metrics}" | awk '$1 ~ /^llm_d_async_async_dispatch_budget{/ && $2 == 0 { found=1 } END { exit !found }'; then
+    break
+  fi
+  if [ "${attempt}" -eq 60 ]; then
+    echo "dispatch budget did not reach zero" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+printf '%s\n' "${metrics}" \
+  | grep '^llm_d_async_async_gate_metric_source_available{'
+```
+
+With the Batch API port-forward still running, start a successful batch in another terminal. The client remains in a non-terminal state while the dispatch budget is zero:
 
 ```bash
 python3 run_example.py \
   --base-url http://127.0.0.1:8001 \
   --success-only
-```
-
-In a third terminal, confirm that the dispatch budget is `0`. `llm_d_async_async_gate_metric_source_available` is `1` when Async read an explicit readiness value of zero and `0` when the series was absent and Async used its fail-closed fallback:
-
-```bash
-kubectl port-forward -n "${NAMESPACE}" \
-  deployment/async-dispatch-llm-d-async 9090:9090
-
-curl --fail --silent http://127.0.0.1:9090/metrics \
-  | grep --extended-regexp \
-    'llm_d_async_async_(dispatch_budget|gate_metric_source_available)'
 ```
 
 Restore one worker. The pending client should complete after the worker registers and Prometheus observes the readiness value of `1`:
@@ -251,7 +262,7 @@ kubectl wait -n "${NAMESPACE}" \
 - Pinning the Dynamo, Batch Gateway, and Async Processor versions used by the example.
 - Reproducing the lifecycle with the standalone example client.
 
-This workflow targets one B200 GPU, Dynamo `1.5.0`, Batch Gateway `0.3.0`, Async Processor `v0.9.0`, and Qwen3-0.6B.
+This workflow was validated on one H200 GPU with a Dynamo `1.5.0` CI image, Batch Gateway `0.3.0`, Async Processor `v0.9.0`, and Qwen3-0.6B.
 
 ## What This Example Does Not Cover
 

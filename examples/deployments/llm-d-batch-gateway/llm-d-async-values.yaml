@@ -36,7 +36,7 @@ ap:
     gateType: prometheus-query
     gateParams:
       pool: dynamo-batch
-      query: 'min(dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B",dynamo_namespace=~".+-qwen3-0-6b-batch"})'
+      query: 'min(dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B",namespace="dynamo-batch-example"})'
       fallback: "0"
   metrics:
     enabled: true
