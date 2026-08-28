@@ -99,6 +99,27 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
     assert "master_port" not in kwargs
 
 
+def test_override_server_args_supports_sglang_0_5_17():
+    calls = []
+
+    class ServerArgs:
+        def override(self, source, **fields):
+            calls.append((source, fields))
+            for name, value in fields.items():
+                object.__setattr__(self, name, value)
+
+    server_args = ServerArgs()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [("dynamo.test", {"enable_memory_saver": True})]
+    assert server_args.enable_memory_saver is True
+
+
 def test_override_server_args_supports_legacy_xpu_pin():
     server_args = SimpleNamespace(enable_memory_saver=False)
 

@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # and scheduler-loop slack before failing closed.
 BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+# (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
@@ -910,7 +910,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             _default_sampling_params,
-            _prometheus_temp_dir,
+            engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
@@ -935,7 +935,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,
@@ -953,6 +957,18 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            # Attached multi-client AsyncLLMs do not own EngineCore. Close all
+            # clients first, then let the parent cleanup resource terminate
+            # child endpoints and finally the shared EngineCore.
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down embedding AsyncLLM client")
+            if engine_cleanup_resource is not None:
+                try:
+                    engine_cleanup_resource.cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up embedding engine resources")
 
     async def _create_classify_worker(
         self,

@@ -28,7 +28,7 @@ These behaviors operate at the worker and engine lifecycle boundary: planned shu
 - **[Graceful Shutdown](graceful-shutdown.md)** — Lets a worker finish the requests it is already handling before Kubernetes terminates the pod. **On by default** — tune the grace period to match your rollout and scale-down behavior.
 - **[Shadow Engine Failover](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md)** — Runs an active/passive engine pair on the same node so a shadow engine can take over locally after an engine failure. It does not preserve in-flight requests or KV cache state.
 - **[Health Check Reference](../../reference/observability/health-checks.mdx)** — Documents the liveness, readiness, and engine-monitoring endpoints used to detect unhealthy workers.
-- **[Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md)** — Explains the service discovery and lease mechanisms Dynamo uses to detect worker loss and route new traffic to healthy capacity.
+- **[Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#distributed-runtime)** — Explains the service discovery and lease mechanisms Dynamo uses to detect worker loss and route new traffic to healthy capacity.
 
 ## Testing and References
 

@@ -124,14 +124,20 @@ async def test_load_audio_batch_rejects_malformed_items():
 
 
 @pytest.mark.asyncio
-async def test_load_audio_batch_prioritizes_typed_client_error():
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+    ],
+)
+async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
     loader = AudioLoader()
-    client_error = UrlValidationError("blocked host")
     loader.load_audio = AsyncMock(  # type: ignore[method-assign]
         side_effect=[RuntimeError("decode failed"), client_error]
     )
 
-    with pytest.raises(UrlValidationError) as exc_info:
+    with pytest.raises(type(client_error)) as exc_info:
         await loader.load_audio_batch(
             [
                 {"Url": "https://example.com/bad.wav"},

@@ -275,7 +275,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Guide](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe gRPC configuration and integration |
+| [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
 | [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |
