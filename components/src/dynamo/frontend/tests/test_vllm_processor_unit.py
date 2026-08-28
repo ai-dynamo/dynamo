@@ -7,6 +7,7 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import asyncio
 import importlib.util
 import json
 from types import SimpleNamespace
@@ -220,6 +221,37 @@ class TestDynamoJsonToolCallFallback:
             "content": '[{"name":"get_weather","parameters":',
         }
 
+    def test_parser_without_forced_choice_uses_json_fallback(self, tokenizer):
+        class LimitedParser:
+            supports_required_and_named = False
+
+            def __init__(self, tokenizer, tools):
+                pass
+
+            def adjust_request(self, request):
+                return request
+
+        class Renderer:
+            async def render_messages_async(self, messages, chat_params):
+                return messages, {"prompt": "tool prompt", "prompt_token_ids": [1]}
+
+        result = asyncio.run(
+            prepost_module.preprocess_chat_request(
+                TOOL_REQUEST
+                | {
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "get_weather"},
+                    }
+                },
+                tokenizer=tokenizer,
+                renderer=Renderer(),
+                tool_parser_class=LimitedParser,
+            )
+        )
+
+        assert result.guided_decoding is None
+        assert result.uses_dynamo_json_tool_call_fallback is True
     def test_multiple_fallback_tool_calls_respect_parallel_setting(self, tokenizer):
         post = self._post_processor(
             tokenizer,
@@ -394,6 +426,39 @@ class TestDynamoJsonToolCallFallback:
             assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
                 f'{{"city":"{city}"}}'
             )
+
+
+def test_guided_assistant_output_bypasses_reasoning_parser(tokenizer):
+    class UnexpectedReasoningParser:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("guided assistant JSON must not be parsed as reasoning")
+
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=SimpleNamespace(include_reasoning=True),
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=None,
+        reasoning_parser_class=UnexpectedReasoningParser,
+        chat_template_kwargs={},
+        stream_response=True,
+        guided_output_is_content=True,
+    )
+
+    choice = post.process_output(
+        SimpleNamespace(
+            index=0,
+            text='{"status":"ok"}',
+            token_ids=[],
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"] == {
+        "role": "assistant",
+        "content": '{"status":"ok"}',
+    }
 
 
 @pytest.fixture(scope="module")

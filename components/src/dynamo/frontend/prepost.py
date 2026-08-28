@@ -66,6 +66,7 @@ class PreprocessResult:
     prompt_token_ids: list[int]
     guided_decoding: dict[str, Any] | None = None
     uses_dynamo_json_tool_call_fallback: bool = False
+    guided_output_is_content: bool = False
 
 
 _ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
@@ -775,6 +776,9 @@ async def preprocess_chat_request(
         prompt_token_ids=tokens,
         guided_decoding=guided_decoding,
         uses_dynamo_json_tool_call_fallback=uses_dynamo_json_tool_call_fallback,
+        guided_output_is_content=(
+            assistant_guided_decoding is not None and not is_forced_tool_choice
+        ),
     )
 
 
@@ -809,6 +813,7 @@ class StreamingPostProcessor:
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
+        guided_output_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
@@ -834,6 +839,7 @@ class StreamingPostProcessor:
             )
             if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
             and response_reasoning_ended is not True
+            and not guided_output_is_content
             else None
         )
         if self.reasoning_parser is not None:
