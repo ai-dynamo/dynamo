@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unary collection for Dynamo's normalized token Generate endpoints."""
+"""Unary helpers for Dynamo's normalized token Generate endpoints."""
 
 from __future__ import annotations
 
@@ -44,6 +44,38 @@ class LLMUnaryClient:
             context=context,
         )
         return await _collect_completion(stream)
+
+
+def with_engine_data(
+    completion: Mapping[str, Any],
+    values: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a completion copy with non-overlapping ``engine_data`` values."""
+
+    if not isinstance(completion, Mapping):
+        raise ValueError("LLM completion must be an object")
+    if not isinstance(values, Mapping):
+        raise ValueError("engine_data values must be an object")
+
+    result = dict(completion)
+    if not values:
+        return result
+
+    existing_value = completion.get("engine_data")
+    if existing_value is None:
+        existing: Mapping[str, Any] = {}
+    elif isinstance(existing_value, Mapping):
+        existing = existing_value
+    else:
+        raise ValueError("existing engine_data must be an object")
+
+    duplicate_keys = sorted(set(existing).intersection(values))
+    if duplicate_keys:
+        keys = ", ".join(repr(key) for key in duplicate_keys)
+        raise ValueError(f"engine_data already contains keys: {keys}")
+
+    result["engine_data"] = {**existing, **values}
+    return result
 
 
 def _validate_request(request: Mapping[str, Any]) -> None:
