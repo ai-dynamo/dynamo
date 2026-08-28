@@ -11,9 +11,4 @@ use dynamo_sidecar_common::SidecarArgs;
 pub(crate) struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
-
-    /// Hugging Face model ID or local path used for tokenization and templates.
-    /// Defaults to the single model advertised by OpenEngine GetServerInfo.
-    #[arg(long)]
-    pub model_path: Option<String>,
 }

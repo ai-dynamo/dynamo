@@ -25,17 +25,13 @@ const SCHEMA_REVISION: u32 = 1;
 #[derive(Clone, Debug)]
 struct Discovery {
     info: pb::ServerInfo,
+    model: pb::ModelInfo,
     role: pb::EngineRole,
     mode: DisaggregationMode,
-    model_source: String,
-    remote_model: String,
 }
 
 impl Discovery {
-    fn from_server_info(
-        info: pb::ServerInfo,
-        model_path: Option<String>,
-    ) -> Result<Self, DynamoError> {
+    fn from_responses(info: pb::ServerInfo, model: pb::ModelInfo) -> Result<Self, DynamoError> {
         if info.engine_name.trim().is_empty() {
             return Err(client::protocol_error(
                 "GetServerInfo returned an empty engine_name",
@@ -67,17 +63,7 @@ impl Discovery {
                 ));
             }
         };
-        let [remote_model] = info.supported_models.as_slice() else {
-            return Err(client::protocol_error(format!(
-                "this initial sidecar requires exactly one supported model; server returned {}",
-                info.supported_models.len()
-            )));
-        };
-        if remote_model.trim().is_empty() {
-            return Err(client::protocol_error(
-                "GetServerInfo returned an empty supported model",
-            ));
-        }
+        let advertised_model = advertised_model(&info)?;
         if mode != DisaggregationMode::Aggregated {
             let connector = info.kv_connector.as_ref().ok_or_else(|| {
                 client::protocol_error("disaggregated server omitted kv_connector")
@@ -88,14 +74,43 @@ impl Discovery {
                 ));
             }
         }
-        let model_source = model_path.unwrap_or_else(|| remote_model.clone());
-        if model_source.trim().is_empty() {
-            return Err(client::invalid_argument("model-path must not be empty"));
+        if model.model_id.trim().is_empty() {
+            return Err(client::protocol_error(
+                "GetModelInfo returned an empty model_id",
+            ));
+        }
+        if model.served_model_name.trim().is_empty() {
+            return Err(client::protocol_error(
+                "GetModelInfo returned an empty served_model_name",
+            ));
+        }
+        if model.supports_token_ids_input != Some(true) {
+            return Err(client::protocol_error(
+                "the discovered model does not support token-ID input",
+            ));
+        }
+        if model
+            .served_model_aliases
+            .iter()
+            .any(|alias| alias.trim().is_empty())
+        {
+            return Err(client::protocol_error(
+                "GetModelInfo returned an empty served model alias",
+            ));
+        }
+        if advertised_model != model.served_model_name
+            && !model
+                .served_model_aliases
+                .iter()
+                .any(|alias| alias == advertised_model)
+        {
+            return Err(client::protocol_error(format!(
+                "GetModelInfo did not recognize advertised model `{advertised_model}`"
+            )));
         }
         Ok(Self {
-            remote_model: remote_model.clone(),
-            model_source,
             info,
+            model,
             role,
             mode,
         })
@@ -105,7 +120,9 @@ impl Discovery {
         if self.info.engine_name != observed.info.engine_name
             || self.info.schema_release != observed.info.schema_release
             || self.role != observed.role
-            || self.remote_model != observed.remote_model
+            || self.model.model_id != observed.model.model_id
+            || self.model.served_model_name != observed.model.served_model_name
+            || self.model.served_model_aliases != observed.model.served_model_aliases
         {
             return Err(client::protocol_error(
                 "OpenEngine identity, role, schema, or model changed during startup",
@@ -132,12 +149,12 @@ impl Discovery {
         let capacity = self.info.capacity.as_ref();
         let parallelism = self.info.parallelism.as_ref();
         EngineConfig {
-            model: self.model_source.clone(),
-            served_model_name: Some(self.remote_model.clone()),
-            model_aliases: Vec::new(),
+            model: self.model.model_id.clone(),
+            served_model_name: Some(self.model.served_model_name.clone()),
+            model_aliases: self.model.served_model_aliases.clone(),
             runtime_data,
             llm: Some(LlmRegistration {
-                context_length: None,
+                context_length: self.model.max_context_length,
                 kv_cache_block_size: capacity.and_then(|value| value.kv_block_size),
                 total_kv_blocks: capacity.and_then(|value| value.total_kv_blocks),
                 max_num_seqs: capacity.and_then(|value| value.max_running_requests),
@@ -187,21 +204,13 @@ impl OpenEngineSidecarEngine {
                 "RL control is not implemented by the TensorRT-LLM OpenEngine server",
             ));
         }
-        if args
-            .model_path
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty())
-        {
-            return Err(client::invalid_argument("model-path must not be empty"));
-        }
-
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         eprintln!(
             "Discovering OpenEngine metadata from {endpoint}; startup deadline: {:?}",
             transport.startup_deadline
         );
-        let discovery = bootstrap_discover(&endpoint, transport, args.model_path)?;
+        let discovery = bootstrap_discover(&endpoint, transport)?;
         let mode = discovery.mode;
         let engine = Self {
             endpoint,
@@ -220,8 +229,8 @@ impl OpenEngineSidecarEngine {
             endpoint: args.sidecar.common.endpoint,
             endpoint_types: args.sidecar.common.endpoint_types,
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
-            model_name: discovery.model_source.clone(),
-            served_model_name: Some(discovery.remote_model.clone()),
+            model_name: discovery.model.model_id.clone(),
+            served_model_name: Some(discovery.model.served_model_name.clone()),
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
             exclude_tools_when_tool_choice_none: args
@@ -253,11 +262,7 @@ impl LLMEngine for OpenEngineSidecarEngine {
             "connecting to OpenEngine gRPC"
         );
         let client = OpenEngineClient::connect(&self.endpoint, self.transport).await?;
-        let info = client
-            .server_info(self.transport.connect_attempt_timeout)
-            .await?;
-        let observed =
-            Discovery::from_server_info(info, Some(self.discovery.model_source.clone()))?;
+        let observed = discover(&client, self.transport.connect_attempt_timeout).await?;
         self.discovery.ensure_same_server(&observed)?;
         let connections = client.connection_count();
         self.client
@@ -267,7 +272,7 @@ impl LLMEngine for OpenEngineSidecarEngine {
             endpoint = %self.endpoint,
             connections,
             engine = %self.discovery.info.engine_name,
-            model = %self.discovery.remote_model,
+            model = %self.discovery.model.served_model_name,
             mode = %self.discovery.mode,
             "OpenEngine gRPC is ready"
         );
@@ -287,7 +292,7 @@ impl LLMEngine for OpenEngineSidecarEngine {
         let proto_request = convert::build_generate_request(
             &request,
             &request_id,
-            &self.discovery.remote_model,
+            &self.discovery.model.served_model_name,
             self.discovery.mode,
         )?;
         let metadata = convert::generate_metadata(&request, ctx.metadata(), self.discovery.mode)?;
@@ -365,7 +370,6 @@ impl LLMEngine for OpenEngineSidecarEngine {
 fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
-    model_path: Option<String>,
 ) -> Result<Discovery, DynamoError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -377,9 +381,66 @@ fn bootstrap_discover(
             ..transport
         };
         let client = OpenEngineClient::connect(endpoint, bootstrap_transport).await?;
-        let info = client
-            .server_info(transport.connect_attempt_timeout)
-            .await?;
-        Discovery::from_server_info(info, model_path)
+        discover(&client, transport.connect_attempt_timeout).await
     })
+}
+
+async fn discover(
+    client: &OpenEngineClient,
+    timeout: std::time::Duration,
+) -> Result<Discovery, DynamoError> {
+    let info = client.server_info(timeout).await?;
+    let model_name = advertised_model(&info)?.to_string();
+    let model = client.model_info(&model_name, timeout).await?;
+    Discovery::from_responses(info, model)
+}
+
+fn advertised_model(info: &pb::ServerInfo) -> Result<&str, DynamoError> {
+    let [model] = info.supported_models.as_slice() else {
+        return Err(client::protocol_error(format!(
+            "this initial sidecar requires exactly one supported model; server returned {}",
+            info.supported_models.len()
+        )));
+    };
+    if model.trim().is_empty() {
+        return Err(client::protocol_error(
+            "GetServerInfo returned an empty supported model",
+        ));
+    }
+    Ok(model)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Discovery, OPENENGINE_SCHEMA_RELEASE, SCHEMA_REVISION, pb};
+
+    #[test]
+    fn discovery_preserves_canonical_and_served_model_identity() {
+        let discovery = Discovery::from_responses(
+            pb::ServerInfo {
+                engine_name: "tensorrt_llm".to_string(),
+                engine_role: pb::EngineRole::Aggregated as i32,
+                supported_models: vec!["served-alias".to_string()],
+                schema_revision: SCHEMA_REVISION,
+                minimum_client_revision: SCHEMA_REVISION,
+                schema_release: OPENENGINE_SCHEMA_RELEASE.to_string(),
+                ..Default::default()
+            },
+            pb::ModelInfo {
+                model_id: "org/model".to_string(),
+                served_model_name: "served-alias".to_string(),
+                served_model_aliases: vec!["org/model".to_string()],
+                max_context_length: Some(8192),
+                supports_token_ids_input: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let config = discovery.engine_config();
+        assert_eq!(config.model, "org/model");
+        assert_eq!(config.served_model_name.as_deref(), Some("served-alias"));
+        assert_eq!(config.model_aliases, ["org/model"]);
+        assert_eq!(config.llm.unwrap().context_length, Some(8192));
+    }
 }

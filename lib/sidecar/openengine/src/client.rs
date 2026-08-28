@@ -68,6 +68,28 @@ impl OpenEngineClient {
         .map_err(|status| status_to_dynamo("GetServerInfo", status))
     }
 
+    pub(crate) async fn model_info(
+        &self,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<pb::ModelInfo, DynamoError> {
+        tokio::time::timeout(
+            timeout,
+            self.control_client()
+                .get_model_info(pb::GetModelInfoRequest {
+                    model: model.to_string(),
+                }),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "OpenEngine GetModelInfo did not respond within {timeout:?}"
+            ))
+        })?
+        .map(tonic::Response::into_inner)
+        .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    }
+
     pub(crate) async fn generate(
         &self,
         request: tonic::Request<pb::GenerateRequest>,
