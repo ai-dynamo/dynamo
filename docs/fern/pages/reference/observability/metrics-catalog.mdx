@@ -288,11 +288,15 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill` or `decode`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
-  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
+  Difference in effective KV cache overlap between the highest-overlap eligible worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill` or `decode`).
+</ParamField>
+
+<ParamField path="dynamo_component_router_avoidable_prefill_tokens_total" type="counter">
+  Router-estimated prefill token-equivalents avoidable by selecting the highest-overlap eligible worker. Lower-tier cache hits use their configured router weights, so this is not a count of blocks that P2P can necessarily transfer. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill` or `decode`).
 </ParamField>
 
 ### Per-request routing overhead

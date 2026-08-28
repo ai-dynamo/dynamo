@@ -63,7 +63,7 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
@@ -843,6 +843,7 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    pub avoidable_prefill_tokens_total: IntCounterVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -976,8 +977,19 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
-                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+                let avoidable_prefill_tokens_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::AVOIDABLE_PREFILL_TOKENS_TOTAL),
+                        "Router-estimated prefill token-equivalents avoidable by selecting the highest-overlap eligible worker",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_avoidable_prefill_tokens_total");
+                for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
+                    non_max_overlap_selections_total.with_label_values(&[worker_type]);
+                    overlap_blocks_lost.with_label_values(&[worker_type]);
+                    avoidable_prefill_tokens_total.with_label_values(&[worker_type]);
+                }
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -990,13 +1002,19 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
+                    avoidable_prefill_tokens_total,
                 })
             })
             .clone()
     }
 
     /// Record a selection that sacrificed KV cache overlap.
-    pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
+    pub fn observe_non_max_overlap_selection(
+        &self,
+        worker_type: &str,
+        overlap_blocks_lost: f64,
+        avoidable_prefill_tokens: u64,
+    ) {
         debug_assert!(overlap_blocks_lost > 0.0);
         self.non_max_overlap_selections_total
             .with_label_values(&[worker_type])
@@ -1004,6 +1022,9 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+        self.avoidable_prefill_tokens_total
+            .with_label_values(&[worker_type])
+            .inc_by(avoidable_prefill_tokens);
     }
 }
 

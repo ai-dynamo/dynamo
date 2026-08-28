@@ -218,6 +218,9 @@ pub mod frontend_service {
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
+    /// Avoidable prefill token-equivalents from non-max-overlap selections
+    pub const AVOIDABLE_PREFILL_TOKENS_TOTAL: &str = "avoidable_prefill_tokens_total";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -672,6 +675,9 @@ pub mod router {
 
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
+
+    /// Avoidable prefill token-equivalents from non-max-overlap selections
+    pub const AVOIDABLE_PREFILL_TOKENS_TOTAL: &str = "router_avoidable_prefill_tokens_total";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";

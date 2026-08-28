@@ -20,7 +20,6 @@ use super::sequence::{
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
@@ -43,6 +42,12 @@ where
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
+}
+
+fn avoidable_prefill_tokens(overlap_blocks_lost: f64, block_size: u32) -> u64 {
+    (overlap_blocks_lost * f64::from(block_size))
+        .round()
+        .max(0.0) as u64
 }
 
 impl<Sel, RF> KvScheduler<Sel, RF>
@@ -121,31 +126,36 @@ where
             worker_type,
             watch_worker_configs,
         )?);
-        if worker_type == WORKER_TYPE_PREFILL {
-            let locality_observer: NonMaxOverlapSelectionObserver =
-                Arc::new(move |request_id, selection| {
-                    let overlap_blocks_lost = selection.overlap_blocks_lost();
-                    if let Some(metrics) = RouterRequestMetrics::get() {
-                        metrics.observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
-                    }
-                    tracing::debug!(
-                        request_id,
+        let locality_observer: NonMaxOverlapSelectionObserver =
+            Arc::new(move |request_id, selection| {
+                let overlap_blocks_lost = selection.overlap_blocks_lost();
+                let avoidable_prefill_tokens =
+                    avoidable_prefill_tokens(overlap_blocks_lost, block_size);
+                if let Some(metrics) = RouterRequestMetrics::get() {
+                    metrics.observe_non_max_overlap_selection(
                         worker_type,
-                        selected_worker_id = selection.selected_worker.worker_id,
-                        selected_dp_rank = selection.selected_worker.dp_rank,
-                        selected_overlap_blocks = selection.selected_overlap_blocks,
-                        highest_overlap_worker_id = selection.highest_overlap_worker.worker_id,
-                        highest_overlap_dp_rank = selection.highest_overlap_worker.dp_rank,
-                        highest_overlap_blocks = selection.highest_overlap_blocks,
                         overlap_blocks_lost,
-                        "Router selected a worker with lower KV cache overlap"
+                        avoidable_prefill_tokens,
                     );
-                });
-            if !inner.set_non_max_overlap_selection_observer(locality_observer) {
-                return Err(KvSchedulerError::InitFailed(
-                    "non-max-overlap observer is already installed".to_string(),
-                ));
-            }
+                }
+                tracing::debug!(
+                    request_id,
+                    worker_type,
+                    selected_worker_id = selection.selected_worker.worker_id,
+                    selected_dp_rank = selection.selected_worker.dp_rank,
+                    selected_overlap_blocks = selection.selected_overlap_blocks,
+                    highest_overlap_worker_id = selection.highest_overlap_worker.worker_id,
+                    highest_overlap_dp_rank = selection.highest_overlap_worker.dp_rank,
+                    highest_overlap_blocks = selection.highest_overlap_blocks,
+                    overlap_blocks_lost,
+                    avoidable_prefill_tokens,
+                    "Router selected a worker with lower KV cache overlap"
+                );
+            });
+        if !inner.set_non_max_overlap_selection_observer(locality_observer) {
+            return Err(KvSchedulerError::InitFailed(
+                "non-max-overlap observer is already installed".to_string(),
+            ));
         }
 
         let metrics_scheduler = Arc::clone(&inner);
@@ -484,6 +494,13 @@ mod tests {
     }
 
     #[test]
+    fn converts_weighted_overlap_blocks_to_avoidable_prefill_tokens() {
+        assert_eq!(avoidable_prefill_tokens(1.5, 128), 192);
+        assert_eq!(avoidable_prefill_tokens(0.25, 256), 64);
+        assert_eq!(avoidable_prefill_tokens(0.0, 256), 0);
+    }
+
+    #[test]
     fn queue_metrics_are_updated_by_class_index() {
         let handles = ["latency", "bulk"]
             .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
@@ -550,6 +567,13 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert!(
+            !scheduler
+                .inner
+                .set_non_max_overlap_selection_observer(Arc::new(|_, _| {})),
+            "decode schedulers must install the locality observer"
+        );
 
         assert_eq!(
             scheduler
