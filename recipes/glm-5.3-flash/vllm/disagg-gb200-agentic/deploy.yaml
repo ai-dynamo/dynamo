@@ -23,6 +23,7 @@ spec:
   components:
     - name: Frontend
       type: frontend
+      runtimeVersionOverride: "1.4.1"
       replicas: 1
       podTemplate:
         spec:
@@ -65,6 +66,7 @@ spec:
 
     - name: VllmPrefill
       type: prefill
+      runtimeVersionOverride: "1.4.1"
       replicas: 1
       podTemplate:
         metadata:
@@ -224,6 +226,7 @@ spec:
 
     - name: VllmDecode
       type: decode
+      runtimeVersionOverride: "1.4.1"
       replicas: 1
       podTemplate:
         metadata:

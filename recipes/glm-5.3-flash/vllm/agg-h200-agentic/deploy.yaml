@@ -8,7 +8,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: glm53-agg-workarounds
-  namespace: shreyasm-kimi-k3
 data:
   sitecustomize.py: |
     import torch
@@ -25,7 +24,6 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: glm53-flash-agg
-  namespace: shreyasm-kimi-k3
   labels:
     app.kubernetes.io/name: glm53-flash-agg
     app.kubernetes.io/part-of: glm53-flash
@@ -38,13 +36,6 @@ spec:
       replicas: 1
       podTemplate:
         spec:
-          nodeSelector:
-            kubernetes.io/arch: amd64
-          tolerations:
-            - key: team
-              operator: Equal
-              value: kimi-k3
-              effect: NoSchedule
           containers:
             - name: main
               image: vllm/vllm-openai:glm53-flash
@@ -94,13 +85,8 @@ spec:
         spec:
           terminationGracePeriodSeconds: 60
           nodeSelector:
-            kubernetes.io/arch: amd64
             nvidia.com/gpu.product: NVIDIA-H200
           tolerations:
-            - key: team
-              operator: Equal
-              value: kimi-k3
-              effect: NoSchedule
             - key: nvidia.com/gpu
               operator: Equal
               value: "true"
