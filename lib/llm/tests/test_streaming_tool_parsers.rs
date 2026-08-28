@@ -2429,44 +2429,67 @@ async fn test_deepseek_v4_finalize_recovers_at_bare_eof_with_no_finish_reason() 
     );
 }
 
-// Finding #6 regression: the SAME partial invoke, but the upstream stream ends in an
-// error instead of a clean EOF. The jail wrapper must yield exactly that error and
-// nothing else — no synthesized `ToolCalls` finish chunk fabricated from the jail's
-// own EOF-triggered finalize, because the request never actually completed.
+// Finding #6 regression: the SAME partial invoke, but the upstream stream ends in a
+// typed error instead of a clean EOF. The jail wrapper must yield exactly that error
+// unchanged and nothing else — no synthesized `ToolCalls` finish chunk fabricated
+// from the jail's own EOF-triggered finalize, because the request never completed.
 #[tokio::test]
-async fn test_deepseek_v4_upstream_error_suppresses_jail_finalize() {
-    let output_chunks = parse_response_stream(
-        stream::iter(vec![
-            deepseek_v4_partial_invoke_chunk(),
-            Annotated::from_error("upstream disconnected"),
-        ]),
-        true,
-        false,
-        Some("deepseek_v4".to_string()),
-        None,
-    )
-    .await;
+async fn test_deepseek_v4_upstream_typed_errors_suppress_jail_finalize() {
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
-    assert!(
-        !output_chunks.is_empty(),
-        "the terminal error itself must still reach the caller"
-    );
-    let last = output_chunks.last().expect("non-empty output");
-    assert!(
-        last.is_error(),
-        "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
-    );
-    assert_eq!(
-        output_chunks.iter().filter(|a| a.is_error()).count(),
-        1,
-        "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
-    );
+    for error_type in [
+        ErrorType::Backend(BackendError::InvalidArgument),
+        ErrorType::Backend(BackendError::EngineShutdown),
+        ErrorType::Backend(BackendError::Disconnected),
+    ] {
+        let message = format!("typed {error_type} error");
+        let output_chunks = parse_response_stream(
+            stream::iter(vec![
+                deepseek_v4_partial_invoke_chunk(),
+                Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(
+                        DynamoError::builder()
+                            .error_type(error_type)
+                            .message(&message)
+                            .build(),
+                    ),
+                },
+            ]),
+            true,
+            false,
+            Some("deepseek_v4".to_string()),
+            None,
+        )
+        .await;
 
-    let aggregated = aggregate_content_from_chunks(&output_chunks);
-    assert!(
-        !aggregated.has_tool_calls,
-        "an upstream error must suppress the jail's EOF finalize entirely — no \
-         synthesized tool call may reach the caller for a request that never actually \
-         completed; got: {output_chunks:#?}"
-    );
+        assert!(
+            !output_chunks.is_empty(),
+            "the terminal error itself must still reach the caller"
+        );
+        let last = output_chunks.last().expect("non-empty output");
+        assert!(
+            last.is_error(),
+            "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
+        );
+        let error = last.error.as_ref().expect("terminal error must be typed");
+        assert_eq!(error.error_type(), error_type);
+        assert_eq!(error.message(), message);
+        assert_eq!(
+            output_chunks.iter().filter(|a| a.is_error()).count(),
+            1,
+            "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
+        );
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert!(
+            !aggregated.has_tool_calls,
+            "an upstream error must suppress the jail's EOF finalize entirely — no \
+             synthesized tool call may reach the caller for a request that never actually \
+             completed; got: {output_chunks:#?}"
+        );
+    }
 }
