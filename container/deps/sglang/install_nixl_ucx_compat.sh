@@ -203,6 +203,7 @@ echo "nixl-ucx-compat: installed ${#ALIASES[@]} aliases for" \
     die "missing ${NIXL_CAPI_DIR}/libnixl_capi.so; NIXL wheel layout changed"
 [[ -d "${NIXL_CAPI_DIR}/plugins" ]] || \
     die "missing ${NIXL_CAPI_DIR}/plugins; NIXL wheel layout changed"
+
 # Expose the C API directory under a stable image path so the Dockerfile can put
 # it on LD_LIBRARY_PATH without knowing the wheel's private layout. A directory
 # symlink (not a per-file one) is required: ld.so expands $ORIGIN from the
@@ -225,25 +226,36 @@ ldconfig
 # /var/cache/ldconfig/aux-cache entries keyed on (st_dev, st_ino, st_size,
 # st_ctime) -- this base image ships that cache pre-populated. Overlayfs recycles
 # those fields across layers, so a correct install can be skipped
-# nondeterministically, and BuildKit then caches the bad layer. LD_LIBRARY_PATH
-# above makes resolution independent of the cache; this check exercises the exact
-# bare dlopen nixl-sys performs, and proves the transitive NIXL deps resolve too.
+# nondeterministically, and BuildKit then caches the bad layer. Resolution does
+# not depend on the cache because the Dockerfile puts CAPI_OUTPUT_DIR on
+# LD_LIBRARY_PATH after this script runs; this check exercises the exact bare
+# dlopen nixl-sys performs, and proves the transitive NIXL deps resolve too.
 LD_LIBRARY_PATH="${CAPI_OUTPUT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' || \
     die "libnixl_capi.so could not be dlopened by SONAME via ${CAPI_OUTPUT_DIR}"
 
-# The ld.so.cache route only matters for a caller that clears the environment,
-# so check it too -- but as a warning, never fatally. Failing the build here is
-# exactly what made this step flake: the miss is a property of how overlayfs laid
-# out this particular set of layers, not of the install. One retry with the
-# aux-cache dropped repairs the stale-entry case; a (st_dev, st_ino) collision is
-# not repairable from here, and LD_LIBRARY_PATH already covers it.
+# A caller that clears or overrides the environment falls back to ld.so.cache,
+# so that route has to work too. Enforce it: a NIXL that silently drops to
+# stub mode is exactly the failure this step exists to catch, and a warning in a
+# build log that nobody reads does not prevent it.
+#
+# Retry once with the aux-cache dropped first. That cache is keyed on (st_dev,
+# st_ino, st_size, st_ctime) and this base image ships it pre-populated, so a
+# stale entry inherited across an overlayfs layer can make ldconfig skip a file
+# it has already "seen" -- the one mechanism repairable from here.
 if ! env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null; then
     rm -f /var/cache/ldconfig/aux-cache
     ldconfig
-    env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null || \
-        echo "nixl-ucx-compat: warning: ldconfig did not cache libnixl_capi.so;" \
-             "${CAPI_OUTPUT_DIR} on LD_LIBRARY_PATH remains the supported path" >&2
+    if ! env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null; then
+        # Surface the other known mechanism rather than making the next reader
+        # rediscover it: ldconfig drops a directory whose (st_dev, st_ino)
+        # matches one it already queued, and overlayfs recycles both.
+        # ldconfig writes these to stderr, so keep stderr and drop stdout.
+        ldconfig -v 2>&1 >/dev/null | grep -F "given more than once" >&2 || true
+        die "ldconfig will not cache libnixl_capi.so from ${NIXL_CAPI_DIR};" \
+            "if a 'given more than once' line above names that directory," \
+            "ldconfig dropped it as a (st_dev, st_ino) duplicate"
+    fi
 fi
 
 echo "nixl-ucx-compat: published ${NIXL_CAPI_DIR} via ${CAPI_OUTPUT_DIR}"
