@@ -12,7 +12,11 @@ from typing import Optional
 
 import pytest
 
-from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
+from dynamo.thunderagent_router.program_state import (
+    ProgramLifecycle,
+    ProgramStatus,
+    ReplicaKey,
+)
 from dynamo.thunderagent_router.router import ThunderAgentConfig, ThunderAgentScheduler
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -20,22 +24,22 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider with configurable worker state."""
+    """Stand-in for WorkerCapacityProvider with configurable replica state."""
 
-    workers: dict[int, int] = field(default_factory=dict)
+    workers: dict[ReplicaKey | int, int] = field(default_factory=dict)
     live_workers: Optional[set[int]] = None
 
-    def snapshot(self) -> dict[int, int]:
+    def snapshot(self) -> dict[ReplicaKey | int, int]:
         return dict(self.workers)
 
     def live_worker_ids(self) -> set[int]:
         if self.live_workers is not None:
             return set(self.live_workers)
-        return set(self.workers)
+        return {key[0] if isinstance(key, tuple) else key for key in self.workers}
 
 
 def make_router(
-    capacity_workers: Optional[dict[int, int]] = None,
+    capacity_workers: Optional[dict[ReplicaKey | int, int]] = None,
     config: Optional[ThunderAgentConfig] = None,
 ) -> tuple[ThunderAgentScheduler, FakeCapacity]:
     capacity = FakeCapacity(workers=capacity_workers or {})
@@ -131,9 +135,88 @@ async def test_before_request_records_exact_prompt_estimate_before_admission():
 async def test_assigned_worker_hint_reflects_sticky_assignment():
     router, _ = make_router()
     await router.before_request("p1", estimated_prompt_tokens=100)
-    await router.assign_worker("p1", 3)
+    await router.assign_replica("p1", (3, 0))
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
     assert decision.assigned_worker_hint == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_only_assignment_requires_one_advertised_replica():
+    router, capacity = make_router()
+    await router.before_request("p1")
+
+    assert await router.assign_worker("p1", 3) is None
+    assert router._table.programs["p1"].assigned_worker_id is None
+
+    capacity.workers = {(3, 2): 1_000}
+    assert await router.assign_worker("p1", 3) == (3, 2)
+    assert router._table.programs["p1"].assigned_dp_rank == 2
+
+
+@pytest.mark.asyncio
+async def test_admission_accounts_for_each_data_parallel_replica():
+    router, _ = make_router(
+        capacity_workers={(7, 0): 1_000, (7, 1): 1_000},
+    )
+
+    first = await router.before_request("p1", estimated_prompt_tokens=100)
+    second = await router.before_request("p2", estimated_prompt_tokens=100)
+
+    assert first.assigned_replica_hint == (7, 0)
+    assert second.assigned_replica_hint == (7, 1)
+    assert router._table.programs["p1"].assigned_dp_rank == 0
+    assert router._table.programs["p2"].assigned_dp_rank == 1
+    assert router._replica_used((7, 0)) == 200
+    assert router._replica_used((7, 1)) == 200
+
+
+@pytest.mark.asyncio
+async def test_pressure_control_is_scoped_to_one_data_parallel_replica():
+    cfg = ThunderAgentConfig(
+        pause_threshold=0.80,
+        pause_target=0.80,
+        acting_token_weight=1.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(
+        capacity_workers={(7, 0): 1_000, (7, 1): 1_000},
+        config=cfg,
+    )
+
+    for pid, replica, prompt_tokens in [
+        ("hot_big", (7, 0), 700),
+        ("hot_small", (7, 0), 200),
+        ("cold", (7, 1), 700),
+    ]:
+        await router.before_request(pid)
+        await router.assign_replica(pid, replica)
+        await router.after_request(
+            pid, prompt_tokens=prompt_tokens, completion_tokens=0
+        )
+
+    await router._pause_until_safe(router._capacity.snapshot())
+
+    assert router._table.programs["hot_small"].lifecycle == ProgramLifecycle.PAUSED
+    assert router._table.programs["hot_big"].lifecycle == ProgramLifecycle.ACTIVE
+    assert router._table.programs["cold"].lifecycle == ProgramLifecycle.ACTIVE
+    assert router._table.programs["cold"].assigned_dp_rank == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_assigns_both_worker_and_data_parallel_rank():
+    router, _ = make_router()
+    await router.before_request("p1")
+    await router.assign_replica("p1", (3, 2))
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("p1")
+
+    async with router._lock:
+        router._resume_program(router._table.programs["p1"], (3, 2))
+
+    program = router._table.programs["p1"]
+    assert program.lifecycle == ProgramLifecycle.ACTIVE
+    assert program.assigned_worker_id == 3
+    assert program.assigned_dp_rank == 2
 
 
 @pytest.mark.asyncio
@@ -189,7 +272,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 0)
+    await router.assign_replica("p1", (0, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     assert router._table.programs["p1"].lifecycle == ProgramLifecycle.PAUSED
@@ -217,7 +300,7 @@ async def test_forced_resume_after_timeout():
     )
     router, _ = make_router(config=cfg)
     await router.before_request("p1")
-    await router.assign_worker("p1", 0)
+    await router.assign_replica("p1", (0, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     decision = await router.before_request("p1")
@@ -369,7 +452,7 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        await router.assign_worker(pid, 1)
+        await router.assign_replica(pid, (1, 0))
         await router.after_request(pid, prompt_tokens=100_000, completion_tokens=0)
 
     await router._pause_until_safe(router._capacity.snapshot())
@@ -406,7 +489,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        await router.assign_worker(pid, 1)
+        await router.assign_replica(pid, (1, 0))
         await router.after_request(pid, prompt_tokens=100, completion_tokens=0)
         router._table.programs[pid].acting_since = time.monotonic() - 10.0
 
@@ -476,7 +559,7 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    await router.assign_replica("p1", (1, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
 
@@ -572,7 +655,7 @@ async def test_cancelled_admission_serializes_a_later_turn():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    await router.assign_replica("p1", (1, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     program = router._table.programs["p1"]

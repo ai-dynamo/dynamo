@@ -111,6 +111,23 @@ def test_snapshot_and_rollback_track_the_admission_epoch():
     assert program.admission_epoch == 1
 
 
+def test_snapshot_and_rollback_preserve_replica_assignment():
+    table = ProgramTable()
+    program = table.begin_request("p1")
+    program.assigned_worker_id = 4
+    program.assigned_dp_rank = 3
+
+    snapshot = table.snapshot_request("p1")
+    assert snapshot is not None
+
+    program.assigned_worker_id = 8
+    program.assigned_dp_rank = 1
+    table.rollback_request("p1", snapshot)
+
+    assert program.assigned_worker_id == 4
+    assert program.assigned_dp_rank == 3
+
+
 def test_rollback_clears_a_wait_event_the_resume_had_set():
     table = ProgramTable()
     table.begin_request("p1")

@@ -38,6 +38,7 @@ from dynamo.thunderagent_router.args import (
     parse_args,
 )
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.program_state import ReplicaKey
 from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
@@ -217,9 +218,11 @@ class ThunderAgentRouterHandler:
                 if proof is not None:
                     if first_chunk:
                         first_chunk = False
-                        selected_worker = self._extract_worker_id(chunk)
-                        if selected_worker is not None:
-                            proof["selected_worker_id"] = selected_worker
+                        selected_worker_info = self._extract_worker_info(chunk)
+                        if selected_worker_info is not None:
+                            proof["selected_worker_id"] = selected_worker_info[0]
+                            if selected_worker_info[1] is not None:
+                                proof["selected_dp_rank"] = selected_worker_info[1]
                     _inject_thunderagent_route_proof(chunk, proof)
                 yield chunk
             return
@@ -233,14 +236,22 @@ class ThunderAgentRouterHandler:
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
         )
-        worker_pin = decision.assigned_worker_hint
+        replica_pin = getattr(decision, "assigned_replica_hint", None)
+        if replica_pin is None:
+            worker_hint = getattr(decision, "assigned_worker_hint", None)
+            dp_rank_hint = getattr(decision, "assigned_dp_rank", None)
+            if worker_hint is not None and dp_rank_hint is not None:
+                replica_pin = (worker_hint, dp_rank_hint)
+        worker_pin = replica_pin[0] if replica_pin is not None else None
+        dp_rank_pin = replica_pin[1] if replica_pin is not None else None
         logger.debug(
             "thunderagent.route path=program program=%s prompt_tokens=%d "
-            "worker_hint=%s waited_seconds=%.4f was_paused=%s "
+            "worker_hint=%s dp_rank_hint=%s waited_seconds=%.4f was_paused=%s "
             "soft_demoted=%s priority_jump=%.3f",
             program_id,
             estimated_prompt_tokens,
             worker_pin,
+            dp_rank_pin,
             decision.waited_seconds,
             decision.was_paused,
             decision.was_soft_demoted,
@@ -257,6 +268,7 @@ class ThunderAgentRouterHandler:
         if worker_pin is not None:
             routing = preprocessed.get("routing") or {}
             routing["backend_instance_id"] = worker_pin
+            routing["dp_rank"] = dp_rank_pin
             preprocessed["routing"] = routing
 
         prompt_tokens_seen = 0
@@ -264,6 +276,7 @@ class ThunderAgentRouterHandler:
         usage_completion_seen = False
         first_chunk = True
         selected_worker_id = None
+        selected_dp_rank = None
         proof = (
             {
                 "handled_by": "thunderagent_router",
@@ -275,6 +288,7 @@ class ThunderAgentRouterHandler:
                 "waited_seconds": decision.waited_seconds,
                 "priority_jump": decision.priority_jump,
                 "assigned_worker_hint": worker_pin,
+                "assigned_dp_rank": dp_rank_pin,
             }
             if want_route_proof
             else None
@@ -283,20 +297,62 @@ class ThunderAgentRouterHandler:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if first_chunk and worker_pin is None:
+                if first_chunk and replica_pin is None:
                     first_chunk = False
-                    selected_worker = self._extract_worker_id(chunk)
-                    if selected_worker is not None:
-                        await self._scheduler.assign_worker(program_id, selected_worker)
-                        selected_worker_id = selected_worker
+                    selected_worker_info = self._extract_worker_info(chunk)
+                    if (
+                        selected_worker_info is not None
+                        and selected_worker_info[1] is not None
+                    ):
+                        selected_replica = (
+                            selected_worker_info[0],
+                            selected_worker_info[1],
+                        )
+                        await self._scheduler.assign_replica(
+                            program_id, selected_replica
+                        )
+                        selected_worker_id, selected_dp_rank = selected_replica
                         if proof is not None:
-                            proof["selected_worker_id"] = selected_worker
+                            proof["selected_worker_id"] = selected_worker_id
+                            proof["selected_dp_rank"] = selected_dp_rank
                         logger.debug(
                             "thunderagent.route_selected program=%s worker=%s "
-                            "source=first_chunk",
+                            "dp_rank=%s source=first_chunk",
                             program_id,
-                            selected_worker,
+                            selected_worker_id,
+                            selected_dp_rank,
                         )
+                    else:
+                        # N-2 compatibility for workers whose WorkerIdInfo omits
+                        # DP-rank fields. Remove this fallback when those workers
+                        # leave the N-2 window; the scheduler resolves only an
+                        # explicitly advertised single-rank worker.
+                        selected_worker = (
+                            selected_worker_info[0]
+                            if selected_worker_info is not None
+                            else None
+                        )
+                        if selected_worker is not None:
+                            assign_worker = getattr(
+                                self._scheduler, "assign_worker", None
+                            )
+                            assigned_replica = (
+                                await assign_worker(program_id, selected_worker)
+                                if assign_worker is not None
+                                else None
+                            )
+                            if assigned_replica is not None:
+                                selected_worker_id, selected_dp_rank = assigned_replica
+                                if proof is not None:
+                                    proof["selected_worker_id"] = selected_worker_id
+                                    proof["selected_dp_rank"] = selected_dp_rank
+                                logger.debug(
+                                    "thunderagent.route_selected program=%s worker=%s "
+                                    "dp_rank=%s source=legacy_worker_id",
+                                    program_id,
+                                    selected_worker_id,
+                                    selected_dp_rank,
+                                )
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
@@ -333,12 +389,15 @@ class ThunderAgentRouterHandler:
             )
             logger.debug(
                 "thunderagent.request_complete program=%s prompt_tokens=%d "
-                "completion_tokens=%d worker_hint=%s selected_worker=%s",
+                "completion_tokens=%d worker_hint=%s dp_rank_hint=%s "
+                "selected_worker=%s selected_dp_rank=%s",
                 program_id,
                 prompt_tokens_seen,
                 completion_tokens_seen,
                 worker_pin,
+                dp_rank_pin,
                 selected_worker_id,
+                selected_dp_rank,
             )
 
     async def status(self, request: Optional[dict[str, Any]] = None):
@@ -382,11 +441,8 @@ class ThunderAgentRouterHandler:
             "workers": scheduler_metrics["workers"],
         }
 
-    def _extract_worker_id(self, chunk: Any) -> Optional[int]:
-        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
-        # bindings: worker attribution rides ``routing_data.worker_id``. Log once if the
-        # shape no longer matches; silent extraction failure here means we lose
-        # worker-affinity on pin.
+    def _extract_worker_info(self, chunk: Any) -> Optional[tuple[int, Optional[int]]]:
+        """Extract worker and optional rank from a binding response payload."""
         if not isinstance(chunk, dict):
             self._warn_unexpected_chunk_shape("not a dict")
             return None
@@ -394,27 +450,67 @@ class ThunderAgentRouterHandler:
         if not isinstance(routing_data, dict):
             self._warn_unexpected_chunk_shape("no routing_data dict")
             return None
+
         info = routing_data.get("worker_id")
         if isinstance(info, dict):
-            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
-            # nested ``worker_id`` key. The sticky pin is applied as
-            # ``backend_instance_id``, which the frontend resolves to the decode/backend
-            # worker, so prefer ``decode_worker_id`` and fall back to
-            # ``prefill_worker_id`` (identical in aggregated mode).
-            worker_id = info.get("decode_worker_id")
-            if not isinstance(worker_id, int):
-                worker_id = info.get("prefill_worker_id")
-            if isinstance(worker_id, int):
-                return worker_id
+            decode_worker_id = info.get("decode_worker_id")
+            if (
+                isinstance(decode_worker_id, int)
+                and not isinstance(decode_worker_id, bool)
+                and decode_worker_id >= 0
+            ):
+                decode_dp_rank = info.get("decode_dp_rank")
+                if (
+                    isinstance(decode_dp_rank, int)
+                    and not isinstance(decode_dp_rank, bool)
+                    and decode_dp_rank >= 0
+                ):
+                    return (decode_worker_id, decode_dp_rank)
+                # Preserve the original decode-worker preference when an
+                # older binding omitted only the rank field.
+                return (decode_worker_id, None)
+
+            prefill_worker_id = info.get("prefill_worker_id")
+            if (
+                isinstance(prefill_worker_id, int)
+                and not isinstance(prefill_worker_id, bool)
+                and prefill_worker_id >= 0
+            ):
+                prefill_dp_rank = info.get("prefill_dp_rank")
+                if (
+                    isinstance(prefill_dp_rank, int)
+                    and not isinstance(prefill_dp_rank, bool)
+                    and prefill_dp_rank >= 0
+                ):
+                    return (prefill_worker_id, prefill_dp_rank)
+                return (prefill_worker_id, None)
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")
         return None
+
+    def _extract_worker_replica(self, chunk: Any) -> Optional[ReplicaKey]:
+        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
+        # bindings: worker attribution rides ``routing_data.worker_id``.  Keep the
+        # worker and its DP rank together so a later sticky pin is unambiguous.
+        info = self._extract_worker_info(chunk)
+        if info is None:
+            return None
+        worker_id, dp_rank = info
+        if dp_rank is None:
+            self._warn_unexpected_chunk_shape("worker_id payload has no dp_rank")
+            return None
+        return (worker_id, dp_rank)
+
+    def _extract_worker_id(self, chunk: Any) -> Optional[int]:
+        """Return only the worker ID for legacy callers."""
+        info = self._extract_worker_info(chunk)
+        return info[0] if info is not None else None
 
     def _warn_unexpected_chunk_shape(self, reason: str) -> None:
         if self._worker_id_extract_warned:
             return
         self._worker_id_extract_warned = True
         logger.warning(
-            "ThunderAgent worker-id extraction failed (%s); subsequent "
+            "ThunderAgent worker/DP-rank extraction failed (%s); subsequent "
             "requests will lose sticky pinning until the binding shape is "
             "fixed.",
             reason,
