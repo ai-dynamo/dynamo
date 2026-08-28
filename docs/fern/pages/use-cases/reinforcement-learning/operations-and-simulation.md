@@ -62,6 +62,14 @@ python3 benchmarks/request_trace/convert_to_perfetto.py \
 
 Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Agent Tracing](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
 
+Use the overview to scan concurrent rollouts for long-tail environment or tool behavior.
+
+![A Perfetto overview of concurrent RL rollouts, where one long-running environment span extends beyond neighboring work.](./_assets/perfetto-rl-rollout-overview.png)
+
+Zoom in on a rollout to separate tool time from request processing, prefill, and decode, then inspect token and latency fields for a selected request.
+
+![A Perfetto close-up showing tool calls, LLM requests, prefill and decode slices, and token and latency details for a selected request.](./_assets/perfetto-rl-rollout-detail.png)
+
 ## Diagnose the Live Run
 
 Work from the framework inward:
