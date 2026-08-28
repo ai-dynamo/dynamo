@@ -380,10 +380,16 @@ class TestVllmRendererApi:
         )
         reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
         abort_request_fields = (*reasoning_request_fields, "abort_immediately")
+        # vLLM 0.28.0 appends session_id after abort_immediately. Dynamo reads
+        # EngineCoreRequest by NAME (vllm_processor.py uses attribute access and
+        # builds EngineCoreOutput by keyword), so a trailing append is compatible
+        # with every shape below and needs no production change.
+        session_request_fields = (*abort_request_fields, "session_id")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
         omni_fields = (*reasoning_request_fields, "additional_information")
         abort_omni_fields = (*abort_request_fields, "additional_information")
+        session_omni_fields = (*session_request_fields, "additional_information")
         valid_request_fields = (
             base_request_fields,
             reasoning_request_fields,
@@ -391,6 +397,8 @@ class TestVllmRendererApi:
             (*base_request_fields, "additional_information"),
             omni_fields,
             abort_omni_fields,
+            session_request_fields,
+            session_omni_fields,
         )
         # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
         # reads EngineCoreRequest fields by name, so the append is compatible

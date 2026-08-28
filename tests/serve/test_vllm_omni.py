@@ -10,7 +10,13 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except (ImportError, OSError, NotImplementedError):
+except (ImportError, OSError, NotImplementedError, RuntimeError):
+    # RuntimeError matters: diffusers imports its pipelines lazily and re-raises
+    # ANY underlying failure as RuntimeError("Failed to import ... because of the
+    # following error"), so a broken transitive dependency never surfaces as
+    # ImportError here. Without it this module ERRORS instead of skipping --
+    # which is what happened once vllm-omni became installable and its diffusers
+    # pin moved ahead of the base image's huggingface_hub.
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
