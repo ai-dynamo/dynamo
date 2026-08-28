@@ -21,6 +21,7 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.sampling import enforce_max_output_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,9 @@ class SglangUtils:
     """General SGLang utilities (not multimodal-specific)"""
 
     @staticmethod
-    def build_sampling_params(request: SglangMultimodalRequest) -> dict:
+    def build_sampling_params(
+        request: SglangMultimodalRequest, max_output_tokens: int | None = None
+    ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)"""
         sampling_params = {}
 
@@ -98,6 +101,7 @@ class SglangUtils:
         if stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = stop_conditions.ignore_eos
 
+        sampling_params = enforce_max_output_tokens(sampling_params, max_output_tokens)
         logger.debug(f"Sampling params: {sampling_params}")
         return sampling_params
 
@@ -452,6 +456,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         # Store serving mode and prefill client (like regular SGLang)
         self.serving_mode = config.serving_mode
         self.prefill_client = prefill_client
+        self._max_output_tokens = config.dynamo_args.max_output_tokens
+        if self._max_output_tokens is not None:
+            logger.info(
+                "Enforcing SGLang max output tokens: %d", self._max_output_tokens
+            )
 
         # Validate prefill client for disaggregated mode
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -534,7 +543,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         if not input_ids:
             raise ValueError("input_ids is required")
 
-        sampling_params = SglangUtils.build_sampling_params(request)
+        sampling_params = SglangUtils.build_sampling_params(
+            request, self._max_output_tokens
+        )
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -583,7 +594,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
         tensor_id: int | None = None
         try:
-            sampling_params = SglangUtils.build_sampling_params(request)
+            sampling_params = SglangUtils.build_sampling_params(
+                request, self._max_output_tokens
+            )
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
                 (
                     image_mm_items,

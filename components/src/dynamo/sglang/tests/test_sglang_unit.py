@@ -262,6 +262,7 @@ def _make_sglang_config(**overrides):
     config.image_diffusion_worker = False
     config.video_generation_worker = False
     config.enable_rl = False
+    config.max_output_tokens = None
     config.frontend_decoding = False
     config.sglang_trace_level = 2
     config.fpm_trace = False
@@ -270,6 +271,13 @@ def _make_sglang_config(**overrides):
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def test_sglang_config_rejects_nonpositive_max_output_tokens():
+    config = _make_sglang_config(max_output_tokens=0)
+
+    with pytest.raises(ValueError, match="--max-output-tokens must be positive"):
+        config.validate()
 
 
 def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):

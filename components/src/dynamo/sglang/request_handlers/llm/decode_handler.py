@@ -44,6 +44,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.sampling import enforce_max_output_tokens
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -332,6 +333,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         self._enable_frontend_decoding = enable_frontend_decoding
         self._first_token_source = first_token_source
+        self._max_output_tokens = config.dynamo_args.max_output_tokens
+        if self._max_output_tokens is not None:
+            logging.info(
+                "Enforcing SGLang max output tokens: %d", self._max_output_tokens
+            )
         self._image_loader: Optional[ImageLoader] = None
         self._video_loader: Optional[VideoLoader] = None
         if self._enable_frontend_decoding:
@@ -459,9 +465,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Keep max_new_tokens even when None — SGLang treats None as "generate
         # until EOS/context-length" whereas omitting it triggers a default of 128.
         keep_if_none = {"max_new_tokens"}
-        return {
+        sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        return enforce_max_output_tokens(sampling_params, self._max_output_tokens)
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:

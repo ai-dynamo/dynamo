@@ -40,6 +40,7 @@ from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     SglangUtils,
     StreamProcessor,
 )
+from dynamo.sglang.sampling import enforce_max_output_tokens
 
 pytestmark = [
     pytest.mark.unit,
@@ -282,6 +283,7 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
     handler._first_token_source = None
+    handler._max_output_tokens = None
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
@@ -714,6 +716,39 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["n"] == 3
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+
+
+@pytest.mark.parametrize("requested", [None, 131073, 200000])
+def test_enforce_max_output_tokens_caps_omitted_and_larger_values(requested):
+    sampling_params = {"max_new_tokens": requested}
+
+    assert enforce_max_output_tokens(sampling_params, 131072) == {
+        "max_new_tokens": 131072
+    }
+
+
+def test_enforce_max_output_tokens_preserves_values_at_or_below_limit():
+    assert enforce_max_output_tokens({"max_new_tokens": 131072}, 131072) == {
+        "max_new_tokens": 131072
+    }
+    assert enforce_max_output_tokens({"max_new_tokens": 4096}, 131072) == {
+        "max_new_tokens": 4096
+    }
+
+
+def test_enforce_max_output_tokens_is_disabled_by_default():
+    assert enforce_max_output_tokens({"max_new_tokens": None}, None) == {
+        "max_new_tokens": None
+    }
+
+
+def test_enforce_max_output_tokens_rejects_minimum_above_limit():
+    with pytest.raises(HttpError, match="configured SGLang output limit") as error:
+        enforce_max_output_tokens(
+            {"min_new_tokens": 131073, "max_new_tokens": 200000}, 131072
+        )
+
+    assert error.value.code == 400
 
 
 def test_build_sampling_params_omits_string_stop_for_token_requests():
