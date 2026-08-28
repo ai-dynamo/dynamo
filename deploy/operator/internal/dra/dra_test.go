@@ -586,7 +586,7 @@ func TestResolvePodGPUCountNativeSidecarDRAClaim(t *testing.T) {
 
 	got, err := ResolvePodGPUCount(
 		t.Context(),
-		testGPUClaimReader(t, testGPUClaimTemplate("gpu-template", 2)),
+		testGPUClaimReader(t, testGPUClaimTemplate("gpu-template")),
 		"default",
 		podSpec,
 	)
@@ -695,7 +695,7 @@ func TestResolvePodGPUCountAddsScalarAndDRAAllocations(t *testing.T) {
 			},
 		}},
 	}
-	template := testGPUClaimTemplate("gpu-template", 2)
+	template := testGPUClaimTemplate("gpu-template")
 	reader := testGPUClaimReader(t, template)
 
 	got, err := ResolvePodGPUCount(t.Context(), reader, "default", podSpec)
@@ -706,9 +706,9 @@ func TestResolvePodGPUCountAddsScalarAndDRAAllocations(t *testing.T) {
 func TestResolvePodSetGPUCountDeduplicatesOnlyConcreteClaimsAcrossPods(t *testing.T) {
 	concreteClaim := &resourcev1.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "shared-gpu", Namespace: "default"},
-		Spec:       testGPUClaimTemplate("unused", 2).Spec.Spec,
+		Spec:       testGPUClaimTemplate("unused").Spec.Spec,
 	}
-	reader := testGPUClaimReader(t, concreteClaim, testGPUClaimTemplate("gpu-template", 2))
+	reader := testGPUClaimReader(t, concreteClaim, testGPUClaimTemplate("gpu-template"))
 	podForClaim := func(alias string, concrete bool) *corev1.PodSpec {
 		podClaim := corev1.PodResourceClaim{Name: alias}
 		if concrete {
@@ -742,7 +742,7 @@ func TestResolvePodSetGPUCountDeduplicatesOnlyConcreteClaimsAcrossPods(t *testin
 	assert.Equal(t, 6, templates, "claim templates allocate once per rendered Pod")
 }
 
-func testGPUClaimTemplate(name string, count int64) *resourcev1.ResourceClaimTemplate {
+func testGPUClaimTemplate(name string) *resourcev1.ResourceClaimTemplate {
 	return &resourcev1.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
@@ -751,7 +751,7 @@ func testGPUClaimTemplate(name string, count int64) *resourcev1.ResourceClaimTem
 				Exactly: &resourcev1.ExactDeviceRequest{
 					DeviceClassName: "gpu.nvidia.com",
 					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
-					Count:           count,
+					Count:           2,
 				},
 			}}},
 		}},
