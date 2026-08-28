@@ -235,6 +235,7 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/common/
   - lib/bindings/
@@ -357,6 +358,7 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
+  - tests/docs/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
