@@ -565,7 +565,7 @@ def test_request_migration_sglang_aggregated(
 
 
 @pytest.mark.timeout(180)  # >3x the measured 45-54s local runtime
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)  # measured NVML peak with three workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @KV_TRANSFER_MIGRATION_PARAMETERS
@@ -669,8 +669,9 @@ def test_request_migration_sglang_kv_transfer(
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
                 expected_ongoing_request_count=1,
-                graceful_shutdown_endpoint=("backend", "generate"),
-                wait_for_worker_health_shutdown=True,
+                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                    frontend, worker
+                ),
                 verify_replacement_worker=True,
                 before_worker_fault=wait_for_initial_transfer,
                 force_max_output_tokens=True,
