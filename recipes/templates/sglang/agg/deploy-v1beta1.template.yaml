@@ -1,9 +1,20 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Hugging Face access: offline. Runtime pods use the pre-populated model cache.
-# To enable online access, add hf-token-secret through envFrom.secretRef and
-# remove HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Every component uses offline Hugging Face settings; the Worker consumes the
+# pre-populated shared-model-cache.
 # Contract:
 # - Use the native nvidia.com/v1beta1 spec.components shape; each component
 #   podTemplate contains a runtime container named main.
@@ -11,15 +22,13 @@
 #   python3 -m dynamo.sglang command.
 # - Keep components ordered as Frontend (frontend), then Worker (worker).
 # - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command arguments.
-# - model-cache is a canonical default Kubernetes object name and patch anchor.
-#   The named namespace-local PVC must exist with pre-populated data unless a
-#   cluster Kustomization replaces the reference; change all coupled references
-#   together. Offline mode requires both offline variables and no hf-token-secret reference.
+# - The Worker uses shared-model-cache as the canonical default PVC, volume,
+#   and mount name. The namespace-local PVC must exist with pre-populated data
+#   unless a cluster Kustomization replaces the reference; keep all Worker
+#   cache references and the /shared-model-cache path synchronized.
 # Derived from: recipes/inkling/sglang/agg-b200/deploy.yaml.
 # Validation status: static catalog validation only; verify admission,
 # readiness, and runtime behavior on the target cluster.
-# The 60-minute worker startup budget is a template default; validate it for
-# the selected model, image, and hardware.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -35,12 +44,11 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+              imagePullPolicy: IfNotPresent
               command: [python3]
               args:
                 - -m
                 - dynamo.frontend
-                - --model-path
-                - /model-cache/thinkingmachines/Inkling-NVFP4
                 - --model-name
                 - thinkingmachines/Inkling-NVFP4
                 - --dyn-chat-processor
@@ -55,21 +63,6 @@ spec:
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
                   value: "1"
-              readinessProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                periodSeconds: 10
-                timeoutSeconds: 3
-                failureThreshold: 3
-              volumeMounts:
-                - name: model-cache
-                  mountPath: /model-cache
-                  readOnly: true
-          volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
 
     - name: Worker
       type: worker
@@ -80,37 +73,61 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+              imagePullPolicy: IfNotPresent
               workingDir: /workspace/examples/backends/sglang
-              command: [/bin/bash, -lc]
+              command: [python3]
               args:
-                - |
-                  python3 -m dynamo.sglang \
-                    --model-path "${MODEL_NAME}" \
-                    --served-model-name "${SERVED_MODEL_NAME}" \
-                    --trust-remote-code \
-                    --tp 8 \
-                    --quantization modelopt_fp4 \
-                    --attention-backend fa4 \
-                    --page-size 128 \
-                    --fp4-gemm-backend flashinfer_trtllm \
-                    --moe-runner-backend flashinfer_trtllm_routed \
-                    --enable-torch-symm-mem \
-                    --mamba-radix-cache-strategy extra_buffer \
-                    --mem-fraction-static 0.75 \
-                    --swa-full-tokens-ratio 0.1 \
-                    --mamba-full-memory-ratio 0.1 \
-                    --enable-multimodal \
-                    --reasoning-parser inkling \
-                    --tool-call-parser inkling \
-                    --speculative-algorithm EAGLE \
-                    --speculative-num-steps 8 \
-                    --speculative-eagle-topk 1 \
-                    --speculative-num-draft-tokens 9 \
-                    --enable-multi-layer-eagle \
-                    --speculative-use-rejection-sampling
+                - -m
+                - dynamo.sglang
+                - --model-path
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --tp
+                - "8"
+                - --quantization
+                - modelopt_fp4
+                - --attention-backend
+                - fa4
+                - --page-size
+                - "128"
+                - --fp4-gemm-backend
+                - flashinfer_trtllm
+                - --moe-runner-backend
+                - flashinfer_trtllm_routed
+                - --enable-torch-symm-mem
+                - --mamba-radix-cache-strategy
+                - extra_buffer
+                - --mem-fraction-static
+                - "0.75"
+                - --swa-full-tokens-ratio
+                - "0.1"
+                - --mamba-full-memory-ratio
+                - "0.1"
+                - --enable-multimodal
+                - --reasoning-parser
+                - inkling
+                - --tool-call-parser
+                - inkling
+                - --speculative-algorithm
+                - EAGLE
+                - --speculative-num-steps
+                - "8"
+                - --speculative-eagle-topk
+                - "1"
+                - --speculative-num-draft-tokens
+                - "9"
+                - --enable-multi-layer-eagle
+                - --speculative-use-rejection-sampling
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
               env:
                 - name: MODEL_NAME
-                  value: /model-cache/thinkingmachines/Inkling-NVFP4
+                  value: /shared-model-cache/thinkingmachines/Inkling-NVFP4
                 - name: SERVED_MODEL_NAME
                   value: thinkingmachines/Inkling-NVFP4
                 - name: DYN_FORWARDPASS_METRIC_PORT
@@ -125,13 +142,6 @@ spec:
                   value: "1"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
-              startupProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 60
-                timeoutSeconds: 20
-                failureThreshold: 60
               resources:
                 requests:
                   cpu: "64"
@@ -140,17 +150,17 @@ spec:
                 limits:
                   nvidia.com/gpu: "8"
               volumeMounts:
-                - name: model-cache
-                  mountPath: /model-cache
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
                 - name: flashinfer-cache
                   mountPath: /root/.cache/flashinfer
           volumes:
-            - name: model-cache
+            - name: shared-model-cache
               persistentVolumeClaim:
-                claimName: model-cache
+                claimName: shared-model-cache
             - name: tmp
               emptyDir:
                 sizeLimit: 200Gi

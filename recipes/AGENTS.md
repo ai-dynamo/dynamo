@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -9,8 +9,21 @@ SPDX-License-Identifier: Apache-2.0
   `deploy-<name>.yaml`; an `overlays/generic/` variant renders when it exists.
   Shared Components selected by multiple recipes live under
   `recipes/kustomize/components/`; that directory has no base or overlays and
-  never renders by itself. Prefer resource-shaped Kustomize merge patches over
-  JSON patches where possible. Bases that patch Dynamo CRDs include the central
+  never renders by itself. The copy-and-fill beta cluster scaffold lives under
+  `recipes/templates/kustomize/`; it uses guarded JSON 6902 patches against
+  canonical `nvidia.com/v1beta1` component positions, requires standalone
+  Kustomize v5.8.1, and does not include the central OpenAPI Component. Keep
+  filled site values outside the repository. Portable templates omit
+  credential Secret references and probe structs. They use the canonical
+  `shared-model-cache` bundle, exec-form runtime commands, and
+  `imagePullPolicy: IfNotPresent`. Every beta component sets both offline
+  environment variables; beta Frontends do not mount the cache, and beta
+  backend workers run as UID/GID 0 with `IPC_LOCK`, `SYS_PTRACE`, and
+  `SYS_RESOURCE`. The scaffold's optional `probes` Component owns complete
+  worker startup-probe overrides. Place it after registry credentials and
+  before scheduling. In the legacy alpha matrix path, prefer
+  resource-shaped Kustomize merge patches where possible. Legacy bases
+  that use strategic merge against Dynamo CRDs include the central
   `recipes/kustomize/components/dynamo-openapi/` Component; its schema is
   generated from every operator CRD. The central
   `recipes/kustomize/components/disagg-workers/` Components require one DGD per

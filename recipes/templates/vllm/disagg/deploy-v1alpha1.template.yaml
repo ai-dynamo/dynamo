@@ -1,8 +1,18 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Hugging Face access: online. Workers read credentials from the
-# hf-token-secret Secret.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # Contract:
 # - Use the native nvidia.com/v1alpha1 spec.services shape; each service
 #   defines its runtime through extraPodSpec.mainContainer.
@@ -14,14 +24,12 @@
 #   arguments, and keep the prefill/decode transfer settings compatible.
 # - KV_TRANSFER_CONFIG remains the first worker environment entry; change its
 #   value on both workers without removing the hook.
-# - model-cache and hf-token-secret are canonical default Kubernetes object
-#   names and patch anchors. Each named namespace-local object must exist unless
-#   a cluster Kustomization replaces the reference; change all coupled references together.
+# - shared-model-cache is the canonical default Kubernetes object name and patch
+#   anchor. The namespace-local PVC must exist unless a cluster Kustomization
+#   replaces the reference; change all coupled references together.
 # Derived from: recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml.
 # Validation status: static catalog validation only; verify admission,
 # readiness, and runtime behavior on the target cluster.
-# The 60-minute worker startup budget is a template default; validate it for
-# the selected model, image, and hardware.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -29,7 +37,7 @@ metadata:
 spec:
   backendFramework: vllm
   pvcs:
-    - name: model-cache
+    - name: shared-model-cache
       create: false
   services:
     Frontend:
@@ -37,29 +45,21 @@ spec:
       replicas: 1
       envs:
         - name: HF_HOME
-          value: /opt/models
+          value: /shared-model-cache
       volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
+        - name: shared-model-cache
+          mountPoint: /shared-model-cache
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
           command: [python3]
           args: [-m, dynamo.frontend]
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-
     PrefillWorker:
       componentType: worker
       subComponentType: prefill
       replicas: 1
-      envFromSecret: hf-token-secret
       sharedMemory:
         size: 80Gi
       resources:
@@ -68,25 +68,34 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
+        - name: shared-model-cache
+          mountPoint: /shared-model-cache
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
-          command: [/bin/bash, -lc]
+          command: [python3]
           args:
-            - |
-              python3 -m dynamo.vllm \
-                --model "${MODEL_NAME}" \
-                --served-model-name "${SERVED_MODEL_NAME}" \
-                --tensor-parallel-size 8 \
-                --data-parallel-size 1 \
-                --disaggregation-mode prefill \
-                --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
-                --gpu-memory-utilization 0.90 \
-                --no-enable-prefix-caching \
-                --block-size 128
+            - -m
+            - dynamo.vllm
+            - --model
+            - $(MODEL_NAME)
+            - --served-model-name
+            - $(SERVED_MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --data-parallel-size
+            - "1"
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - $(KV_TRANSFER_CONFIG)
+            - --gpu-memory-utilization
+            - "0.90"
+            - --no-enable-prefix-caching
+            - --block-size
+            - "128"
           env:
             - name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
@@ -95,20 +104,11 @@ spec:
             - name: SERVED_MODEL_NAME
               value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
             - name: HF_HOME
-              value: /opt/models
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 60
-            timeoutSeconds: 20
-            failureThreshold: 60
-
+              value: /shared-model-cache
     DecodeWorker:
       componentType: worker
       subComponentType: decode
       replicas: 1
-      envFromSecret: hf-token-secret
       sharedMemory:
         size: 80Gi
       resources:
@@ -117,25 +117,34 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
+        - name: shared-model-cache
+          mountPoint: /shared-model-cache
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
-          command: [/bin/bash, -lc]
+          command: [python3]
           args:
-            - |
-              python3 -m dynamo.vllm \
-                --model "${MODEL_NAME}" \
-                --served-model-name "${SERVED_MODEL_NAME}" \
-                --tensor-parallel-size 8 \
-                --data-parallel-size 1 \
-                --disaggregation-mode decode \
-                --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
-                --gpu-memory-utilization 0.90 \
-                --no-enable-prefix-caching \
-                --block-size 128
+            - -m
+            - dynamo.vllm
+            - --model
+            - $(MODEL_NAME)
+            - --served-model-name
+            - $(SERVED_MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --data-parallel-size
+            - "1"
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - $(KV_TRANSFER_CONFIG)
+            - --gpu-memory-utilization
+            - "0.90"
+            - --no-enable-prefix-caching
+            - --block-size
+            - "128"
           env:
             - name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
@@ -144,11 +153,4 @@ spec:
             - name: SERVED_MODEL_NAME
               value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
             - name: HF_HOME
-              value: /opt/models
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 60
-            timeoutSeconds: 20
-            failureThreshold: 60
+              value: /shared-model-cache

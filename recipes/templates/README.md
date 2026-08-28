@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 This catalog contains concrete, copyable `DynamoGraphDeployment` examples. Select the closest example, copy it into a recipe directory as `deploy.yaml`, and edit the portable serving fields. The `template` filename means "copyable example"; no renderer processes these files.
 
-Each YAML file contains one DGD and any supporting ConfigMaps, ComputeDomains, or DRA resources that the DGD requires. Supporting resources appear before the DGD. The framework and topology example directories intentionally contain no `kustomization.yaml` files or copied OpenAPI data.
+Each YAML file contains one DGD and any supporting ConfigMaps, ComputeDomains, or DRA resources that the DGD requires. Supporting resources appear before the DGD. The framework and topology example directories intentionally contain no `kustomization.yaml` files or copied OpenAPI data. The separate [beta cluster Kustomization starter](kustomize/README.md) contains copy-and-fill cluster Components; it is not a recipe-template directory.
 
-For the end-to-end authoring, validation, and shipping workflow, see the [recipe contribution guide](../CONTRIBUTING.md).
+For the end-to-end authoring, cluster adaptation, validation, and shipping workflow, see the [recipe contribution guide](../CONTRIBUTING.md) and the [cluster Kustomization starter](kustomize/README.md).
 
 ## Catalog
 
@@ -61,7 +61,15 @@ cp recipes/templates/vllm/agg/deploy-v1beta1.template.yaml \
   recipes/qwen3-0.6b/vllm/agg-example/deploy.yaml
 ```
 
-Edit `deploy.yaml`: change the DGD name, model and served-model values, image, runtime arguments, replicas, GPU intent, and framework configuration as needed. Keep external reference names, such as `model-cache` and `hf-token-secret`, internally consistent. These are concrete Kubernetes object references: direct application requires same-named objects in the target namespace, while a cluster Kustomization can replace the references with site-specific names.
+Edit `deploy.yaml`: change the DGD name, model and served-model values, image, runtime arguments, replicas, GPU intent, and framework configuration as needed. Keep the `shared-model-cache` bundle internally consistent. Direct application requires a same-named PVC in the target namespace, while a cluster Kustomization can replace the physical claim reference with a site-specific name.
+
+### Offline model access
+
+Every beta example sets `HF_HUB_OFFLINE: "1"` and
+`TRANSFORMERS_OFFLINE: "1"` on every component and runs against the
+pre-populated `shared-model-cache`. The catalog contains no credential Secret
+references. Beta Frontends retrieve model metadata from workers and do not
+mount the model cache.
 
 ## Adapt without adding a template
 
@@ -75,7 +83,7 @@ Treat a vLLM context-length or quality-of-service profile as a coordinated runti
 - add `VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"` only when the selected vLLM and model combination requires an override of the model-derived maximum;
 - remove `--spec-method` and `--spec-tokens` only when the profile intentionally disables that speculative-decoding configuration;
 - adjust decode `replicas` only when capacity and measured service objectives require it; and
-- review shared memory, resources, backend or kernel flags, and startup-probe budgets.
+- review shared memory, resources, and backend or kernel flags.
 
 Different models and hardware profiles require different subsets of these changes. Treat the field names as a review checklist, not a universal context-length delta. Requalify readiness, memory use, latency, and throughput after the change.
 
@@ -97,24 +105,26 @@ Router configuration belongs to the frontend and uses the same CLI and environme
 - **Prediction-based KV routing:** When the copied example does not configure worker event publication, add `--no-router-kv-events` until publishing is configured.
 - **Round-robin routing:** This mode requires no KV-event configuration.
 
-Set `--kv-cache-block-size` to the indexed workers' cache block or page size. It is a compatibility value, not an independent tuning knob. The current vLLM aggregate beta example selects KV routing without worker event publication; add `--no-router-kv-events` unless the recipe adds a compatible publisher. The current vLLM disaggregated beta example also lacks worker event publication but already passes `--router-kv-events`; replace that flag with `--no-router-kv-events` unless the recipe adds a compatible publisher.
+Set `--kv-cache-block-size` to the indexed workers' cache block or page size. It is a compatibility value, not an independent tuning knob.
 
 ## Field ownership and Kustomize boundary
 
-| Concern | Recipe example owns | Cluster Kustomization owns |
+| Concern | Recipe example owns | Operator or cluster configuration owns |
 | --- | --- | --- |
 | API and graph | DGD API, framework, topology, component names | Source-native API patches; no API conversion |
-| Model runtime | Image, command, arguments, model identity, framework configuration | Optional organization image overrides |
+| Model runtime | Image, command, arguments, model identity, framework configuration, and the beta worker security default | Optional organization image overrides |
 | Scale intent | Replicas, multinode intent, CPU, memory, and GPU counts | Cluster-approved resource adjustments |
 | Scheduling | None | Scheduler, node selection, affinity, tolerations, runtime class, priority, topology references, and label keys |
-| Artifacts and application Secrets | Canonical default object references and container-visible paths | Object provisioning or coordinated site-specific reference and path overrides |
+| Artifacts | Canonical `shared-model-cache` references and container-visible paths | Object provisioning or coordinated site-specific claim overrides |
+| Application credentials | None | Secret references, credential provisioning, and rotation |
+| Health probes | None by default; an intentional complete per-recipe override may tighten a workload budget | Operator defaults or optional cluster-wide overrides |
 | Registry credentials and networking | Framework transport intent, such as NIXL roles | Pull-Secret references, provider annotations, resources, interfaces, and endpoints |
 | ComputeDomain and DRA | Logical ComputeDomain and claim relationships | Site placement and physical driver or device-class binding |
 | Namespace | No `metadata.namespace` | Apply or orchestration selects the namespace |
 
-The current shared provider Components target alpha `spec.services` and offer limited provider networking support. They do not patch beta `spec.components[].podTemplate`; beta bases need beta-targeted patches. A Kustomize Component does not convert a DGD API.
+The current shared provider Components target alpha `spec.services` and offer limited provider networking support. They do not patch beta `spec.components[].podTemplate`; beta bases need beta-targeted patches. A Kustomize Component does not convert a DGD API. Use the [beta cluster Kustomization starter](kustomize/README.md) for private cluster bindings around a portable beta base.
 
-Recipe examples must omit cluster scheduling, cluster-specific artifact and Secret identities, image-pull Secrets, provider-network bindings, host bindings, and `metadata.namespace`. They retain portable serving behavior, canonical default object references, and the fields needed by framework runtime commands.
+Recipe examples must omit health probes, Secret references, cluster scheduling, cluster-specific artifact identities, image-pull Secrets, provider-network bindings, host bindings, and `metadata.namespace`. They retain portable serving behavior, canonical `shared-model-cache` references, and the fields needed by framework runtime commands.
 
 ## Shared memory behavior
 
@@ -124,32 +134,48 @@ For `v1beta1` workers, the operator owns `/dev/shm` unless injection is explicit
 - A positive `sharedMemorySize` makes the operator inject a volume of that size and drop any manual mount at `/dev/shm`.
 - `sharedMemorySize: "0"` disables operator injection. This is the only mode in which a manual `/dev/shm` volume applies, and the catalog does not use it.
 
+## Operator health probes
+
+Templates omit probes so the operator can supply its complete defaults. The defaults are:
+
+| Role | Probe | HTTP path | Named port | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Frontend | Liveness | `/live` | `http` | 15 s | 10 s | 1 s | 3 |
+| Frontend | Readiness | `/health` | `http` | 10 s | 10 s | 3 s | 3 |
+| Worker | Liveness | `/live` | `system` | None | 5 s | 4 s | 1 |
+| Worker | Readiness | `/health` | `system` | None | 10 s | 4 s | 3 |
+| Worker | Startup | `/live` | `system` | None | 10 s | 5 s | 720 |
+
+The worker startup budget is 7,200 seconds: a 10-second period multiplied by 720 failures. Worker liveness uses `failureThreshold: 1`, so a single failed check restarts the Pod after startup succeeds.
+
+A workload that needs a tighter startup budget than two hours may add a complete `startupProbe` as a per-recipe edit. The operator replaces a probe as a whole structure when the recipe supplies one; restate every handler, timing, and threshold field that the recipe must retain. Use the optional `probes` Component in the [cluster Kustomization starter](kustomize/README.md) when one cluster needs a uniform override, such as a longer budget for slow cache storage.
+
 ## Limits
 
 These examples are copy starts, not synchronized source mirrors or cluster-qualified deployments. Catalog checks cover YAML and static structure; they do not prove admission, scheduling, networking, model access, readiness, or benchmark performance. Qualify a copied recipe with its cluster Kustomization and target-cluster policy.
 
 ## Source recipes and validation
 
-Each example starts from the linked repository recipe and is then normalized to the catalog contract. The link records the starting point; it does not make the example a synchronized mirror. Unless a row says otherwise, the model, image, runtime arguments, scale, GPU intent, and framework configuration are retained from that source. All examples use canonical component names, canonical default object references, standard probe shapes, and omit cluster-supplied settings.
+Each example starts from the linked repository recipe and is then normalized to the catalog contract. The link records the starting point; it does not make the example a synchronized mirror. Unless a row says otherwise, the model, image, runtime arguments, scale, GPU intent, and framework configuration are retained from that source. All examples use canonical component names, the `shared-model-cache` worker bundle, exec-form commands, explicit `IfNotPresent` image-pull policy, operator probe defaults, and no Secret references or cluster-supplied settings. Beta examples additionally use offline environment settings on every component, omit cache mounts from Frontends, and use the standard backend-worker security context.
 
 "Source-derived" means the workload values come from the linked recipe. "API translation" means the runtime bundle was also projected into a different DGD API shape. Unless a table row records additional evidence, these statuses receive YAML and static catalog checks only; neither claims target-cluster readiness or runtime qualification.
 
 | Example | Source recipe | Preserved source fields | Deliberate template adjustments | Validation |
 | --- | --- | --- | --- | --- |
-| [vLLM aggregate alpha](vllm/agg/deploy-v1alpha1.template.yaml) | [Llama 3 70B aggregate](../llama-3-70b/vllm/agg/deploy.yaml) | Runtime bundle, scale, GPU intent, 20Gi shared memory | Canonical names and a 60-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [vLLM disaggregated alpha](vllm/disagg/deploy-v1alpha1.template.yaml) | [Llama 3 70B multi-node disaggregated](../llama-3-70b/vllm/disagg-multi-node/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 80Gi shared memory | Canonical names, transfer hook, and a 60-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [vLLM aggregate beta](vllm/agg/deploy-v1beta1.template.yaml) | [DeepSeek V4 Flash aggregate](../deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml) | Runtime bundle, scale, GPU intent | Online model access, 64Gi shared memory, and a 60-minute worker startup budget; the source did not define the latter two values | Source-derived; static checks |
-| [vLLM disaggregated beta](vllm/disagg/deploy-v1beta1.template.yaml) | [GPT-OSS 120B disaggregated](../gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 64Gi shared-memory amount, 60-minute worker startup budget | Operator-owned shared memory and the anchored transfer hook | Source-derived; static checks |
-| [vLLM disaggregated ComputeDomain beta](vllm/disagg/deploy-v1beta1-compute-domain.template.yaml) | [DeepSeek V4 Pro ComputeDomain deployment](../deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml) | Runtime and transfer bundle, two-node workers, 4 GPUs per pod, 40Gi/200Gi shared memory, 5,400-second worker startup budget | Native beta components, canonical names, standard probes, and the anchored transfer hook | Alpha configuration: render and server-side dry run; beta translation: static checks |
-| [SGLang aggregate alpha](sglang/agg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 aggregate](../nemotron-3-super-fp8/sglang/agg/deploy.yaml) | Runtime bundle, scale, GPU intent, 16Gi shared memory | Canonical names and a 60-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [SGLang disaggregated alpha](sglang/disagg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/sglang/disagg/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 16Gi shared memory | Canonical names, anchored transfer setting, and a 120-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [SGLang aggregate beta](sglang/agg/deploy-v1beta1.template.yaml) | [Inkling aggregate](../inkling/sglang/agg-b200/deploy.yaml) | Runtime bundle, scale, GPU intent, 512Gi shared-memory amount and scratch volumes | Operator-owned shared memory, explicit offline operation, and a 60-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [SGLang disaggregated beta](sglang/disagg/deploy-v1beta1.template.yaml) | [GLM-5.2 disaggregated](../glm-5.2/sglang/disagg-b200-agentic/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, 64Gi shared memory, 120-minute worker startup budget | Canonical names and anchored transfer setting | Source-derived; static checks |
-| [SGLang ComputeDomain beta](sglang/agg/deploy-v1beta1-compute-domain.template.yaml) | [Qwen 3.8 ComputeDomain aggregate](../qwen3.8-2.4t-a95b-fp8/sglang/agg-gb300-chat/deploy.yaml) | ConfigMap, DRA chain, runtime bundle, node/GPU shape, offline operation, 7,200-second worker startup budget | 200Gi shared memory borrowed from the vLLM ComputeDomain source because the SGLang source did not size `/dev/shm`; reduced capability set | Source-derived except for shared-memory size; static checks; 200Gi requires SGLang-owner review |
-| [TensorRT-LLM aggregate alpha](trtllm/agg/deploy-v1alpha1.template.yaml) | [GPT-OSS 120B aggregate](../gpt-oss-120b/trtllm/agg/deploy.yaml) | ConfigMap, runtime bundle, scale, GPU intent, 80Gi shared memory | Canonical names and a 60-minute worker startup budget; the source had no worker probe | Source-derived; static checks |
-| [TensorRT-LLM disaggregated alpha](trtllm/disagg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/trtllm/disagg/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, 16Gi shared memory, 6,000-second worker startup budget | Canonical names and standard probe shape | Source-derived; static checks |
-| [TensorRT-LLM aggregate beta](trtllm/agg/deploy-v1beta1.template.yaml) | [Nemotron 3.5 Lightning aggregate](../nemotron-3.5-lightning/trtllm/agg-b200-bf16/deploy.yaml) | ConfigMap, runtime bundle except model identity, scale, GPU intent, 40Gi shared memory, 3,600-second worker startup budget | NVFP4 model substitution, matching parser flags, canonical names, online model access, and reduced cluster policy | Source-derived except for model identity; static checks; the NVFP4 substitution requires TensorRT-LLM owner review |
-| [TensorRT-LLM disaggregated beta](trtllm/disagg/deploy-v1beta1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/trtllm/disagg/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, 16Gi shared memory, 6,000-second worker startup budget | Native beta components and canonical names | API translation; static checks |
+| [vLLM aggregate alpha](vllm/agg/deploy-v1alpha1.template.yaml) | [Llama 3 70B aggregate](../llama-3-70b/vllm/agg/deploy.yaml) | Runtime bundle, scale, GPU intent, 20Gi shared memory | Canonical names | Source-derived; static checks |
+| [vLLM disaggregated alpha](vllm/disagg/deploy-v1alpha1.template.yaml) | [Llama 3 70B multi-node disaggregated](../llama-3-70b/vllm/disagg-multi-node/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 80Gi shared memory | Canonical names and transfer hook | Source-derived; static checks |
+| [vLLM aggregate beta](vllm/agg/deploy-v1beta1.template.yaml) | [DeepSeek V4 Flash aggregate](../deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml) | Runtime bundle, scale, GPU intent | 64Gi shared memory; the source did not define the shared-memory value | Source-derived; static checks |
+| [vLLM disaggregated beta](vllm/disagg/deploy-v1beta1.template.yaml) | [GPT-OSS 120B disaggregated](../gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 64Gi shared-memory amount | Operator-owned shared memory and the anchored transfer hook | Source-derived; static checks |
+| [vLLM disaggregated ComputeDomain beta](vllm/disagg/deploy-v1beta1-compute-domain.template.yaml) | [DeepSeek V4 Pro ComputeDomain deployment](../deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml) | Runtime and transfer bundle, two-node workers, 4 GPUs per pod, 40Gi/200Gi shared memory | Native beta components, canonical names, and the anchored transfer hook | Alpha configuration: render and server-side dry run; beta translation: static checks |
+| [SGLang aggregate alpha](sglang/agg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 aggregate](../nemotron-3-super-fp8/sglang/agg/deploy.yaml) | Runtime bundle, scale, GPU intent, 16Gi shared memory | Canonical names | Source-derived; static checks |
+| [SGLang disaggregated alpha](sglang/disagg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/sglang/disagg/deploy.yaml) | Runtime and transfer bundle, scale, GPU intent, 16Gi shared memory | Canonical names and coordinated transfer arguments | Source-derived; static checks |
+| [SGLang aggregate beta](sglang/agg/deploy-v1beta1.template.yaml) | [Inkling aggregate](../inkling/sglang/agg-b200/deploy.yaml) | Runtime bundle, scale, GPU intent, 512Gi shared-memory amount and scratch volumes | Operator-owned shared memory and explicit offline mode | Source-derived; static checks |
+| [SGLang disaggregated beta](sglang/disagg/deploy-v1beta1.template.yaml) | [GLM-5.2 disaggregated](../glm-5.2/sglang/disagg-b200-agentic/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, 64Gi shared memory | Canonical names and anchored transfer environment setting | Source-derived; static checks |
+| [SGLang ComputeDomain beta](sglang/agg/deploy-v1beta1-compute-domain.template.yaml) | [Qwen 3.8 ComputeDomain aggregate](../qwen3.8-2.4t-a95b-fp8/sglang/agg-gb300-chat/deploy.yaml) | ConfigMap, DRA chain, runtime bundle, node/GPU shape, and offline mode | 200Gi shared memory borrowed from the vLLM ComputeDomain source because the SGLang source did not size `/dev/shm` | Source-derived except for shared-memory size; static checks; 200Gi requires SGLang-owner review |
+| [TensorRT-LLM aggregate alpha](trtllm/agg/deploy-v1alpha1.template.yaml) | [GPT-OSS 120B aggregate](../gpt-oss-120b/trtllm/agg/deploy.yaml) | ConfigMap, runtime bundle, scale, GPU intent, 80Gi shared memory | Canonical names | Source-derived; static checks |
+| [TensorRT-LLM disaggregated alpha](trtllm/disagg/deploy-v1alpha1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/trtllm/disagg/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, and 16Gi shared memory | Canonical names | Source-derived; static checks |
+| [TensorRT-LLM aggregate beta](trtllm/agg/deploy-v1beta1.template.yaml) | [Nemotron 3.5 Lightning aggregate](../nemotron-3.5-lightning/trtllm/agg-b200-bf16/deploy.yaml) | ConfigMap, runtime bundle except model identity, scale, GPU intent, and 40Gi shared memory | NVFP4 model substitution, matching parser flags, and canonical names | Source-derived except for model identity; static checks; the NVFP4 substitution requires TensorRT-LLM owner review |
+| [TensorRT-LLM disaggregated beta](trtllm/disagg/deploy-v1beta1.template.yaml) | [Nemotron 3 Super FP8 disaggregated](../nemotron-3-super-fp8/trtllm/disagg/deploy.yaml) | ConfigMaps, runtime and transfer bundle, scale, and 16Gi shared memory | Native beta components and canonical names | API translation; static checks |
 
 ## Field contract
 
@@ -169,25 +195,31 @@ Apply the strongest requirement that affects a field. The DGD API may permit a v
 ### Catalog conventions
 
 - Beta aggregate examples list `Frontend`/`frontend`, then `Worker`/`worker`. Beta disaggregated examples list `Frontend`/`frontend`, `PrefillWorker`/`prefill`, then `DecodeWorker`/`decode`. Alpha examples use the same canonical service keys and roles, but map order is not patch-semantic. Put optional `planner` or `epp` components after the canonical components.
-- `model-cache` is the canonical default PVC reference and patch anchor when present. Direct application requires a same-named PVC in the target namespace; a cluster Kustomization may replace the reference with a site-specific name. For a cacheless recipe, remove the PVC or volume, every mount, and cache-path couplings such as `HF_HOME` and local-filesystem model paths as one change; also remove any cache-binding Component from the cluster Kustomization. Retain the runtime's required model selector, such as `--model` or `--model-path`, when it names an online model ID.
-- `hf-token-secret` is the canonical default Secret reference and patch anchor for online model access. Direct application requires a same-named Secret in the target namespace; a cluster Kustomization may replace the reference with a site-specific name. For offline operation, remove every alpha `envFromSecret` or beta `envFrom.secretRef` reference, add `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` where the runtime needs them, and retain the pre-populated cache unless the recipe is also cacheless. Update every reference together when renaming either default object.
+- `shared-model-cache` is the canonical worker PVC reference, volume name, volume-mount name, and container path. Keep paths coupled to that mount synchronized; workload-owned scratch-cache paths remain part of the runtime bundle. In every beta backend component selected by `cache-binding`, the cache volume and mount are each the first entry (index `0`) in their lists, and `volumes[0].persistentVolumeClaim.claimName` is `shared-model-cache`. Beta Frontends retrieve model metadata from workers and have no model-cache volume, mount, or mount-referencing environment setting. Direct application requires a same-named PVC in the target namespace; a cluster Kustomization may replace only the physical claim reference. For a cacheless recipe, remove the PVC or volume, every mount, and cache-path couplings such as `HF_HOME` and local-filesystem model paths as one change; also remove any cache-binding Component from the cluster Kustomization.
+- Every beta component sets `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` to `"1"`. Beta examples use the pre-populated cache and omit credential Secret references.
+- Every catalog container sets `imagePullPolicy: IfNotPresent`. Runtime containers use `command: [python3]` and token-list `args` beginning with `-m` and a `dynamo.<module>` entry point. Use Kubernetes `$(VAR)` substitution in argument tokens; do not add a shell prelude or `${VAR}` interpolation.
+- Every beta backend-worker main container uses `runAsUser: 0`, `runAsGroup: 0`, and adds `IPC_LOCK`, `SYS_PTRACE`, and `SYS_RESOURCE`. Frontend containers do not set this security context.
 - Networking hooks are stable patch anchors. `KV_TRANSFER_CONFIG` and `SGLANG_DISAGGREGATION_NIXL_BACKEND`, when present, are the first worker environment entries and carry portable defaults. Override their values with guarded `test` plus `replace` operations; do not remove the hook while its argument or runtime consumer remains.
 - Review canonical names, roles, ordering, and hook positions before contribution. An ordinary Kustomize build has no patch precondition that checks them. Only a guarded JSON Patch Component with explicit `test` operations can fail the build when a name, role, position, or replaced value differs from its expectation. This prevents a rename from silently creating an extra component through merge behavior.
 
 ### Editable values
 
-Edit DGD and ConfigMap names, model identities, image tags, replicas, `multinode.nodeCount`, CPU, memory, GPU counts, engine flags, ConfigMap contents, probe budgets such as `failureThreshold`, and `sharedMemorySize` for the target workload.
+Edit DGD and ConfigMap names, model identities, image tags, replicas, `multinode.nodeCount`, CPU, memory, GPU counts, engine flags, ConfigMap contents, and `sharedMemorySize` for the target workload.
 
 These fields are examples, not independent knobs. Keep the framework, model, image, parallelism, GPU shape, memory, transfer configuration, and engine settings compatible. YAML parsing and API admission do not prove readiness, correct responses, or performance.
 
-### Cluster-supplied settings
+A model-specific startup budget tighter than the operator's 7,200-second default is also a per-recipe edit. Add the entire probe structure and state which operator default it replaces; a partial structure does not inherit omitted fields from the operator default.
 
-Portable recipe examples omit the following fields. Supply them through cluster Components, guarded site patches, or the deployment environment:
+### Fields omitted from templates
+
+Portable recipe examples omit the following operator- or cluster-owned fields:
 
 - `metadata.namespace`;
+- alpha `envFromSecret` and the complete beta main-container `envFrom` field;
+- `livenessProbe`, `readinessProbe`, and `startupProbe`; use the operator defaults unless a complete per-recipe or optional cluster-wide override is required;
 - `nodeSelector`, affinity, tolerations, `schedulerName`, `runtimeClassName`, and `priorityClassName`;
 - `imagePullSecrets`, site-specific PVC names, storage classes, and provisioning details;
 - provider network annotations and resources, physical interface or device names, endpoints, host bindings, and physical ComputeDomain/DRA realization; and
 - cluster-owned environment families such as `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, and site interface or device selections.
 
-Cluster Components may add whole policy fields or append environment entries. Defining those values in the base can overwrite policy or create duplicate environment variables. A narrowly scoped runtime capability may remain only when the selected image or transport requires it and the template documents that requirement; provider-wide privileges and host access remain cluster policy.
+Cluster Components may add whole policy fields or append environment entries. Defining those values in the base can overwrite policy or create duplicate environment variables. The beta backend-worker security context described above is part of the catalog contract; provider networking and host access remain cluster policy.
