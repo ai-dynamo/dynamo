@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AWS GB300 runner smoke test
+
+on:
+  push:
+    branches:
+      - "aws-gb300-runner-smoketest"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-gb300-runner-smoketest-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_IMAGE: nvcr.io/nvidia/cuda@sha256:605fb0c8acf8674e164d822da8a8521f3a655056e569f0899e72ae940e1fe7dc
+
+jobs:
+  arc-runner-smoke:
+    name: ARC runner using ${{ matrix.gpu_count }} GPU(s)
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        gpu_count: [1, 2]
+    runs-on: aws-gb300-tester-amd-gpu-v2
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/cuda@sha256:605fb0c8acf8674e164d822da8a8521f3a655056e569f0899e72ae940e1fe7dc
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    steps:
+      - name: Validate runner, GPUs, and mounts
+        shell: bash
+        env:
+          GPU_COUNT: ${{ matrix.gpu_count }}
+        run: |
+          set -euo pipefail
+
+          test "$(uname -m)" = "x86_64"
+
+          mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
+          # The ARC hook intentionally reserves two GPUs for every job. The
+          # matrix cases exercise either the first device or both devices.
+          test "${#gpu_names[@]}" -eq 2
+          if printf '%s\n' "${gpu_names[@]}" | grep -vq "GB300"; then
+            printf 'Unexpected GPU type:\n%s\n' "${gpu_names[@]}" >&2
+            exit 1
+          fi
+
+          for gpu_index in $(seq 0 $((GPU_COUNT - 1))); do
+            nvidia-smi --id="${gpu_index}" \
+              --query-gpu=index,name,uuid,memory.total \
+              --format=csv,noheader
+          done
+
+          test -d /models
+          test -d /scratch
+          test -d /dev/shm
+
+          scratch_probe="/scratch/aws-gb300-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GPU_COUNT}"
+          work_probe="${GITHUB_WORKSPACE}/.aws-gb300-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GPU_COUNT}"
+          touch "${scratch_probe}" "${work_probe}"
+          rm -f "${scratch_probe}" "${work_probe}"
+
+          shm_bytes="$(df --output=size -B1 /dev/shm | tail -1 | tr -d ' ')"
+          test "${shm_bytes}" -ge $((18 * 1024 * 1024 * 1024))
+          df -h /models /scratch /dev/shm "${GITHUB_WORKSPACE}"
+
+  prod-runner-smoke:
+    name: Prod runner creates ${{ matrix.gpu_count }}-GPU Job
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        gpu_count: [1, 2]
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 20
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-gb300
+      KUBE_NAMESPACE: dynamo-deploy-test
+      GPU_COUNT: ${{ matrix.gpu_count }}
+      JOB_NAME: gb300-prod-smoke-${{ matrix.gpu_count }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout workflow actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select dynamo-aws-gb300 through tbot
+        uses: $/.github/actions/set-kube-context
+
+      - name: Validate cluster access
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl get namespace "${KUBE_NAMESPACE}"
+          kubectl get priorityclass ci-nightly-high-priority
+          kubectl get pvc shared-model-cache --namespace "${KUBE_NAMESPACE}"
+          kubectl auth can-i create jobs --namespace "${KUBE_NAMESPACE}" | grep -qx yes
+          kubectl get nodes \
+            -l nvidia.com/gpu.product=NVIDIA-GB300 \
+            -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'
+
+      - name: Run GPU smoke Job
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl delete job "${JOB_NAME}" \
+            --namespace "${KUBE_NAMESPACE}" \
+            --ignore-not-found=true \
+            --wait=true
+
+          kubectl apply -f - <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${KUBE_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: aws-gb300-runner-smoke
+              app.kubernetes.io/part-of: dynamo-ci
+          spec:
+            activeDeadlineSeconds: 900
+            backoffLimit: 0
+            completions: 1
+            parallelism: 1
+            ttlSecondsAfterFinished: 300
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: aws-gb300-runner-smoke
+                  app.kubernetes.io/instance: ${JOB_NAME}
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: gpu-smoke
+                    image: ${CUDA_IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    command: ["/bin/bash", "-ceu"]
+                    args:
+                      - |
+                        nvidia-smi
+                        gpu_count="\$(nvidia-smi --query-gpu=uuid --format=csv,noheader | wc -l | tr -d '[:space:]')"
+                        gpu_names="\$(nvidia-smi --query-gpu=name --format=csv,noheader)"
+                        test "\${gpu_count}" = "${GPU_COUNT}"
+                        if grep -vq "GB300" <<< "\${gpu_names}"; then
+                          echo "Unexpected GPU type: \${gpu_names}" >&2
+                          exit 1
+                        fi
+                        test -d /models
+                        df -h /models
+                        echo "GB300 ${GPU_COUNT}-GPU smoke passed: \${gpu_names}"
+                    resources:
+                      requests:
+                        nvidia.com/gpu: "${GPU_COUNT}"
+                      limits:
+                        nvidia.com/gpu: "${GPU_COUNT}"
+                    volumeMounts:
+                      - name: models
+                        mountPath: /models
+                volumes:
+                  - name: models
+                    persistentVolumeClaim:
+                      claimName: shared-model-cache
+          EOF
+
+          pod_name=""
+          for _ in $(seq 1 60); do
+            pod_name="$(kubectl get pods \
+              --namespace "${KUBE_NAMESPACE}" \
+              -l "job-name=${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -n "${pod_name}" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "${pod_name}" ]; then
+            echo "::error::No pod was created for Job ${JOB_NAME}"
+            kubectl describe job "${JOB_NAME}" --namespace "${KUBE_NAMESPACE}" || true
+            exit 1
+          fi
+
+          pod_json="$(kubectl get pod "${pod_name}" --namespace "${KUBE_NAMESPACE}" -o json)"
+          jq -e '.spec.nodeSelector["nvidia.com/gpu.product"] == "NVIDIA-GB300"' <<< "${pod_json}"
+          jq -e '.spec.priorityClassName == "ci-nightly-high-priority"' <<< "${pod_json}"
+          jq -e '
+            all(
+              .spec.tolerations[]?;
+              .key != "dedicated" and
+              .key != "github-runners" and
+              .key != "nvidia.com/gpu"
+            )
+          ' <<< "${pod_json}"
+          jq -e --arg gpu_count "${GPU_COUNT}" '
+            any(
+              .spec.containers[];
+              .name == "gpu-smoke" and
+              .resources.requests["nvidia.com/gpu"] == $gpu_count and
+              .resources.limits["nvidia.com/gpu"] == $gpu_count
+            )
+          ' <<< "${pod_json}"
+
+          if ! kubectl wait \
+            --namespace "${KUBE_NAMESPACE}" \
+            --for=condition=complete \
+            "job/${JOB_NAME}" \
+            --timeout=15m; then
+            kubectl get pod "${pod_name}" --namespace "${KUBE_NAMESPACE}" -o wide || true
+            kubectl describe pod "${pod_name}" --namespace "${KUBE_NAMESPACE}" || true
+            kubectl logs "${pod_name}" --namespace "${KUBE_NAMESPACE}" --all-containers || true
+            exit 1
+          fi
+
+          kubectl logs "${pod_name}" --namespace "${KUBE_NAMESPACE}" --all-containers
+          node_name="$(kubectl get pod "${pod_name}" \
+            --namespace "${KUBE_NAMESPACE}" \
+            -o jsonpath='{.spec.nodeName}')"
+
+          {
+            echo "### AWS GB300 ${GPU_COUNT}-GPU smoke passed"
+            echo "- Context: \`${KUBE_CONTEXT}\`"
+            echo "- Namespace: \`${KUBE_NAMESPACE}\`"
+            echo "- Job: \`${JOB_NAME}\`"
+            echo "- Node: \`${node_name}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup smoke Job
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${KUBECONFIG:-}" ] || [ ! -f "${KUBECONFIG}" ]; then
+            echo "Kubeconfig was not initialized; nothing to clean up"
+            exit 0
+          fi
+
+          kubectl delete job "${JOB_NAME}" \
+            --namespace "${KUBE_NAMESPACE}" \
+            --ignore-not-found=true \
+            --wait=true \
+            --timeout=2m
