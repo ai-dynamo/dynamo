@@ -21,6 +21,10 @@ pub(crate) enum ToolCallIdentityField {
 }
 
 impl ToolCallIdentityField {
+    // TODO: drop this `allow` once the streaming `tool_call_dispatch` assembly
+    // state machine lands and logs the conflicting field name; it is the only
+    // intended caller.
+    #[allow(dead_code)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Id => "id",
@@ -77,14 +81,22 @@ pub(crate) fn merge_tool_call_chunk(
 
     match (&existing.id, incoming.id) {
         (None, Some(id)) => existing.id = Some(id),
-        // An empty later value is a producer no-op, not a disagreement.
-        (Some(current), Some(id)) if !id.is_empty() && *current != id => {
+        // An empty value on *either* side is a producer no-op rather than a
+        // disagreement: a producer may open the call with `id: ""` and carry
+        // the real value in a later delta, or repeat the field as an empty
+        // placeholder once it has already been established. Both orderings are
+        // the same non-event, so the guard is symmetric.
+        (Some(current), Some(id)) if !current.is_empty() && !id.is_empty() && *current != id => {
             note(ToolCallIdentityField::Id)
         }
         _ => {}
     }
     match (&existing.r#type, incoming.r#type) {
         (None, Some(ty)) => existing.r#type = Some(ty),
+        // Forward-compat only: `FunctionType` has exactly one variant in the
+        // OpenAI schema today, so this arm cannot fire and `Type` cannot be
+        // reported. It is kept so that a second variant does not silently
+        // acquire unreported first-wins semantics.
         (Some(current), Some(ty)) if *current != ty => note(ToolCallIdentityField::Type),
         _ => {}
     }
@@ -97,7 +109,10 @@ pub(crate) fn merge_tool_call_chunk(
         Some(existing_fn) => {
             match (&existing_fn.name, incoming_fn.name) {
                 (None, Some(name)) => existing_fn.name = Some(name),
-                (Some(current), Some(name)) if !name.is_empty() && *current != name => {
+                // Symmetric with the `id` arm above.
+                (Some(current), Some(name))
+                    if !current.is_empty() && !name.is_empty() && *current != name =>
+                {
                     note(ToolCallIdentityField::Name)
                 }
                 _ => {}
@@ -158,7 +173,8 @@ mod tests {
     #[test]
     fn identity_is_first_wins_and_conflict_is_reported() {
         let mut acc = chunk(0, Some("call-1"), Some("calculator"), Some("{}"));
-        let outcome = merge_tool_call_chunk(&mut acc, chunk(0, Some("call-2"), Some("other"), None));
+        let outcome =
+            merge_tool_call_chunk(&mut acc, chunk(0, Some("call-2"), Some("other"), None));
         // First conflicting field wins the report; `id` is checked first.
         assert_eq!(
             outcome,
@@ -179,6 +195,21 @@ mod tests {
             ToolCallMergeOutcome::Merged
         );
         assert_eq!(acc.id.as_deref(), Some("call-1"));
+    }
+
+    #[test]
+    fn empty_established_identity_value_is_not_a_conflict() {
+        // A producer that opens the call with `id: ""` and carries the real id
+        // in a later delta is not disagreeing with itself. First-wins still
+        // keeps the empty opener, exactly as it did before conflict reporting
+        // existed; only the report changes.
+        let mut acc = chunk(0, Some(""), Some(""), None);
+        assert_eq!(
+            merge_tool_call_chunk(&mut acc, chunk(0, Some("call-1"), Some("calculator"), None)),
+            ToolCallMergeOutcome::Merged
+        );
+        assert_eq!(acc.id.as_deref(), Some(""));
+        assert_eq!(acc.function.unwrap().name.as_deref(), Some(""));
     }
 
     #[test]

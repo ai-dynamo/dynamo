@@ -248,7 +248,8 @@ fn finalize_merged_tool_chunk(
         // Use the merged r#type if the stream carried one. Falls back to
         // `Function` — today the only variant in the OpenAI schema, but
         // threading the merged value keeps us forward-compat if variants
-        // are added later and avoids dead state in `merge_tool_call_chunk`.
+        // are added later and avoids dead state in
+        // `super::tool_call_merge::merge_tool_call_chunk`.
         r#type: chunk
             .r#type
             .unwrap_or(dynamo_protocols::types::FunctionType::Function),
