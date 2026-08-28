@@ -13,7 +13,7 @@ jobs:
     name: Validate PR title and add label
     runs-on: ubuntu-latest
     steps:
-      - uses: ytanikin/pr-conventional-commits@b628c5a234cc32513014b7bfdd1e47b532124d98  # v1.3.0
+      - uses: ytanikin/pr-conventional-commits@639145d78959c53c43112365837e3abd21ed67c1  # v1.5.2
         with:
           task_types: '["feat", "fix", "docs", "test", "ci", "refactor", "perf", "chore", "revert", "style", "build"]'
           add_label: 'true'

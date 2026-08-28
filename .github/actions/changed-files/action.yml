@@ -129,7 +129,7 @@ runs:
         fi
 
     - name: Check for changes
-      uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
       id: filter
       with:
         files_yaml_from_source_file: .github/filters.yaml
