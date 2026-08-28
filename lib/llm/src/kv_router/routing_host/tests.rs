@@ -727,22 +727,14 @@ fn is_engine_shutdown(item: &Annotated<LLMEngineOutput>) -> bool {
     })
 }
 
-/// A worker asked to shut down aborts the in-flight generation and only then
-/// reports why: a `Cancelled` data frame arrives first and the typed
-/// `BackendEngineShutdown` error arrives after it. The migration layer decides on
-/// `error` alone, so ending the stream on the first frame hides the failure.
-///
-/// The `Cancelled` frame must also not be forwarded once the error turns up. A
-/// consumer that reads a terminal finish reason as the end of the request would
-/// act on it before migration ever sees the error, which is the same failure by
-/// another route.
+/// A trailing `EngineShutdown` error must reach migration, and the `Cancelled` frame that
+/// preceded it must not be forwarded once it does.
 #[tokio::test]
 #[serial_test::serial]
 async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
     let (router, runtime) = router(None).await;
     let context = Context::new(()).context();
-    // Set between the two frames: reaching it at all is what the old code could
-    // not do, because it stopped reading on the `Cancelled` frame.
+    // Reaching this at all is what the old code could not do.
     let polled_past_cancel = Arc::new(AtomicBool::new(false));
     let source_polled = Arc::clone(&polled_past_cancel);
     let source = ResponseStream::new(
@@ -780,9 +772,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
     runtime.shutdown();
 }
 
-/// A client that goes away is signalled through the context, never through a
-/// `Cancelled` frame, so it must still preempt the response stream without
-/// reading anything the worker might still be sending.
+/// A client cancel arrives through the context, not as a frame, so it must still preempt.
 #[tokio::test]
 #[serial_test::serial]
 async fn client_cancellation_still_ends_stream_without_draining() {
@@ -822,8 +812,100 @@ async fn client_cancellation_still_ends_stream_without_draining() {
     runtime.shutdown();
 }
 
-/// The drain has no trailing frame to wait for when the transport simply ends,
-/// and the request must still be released rather than left booked.
+/// A worker that sends a terminal frame and then stops talking without closing the transport
+/// must not hold the request open; the drain is bounded.
+#[tokio::test]
+#[serial_test::serial]
+async fn drain_without_trailing_error_gives_up_at_the_deadline() {
+    let (router, runtime) = router(None).await;
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield cancelled_frame();
+            // Never ends and never sends the error: the transport is wedged open.
+            std::future::pending::<()>().await;
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "shutdown-drain-deadline".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        &request(),
+        false,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    // Generous relative to DRAIN_TIMEOUT: the assertion is that the drain is bounded at all.
+    let deadline = DRAIN_TIMEOUT * 4;
+    let item = tokio::time::timeout(deadline, monitored.next())
+        .await
+        .expect("the drain must give up at DRAIN_TIMEOUT")
+        .expect("the withheld frame must be released once the drain gives up");
+    assert!(matches!(
+        item.data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref()),
+        Some(FinishReason::Cancelled)
+    ));
+    assert!(
+        tokio::time::timeout(deadline, monitored.next())
+            .await
+            .expect("the stream must end after the drain gives up")
+            .is_none()
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A terminal frame followed by more data was not terminal after all: both frames go out in
+/// order and the request still completes cleanly rather than being accounted as a failure.
+#[tokio::test]
+#[serial_test::serial]
+async fn data_after_a_terminal_frame_reopens_the_stream() {
+    let (router, runtime) = router(None).await;
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(stream::iter(vec![
+            cancelled_frame(),
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            }),
+        ])),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "terminal-then-data".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        &request(),
+        false,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    let first = monitored.next().await.expect("the withheld frame");
+    assert!(matches!(
+        first
+            .data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref()),
+        Some(FinishReason::Cancelled)
+    ));
+    let second = monitored.next().await.expect("the frame that followed it");
+    assert_eq!(second.data.as_ref().unwrap().token_ids, vec![7]);
+    assert!(monitored.next().await.is_none());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Transport EOF ends the drain and releases the booking.
 #[tokio::test]
 #[serial_test::serial]
 async fn shutdown_cancellation_without_trailing_error_still_aborts() {
@@ -1797,15 +1879,14 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Reje
     }
 }
 
-/// A two-worker routing host wired to a caller-supplied dispatch, so a test can
-/// drive migration end to end by choosing what the first worker answers with.
+/// A two-worker routing host wired to a caller-supplied dispatch, for driving migration
+/// end to end by choosing what the first worker answers with.
 struct MigrationHarness {
     runtime: Runtime,
     chooser: Arc<KvRouter>,
     engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     registered_ids: HashSet<u64>,
-    // Kept alive for the duration of the test: dropping any of these tears down
-    // discovery for the workers the router is expected to see.
+    // Kept alive: dropping these tears down discovery for the workers the router must see.
     _store: tempfile::TempDir,
     _drts: Vec<DistributedRuntime>,
 }
@@ -1979,8 +2060,7 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     runtime.shutdown();
 }
 
-/// Mimics a worker that is shutting down gracefully: it aborts the generation
-/// with a `Cancelled` data frame and reports the reason in the *next* frame.
+/// A gracefully shutting-down worker: `Cancelled` data frame, then the reason.
 #[derive(Default)]
 struct ShutdownAfterCancelDispatch {
     attempts: Mutex<Vec<(u64, Vec<u64>)>>,
@@ -2039,8 +2119,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
     }
 }
 
-/// The routing host must carry the worker's shutdown error all the way to the
-/// migration layer, which is the only component that can move the request.
+/// The shutdown error must reach migration, which is the only layer that can move the request.
 #[tokio::test]
 #[serial_test::serial]
 async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {

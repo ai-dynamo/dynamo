@@ -393,7 +393,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.nightly
+# TEMPORARY (DYN-4163): promoted from `nightly` to `pre_merge` so the graceful-shutdown
+# migration fix in `routing_host.rs` is proven on GPU before merge. These are the exact
+# parameterizations that regressed. Revert to `@pytest.mark.nightly` once this PR is green.
+@pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(4.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
 @MIGRATION_PARAMETERS

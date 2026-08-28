@@ -63,6 +63,9 @@ use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
+/// Bounds the wait for a worker's trailing typed error after a terminal frame.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
@@ -85,14 +88,12 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
-        // Set when a terminal frame carries no error of its own: a later frame may
-        // still carry the typed error, so the stream keeps reading.
+        // Migration acts on errors only; a shutting-down worker sends its error after the terminal frame.
         let mut drainable_terminal = false;
-        // The most recent such frame, withheld until the stream shows whether a
-        // typed error follows it. Yielding it straight away lets a consumer that
-        // stops on a terminal finish reason end the request before migration ever
-        // sees the error.
         let mut pending_terminal: Option<Annotated<LLMEngineOutput>> = None;
+        // Armed only while draining: a worker that goes quiet without EOF must not hang us.
+        let drain_deadline = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(drain_deadline);
 
         let completed = loop {
             tokio::select! {
@@ -100,31 +101,24 @@ where
 
                 _ = &mut stopped => {
                     tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
+                    // The client is gone, so the withheld frame has nowhere to go.
+                    drop(pending_terminal.take());
                     break false;
                 }
 
                 item = response_stream.next() => {
                     let Some(item) = item else {
+                        // EOF while draining means no trailing error is coming.
                         if drainable_terminal {
-                            // No trailing error arrived. Account it as the error-bearing
-                            // path would, not as a clean completion, and only now release
-                            // the withheld frame: it really was the last one.
                             guard.record_migration_failure(None);
-                            guard.abort().await;
-                            if let Some(pending) = pending_terminal.take() {
-                                yield pending;
-                            }
-                            break false;
                         }
-                        break true;
+                        break !drainable_terminal;
                     };
                     let outcome = classify_response_item(&item);
                     guard.on_item(&item).await;
                     match outcome {
                         ResponseItemOutcome::Failed => {
-                            // The typed error supersedes any withheld terminal frame:
-                            // forwarding both would hand the consumer a terminal finish
-                            // reason for a request the migration layer is about to retry.
+                            // Supersedes the withheld frame: never end a request about to be retried.
                             drop(pending_terminal.take());
                             guard.record_migration_failure(item.error.clone());
                             // Release the failed attempt before Migration can observe
@@ -136,21 +130,31 @@ where
                         }
                         ResponseItemOutcome::DrainableTerminal => {
                             drainable_terminal = true;
-                            // Only the newest terminal frame can be the last one, so an
-                            // older one is no longer in doubt and goes out in order.
+                            drain_deadline.as_mut().reset(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                            // Only the newest terminal frame can be the last one.
                             if let Some(previous) = pending_terminal.replace(item) {
                                 yield previous;
                             }
                         }
                         ResponseItemOutcome::Healthy => {
-                            // More data followed, so the withheld frame was not the last
-                            // one after all. Release it first to keep the stream ordered.
+                            // More data followed, so the withheld frame was not last after all.
+                            drainable_terminal = false;
                             if let Some(previous) = pending_terminal.take() {
                                 yield previous;
                             }
                             yield item;
                         }
                     }
+                }
+
+                // Last arm: a frame that is already available always beats an expired drain.
+                _ = &mut drain_deadline, if drainable_terminal => {
+                    tracing::debug!(
+                        request_id = context.id(),
+                        "Terminal frame was not followed by an error within {DRAIN_TIMEOUT:?}, ending stream"
+                    );
+                    guard.record_migration_failure(None);
+                    break false;
                 }
             }
         };
@@ -159,6 +163,10 @@ where
             guard.finish().await;
         } else {
             guard.abort().await;
+        }
+        // Released only now: the drain proved it was last, and the booking is already gone.
+        if let Some(pending) = pending_terminal.take() {
+            yield pending;
         }
     }
 }
@@ -756,17 +764,9 @@ where
 enum ResponseItemOutcome {
     /// The stream is healthy and must keep running.
     Healthy,
-    /// A terminal failure signalled only by the data frame's finish reason.
-    ///
-    /// The frame carries no error for the migration layer to act on, and a
-    /// worker that aborts a generation during graceful shutdown sends its typed
-    /// error in a *later* frame. Ending the stream here would drop that error,
-    /// so this outcome keeps reading until the transport ends. The frame itself
-    /// is withheld meanwhile, because a consumer that treats a terminal finish
-    /// reason as the end of the request would otherwise act on it first.
+    /// Terminal by finish reason only; withheld while the stream drains for a trailing error.
     DrainableTerminal,
-    /// A terminal failure that carries the error itself. The migration layer can
-    /// act on it as soon as it is yielded, so the stream ends immediately.
+    /// Terminal and carries the error itself. Yielded, and the stream ends.
     Failed,
 }
 
