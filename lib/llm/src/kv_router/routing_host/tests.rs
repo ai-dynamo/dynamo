@@ -731,6 +731,11 @@ fn is_engine_shutdown(item: &Annotated<LLMEngineOutput>) -> bool {
 /// reports why: a `Cancelled` data frame arrives first and the typed
 /// `BackendEngineShutdown` error arrives after it. The migration layer decides on
 /// `error` alone, so ending the stream on the first frame hides the failure.
+///
+/// The `Cancelled` frame must also not be forwarded once the error turns up. A
+/// consumer that reads a terminal finish reason as the end of the request would
+/// act on it before migration ever sees the error, which is the same failure by
+/// another route.
 #[tokio::test]
 #[serial_test::serial]
 async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
@@ -759,11 +764,6 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
 
-    let cancelled = monitored
-        .next()
-        .await
-        .expect("the cancelled frame must still reach the client");
-    assert!(cancelled.error.is_none());
     let shutdown = monitored
         .next()
         .await
@@ -849,8 +849,8 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
 
     let item = tokio::time::timeout(Duration::from_secs(10), monitored.next())
         .await
-        .expect("the cancelled frame must be yielded without waiting on the drain")
-        .expect("the cancelled frame must be yielded");
+        .expect("the drain must end at transport EOF, not block on a trailing error")
+        .expect("the cancelled frame must be yielded once EOF proves it was the last");
     assert!(matches!(
         item.data
             .as_ref()
@@ -2067,9 +2067,19 @@ async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
     assert!(harness.registered_ids.contains(&retried_worker));
     assert!(attempts[0].1.is_empty());
     assert_eq!(attempts[1].1, vec![failed_worker]);
+    assert_eq!(
+        responses.len(),
+        1,
+        "a migrated request must read as one clean stream; the aborted attempt's \
+         terminal frame must not surface ahead of the retry: {responses:?}"
+    );
     let last = responses.last().expect("the retry must produce output");
     assert!(last.error.is_none());
     assert_eq!(last.data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(
+        last.data.as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
     let loads = harness
         .chooser
         .get_potential_loads(&[], None, None, None, None)
@@ -2105,6 +2115,12 @@ async fn engine_shutdown_after_cancel_frame_surfaces_error_at_limit_zero() {
         attempts.clone()
     };
     assert_eq!(attempts.len(), 1, "migration is disabled at limit zero");
+    assert_eq!(
+        responses.len(),
+        1,
+        "the shutdown error is the whole response; a bare cancellation must not \
+         precede it: {responses:?}"
+    );
     let last = responses
         .last()
         .expect("the shutdown must be reported to the client");

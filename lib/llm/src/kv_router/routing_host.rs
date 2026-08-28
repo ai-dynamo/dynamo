@@ -88,6 +88,11 @@ where
         // Set when a terminal frame carries no error of its own: a later frame may
         // still carry the typed error, so the stream keeps reading.
         let mut drainable_terminal = false;
+        // The most recent such frame, withheld until the stream shows whether a
+        // typed error follows it. Yielding it straight away lets a consumer that
+        // stops on a terminal finish reason end the request before migration ever
+        // sees the error.
+        let mut pending_terminal: Option<Annotated<LLMEngineOutput>> = None;
 
         let completed = loop {
             tokio::select! {
@@ -102,9 +107,13 @@ where
                     let Some(item) = item else {
                         if drainable_terminal {
                             // No trailing error arrived. Account it as the error-bearing
-                            // path would, not as a clean completion.
+                            // path would, not as a clean completion, and only now release
+                            // the withheld frame: it really was the last one.
                             guard.record_migration_failure(None);
                             guard.abort().await;
+                            if let Some(pending) = pending_terminal.take() {
+                                yield pending;
+                            }
                             break false;
                         }
                         break true;
@@ -113,6 +122,10 @@ where
                     guard.on_item(&item).await;
                     match outcome {
                         ResponseItemOutcome::Failed => {
+                            // The typed error supersedes any withheld terminal frame:
+                            // forwarding both would hand the consumer a terminal finish
+                            // reason for a request the migration layer is about to retry.
+                            drop(pending_terminal.take());
                             guard.record_migration_failure(item.error.clone());
                             // Release the failed attempt before Migration can observe
                             // the item and start another one. This keeps serialized
@@ -123,9 +136,18 @@ where
                         }
                         ResponseItemOutcome::DrainableTerminal => {
                             drainable_terminal = true;
-                            yield item;
+                            // Only the newest terminal frame can be the last one, so an
+                            // older one is no longer in doubt and goes out in order.
+                            if let Some(previous) = pending_terminal.replace(item) {
+                                yield previous;
+                            }
                         }
                         ResponseItemOutcome::Healthy => {
+                            // More data followed, so the withheld frame was not the last
+                            // one after all. Release it first to keep the stream ordered.
+                            if let Some(previous) = pending_terminal.take() {
+                                yield previous;
+                            }
                             yield item;
                         }
                     }
@@ -739,7 +761,9 @@ enum ResponseItemOutcome {
     /// The frame carries no error for the migration layer to act on, and a
     /// worker that aborts a generation during graceful shutdown sends its typed
     /// error in a *later* frame. Ending the stream here would drop that error,
-    /// so this outcome keeps reading until the transport ends.
+    /// so this outcome keeps reading until the transport ends. The frame itself
+    /// is withheld meanwhile, because a consumer that treats a terminal finish
+    /// reason as the end of the request would otherwise act on it first.
     DrainableTerminal,
     /// A terminal failure that carries the error itself. The migration layer can
     /// act on it as soon as it is yielded, so the stream ends immediately.
