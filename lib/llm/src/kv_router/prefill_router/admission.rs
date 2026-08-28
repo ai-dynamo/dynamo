@@ -11,51 +11,18 @@ use tracing::Instrument;
 use dynamo_kv_router::selector::WorkerSelector;
 
 use dynamo_runtime::{
-    pipeline::{ManyOut, SingleIn},
+    pipeline::ManyOut,
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
 use super::{PrefillCompletion, PrefillError, PrefillRouter};
 use crate::{
-    kv_router::KvPushRouter,
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
-        llm_backend::{FinishReason, LLMEngineOutput, PreprocessedRequest},
+        llm_backend::{FinishReason, LLMEngineOutput},
         timing::RequestTracker,
     },
-    session_affinity::{AffinityTarget, SessionAffinityPushRouter},
 };
-
-pub(super) enum InnerPrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    KvRouter(Arc<KvPushRouter<Sel>>),
-    SimpleRouter(Arc<SessionAffinityPushRouter>),
-}
-
-impl<Sel> InnerPrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    pub(super) async fn select_and_dispatch_prefill<M, F>(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
-    {
-        match self {
-            InnerPrefillRouter::KvRouter(router) => {
-                router.select_and_dispatch_prefill(request, prepare).await
-            }
-            InnerPrefillRouter::SimpleRouter(router) => {
-                router.select_and_dispatch_prefill(request, prepare).await
-            }
-        }
-    }
-}
 
 impl<Sel> PrefillRouter<Sel>
 where

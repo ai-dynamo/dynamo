@@ -47,6 +47,27 @@ class Program:
     # monotonic seconds; used to compute resume-side decay
     acting_since: float = 0.0
 
+    # Distinguishes successive admissions that share a Program object.
+    admission_epoch: int = 0
+
+
+@dataclass(frozen=True)
+class RequestSnapshot:
+    """Program state captured before admission."""
+
+    program: Program
+    status: ProgramStatus
+    lifecycle: ProgramLifecycle
+    assigned_worker_id: Optional[int]
+    token_total: int
+    step_count: int
+    marked_for_pause: bool
+    soft_demoted_until: float
+    waiting: Optional[asyncio.Event]
+    acting_since: float
+    was_paused: bool
+    admission_epoch: int
+
 
 @dataclass
 class ProgramTable:
@@ -63,11 +84,65 @@ class ProgramTable:
             program = Program(program_id=program_id)
             self.programs[program_id] = program
         program.step_count += 1
+        program.admission_epoch += 1
         if estimated_prompt_tokens > 0:
             program.token_total = estimated_prompt_tokens
         program.status = ProgramStatus.REASONING
         program.acting_since = 0.0
         return program
+
+    def snapshot_request(self, program_id: str) -> Optional[RequestSnapshot]:
+        """Capture state before admission; None means admission creates it."""
+        program = self.programs.get(program_id)
+        if program is None:
+            return None
+        return RequestSnapshot(
+            program=program,
+            status=program.status,
+            lifecycle=program.lifecycle,
+            assigned_worker_id=program.assigned_worker_id,
+            token_total=program.token_total,
+            step_count=program.step_count,
+            marked_for_pause=program.marked_for_pause,
+            soft_demoted_until=program.soft_demoted_until,
+            waiting=program.waiting,
+            acting_since=program.acting_since,
+            was_paused=program_id in self.paused,
+            admission_epoch=program.admission_epoch,
+        )
+
+    def rollback_request(
+        self, program_id: str, snapshot: Optional[RequestSnapshot]
+    ) -> None:
+        """Restore state only if the snapshot still names the current program."""
+        if snapshot is None:
+            self.paused.pop(program_id, None)
+            self.programs.pop(program_id, None)
+            return
+
+        program = self.programs.get(program_id)
+        if program is not snapshot.program:
+            return
+
+        program.status = snapshot.status
+        program.lifecycle = snapshot.lifecycle
+        program.assigned_worker_id = snapshot.assigned_worker_id
+        program.token_total = snapshot.token_total
+        program.step_count = snapshot.step_count
+        program.marked_for_pause = snapshot.marked_for_pause
+        program.soft_demoted_until = snapshot.soft_demoted_until
+        program.acting_since = snapshot.acting_since
+        program.admission_epoch = snapshot.admission_epoch
+        # Do not replace an event installed after this snapshot was captured.
+        if program.waiting is None or program.waiting is snapshot.waiting:
+            program.waiting = snapshot.waiting
+        if program.lifecycle == ProgramLifecycle.PAUSED and program.waiting is not None:
+            # A set event would admit the next paused turn without a capacity check.
+            program.waiting.clear()
+        if snapshot.was_paused:
+            self.paused[program_id] = None
+        else:
+            self.paused.pop(program_id, None)
 
     def end_request(
         self, program_id: str, prompt_tokens: int, completion_tokens: int

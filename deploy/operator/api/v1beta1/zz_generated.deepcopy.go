@@ -920,6 +920,11 @@ func (in *FeaturesSpec) DeepCopyInto(out *FeaturesSpec) {
 		*out = new(runtime.RawExtension)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.KVRouter != nil {
+		in, out := &in.KVRouter, &out.KVRouter
+		*out = new(KVRouterSpec)
+		**out = **in
+	}
 	if in.Mocker != nil {
 		in, out := &in.Mocker, &out.Mocker
 		*out = new(MockerSpec)

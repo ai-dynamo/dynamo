@@ -107,9 +107,23 @@ Public matrix variants are the documented exception: commit their generated over
 
 ## Publish Public Kustomize Variants
 
-Use this workflow when repository users need multiple maintained public provider or network variants of one deployment shape. Every selected Component must target the base manifest's API and field paths. The current shared provider Components are the legacy alpha strategic-merge path: they target `spec.services` and cannot convert or patch a beta `spec.components` base. The private [beta cluster starter](templates/kustomize/README.md) instead uses guarded JSON 6902 patches against canonical beta component positions and does not include the central OpenAPI Component.
+Use this workflow when repository users need multiple maintained public provider
+or network variants of one deployment shape. Every selected Component must target
+the base manifest's API and field paths. The existing public provider matrix
+examples use the legacy alpha shape: their static and template-generated
+Components target `spec.services` and cannot convert or patch a beta
+`spec.components` base. The cluster-owned [beta cluster
+starter](templates/kustomize/README.md) instead uses guarded JSON 6902 patches
+against canonical beta component positions and does not include the central
+OpenAPI Component.
 
-Recipe-local bases, Components, and generated public overlays live under `<deployment>/kustomize/`. Shared Components reusable by multiple recipes live under `recipes/kustomize/components/`. Run the commands in this guide from the repository root. Keep the checked-in manifests directly applicable and easy to review:
+Recipe-local bases, Components, and generated public overlays live under
+`<deployment>/kustomize/`. Shared Components reusable by multiple recipes live
+under `recipes/kustomize/components/`. Contributor-only Jinja template sources
+for this matrix workflow live under `recipes/kustomize/templates/`; they are
+separate from the portable examples and beta cluster starter under
+`recipes/templates/`. Run the commands in this guide from the repository root.
+Keep the checked-in manifests directly applicable and easy to review:
 
 ```text
 <deployment>/
@@ -162,20 +176,45 @@ None of these user workflows requires `unfold` or `render`.
 
 ### Contribute a Variant
 
-For a matrix-backed recipe, the source of truth is `.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, optional `kustomize/components/`, and any referenced Components under `recipes/kustomize/components/`. The generated files are public overlay `kustomization.yaml` files, `deploy-<name>.yaml` manifests, and the central `recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` schema. Commit the generated files for users to inspect and apply, but do not edit them by hand.
+For a matrix-backed recipe, the source of truth is
+`.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, optional
+`kustomize/components/`, template sources, and any referenced Components under
+`recipes/kustomize/components/`. The generated files are public overlay
+`kustomization.yaml` files, their generated `components/` template Components,
+`deploy-<name>.yaml` manifests, and the central
+`recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` schema. Commit
+the generated files for users to inspect and apply, but do not edit them by hand.
 
 The render convention is:
 
 - `kustomize/base/` is shared input and is not rendered directly.
 - `kustomize/overlays/<name>/` renders to `deploy-<name>.yaml`.
-- `kustomize/overlays/generic/` renders to `deploy-generic.yaml`. Use it when a generic deployable variant exists.
-- `kustomize/components/` is for recipe-specific Kustomize building blocks and is not rendered. Shared building blocks live under `recipes/kustomize/components/` and are also not rendered directly.
-- Legacy strategic-merge bases that patch Dynamo CRDs include the central `recipes/kustomize/components/dynamo-openapi/` Component. Its generated schema is derived from every operator CRD and lets strategic merge patches merge CRD map lists such as `env` by name. Guarded JSON 6902 Components, including the beta cluster starter, do not include it.
-- The central `recipes/kustomize/components/disagg-workers/` Components apply to bases containing one DGD with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
+- `kustomize/overlays/generic/` renders to `deploy-generic.yaml`. Use it when a
+  generic deployable variant exists.
+- `kustomize/components/` is for recipe-specific Kustomize building blocks and is
+  not rendered. Shared building blocks live under
+  `recipes/kustomize/components/` and are also not rendered directly.
+- `recipes/kustomize/templates/` holds contributor-only Jinja template sources.
+  `unfold` renders each selected source into an ordinary Component under the
+  public overlay's `components/` directory at the selected path. Users never
+  need Jinja to inspect or apply that overlay.
+- Legacy strategic-merge bases that patch Dynamo CRDs include the central
+  `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
+  schema is derived from every operator CRD and lets strategic merge patches
+  merge CRD map lists such as `env` by name. Guarded JSON 6902 Components,
+  including the beta cluster starter, do not include it.
+- The central `recipes/kustomize/components/disagg-workers/` Components apply
+  to bases containing one DGD with backend-neutral `PrefillWorker` and
+  `DecodeWorker` service keys.
 
 Within the legacy alpha matrix path, prefer resource-shaped Kustomize merge patches where possible. For other Custom Resource Definition (CRD) list fields, include the complete intended list in the merge patch unless the schema supplies an OpenAPI merge key. Use guarded JSON 6902 for the beta cluster starter and beta Components whose correctness depends on canonical list positions and fail-loud preconditions.
 
-Edit the Kustomize source, not the generated manifests. A recipe matrix is an explicit `.kustomize-matrix.yaml` beside the recipe. It names the Kustomize `source`, a `nameTemplate`, and matrix dimensions. Every dimension value has a human-readable `name` and a list of Kustomize `components`; output names interpolate only the value names, never their paths:
+Edit the Kustomize source, not the generated manifests. A recipe matrix is an
+explicit `.kustomize-matrix.yaml` beside the recipe. It names the Kustomize
+`source`, a `nameTemplate`, and matrix dimensions. Every dimension value has a
+human-readable `name`, plus optional Kustomize `components`, `templates`, and
+template `values`; output names interpolate only the value names, never their
+paths:
 
 ```yaml
 source: kustomize/base
@@ -183,11 +222,83 @@ nameTemplate: "${variant}"
 matrix:
   variant:
     - name: aws-p5.48xlarge
-      components:
-        - ../../../kustomize/components/aws-efa-p16d16
+      templates:
+        - source: ../../../kustomize/templates/aws-efa/p5.48xlarge
+          path: components/efa
+      values:
+        # Variant values override defaults from a selected template's values.yaml.
+        EFAS_PER_GPU: 4
 ```
 
-Regenerate derived artifacts in order: `unfold` writes every checked-in public overlay `kustomization.yaml` file for the matrix; `render` invokes Kustomize and writes every rendered `deploy-<name>.yaml` manifest for the matrix and the central CRD schema:
+A template selection names a source directory relative to the matrix and an
+output `path` relative to the generated overlay. The output path must be under
+`components/`; `path: components/efa` produces a normal local Component at
+`kustomize/overlays/<name>/components/efa/`. Template output paths selected by
+one variant must be unique and must not contain one another. The selected
+template directory or its parent must provide `kustomization.yaml` or
+`kustomization.yaml.j2` and may provide a plain `values.yaml` mapping. Whether
+plain or rendered from Jinja, the selected Kustomization must produce one
+v1alpha1 Kustomize `Component`. A Jinja source receives `values` and an indexed
+`base` rendered from the matrix `source`. `base` is indexed by lower-case Kind
+and `metadata.name`, for example
+`base.configmap[values.PREFILL_CONFIG]`. When exactly one resource of a Kind is
+expected, use `base.dynamographdeployment | only`; this fails clearly if the
+source changes to contain zero or multiple such resources. Templates may use
+embedded patches or ordinary local Kustomize source paths.
+
+#### Inheriting Template Files
+
+Put common YAML files and defaults directly in the parent of concrete template
+directories when several variants share the same Kustomize structure:
+
+```text
+aws-efa/
+├── kustomization.yaml.j2
+├── resources.yaml.j2
+├── values.yaml
+├── p5.48xlarge/
+│   ├── kustomization.yaml.j2
+│   └── values.yaml
+└── p6-b200.48xlarge/
+    └── values.yaml
+```
+
+The matrix selects one concrete directory:
+
+```yaml
+templates:
+  - source: ../../../kustomize/templates/aws-efa/p5.48xlarge
+    path: components/efa
+```
+
+`unfold` reads only direct `*.yaml` and `*.yaml.j2` files from the selected
+directory's parent and then from the selected directory. It never scans either
+directory recursively. Files are matched by their output name after removing a
+final `.j2`; for example, a selected `resources.yaml` replaces an inherited
+`resources.yaml.j2`, and a selected `resources.yaml.j2` likewise replaces an
+inherited `resources.yaml`. It replaces complete files and does not merge YAML
+content.
+Values use shallow, top-level replacement in this order:
+
+```text
+parent values.yaml -> selected values.yaml -> matrix values
+```
+
+The effective files are rendered once into the selected output path. A
+values-only selected directory inherits the parent's files unchanged. A
+specialized directory can replace `kustomization.yaml.j2` or any other inherited
+YAML file by providing the same output name. Subdirectories and non-YAML files
+are never materialized. A template can reference shared Components or
+resources; `unfold` rebases those external paths for the generated location.
+Jinja rendering uses strict, immutable sandboxed values: undefined names and
+attempts to mutate data are errors. Rendering a matrix that selects templates
+requires `jinja2==3.1.6`, which is installed in the development and test
+dependency sets.
+
+Regenerate derived artifacts in order: `unfold` writes every checked-in public
+overlay `kustomization.yaml` file and selected generated Component for the
+matrix; `render` invokes Kustomize and writes every rendered
+`deploy-<name>.yaml` manifest and the central CRD schema:
 
 ```bash
 scripts/kustomize-matrix.py unfold <matrix.yaml>
@@ -200,7 +311,10 @@ To inspect only one concrete public overlay without regenerating the matrix, run
 kustomize build <deployment>/kustomize/overlays/<name>
 ```
 
-For dependent Components, use flat, explicit names such as `aws-efa` and `aws-efa-p8d16`. A leaf Component may include its predecessor, while the matrix selects only the leaf.
+For dependent Components, use flat, explicit names such as `aws-efa` and
+`vllm-disagg/aws-efa`. An instance-type template can include a generic fabric
+Component and patch the hardware-specific resource count derived from the base
+deployment.
 
 `render` runs `kustomize build` and falls back to `kubectl kustomize` when `kustomize` is not on `PATH`. Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from the source YAML before matching rendered fields. It does not copy comments inside literal block scalars because those already render in place. It also refreshes the central OpenAPI schema from the operator CRDs.
 

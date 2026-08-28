@@ -231,6 +231,7 @@
 /lib/runtime/src/component/                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/discovery/                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/protocols/                                                  @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/dynamo-sidecar                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/transports/                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/examples/                                                @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/                                               @ai-dynamo/dynamo-runtime-codeowners
@@ -416,7 +417,6 @@
 /recipes/deepseek-r1/                                                        @ai-dynamo/dynamo-performance-codeowners
 /recipes/deepseek-v4/                                                        @ai-dynamo/dynamo-performance-codeowners
 /recipes/glm-5-nvfp4/                                                        @ai-dynamo/dynamo-performance-codeowners
-/recipes/llama-3-70b/                                                        @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3.6-35b/                                                        @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/incluster/                                                       @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/nat_trace/                                                       @ai-dynamo/dynamo-performance-codeowners
@@ -434,7 +434,6 @@
 /benchmarks/pyproject.toml                                                   @ai-dynamo/dynamo-performance-codeowners
 /examples/backends/mocker/                                                   @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/scheduler/                                                   @ai-dynamo/dynamo-performance-codeowners
-/recipes/deepseek-v32-fp4/                                                   @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/README.md                                                 @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/burstgpt_loadgen/                                                @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                @ai-dynamo/dynamo-performance-codeowners
@@ -463,6 +462,7 @@
 # === Path overrides: a subsystem nested inside another area's tree.
 # More specific, so they win via last-match over area and file-type rules. ===
 /tests/rl/                                                                   @ai-dynamo/dynamo-rl-codeowners
+/tests/docs/                                                                 @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-operator-codeowners
 /tests/router/                                                               @ai-dynamo/dynamo-router-codeowners
 /tests/lmcache/                                                              @ai-dynamo/dynamo-kv-memory-codeowners

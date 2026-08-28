@@ -19,8 +19,8 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, TextInput, TokenInput, deepseek_formatter_for, kimi_k3_formatter_for,
-    may_be_fix_tool_schema,
+    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, deepseek_formatter_for,
+    kimi_k3_formatter_for, may_be_fix_tool_schema,
 };
 
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
@@ -272,8 +272,14 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Using vLLM default behavior
-        true
+        // vLLM / HF: continue_final_message leaves the last turn open, which is
+        // incompatible with appending a new generation prompt. Validation already
+        // rejects the omitted/true add_generation_prompt combination; keep this
+        // guard so internal callers that skip ValidateRequest still match HF.
+        if self.common.continue_final_message == Some(true) {
+            return false;
+        }
+        self.common.add_generation_prompt.unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
@@ -478,6 +484,108 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
     }
 }
 
+const CONTINUE_FINAL_MESSAGE_NOT_FOUND: &str =
+    "Unable to continue the final message because it was not found in the rendered chat template.";
+
+/// HuggingFace `render_jinja_template` marker. Appended to last-message content
+/// before render so truncation uniquely identifies the final turn even when the
+/// template rewrites or repeats earlier text.
+pub(crate) const CONTINUE_FINAL_MESSAGE_TAG: &str = "CONTINUE_FINAL_MESSAGE_TAG ";
+
+/// Append [`CONTINUE_FINAL_MESSAGE_TAG`] to the last message's text content.
+/// Array content uses the last non-empty `text` part, matching Transformers.
+pub(crate) fn append_continue_final_message_tag(messages: &mut serde_json::Value) -> Result<()> {
+    let Some(last) = messages.as_array_mut().and_then(|arr| arr.last_mut()) else {
+        anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND);
+    };
+    match last.get_mut("content") {
+        Some(serde_json::Value::String(text)) if !text.is_empty() => {
+            text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
+            Ok(())
+        }
+        Some(serde_json::Value::Array(parts)) => {
+            for part in parts.iter_mut().rev() {
+                if let Some(serde_json::Value::String(text)) = part.get_mut("text") {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
+                    return Ok(());
+                }
+            }
+            anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND);
+        }
+        _ => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
+    }
+}
+
+/// HuggingFace `apply_chat_template(continue_final_message=True)`: after render,
+/// drop the marker and any tokens after it so the prompt ends at the last
+/// message text.
+///
+/// The renderer must have seen [`CONTINUE_FINAL_MESSAGE_TAG`] in the last
+/// message. Searching for the raw last-message string cannot prove the match
+/// belongs to the final turn (a template may rewrite or repeat earlier copies).
+///
+/// When the renderer returned segment boundaries (Kimi K3 XTML), keep them so
+/// tokenization still uses `encode_segments` instead of flattening to plain text.
+/// Missing marker, empty content, or a template that dropped the marker is an
+/// invalid request rather than silently returning the closed prompt.
+pub(crate) fn apply_continue_final_message(prompt: RenderedPrompt) -> Result<RenderedPrompt> {
+    let rendered = prompt.as_str();
+    let tag = CONTINUE_FINAL_MESSAGE_TAG;
+    let tag_name = tag.trim_end();
+    let Some(tag_loc) = rendered.rfind(tag_name) else {
+        anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND);
+    };
+    // Transformers: if the full tag (including trailing space) survived, cut
+    // at the tag. If the template trimmed that space, also rstrip the prefix.
+    let end = if rendered[tag_loc..].starts_with(tag) {
+        tag_loc
+    } else {
+        rendered[..tag_loc].trim_end().len()
+    };
+    Ok(truncate_rendered_prompt(prompt, end))
+}
+
+/// Truncate `prompt` to the first `end` bytes of `as_str()`, preserving
+/// `RenderedSegment` trust boundaries when they are present.
+fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPrompt {
+    let Some(segments) = prompt.segments() else {
+        return RenderedPrompt::text(prompt.as_str()[..end].to_string());
+    };
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for seg in segments {
+        let next = offset + seg.text.len();
+        if next <= end {
+            if !seg.text.is_empty() {
+                out.push(seg.clone());
+            }
+            offset = next;
+            if offset == end {
+                break;
+            }
+            continue;
+        }
+        if offset < end {
+            let keep = end - offset;
+            if keep > 0 && keep <= seg.text.len() && seg.text.is_char_boundary(keep) {
+                out.push(RenderedSegment {
+                    text: seg.text[..keep].to_string(),
+                    allow_special: seg.allow_special,
+                });
+            }
+        }
+        break;
+    }
+    if out.is_empty() {
+        RenderedPrompt::text(String::new())
+    } else {
+        RenderedPrompt::segmented(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_tool_call_arguments;
@@ -589,5 +697,219 @@ mod tests {
             args.as_str().unwrap(),
             r#"{"location": "San Francisco", "unit": "celsius"}"#
         );
+    }
+
+    fn continue_rendered(
+        prompt: dynamo_renderer::RenderedPrompt,
+    ) -> dynamo_renderer::RenderedPrompt {
+        super::apply_continue_final_message(prompt).unwrap()
+    }
+
+    #[test]
+    fn continue_final_message_truncates_after_last_assistant_text() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "user text<|im_end|>LLM-Native Interaction{}<|im_end|><|im_start|>assistant",
+            super::CONTINUE_FINAL_MESSAGE_TAG
+        )));
+        assert_eq!(
+            rendered.as_str(),
+            "user text<|im_end|>LLM-Native Interaction"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_rstrips_when_template_trims_tag_space() {
+        use dynamo_renderer::RenderedPrompt;
+
+        // Transformers: if the template drops the marker's trailing space, also
+        // rstrip the prefix (the template likely trimmed message trailing space).
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "hello world{}extra",
+            super::CONTINUE_FINAL_MESSAGE_TAG.trim_end()
+        )));
+        assert_eq!(rendered.as_str(), "hello world");
+    }
+
+    #[test]
+    fn continue_final_message_marker_survives_repeated_last_text() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "LLM-Native Interaction in the user turn. LLM-Native Interaction{}<|im_end|>",
+            super::CONTINUE_FINAL_MESSAGE_TAG
+        )));
+        assert_eq!(
+            rendered.as_str(),
+            "LLM-Native Interaction in the user turn. LLM-Native Interaction"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_appends_tag_to_last_array_text_part() {
+        let mut messages = serde_json::json!([{
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "ignored"},
+                {"type": "text", "text": "Design"}
+            ]
+        }]);
+        super::append_continue_final_message_tag(&mut messages).unwrap();
+        assert_eq!(
+            messages[0]["content"][1]["text"].as_str().unwrap(),
+            format!("Design{}", super::CONTINUE_FINAL_MESSAGE_TAG)
+        );
+        assert_eq!(messages[0]["content"][0]["text"], "ignored");
+    }
+
+    #[test]
+    fn continue_final_message_appends_tag_to_developer_array_text_part() {
+        let mut messages = serde_json::json!([{
+            "role": "developer",
+            "content": [
+                {"type": "text", "text": "ignored"},
+                {"type": "text", "text": "Design"}
+            ]
+        }]);
+        super::append_continue_final_message_tag(&mut messages).unwrap();
+        assert_eq!(
+            messages[0]["content"][1]["text"].as_str().unwrap(),
+            format!("Design{}", super::CONTINUE_FINAL_MESSAGE_TAG)
+        );
+    }
+
+    #[test]
+    fn continue_final_message_continues_final_user_message() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "hello world{}extra",
+            super::CONTINUE_FINAL_MESSAGE_TAG
+        )));
+        assert_eq!(rendered.as_str(), "hello world");
+    }
+
+    /// Raw turns `same / previous / same`; rendered last turn is `SAME`.
+    /// Searching for `same` would cut at the first copy.
+    #[test]
+    fn continue_final_message_marker_survives_rewritten_final_turn() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "same|PREVIOUS|SAME{}|closed",
+            super::CONTINUE_FINAL_MESSAGE_TAG
+        )));
+        assert_eq!(rendered.as_str(), "same|PREVIOUS|SAME");
+    }
+
+    /// Whitespace-only last content must not match earlier structural spaces.
+    #[test]
+    fn continue_final_message_whitespace_only_does_not_match_structural_spaces() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let mut messages = serde_json::json!([
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "   "}
+        ]);
+        super::append_continue_final_message_tag(&mut messages).unwrap();
+        assert_eq!(
+            messages[1]["content"].as_str().unwrap(),
+            format!("   {}", super::CONTINUE_FINAL_MESSAGE_TAG)
+        );
+
+        let rendered = continue_rendered(RenderedPrompt::text(format!(
+            "hello   world   {}extra",
+            super::CONTINUE_FINAL_MESSAGE_TAG
+        )));
+        assert_eq!(rendered.as_str(), "hello   world   ");
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_marker_is_missing() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let err =
+            super::apply_continue_final_message(RenderedPrompt::text("unchanged".to_string()))
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not found in the rendered chat template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_final_content_is_empty() {
+        let mut messages = serde_json::json!([{"role": "assistant", "content": ""}]);
+        let err = super::append_continue_final_message_tag(&mut messages).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not found in the rendered chat template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_preserves_segment_boundaries() {
+        use dynamo_renderer::{RenderedPrompt, RenderedSegment};
+
+        let rendered = continue_rendered(RenderedPrompt::segmented(vec![
+            RenderedSegment {
+                text: "<|im_start|>assistant\n".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: format!(
+                    "LLM-Native Interaction{}",
+                    super::CONTINUE_FINAL_MESSAGE_TAG
+                ),
+                allow_special: false,
+            },
+            RenderedSegment {
+                text: "<|im_end|>".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: "<|im_start|>assistant\n".to_string(),
+                allow_special: true,
+            },
+        ]));
+        assert_eq!(
+            rendered.as_str(),
+            "<|im_start|>assistant\nLLM-Native Interaction"
+        );
+        let segments = rendered
+            .segments()
+            .expect("Kimi-style prompts must keep segment boundaries");
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].allow_special);
+        assert_eq!(segments[0].text, "<|im_start|>assistant\n");
+        assert!(!segments[1].allow_special);
+        assert_eq!(segments[1].text, "LLM-Native Interaction");
+    }
+
+    #[test]
+    fn continue_final_message_truncates_inside_an_ordinary_segment() {
+        use dynamo_renderer::{RenderedPrompt, RenderedSegment};
+
+        let rendered = continue_rendered(RenderedPrompt::segmented(vec![
+            RenderedSegment {
+                text: "<ctrl>".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: format!("hello world{}extra", super::CONTINUE_FINAL_MESSAGE_TAG),
+                allow_special: false,
+            },
+        ]));
+        assert_eq!(rendered.as_str(), "<ctrl>hello world");
+        let segments = rendered
+            .segments()
+            .expect("truncated prompt stays segmented");
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].allow_special);
+        assert_eq!(segments[1].text, "hello world");
+        assert!(!segments[1].allow_special);
     }
 }
