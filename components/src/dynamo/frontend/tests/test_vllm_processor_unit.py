@@ -2650,9 +2650,7 @@ class TestReasoningTokenAccounting:
 
     # -- P1 #1: account before the include_reasoning projection ------------
 
-    def test_hidden_reasoning_is_counted_when_include_reasoning_false(
-        self, tokenizer
-    ):
+    def test_hidden_reasoning_is_counted_when_include_reasoning_false(self, tokenizer):
         """include_reasoning=false suppresses the reasoning DELTA, not the tokens.
 
         Observing emitted choices saw no reasoning_content here and reported 0 for a
