@@ -467,10 +467,17 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# Analyze NumPy types without surfacing errors from NumPy itself.
+# WAR mypy 1.18.x crash with numpy 1.26.x stubs:
+# "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]
-follow_imports = "silent"
+follow_imports = "skip"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# NumPy 2.3+ leaves np.empty() untyped when NumPy imports are skipped. Keep the
+# existing realtime handler accepted without suppressing other error classes.
+module = ["dynamo.vllm.realtime.handler"]
+disable_error_code = ["var-annotated"]
 
 [[tool.mypy.overrides]]
 # Third-party libs without type stubs or optional internal deps
