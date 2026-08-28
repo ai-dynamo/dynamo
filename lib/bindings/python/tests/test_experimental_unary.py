@@ -50,7 +50,7 @@ async def test_unary_client_propagates_cancellation_to_nested_endpoint(
     runtime: Any,
 ) -> None:
     suffix = uuid4().hex
-    inner_endpoint = runtime.endpoint(f"experimental-{suffix}.inner.generate")
+    inner_endpoint = runtime.endpoint(f"experimental-{suffix}.inner.complete")
     outer_endpoint = runtime.endpoint(f"experimental-{suffix}.outer.generate")
     inner_started = asyncio.Event()
     inner_stopped = asyncio.Event()
@@ -117,7 +117,7 @@ async def test_llm_unary_client_collects_a_generate_endpoint(runtime: Any) -> No
             "completion_usage": {"completion_tokens": 3},
         }
 
-    server_task = asyncio.create_task(endpoint.serve_endpoint(generate))
+    server_task = asyncio.ensure_future(endpoint.serve_endpoint(generate))
     try:
         client = await endpoint.client()
         await client.wait_for_instances()
