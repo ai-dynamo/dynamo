@@ -33,7 +33,9 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs,
             self.nvext(),
         );
-        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
+        let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
+        generator.should_return_prompt_logprobs = self.common.prompt_logprobs.is_some();
+        generator
     }
 }
 
@@ -45,6 +47,10 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
+    /// Whether the unary response should include prompt logprobs at its root.
+    should_return_prompt_logprobs: bool,
+    /// Prompt logprobs may arrive before the terminal backend delta.
+    prompt_logprobs: Option<common::llm_backend::PromptLogprobs>,
 }
 
 impl DeltaGenerator {
@@ -58,6 +64,8 @@ impl DeltaGenerator {
             ),
             service_tier: None,
             emitted_role_choices: HashSet::new(),
+            should_return_prompt_logprobs: false,
+            prompt_logprobs: None,
         }
     }
 
@@ -174,6 +182,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None, // Will be populated by router layer if needed
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
@@ -198,6 +207,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
@@ -272,8 +282,26 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        let prompt_logprobs_payload =
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let include_root_prompt_logprobs = self.should_return_prompt_logprobs;
+        let include_nvext_prompt_logprobs = self.state.options().response_fields.prompt_logprobs;
+        if self.prompt_logprobs.is_none()
+            && (include_root_prompt_logprobs || include_nvext_prompt_logprobs)
+        {
+            self.prompt_logprobs =
+                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        }
+        let prompt_logprobs_payload = finish_reason
+            .is_some()
+            .then(|| self.prompt_logprobs.take())
+            .flatten();
+        let (root_prompt_logprobs, nvext_prompt_logprobs) =
+            match (include_root_prompt_logprobs, include_nvext_prompt_logprobs) {
+                (true, true) => (prompt_logprobs_payload.clone(), prompt_logprobs_payload),
+                (true, false) => (prompt_logprobs_payload, None),
+                (false, true) => (None, prompt_logprobs_payload),
+                (false, false) => (None, None),
+            };
+        stream_response.prompt_logprobs = root_prompt_logprobs;
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
             Some(self.state.tracker_ref()),
@@ -281,7 +309,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             delta.engine_data,
             stop_reason,
             Some(completion_token_ids_slice),
-            prompt_logprobs_payload,
+            nvext_prompt_logprobs,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -693,6 +721,83 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_prompt_logprobs_emit_on_unary_root_with_optional_nvext() {
+        let expected = serde_json::json!([
+            null,
+            {
+                "17": {
+                    "logprob": -0.25,
+                    "rank": 1,
+                    "decoded_token": " hello"
+                }
+            }
+        ]);
+
+        for (request_prompt_logprobs, include_nvext) in
+            [(true, false), (true, true), (false, true), (false, false)]
+        {
+            let mut request = create_test_request();
+            if include_nvext {
+                request.nvext = Some(
+                    crate::protocols::common::extensions::NvExt::builder()
+                        .extra_fields(vec!["prompt_logprobs".to_string()])
+                        .build()
+                        .expect("valid nvext"),
+                );
+            }
+            let prompt_logprobs_count = if include_nvext { 2 } else { 0 };
+            request.common.prompt_logprobs =
+                request_prompt_logprobs.then_some(prompt_logprobs_count);
+            let mut generator = request.response_generator(format!(
+                "req-prompt-logprobs-{request_prompt_logprobs}-{include_nvext}"
+            ));
+
+            let mut partial_output = final_backend_output();
+            partial_output.finish_reason = None;
+            partial_output.engine_data = Some(serde_json::json!({
+                "prompt_logprobs": expected.clone()
+            }));
+            let partial_response = generator
+                .choice_from_postprocessor(partial_output)
+                .expect("partial choice generation");
+            assert!(partial_response.prompt_logprobs.is_none());
+
+            let stream_response = generator
+                .choice_from_postprocessor(final_backend_output())
+                .expect("choice generation");
+
+            assert_eq!(
+                serde_json::to_value(&stream_response)
+                    .expect("serialize stream response")
+                    .get("prompt_logprobs"),
+                None,
+                "internal prompt logprobs must not leak into SSE chunks"
+            );
+
+            let response = crate::protocols::openai::chat_completions::DeltaAggregator::apply(
+                futures::stream::iter(vec![crate::protocols::Annotated::from_data(
+                    stream_response,
+                )]),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .expect("aggregate response");
+            let response_json = serde_json::to_value(response).expect("serialize unary response");
+
+            if request_prompt_logprobs {
+                assert_eq!(response_json["prompt_logprobs"], expected);
+            } else {
+                assert!(response_json.get("prompt_logprobs").is_none());
+            }
+            if include_nvext {
+                assert_eq!(response_json["nvext"]["prompt_logprobs"], expected);
+            } else {
+                assert!(response_json.get("nvext").is_none());
+            }
+        }
     }
 
     #[test]
