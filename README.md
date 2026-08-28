@@ -42,6 +42,7 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
+| Thu, Sep 10, 2026 | **[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)** | [Luma](https://luma.com/BaseDynSGL) |
 | Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
 | Thu, Jul 30, 2026 | ~~[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)~~ | [Luma](https://luma.com/JulyDynamoAfterHours) |
 <!-- EVENTS:END -->
@@ -191,9 +192,9 @@ Pre-built recipes for common models:
 
 | Model | Framework | Mode | Recipe |
 |-------|-----------|------|--------|
-| Llama-3-70B | vLLM | Aggregated | [View](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
+| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
+| Kimi-K3 | vLLM | Aggregated | [View](recipes/kimi-k3/vllm/) |
 
 See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 

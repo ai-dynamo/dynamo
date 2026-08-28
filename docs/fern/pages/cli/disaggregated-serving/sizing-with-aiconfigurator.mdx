@@ -87,9 +87,8 @@ for [vLLM](../../recipes/cli-templates/vllm.mdx),
 [SGLang](../../recipes/cli-templates/sglang.mdx), and
 [TensorRT-LLM](../../recipes/cli-templates/tensorrt-llm.mdx).
 
-If one worker requires more GPUs than a node provides, follow
-[Multi-Node Deployment](../model-deployment/multi-node-deployment.mdx) rather than treating the GPU budget as one flat
-local device list.
+If one worker requires more GPUs than a node provides, use a
+[Kubernetes multinode deployment](../../kubernetes/model-deployment/multinode-deployments.md) instead of treating the GPU budget as one flat local device list.
 
 </Step>
 <Step title="Validate the recommendation" id="validate-the-recommendation">

@@ -228,7 +228,7 @@ def test_repository_selective_backend_jobs_keep_default_marker_dimensions() -> N
         if "test_markers:" in line and "_features" in line
     ]
 
-    assert len(selective_marker_inputs) == 10
+    assert len(selective_marker_inputs) == 9
     assert all("and (unit or ({0}))" in line for line in selective_marker_inputs)
     assert all("gpu_" in line for line in selective_marker_inputs)
     assert all(
@@ -300,10 +300,6 @@ def test_exact_pr_inventory_applies_lifecycle_and_gpu_markers() -> None:
             "nodeid": "tests/serve/test_vllm.py::test_multi_gpu",
             "markers": ["pre_merge", "gpu_2", "router", "vllm"],
         },
-        {
-            "nodeid": "tests/serve/test_vllm.py::test_four_gpu",
-            "markers": ["post_merge", "gpu_4", "router", "vllm"],
-        },
     ]
 
     selected = selected_pr_tests(plan, records)
@@ -314,4 +310,3 @@ def test_exact_pr_inventory_applies_lifecycle_and_gpu_markers() -> None:
     ]
     assert selected["vllm-gpu-1"] == ["tests/serve/test_vllm.py::test_gpu"]
     assert selected["vllm-multi-gpu"] == ["tests/serve/test_vllm.py::test_multi_gpu"]
-    assert selected["vllm-4-gpu"] == ["tests/serve/test_vllm.py::test_four_gpu"]

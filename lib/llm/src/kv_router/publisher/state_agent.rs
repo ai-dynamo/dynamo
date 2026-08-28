@@ -40,7 +40,7 @@ use dynamo_kv_router::{
     },
     protocols::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, StorageTier, WorkerWithDpRank,
+        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
     },
     zmq_wire::{KvEventOwnership, ZmqEventNormalizer},
 };
@@ -98,6 +98,7 @@ pub fn resolve_stable_dp_slot_id(explicit_slot: &str) -> Result<StableDpSlotId> 
 pub struct KvStateAgentSlotConfig {
     pub cache_owner_id: CacheOwnerId,
     pub global_dp_rank: u32,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -872,6 +873,7 @@ impl KvStateAgent {
             protocol_version: identity.protocol_version,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: recovery_target.clone(),
+            router_hint_source: config.slot.router_hint_source.clone(),
         };
         let persistent_source = match register_advertisement(
             &component,

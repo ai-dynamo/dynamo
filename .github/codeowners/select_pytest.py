@@ -108,12 +108,6 @@ def selected_pr_tests(plan: SelectionPlan, records: list[dict]) -> dict[str, lis
                 if markers_by_nodeid[nodeid] & allowed_lifecycle
                 and markers_by_nodeid[nodeid] & allowed_hardware
             ]
-    jobs["vllm-4-gpu"] = [
-        nodeid
-        for nodeid in lane_tests["vllm"]
-        if markers_by_nodeid[nodeid] & {"pre_merge", "post_merge"}
-        and "gpu_4" in markers_by_nodeid[nodeid]
-    ]
     return jobs
 
 
