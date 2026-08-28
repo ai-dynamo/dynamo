@@ -299,6 +299,30 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Router-estimated prefill token-equivalents avoidable by selecting the highest-overlap eligible worker. Lower-tier cache hits use their configured router weights, so this is not a count of blocks that P2P can necessarily transfer. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill` or `decode`).
 </ParamField>
 
+### Sampled routing-decision diagnostics
+
+Set `DYN_ROUTER_DECISION_LOG_SAMPLE_RATE` on a router process to emit an INFO event named
+`Sampled non-max-overlap routing decision`. The default is `0` (off). A sampled event is emitted only
+when the built-in policy selects less effective overlap than another eligible worker. Its
+`routing_decision` field contains one JSON object with:
+
+- the existing request ID, worker type, selection method, block size, and request size in blocks;
+- the selected and highest-overlap eligible workers and avoidable prefill token-equivalents;
+- the effective router settings, including request-level overrides; and
+- one row per eligible worker with tier overlap, active load, every score component, taint multiplier,
+  and final score.
+
+The diagnostic never includes prompts, token IDs, headers, bearer keys, or session IDs. It reports
+only eligible candidates; workers excluded by availability, overload, allow lists, or required taints
+are outside `candidate_scope=eligible_workers_only`. Effective overlap and avoidable tokens are
+weighted token-equivalents, not necessarily literal device-resident blocks transferable by P2P.
+
+At the default value there is no serialization or candidate rescoring. For a sampled non-max decision,
+the router makes one additional pass over eligible workers and emits one JSON record whose size grows
+linearly with worker count. Start a Flash shadow at `0.001` (0.1%), measure emitted record volume, and
+increase only if needed. Set the value back to `0` or remove it to stop diagnostics; workers do not
+need a configuration or image change.
+
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.

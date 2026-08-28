@@ -15,7 +15,7 @@ pub use policy::{
     WorkerSelectionPolicy,
 };
 
-use default::{pick_default_worker, selection_weights};
+use default::{log_non_max_overlap_diagnostic, pick_default_worker, selection_weights};
 use policy::{
     CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
 };
@@ -378,7 +378,19 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 kv_router_config,
                 worker_type,
             };
-            pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+            let selected =
+                pick_default_worker(&scorer, picker, &input, workers, request, eligibility);
+            if let Some((worker, _)) = selected {
+                log_non_max_overlap_diagnostic(
+                    &scorer,
+                    &input,
+                    workers,
+                    request,
+                    eligibility,
+                    worker,
+                );
+            }
+            selected
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();

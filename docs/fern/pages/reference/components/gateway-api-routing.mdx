@@ -157,6 +157,12 @@ Gateway topology.
   Controls worker exploration through normalized softmax sampling. `0` selects deterministically.
 </ParamField>
 
+<ParamField path="DYN_ROUTER_DECISION_LOG_SAMPLE_RATE" type="number" default="0.0">
+  Samples payload-free diagnostics for decisions that selected less effective KV overlap than another
+  eligible worker. Accepts a fraction from `0` through `1`; `0` disables the diagnostic. Sampling is
+  deterministic by request ID and applies only to the built-in worker-selection policy.
+</ParamField>
+
 <ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
   plane.

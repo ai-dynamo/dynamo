@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::Serialize;
 
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
@@ -105,6 +106,21 @@ pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
 struct DefaultScoringContext {
     min_active_prefill_tokens: usize,
     has_tier_overlap_blocks: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+struct DefaultScoreBreakdown {
+    overlap_credit_decay: f64,
+    effective_overlap_score_credit: f64,
+    overlap_credit_blocks: f64,
+    adjusted_prefill_blocks: f64,
+    prefill_cost_blocks: f64,
+    decode_cost_blocks: f64,
+    active_request_cost_blocks: f64,
+    base_score: f64,
+    preferred_taint_multiplier: Option<f64>,
+    total_score: f64,
+    decode_overlap_formula: bool,
 }
 
 pub(super) struct DefaultWorkerPicker {
@@ -270,27 +286,248 @@ fn default_row(
     )
 }
 
+#[cfg(any(test, feature = "standalone-indexer"))]
+#[derive(Debug, Serialize)]
+struct RoutingDecisionDiagnostic<'a> {
+    schema: &'static str,
+    request_id: &'a str,
+    worker_type: &'static str,
+    policy: &'static str,
+    selection_reason: &'static str,
+    candidate_scope: &'static str,
+    block_size: u32,
+    request_blocks: u64,
+    track_prefill_tokens: bool,
+    selected_worker: WorkerWithDpRank,
+    max_overlap_worker: WorkerWithDpRank,
+    avoidable_prefill_token_equivalents: f64,
+    settings: RoutingDecisionSettings,
+    candidates: Vec<RoutingCandidateDiagnostic>,
+}
+
+#[cfg(any(test, feature = "standalone-indexer"))]
+#[derive(Debug, Serialize)]
+struct RoutingDecisionSettings {
+    overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
+    prefill_load_scale: f64,
+    host_cache_hit_weight: f64,
+    disk_cache_hit_weight: f64,
+    shared_cache_multiplier: f64,
+    decode_active_request_weight: f64,
+    router_temperature: f64,
+}
+
+#[cfg(any(test, feature = "standalone-indexer"))]
+#[derive(Debug, Serialize)]
+struct RoutingCandidateDiagnostic {
+    worker: WorkerWithDpRank,
+    eligible: bool,
+    selected: bool,
+    max_overlap: bool,
+    effective_overlap_blocks: f64,
+    device_overlap_blocks: f64,
+    host_overlap_blocks: f64,
+    disk_overlap_blocks: f64,
+    shared_beyond_device_blocks: u32,
+    raw_prefill_blocks: f64,
+    active_prefill_tokens: usize,
+    decode_cost_blocks: f64,
+    active_requests: usize,
+    score: DefaultScoreBreakdown,
+}
+
+#[cfg(any(test, feature = "standalone-indexer"))]
+fn sampled_request(request_id: &str, sample_rate: f64) -> bool {
+    if sample_rate <= 0.0 {
+        return false;
+    }
+    if sample_rate >= 1.0 {
+        return true;
+    }
+    let sample = xxhash_rust::xxh3::xxh3_64(request_id.as_bytes()) as f64 / u64::MAX as f64;
+    sample < sample_rate
+}
+
+#[cfg(feature = "standalone-indexer")]
+fn decision_log_sample_rate() -> f64 {
+    use std::sync::OnceLock;
+
+    static SAMPLE_RATE: OnceLock<f64> = OnceLock::new();
+    *SAMPLE_RATE.get_or_init(|| {
+        let Some(value) = std::env::var_os("DYN_ROUTER_DECISION_LOG_SAMPLE_RATE") else {
+            return 0.0;
+        };
+        let value = value.to_string_lossy();
+        match value.parse::<f64>() {
+            Ok(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => rate,
+            _ => {
+                tracing::warn!(
+                    value = %value,
+                    "Ignoring invalid DYN_ROUTER_DECISION_LOG_SAMPLE_RATE; expected 0 through 1"
+                );
+                0.0
+            }
+        }
+    })
+}
+
+#[cfg(any(test, feature = "standalone-indexer"))]
+fn non_max_overlap_diagnostic<'a, C: WorkerConfigLike>(
+    scorer: &DefaultWorkerScorer<&KvRouterConfig>,
+    input: &MaterializedSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &'a SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selected_worker: WorkerWithDpRank,
+    sample_rate: f64,
+) -> Option<RoutingDecisionDiagnostic<'a>> {
+    if eligibility.pinned_worker().is_some() {
+        return None;
+    }
+    let request_id = request.mode.request_id()?;
+    if !sampled_request(request_id, sample_rate) {
+        return None;
+    }
+
+    let selected_overlap = request.effective_overlap_blocks_for(selected_worker);
+    let mut max_overlap = (selected_worker, selected_overlap);
+    eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+        let overlap = request.effective_overlap_blocks_for(worker);
+        if overlap > max_overlap.1 || (overlap == max_overlap.1 && worker < max_overlap.0) {
+            max_overlap = (worker, overlap);
+        }
+    });
+    if max_overlap.1 <= selected_overlap {
+        return None;
+    }
+
+    let default_context =
+        DefaultScoringContext::new(workers, request, eligibility, input.context.weights);
+    let mut candidates = Vec::new();
+    eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+        let preferred_taint_multiplier = request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints());
+        let row = default_row(input, default_context, worker, preferred_taint_multiplier);
+        candidates.push(RoutingCandidateDiagnostic {
+            worker,
+            eligible: true,
+            selected: worker == selected_worker,
+            max_overlap: worker == max_overlap.0,
+            effective_overlap_blocks: row.cache.effective_overlap_blocks,
+            device_overlap_blocks: row.cache.device_overlap_blocks,
+            host_overlap_blocks: row.cache.host_overlap_blocks,
+            disk_overlap_blocks: row.cache.disk_overlap_blocks,
+            shared_beyond_device_blocks: row.cache.shared_beyond_device_blocks,
+            raw_prefill_blocks: row.load.raw_prefill_blocks,
+            active_prefill_tokens: row.load.active_prefill_tokens,
+            decode_cost_blocks: row.load.decode_cost_blocks,
+            active_requests: row.load.active_requests,
+            score: scorer.diagnostic_score(&input.context, default_context, &row),
+        });
+    });
+    candidates
+        .sort_unstable_by_key(|candidate| (candidate.worker.worker_id, candidate.worker.dp_rank));
+
+    let temperature = input
+        .context
+        .router_temperature_override
+        .unwrap_or(scorer.kv_router_config.router_temperature);
+    Some(RoutingDecisionDiagnostic {
+        schema: "dynamo.router.decision.v1",
+        request_id,
+        worker_type: scorer.worker_type,
+        policy: "default",
+        selection_reason: if temperature == 0.0 {
+            "minimum_cost"
+        } else {
+            "temperature_sample"
+        },
+        candidate_scope: "eligible_workers_only",
+        block_size: input.context.block_size,
+        request_blocks: input.context.request_blocks,
+        track_prefill_tokens: input.context.track_prefill_tokens,
+        selected_worker,
+        max_overlap_worker: max_overlap.0,
+        avoidable_prefill_token_equivalents: (max_overlap.1 - selected_overlap)
+            * input.context.block_size as f64,
+        settings: RoutingDecisionSettings {
+            overlap_score_credit: input.context.weights.overlap_score_credit,
+            overlap_score_credit_decay: input.context.weights.overlap_score_credit_decay,
+            prefill_load_scale: input.context.weights.prefill_load_scale,
+            host_cache_hit_weight: scorer.kv_router_config.host_cache_hit_weight,
+            disk_cache_hit_weight: scorer.kv_router_config.disk_cache_hit_weight,
+            shared_cache_multiplier: input.context.weights.shared_cache_multiplier,
+            decode_active_request_weight: scorer.kv_router_config.decode_active_request_weight,
+            router_temperature: temperature,
+        },
+        candidates,
+    })
+}
+
+#[cfg(not(feature = "standalone-indexer"))]
+pub(super) fn log_non_max_overlap_diagnostic<C: WorkerConfigLike>(
+    scorer: &DefaultWorkerScorer<&KvRouterConfig>,
+    input: &MaterializedSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selected_worker: WorkerWithDpRank,
+) {
+    let _ = (
+        scorer,
+        input,
+        workers,
+        request,
+        eligibility,
+        selected_worker,
+    );
+}
+
+#[cfg(feature = "standalone-indexer")]
+pub(super) fn log_non_max_overlap_diagnostic<C: WorkerConfigLike>(
+    scorer: &DefaultWorkerScorer<&KvRouterConfig>,
+    input: &MaterializedSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selected_worker: WorkerWithDpRank,
+) {
+    let Some(diagnostic) = non_max_overlap_diagnostic(
+        scorer,
+        input,
+        workers,
+        request,
+        eligibility,
+        selected_worker,
+        decision_log_sample_rate(),
+    ) else {
+        return;
+    };
+    match serde_json::to_string(&diagnostic) {
+        Ok(diagnostic) => tracing::info!(
+            target: "dynamo::router_decision",
+            routing_decision = %diagnostic,
+            "Sampled non-max-overlap routing decision"
+        ),
+        Err(error) => tracing::warn!(%error, "Failed to serialize routing decision diagnostic"),
+    }
+}
+
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
-    fn worker_logit(
+    fn score_breakdown(
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
         row: &WorkerCandidate,
-        formula_name: &'static str,
-    ) -> f64 {
+    ) -> DefaultScoreBreakdown {
         let kv_router_config = self.kv_router_config.borrow();
         let weights = context.weights;
-        let worker = row.worker;
         let cache = &row.cache;
         let load = &row.load;
-        let effective_overlap_blocks = cache.effective_overlap_blocks;
-        let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = cache.shared_beyond_device_blocks;
         let shared_overlap_blocks =
-            weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
-        // Normalize backlog above the least-loaded eligible worker by this request's
-        // size. The rational decay softly trades cache locality for prefill balance,
-        // while leaving workers at the load floor with their full device credit.
+            weights.shared_cache_multiplier * cache.shared_beyond_device_blocks as f64;
         let overlap_credit_decay =
             if context.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
                 let excess_active_prefill_blocks = load
@@ -305,28 +542,80 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit * cache.device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
         let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
+        let decode_overlap_formula = self.worker_type == "decode"
+            && !context.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0;
+        let (adjusted_prefill_blocks, prefill_cost_blocks, base_score) = if decode_overlap_formula {
+            let adjusted_decode_blocks = (decode_cost_blocks - overlap_credit_blocks).max(0.0);
+            (
+                0.0,
+                0.0,
+                adjusted_decode_blocks + active_request_cost_blocks,
+            )
+        } else {
+            let adjusted_prefill_blocks =
+                (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+            let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
+            (
+                adjusted_prefill_blocks,
+                prefill_cost_blocks,
+                prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks,
+            )
+        };
+        let total_score = row
+            .preferred_taint_multiplier
+            .map_or(base_score, |multiplier| base_score * multiplier);
+
+        DefaultScoreBreakdown {
+            overlap_credit_decay,
+            effective_overlap_score_credit,
+            overlap_credit_blocks,
+            adjusted_prefill_blocks,
+            prefill_cost_blocks,
+            decode_cost_blocks,
+            active_request_cost_blocks,
+            base_score,
+            preferred_taint_multiplier: row.preferred_taint_multiplier,
+            total_score,
+            decode_overlap_formula,
+        }
+    }
+
+    fn worker_logit(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        default_context: DefaultScoringContext,
+        row: &WorkerCandidate,
+        formula_name: &'static str,
+    ) -> f64 {
+        let weights = context.weights;
+        let worker = row.worker;
+        let cache = &row.cache;
+        let load = &row.load;
+        let effective_overlap_blocks = cache.effective_overlap_blocks;
+        let shared_beyond_device_blocks = cache.shared_beyond_device_blocks;
+        let breakdown = self.score_breakdown(context, default_context, row);
+        let overlap_credit_decay = breakdown.overlap_credit_decay;
+        let overlap_credit_blocks = breakdown.overlap_credit_blocks;
+        let decode_cost_blocks = breakdown.decode_cost_blocks;
+        let active_request_cost_blocks = breakdown.active_request_cost_blocks;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
         // conditional disagg leaves a positive overlap credit in place, prefer
         // cache-hot decode workers while still charging decode backlog.
-        if self.worker_type == "decode"
-            && !context.track_prefill_tokens
-            && weights.overlap_score_credit > 0.0
-        {
+        if breakdown.decode_overlap_formula {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
             // This loses ordering between workers whose overlap fully offsets decode load, but
             // avoids inverting taint preference among negative-score workers.
-            let overlap_adjusted_decode_blocks =
-                (decode_cost_blocks - overlap_credit_blocks).max(0.0);
-            let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            let logit = breakdown.base_score;
             // Stamped for the same reason as the two rows below: this row is emitted from the
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
@@ -342,9 +631,8 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             return logit;
         }
 
-        let adjusted_prefill_blocks = (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        let adjusted_prefill_blocks = breakdown.adjusted_prefill_blocks;
+        let logit = breakdown.base_score;
 
         // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
         // spawns without the caller's request span, so the logging layer cannot attach
@@ -396,12 +684,18 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         row: &WorkerCandidate,
     ) -> f64 {
         let base_score = self.worker_logit(context, default_context, row, "Formula");
-        match row.preferred_taint_multiplier {
-            // NOTE: This multiplicative bias assumes a non-negative score. Negative
-            // overlap scores expose its pre-existing sign sensitivity; keep it for now.
-            Some(multiplier) => base_score * multiplier,
-            None => base_score,
-        }
+        row.preferred_taint_multiplier
+            .map_or(base_score, |multiplier| base_score * multiplier)
+    }
+
+    #[cfg(any(test, feature = "standalone-indexer"))]
+    fn diagnostic_score(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        default_context: DefaultScoringContext,
+        row: &WorkerCandidate,
+    ) -> DefaultScoreBreakdown {
+        self.score_breakdown(context, default_context, row)
     }
 }
 
@@ -661,6 +955,114 @@ mod tests {
                 &default_row(&input, default_context, worker, None),
                 "test",
             )
+    }
+
+    #[test]
+    fn decision_sampling_is_off_by_default_and_deterministic() {
+        assert!(!sampled_request("request-a", 0.0));
+        assert!(sampled_request("request-a", 1.0));
+        assert_eq!(
+            sampled_request("request-a", 0.25),
+            sampled_request("request-a", 0.25)
+        );
+    }
+
+    #[test]
+    fn non_max_diagnostic_contains_only_eligible_candidate_scores() {
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+            (2, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(256);
+        request.overlap.effective_overlap_blocks = HashMap::from([
+            (WorkerWithDpRank::from_worker_id(0), 8.0),
+            (WorkerWithDpRank::from_worker_id(1), 2.0),
+            (WorkerWithDpRank::from_worker_id(2), 16.0),
+        ]);
+        request.allowed_worker_ids = Some(HashSet::from([0, 1]));
+        let config = KvRouterConfig {
+            overlap_score_credit: 1.0,
+            ..Default::default()
+        };
+        let input =
+            MaterializedSelectionInput::new(&request, 32, selection_weights(&config, &request));
+        let scorer = DefaultWorkerScorer {
+            kv_router_config: &config,
+            worker_type: "decode",
+        };
+
+        let diagnostic = non_max_overlap_diagnostic(
+            &scorer,
+            &input,
+            &workers,
+            &request,
+            request.eligibility(),
+            WorkerWithDpRank::from_worker_id(1),
+            1.0,
+        )
+        .expect("worker 1 sacrifices eligible overlap on worker 0");
+
+        assert_eq!(diagnostic.selected_worker.worker_id, 1);
+        assert_eq!(diagnostic.max_overlap_worker.worker_id, 0);
+        assert_eq!(diagnostic.avoidable_prefill_token_equivalents, 192.0);
+        assert_eq!(diagnostic.candidates.len(), 2);
+        assert!(diagnostic.candidates.iter().all(|row| row.eligible));
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .all(|row| row.worker.worker_id != 2)
+        );
+        let selected = diagnostic
+            .candidates
+            .iter()
+            .find(|row| row.selected)
+            .expect("selected candidate");
+        assert_eq!(selected.worker.worker_id, 1);
+        assert_eq!(selected.score.total_score, selected.score.base_score);
+
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+        assert!(serialized.contains("dynamo.router.decision.v1"));
+        assert!(serialized.contains("avoidable_prefill_token_equivalents"));
+        for forbidden in ["prompt", "token_ids", "bearer", "session_id", "headers"] {
+            assert!(!serialized.contains(forbidden), "leaked field: {forbidden}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_skips_ties() {
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(64);
+        request.overlap.effective_overlap_blocks = HashMap::from([
+            (WorkerWithDpRank::from_worker_id(0), 3.0),
+            (WorkerWithDpRank::from_worker_id(1), 3.0),
+        ]);
+        let config = KvRouterConfig {
+            ..Default::default()
+        };
+        let input =
+            MaterializedSelectionInput::new(&request, 16, selection_weights(&config, &request));
+        let scorer = DefaultWorkerScorer {
+            kv_router_config: &config,
+            worker_type: "prefill",
+        };
+
+        assert!(
+            non_max_overlap_diagnostic(
+                &scorer,
+                &input,
+                &workers,
+                &request,
+                request.eligibility(),
+                WorkerWithDpRank::from_worker_id(1),
+                1.0,
+            )
+            .is_none()
+        );
     }
 
     #[test]
