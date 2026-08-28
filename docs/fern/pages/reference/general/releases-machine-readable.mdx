@@ -146,7 +146,7 @@ Release highlights (stable releases):
 | Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
 | Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |
 | Request Cancellation | Experimental (Remote-prefill-phase cancellation not supported in disaggregated mode) | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
-| LoRA | Not supported | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
+| LoRA | Experimental (Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated) | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
 | Tool Calling | Supported | Supported | Supported |
 | Speculative Decoding | Experimental (Code hooks exist; no examples or docs yet) | Supported | Supported (Eagle3) |
 | GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
