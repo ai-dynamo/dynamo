@@ -650,33 +650,27 @@ def test_destroy_mapping_frees_allocation_and_metadata(running_gms):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_prune_allocations_frees_unreferenced_mappings(running_gms):
+def test_destroy_mapping_releases_only_the_named_allocation(running_gms):
     _, socket_path = running_gms
-
-    from gpu_memory_service.client.torch.allocator import prune_allocations
 
     writer = GMSClientMemoryManager(socket_path, device=0)
     try:
         writer.connect(RequestedLockType.RW)
         keep_va = writer.create_mapping(size=4096, tag="weights")
-        prune_va = writer.create_mapping(size=8192, tag="weights")
+        drop_va = writer.create_mapping(size=8192, tag="weights")
 
         keep_allocation_id = writer.mappings[keep_va].allocation_id
-        prune_allocation_id = writer.mappings[prune_va].allocation_id
+        drop_allocation_id = writer.mappings[drop_va].allocation_id
 
-        prune_allocations(
-            writer,
-            referenced_allocation_ids={keep_allocation_id},
-            synchronize=False,
-        )
+        writer.destroy_mapping(drop_va)
 
         assert keep_va in writer.mappings
-        assert prune_va not in writer.mappings
+        assert drop_va not in writer.mappings
         assert [info.allocation_id for info in writer.list_handles()] == [
             keep_allocation_id
         ]
         with pytest.raises(RuntimeError, match="Unknown allocation"):
-            writer.get_handle_info(prune_allocation_id)
+            writer.get_handle_info(drop_allocation_id)
     finally:
         writer.close()
 
@@ -795,8 +789,6 @@ def test_remap_all_vas_accepts_restored_layout_after_pruned_slot_gap(
 
     _, socket_path = running_gms
 
-    from gpu_memory_service.client.torch.allocator import prune_allocations
-
     first_writer = GMSClientMemoryManager(socket_path, device=0)
     reader = GMSClientMemoryManager(socket_path, device=0)
     second_writer = GMSClientMemoryManager(socket_path, device=0)
@@ -814,11 +806,9 @@ def test_remap_all_vas_accepts_restored_layout_after_pruned_slot_gap(
         assert first_writer.mappings[pruned_va].layout_slot == 1
         assert kept_b.layout_slot == 2
 
-        prune_allocations(
-            first_writer,
-            referenced_allocation_ids={kept_a.allocation_id, kept_b.allocation_id},
-            synchronize=False,
-        )
+        # Dropping the middle allocation leaves a gap in the source slots,
+        # which is what the restored layout must be allowed to compact away.
+        first_writer.destroy_mapping(pruned_va)
         first_writer.metadata_put("tensor.0", kept_a.allocation_id, 0, b"a")
         first_writer.metadata_put("tensor.1", kept_b.allocation_id, 0, b"b")
         assert first_writer.commit()

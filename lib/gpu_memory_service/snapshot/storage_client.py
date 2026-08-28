@@ -197,7 +197,14 @@ class GMSStorageClient:
         targets: Dict[str, GMSTransferTarget] = {}
         for entry in manifest.allocations:
             old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
+            # dedicated=True: a restore reproduces a published layout
+            # byte-for-byte. The saved tensor metadata carries offsets relative
+            # to each original allocation and is replayed unchanged, so one
+            # allocation per manifest entry is load-bearing -- carving these
+            # out of a shared slab would rebase every offset after the first
+            # region in a slab, and the server's bound check cannot catch it
+            # because the slab is larger than the allocation it replaced.
+            va = mm.create_mapping(size=entry.size, tag=entry.tag, dedicated=True)
             id_map[old_id] = mm.mappings[va].allocation_id
             targets[old_id] = GMSTransferTarget(
                 allocation_id=old_id,

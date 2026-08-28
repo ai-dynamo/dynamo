@@ -57,7 +57,7 @@ class _FakeAllocator:
 
 @pytest.fixture
 def gms_write(monkeypatch):
-    """A prepared (registered + pruned, uncommitted) fake GMS write."""
+    """A prepared (registered + reclaimed, uncommitted) fake GMS write."""
     events = []
     allocator = _FakeAllocator(events)
 
@@ -65,14 +65,15 @@ def gms_write(monkeypatch):
         events.append("register")
         return {"weight"}
 
-    def prune(_allocator, *, referenced_allocation_ids):
-        assert referenced_allocation_ids == {"weight"}
-        events.append("prune")
+    def release_mempool(_allocator):
+        # Destroying the mempool hands torch's cached, unreferenced blocks
+        # back through the free callback; live Parameter storage stays mapped.
+        events.append("release_mempool")
         _allocator.mappings.pop(2)
         _allocator.total_bytes = 60
 
     monkeypatch.setattr(common_utils, "register_module_tensors", register)
-    monkeypatch.setattr(common_utils, "prune_allocations", prune)
+    monkeypatch.setattr(common_utils, "release_weight_mempool", release_mempool)
     monkeypatch.setattr(
         common_utils,
         "rebind_nonparameter_tensors",
@@ -91,11 +92,11 @@ def clear_pending_write(monkeypatch):
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
 
 
-def test_prepare_registers_prunes_and_defers_commit(gms_write):
-    """Prepare must not commit; accounting covers pruned and rebound bytes."""
+def test_prepare_registers_reclaims_and_defers_commit(gms_write):
+    """Prepare must not commit; accounting covers reclaimed and rebound bytes."""
     allocator, stats, events = gms_write
 
-    assert events == ["register", "prune"]
+    assert events == ["register", "release_mempool"]
     assert stats.committed_bytes == 60
     assert stats.pruned_bytes == 40
     assert stats.pruned_count == 1
@@ -113,7 +114,7 @@ def test_pending_write_publish_clears_pending(gms_write):
 
     assert model_loader.publish_pending_gms_write()
 
-    assert events == ["register", "prune", "commit", "connect", "remap"]
+    assert events == ["register", "release_mempool", "commit", "connect", "remap"]
     assert not model_loader.has_pending_gms_write()
     assert not model_loader.publish_pending_gms_write()
 
@@ -125,7 +126,7 @@ def test_pending_write_abort_releases_writer_without_cuda_cleanup(gms_write):
 
     assert model_loader.abort_pending_gms_write()
 
-    assert events == ["register", "prune", "close_best_effort"]
+    assert events == ["register", "release_mempool", "close_best_effort"]
     assert "close" not in events
     assert model_loader._pending_retained_gms_tensors == []
     assert not model_loader.has_pending_gms_write()
@@ -140,7 +141,7 @@ def test_publication_failure_releases_writer_and_preserves_error(gms_write):
     with pytest.raises(RuntimeError, match="commit failed"):
         model_loader.publish_pending_gms_write()
 
-    assert events == ["register", "prune", "commit", "close_best_effort"]
+    assert events == ["register", "release_mempool", "commit", "close_best_effort"]
     assert not model_loader.has_pending_gms_write()
 
 
@@ -157,7 +158,7 @@ def test_eager_finalize_preserves_publish_then_rebind_order(gms_write):
     assert stats.pruned_bytes == 40
     assert events == [
         "register",
-        "prune",
+        "release_mempool",
         "commit",
         "connect",
         "remap",

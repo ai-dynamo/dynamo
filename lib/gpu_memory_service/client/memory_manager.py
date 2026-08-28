@@ -31,7 +31,8 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from gpu_memory_service.client.session import _GMSClientSession
@@ -82,6 +83,69 @@ class _ScratchMapping:
     va_reserved_size: int  # scratch-rounded local VA reservation
     tag: str
     scratch_handle: int  # 0 after unmap_all_vas drops the physical
+
+
+@dataclass
+class _Slab:
+    """Free-space bookkeeping for one server allocation carved into regions.
+
+    ``holes`` is a sorted, coalesced list of ``(offset, length)`` free ranges
+    within the slab. ``carved_bytes`` counts what is currently handed out;
+    the slab is retired when it reaches zero. Counting is deliberate rather
+    than inferring emptiness from ``holes``: a slab whose single region spans
+    the whole allocation starts with no holes at all, so a hole-shaped test
+    cannot distinguish "full" from "empty".
+    """
+
+    tag: str
+    aligned_size: int
+    holes: List[tuple[int, int]] = field(default_factory=list)
+    carved_bytes: int = 0
+
+    def take(self, aligned_size: int) -> Optional[int]:
+        """First-fit an aligned range, returning its offset within the slab."""
+        for index, (offset, length) in enumerate(self.holes):
+            if length < aligned_size:
+                continue
+            leftover = length - aligned_size
+            if leftover:
+                self.holes[index] = (offset + aligned_size, leftover)
+            else:
+                del self.holes[index]
+            self.carved_bytes += aligned_size
+            return offset
+        return None
+
+    def give_back(self, offset: int, aligned_size: int) -> None:
+        """Return a range and coalesce it with any adjacent free neighbours."""
+        index = 0
+        while index < len(self.holes) and self.holes[index][0] < offset:
+            index += 1
+        self.holes.insert(index, (offset, aligned_size))
+        merged: List[tuple[int, int]] = []
+        for hole_offset, hole_length in self.holes:
+            if merged and hole_offset <= merged[-1][0] + merged[-1][1]:
+                prev_offset, prev_length = merged[-1]
+                end = max(prev_offset + prev_length, hole_offset + hole_length)
+                merged[-1] = (prev_offset, end - prev_offset)
+                continue
+            merged.append((hole_offset, hole_length))
+        self.holes = merged
+        self.carved_bytes -= aligned_size
+
+    @property
+    def is_empty(self) -> bool:
+        return self.carved_bytes == 0
+
+
+@dataclass(frozen=True)
+class _Region:
+    """One caller-visible allocation carved out of a slab."""
+
+    slab_va: int
+    offset: int
+    size: int  # as requested by the caller
+    aligned_size: int  # what the slab actually reserved
 
 
 @dataclass(frozen=True)
@@ -164,6 +228,7 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
+        slab_size: int = 0,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
@@ -181,6 +246,13 @@ class GMSClientMemoryManager:
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
+        # Slab packing rides on top of _mappings: a slab IS a normal
+        # LocalMapping, so unmap/remap/reallocate and layout_slot pairing stay
+        # allocation-shaped and simply have far fewer entries to walk.
+        #   _slabs   — slab base VA -> free-space bookkeeping
+        #   _regions — caller VA -> the slab range backing it
+        self._slabs: Dict[int, _Slab] = {}
+        self._regions: Dict[int, _Region] = {}
         # All scratch mappings alias ONE shared physical granule (N KV layers ->
         # one scratch_size block, not N). Created lazily, released once.
         self._shared_scratch_handle: int = 0
@@ -195,6 +267,15 @@ class GMSClientMemoryManager:
 
         self._vmm.ensure_initialized()
         self.granularity = self._vmm.get_allocation_granularity(device)
+        # Packing is opt-in, because it trades committed memory for a smaller
+        # allocation count: a slab is allocated whole, so a manager that hands
+        # out a handful of small mappings would commit a whole slab for them.
+        # It pays off only where torch drives hundreds of segment mallocs
+        # through us, so the torch mempool seam turns it on (see
+        # get_or_create_gms_client_memory_manager).
+        self.slab_size = (
+            align_to_granularity(slab_size, self.granularity) if slab_size > 0 else 0
+        )
 
     # ==================== Properties ====================
 
@@ -220,7 +301,35 @@ class GMSClientMemoryManager:
 
     @property
     def total_bytes(self) -> int:
+        """Bytes actually handed out, not bytes reserved.
+
+        A slab is mapped whole but may be only partly carved, so summing
+        aligned_size over _mappings would count the un-carved tail. This value
+        feeds vLLM/SGLang KV sizing via imported_weights_bytes; over-reporting
+        it silently shrinks the KV cache.
+        """
+        total = 0
+        for va, mapping in self._mappings.items():
+            slab = self._slabs.get(va)
+            total += slab.carved_bytes if slab is not None else mapping.aligned_size
+        return total
+
+    @property
+    def reserved_bytes(self) -> int:
+        """Physical bytes committed on the server, including slab tails."""
         return sum(m.aligned_size for m in self._mappings.values())
+
+    def owns(self, va: int) -> bool:
+        """Whether this manager handed out ``va``.
+
+        Accepts both slab-carved regions and whole allocations, so the torch
+        free callback can dispatch on it without knowing which it got. A slab
+        base is not itself owned: callers only ever hold regions carved out of
+        it, and the first carve shares the slab's VA.
+        """
+        return va in self._regions or (
+            va in self._mappings and va not in self._slabs
+        )
 
     # ==================== Tier 1: Connection ====================
 
@@ -355,6 +464,27 @@ class GMSClientMemoryManager:
         self._granted_lock_type = None
         return True
 
+    def drop_committed_layout(self) -> None:
+        """Free committed server pages after this process has cloned off VMM.
+
+        Unmap, abort the RO session, reconnect RW (the server clears the
+        published allocations on RW connect), then abort. Leaves the manager
+        unmapped with an empty mapping table. A later shadow remap will fail
+        until a writer republishes; that is the memory trade for native-speed
+        serving plus a full KV cache on one B200.
+        """
+        if not self._unmapped:
+            self.unmap_all_vas()
+        self.abort()
+        self.connect(RequestedLockType.RW)
+        self.abort()
+        self._mappings.clear()
+        self._inverse_mapping.clear()
+        self._unmapped = True
+        self._va_preserved = False
+        self._last_memory_layout_hash = ""
+        logger.info("[GMS] Dropped committed weight layout after private clone")
+
     def commit_layout(self) -> "LayoutCommit":
         """Seal the allocation set: the shape is final, the pages outlive this session.
 
@@ -478,14 +608,22 @@ class GMSClientMemoryManager:
         allocation_id: Optional[str] = None,
         size: int = 0,
         tag: str = "default",
+        dedicated: bool = False,
     ) -> int:
         """Allocate or import a handle and map to a new VA.
 
         If allocation_id is None (allocate path):
-          allocate_handle -> export_handle -> reserve_va -> map_va
+          carve from a slab, or allocate_handle -> export_handle ->
+          reserve_va -> map_va for a fresh one
 
         If allocation_id given (import path, cached):
           Check cache -> get_handle_info -> export_handle -> reserve_va -> map_va
+
+        The import path never packs: it maps one foreign server allocation at
+        its own reservation, and its offsets are that allocation's own. Pass
+        ``dedicated`` on the allocate path to get the same whole-allocation
+        shape, which callers reproducing a published layout byte-for-byte
+        (snapshot restore) require.
         """
         if allocation_id is not None:
             # Import path: check cache first
@@ -513,6 +651,12 @@ class GMSClientMemoryManager:
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
+        if self.slab_size and not dedicated:
+            return self._carve(size, tag)
+        return self._allocate_whole(size, tag)
+
+    def _allocate_whole(self, size: int, tag: str) -> int:
+        """One server allocation mapped at its own VA reservation."""
         alloc_id, layout_slot = self.allocate_handle(size, tag)
         fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
@@ -520,7 +664,91 @@ class GMSClientMemoryManager:
         self.map_va(fd, va, size, alloc_id, tag, layout_slot)
         return va
 
-    def destroy_mapping(self, va: int) -> None:
+    def _carve(self, size: int, tag: str) -> int:
+        """Hand out a range of a slab, growing a new slab when none fits."""
+        aligned_size = align_to_granularity(size, self.granularity)
+        for slab_va in sorted(self._slabs):
+            slab = self._slabs[slab_va]
+            if slab.tag != tag:
+                continue
+            offset = slab.take(aligned_size)
+            if offset is None:
+                continue
+            va = slab_va + offset
+            self._regions[va] = _Region(slab_va, offset, size, aligned_size)
+            return va
+
+        slab_va = self._add_slab(aligned_size, tag)
+        slab = self._slabs[slab_va]
+        offset = slab.take(aligned_size)
+        assert offset == 0, "a fresh slab must satisfy the request that grew it"
+        self._regions[slab_va] = _Region(slab_va, 0, size, aligned_size)
+        return slab_va
+
+    def _add_slab(self, aligned_size: int, tag: str) -> int:
+        """Allocate and map one slab, big enough for ``aligned_size``.
+
+        Rolls back the server allocation and the VA reservation if any step
+        fails, so a failed grow leaves neither an orphaned handle on the
+        server nor a stranded reservation in this address space.
+        """
+        slab_bytes = max(self.slab_size, aligned_size)
+        alloc_id, layout_slot = self.allocate_handle(slab_bytes, tag)
+        va = 0
+        try:
+            fd = self.export_handle(alloc_id)
+            va = self.reserve_va(slab_bytes)
+            self.map_va(fd, va, slab_bytes, alloc_id, tag, layout_slot)
+        except BaseException:
+            if va:
+                self._vmm.address_free(va, slab_bytes)
+            self.free_handle(alloc_id)
+            raise
+        self._slabs[va] = _Slab(tag=tag, aligned_size=slab_bytes, holes=[(0, slab_bytes)])
+        logger.debug(
+            "[GMS] Added %d MiB %s slab at 0x%x (%d slabs)",
+            slab_bytes // (1 << 20),
+            tag,
+            va,
+            len(self._slabs),
+        )
+        return va
+
+    def destroy_mapping(self, va: int, size: Optional[int] = None) -> None:
+        """Release a carved region, or a whole allocation.
+
+        A slab-carved region is returned to its slab's free list; the slab
+        itself is torn down only once every region in it is gone. Torch frees
+        blocks in a different order than it allocated them, so partially free
+        slabs are normal and their space is reused by later carves.
+        """
+        region = self._regions.get(va)
+        if region is not None:
+            if size is not None and size != region.size:
+                raise RuntimeError(
+                    "allocator free does not match the GMS region: "
+                    f"{size} vs {region.size}"
+                )
+            del self._regions[va]
+            slab = self._slabs[region.slab_va]
+            slab.give_back(region.offset, region.aligned_size)
+            if slab.is_empty:
+                self._destroy_whole(region.slab_va)
+                del self._slabs[region.slab_va]
+            return
+
+        if va in self._slabs:
+            # The slab's own VA is not a caller-visible allocation: its first
+            # carve shares this address and is tracked in _regions above. A
+            # slab is only ever retired by its last region going away.
+            raise RuntimeError(
+                f"0x{va:x} is a GMS slab base, not an allocation; "
+                "it is released when its last region is freed"
+            )
+
+        self._destroy_whole(va)
+
+    def _destroy_whole(self, va: int) -> None:
         """Unmap + free VA + free server handle for a single mapping."""
         mapping = self._mappings.get(va)
         if mapping is None:
@@ -609,6 +837,8 @@ class GMSClientMemoryManager:
         remapped_count = 0
         total_bytes = 0
         remapped_vas: list[int] = []
+        export_s = import_s = map_s = access_s = 0.0
+        loop_started = time.perf_counter()
         for rank, ((va, mapping), alloc_info) in enumerate(
             zip(local_mappings, committed_allocations)
         ):
@@ -625,12 +855,20 @@ class GMSClientMemoryManager:
                     f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
+            exported_at = time.perf_counter()
             fd = self.export_handle(alloc_info.allocation_id)
+            imported_at = time.perf_counter()
             handle = self._vmm.import_shareable_handle_close_fd(fd)
+            mapped_at = time.perf_counter()
             self._vmm.map(va, mapping.aligned_size, handle)
+            access_at = time.perf_counter()
             self._vmm.set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
+            export_s += imported_at - exported_at
+            import_s += mapped_at - imported_at
+            map_s += access_at - mapped_at
+            access_s += time.perf_counter() - access_at
             remapped_vas.append(va)
 
             if mapping.allocation_id != alloc_info.allocation_id:
@@ -643,19 +881,32 @@ class GMSClientMemoryManager:
             remapped_count += 1
             total_bytes += mapping.aligned_size
 
+        loop_s = time.perf_counter() - loop_started
+        validate_started = time.perf_counter()
         if remapped_vas:
             self._vmm.synchronize()
             for va in remapped_vas:
                 self._vmm.validate_pointer(va)
+        validate_s = time.perf_counter() - validate_started
 
         self._va_preserved = False
         self._unmapped = False
+        # Wake latency is an SLO for shadow failover and is dominated by the
+        # per-allocation export round trip, so log the split, not just a total.
         logger.info(
             "[GPU Memory Service] Remap complete on device %d: "
-            "remapped %d allocations (%.2f GiB)",
+            "remapped %d allocations (%.2f GiB) in %.2fs "
+            "(export %.2fs, import %.2fs, map %.2fs, access %.2fs, "
+            "validate %.2fs)",
             self.device,
             remapped_count,
             total_bytes / (1 << 30),
+            loop_s + validate_s,
+            export_s,
+            import_s,
+            map_s,
+            access_s,
+            validate_s,
         )
 
     def reallocate_all_handles(self, tag: str = "default") -> None:
@@ -673,6 +924,7 @@ class GMSClientMemoryManager:
             )
 
         reallocated = 0
+        started = time.perf_counter()
         for va, mapping in sorted(
             self._mappings.items(), key=lambda item: item[1].layout_slot
         ):
@@ -697,8 +949,10 @@ class GMSClientMemoryManager:
             reallocated += 1
 
         logger.info(
-            "[GPU Memory Service] Reallocated %d handles for preserved VAs",
+            "[GPU Memory Service] Reallocated %d handles for preserved VAs "
+            "in %.2fs",
             reallocated,
+            time.perf_counter() - started,
         )
 
     # ==================== Scratch-aliased mappings ====================
@@ -892,6 +1146,8 @@ class GMSClientMemoryManager:
             self._inverse_mapping.clear()
             self._scratch_mappings.clear()
             self._shared_scratch_handle = 0
+            self._slabs.clear()
+            self._regions.clear()
         else:
             self._vmm.synchronize()
             for base_va in list(self._scratch_mappings.keys()):
@@ -900,6 +1156,8 @@ class GMSClientMemoryManager:
                 self.unmap_va(va)
                 self.free_va(va)
             self.abort()
+            self._slabs.clear()
+            self._regions.clear()
         self._unmapped = False
         self._va_preserved = False
         from gpu_memory_service.client.torch.allocator import (

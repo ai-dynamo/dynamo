@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -39,6 +40,26 @@ _active_tag: ContextVar[str | None] = ContextVar(
 _callbacks_initialized = False
 _pluggable_alloc: Any | None = None
 
+# Torch drives one malloc per caching-allocator segment through us, and every
+# resulting server allocation costs ~15 ms to re-import when a sleeping engine
+# wakes (export round trip + cuMemImport + cuMemSetAccess; cuMemMap is free).
+# Packing those mallocs into a few large slabs is what keeps wake proportional
+# to the weight set rather than to the segment count: GLM-5.2 TP8 goes from 585
+# allocations to ~28, and weights remap from ~8.7 s to well under a second.
+#
+# The cost is committed memory: a slab is allocated whole, so its unused tail
+# stays resident. Set DYN_GMS_SLAB_SIZE=0 to go back to one server allocation
+# per malloc.
+DEFAULT_SLAB_SIZE = 2 * 1024 * 1024 * 1024
+
+
+def _slab_size_for(tag: str) -> int:
+    """Slab size for a tag's mempool, overridable via DYN_GMS_SLAB_SIZE."""
+    raw = os.environ.get("DYN_GMS_SLAB_SIZE")
+    if raw is None or raw == "":
+        return DEFAULT_SLAB_SIZE
+    return int(raw)
+
 
 def _gms_malloc(size: int, device: int, stream: int) -> int:
     # Tag-context dispatch: the active tag (set by gms_use_mem_pool) selects
@@ -70,10 +91,10 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
             logger.debug("[GMS] scratch free(tag=%s): va=0x%x size=%d", tag, va, size)
             return
     for tag, state in _tag_states.items():
-        if va not in state.manager.mappings:
+        if not state.manager.owns(va):
             continue
         logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
-        state.manager.destroy_mapping(va)
+        state.manager.destroy_mapping(va, int(size))
         return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
@@ -152,7 +173,9 @@ def get_or_create_gms_client_memory_manager(
             )
         return state.manager
 
-    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
+    manager = GMSClientMemoryManager(
+        socket_path, device=device, tag=tag, slab_size=_slab_size_for(tag)
+    )
     manager.connect(mode, timeout_ms=timeout_ms)
 
     # Mempool only when we have RW: the pluggable allocator routes torch
@@ -264,62 +287,52 @@ def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 
 
-def prune_allocations(
-    manager: "GMSClientMemoryManager",
-    *,
-    referenced_allocation_ids: set[str],
-    synchronize: bool = True,
-) -> None:
-    """Free GMS allocations that are not in an explicit torch keep-set.
+def release_weight_mempool(manager: "GMSClientMemoryManager") -> None:
+    """Drop the tag's MemPool so torch returns its dead blocks to GMS.
 
-    Callers provide the allocation IDs that remain valid; this helper does not
-    infer liveness from Python GC.  Weight loaders call it after registering
-    module tensors, treating other allocations as load-time scratch/cache that
-    PyTorch's caching allocator may leave behind because ``empty_cache()`` is a
-    no-op while live GMS mempool mappings exist.
+    This is how load-time scratch is reclaimed. PyTorch's caching allocator
+    holds freed blocks instead of handing them back, and ``empty_cache()`` is
+    a no-op while live GMS mempool mappings exist, so the blocks are only
+    released when the pool itself is destroyed: torch then calls the free
+    callback for every cached, unreferenced block. Blocks still owned by live
+    Parameter storage stay mapped and become the committed weight set.
 
-    Args:
-        manager: GMS manager whose local mappings should be pruned.
-        referenced_allocation_ids: Allocation IDs that must remain mapped and
-            committed.
-        synchronize: Synchronize CUDA before freeing unreferenced mappings.  The
-            default avoids freeing a block while prior GPU work may still be
-            using it.  Callers that have already synchronized can pass
-            ``False``.
+    Reclaim therefore happens at torch-block granularity, which is what slab
+    packing needs -- a keep-set of allocation IDs could only free whole server
+    allocations, and one live tensor would pin an entire slab.
 
+    The pool is not needed again: after publication the manager serves the
+    weights read-only.
     """
-    if manager.granted_lock_type != GrantedLockType.RW or manager.is_unmapped:
+    if manager.tag is None:
+        raise RuntimeError("cannot release the mempool of an untagged manager")
+    state = _tag_states.get(manager.tag)
+    if state is None or state.mem_pool is None:
         return
 
-    if not any(mapping.handle != 0 for mapping in manager.mappings.values()):
-        return
+    from gpu_memory_service.integrations.common.utils import torch_device
 
-    if synchronize:
-        from gpu_memory_service.integrations.common.utils import torch_device
+    torch_device().synchronize(manager.device)
 
-        torch_device().synchronize(manager.device)
+    before_bytes = manager.total_bytes
+    before_count = len(manager.mappings)
 
-    keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
+    import gc
 
-    pruned_allocations = 0
-    pruned_bytes = 0
-    for va, mapping in list(manager.mappings.items()):
-        if str(mapping.allocation_id) in keep:
-            continue
-        if mapping.handle == 0:
-            continue
-        pruned_allocations += 1
-        pruned_bytes += int(mapping.aligned_size)
-        manager.destroy_mapping(va)
+    mem_pool = state.mem_pool
+    state.mem_pool = None
+    del mem_pool
+    gc.collect()
 
-    if pruned_allocations:
-        logger.info(
-            "[GMS] Pruned %d unreferenced allocations (%.2f GiB); "
-            "kept %d registered allocations",
-            pruned_allocations,
-            pruned_bytes / (1 << 30),
-            len(keep),
-        )
+    logger.info(
+        "[GMS] Released the %s mempool: %d -> %d allocations, "
+        "%.2f -> %.2f GiB live",
+        manager.tag,
+        before_count,
+        len(manager.mappings),
+        before_bytes / (1 << 30),
+        manager.total_bytes / (1 << 30),
+    )
 
 
 def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:

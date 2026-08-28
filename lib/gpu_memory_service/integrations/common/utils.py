@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
-from gpu_memory_service.client.torch.allocator import prune_allocations
+from gpu_memory_service.client.torch.allocator import release_weight_mempool
 from gpu_memory_service.client.torch.module import (
     rebind_nonparameter_tensors,
     register_module_tensors,
@@ -94,11 +94,15 @@ def prepare_gms_write(
     allocator: "GMSClientMemoryManager",
     model: torch.nn.Module,
 ) -> GMSCommittedMemoryStats:
-    """Register model tensors and prune unreferenced allocations.
+    """Register model tensors and release load-time scratch.
 
     This is the first half of a GMS write: it does not commit. The allocator
     keeps its RW lease until :func:`publish_gms_write`, which lets a caller
     defer publication (e.g. until after vLLM memory profiling).
+
+    Registration runs first, while every buffer still sits at the GMS address
+    that will be published for it. Dropping the mempool afterwards is what
+    reclaims the load-time scratch, at torch-block granularity.
 
     Args:
         allocator: The GMS client memory manager in write mode.
@@ -107,25 +111,17 @@ def prepare_gms_write(
     Returns:
         Committed/pruned byte stats for the write awaiting publication.
     """
-    referenced_allocation_ids = register_module_tensors(allocator, model)
-    before_prune_bytes = allocator.total_bytes
-    before_prune_count = len(allocator.mappings)
+    register_module_tensors(allocator, model)
+    before_bytes = allocator.total_bytes
+    before_count = len(allocator.mappings)
 
-    # prune_allocations synchronizes allocator.device before destroying
-    # unreferenced mappings. allocator.commit() performs the publish-barrier
-    # sync before committing the remaining registered weights.
-    prune_allocations(
-        allocator,
-        referenced_allocation_ids=referenced_allocation_ids,
-    )
+    release_weight_mempool(allocator)
+
     total_bytes = allocator.total_bytes
-    pruned_bytes = before_prune_bytes - total_bytes
-    pruned_count = before_prune_count - len(allocator.mappings)
-
     return GMSCommittedMemoryStats(
         committed_bytes=int(total_bytes),
-        pruned_bytes=int(pruned_bytes),
-        pruned_count=pruned_count,
+        pruned_bytes=int(before_bytes - total_bytes),
+        pruned_count=before_count - len(allocator.mappings),
     )
 
 
