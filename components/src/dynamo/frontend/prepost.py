@@ -1488,8 +1488,7 @@ class StreamingPostProcessor:
                     choice = self._build_choice(output, delta)
             elif delta_message.tool_calls:
                 if self.in_progress_tool_calls:
-                    # Emit every parser delta immediately: inside a long string
-                    # argument the parser never falls silent. See https://github.com/ai-dynamo/dynamo/issues/13821
+                    # Emit each parser delta instead of waiting for a quiet chunk.
                     choice = self._emit_tool_calls_choice(output)
             elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)

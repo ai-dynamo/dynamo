@@ -2078,8 +2078,6 @@ def test_streaming_parallel_tool_calls_no_think(
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
 
 
-# Consecutive tool-call-only parser deltas with no quiet chunk between them.
-# Token IDs are arbitrary; the hermes parser reads text, not decoded tokens.
 _LONG_ARGUMENT_FRAGMENTS = [
     "James",
     " Joyce",
@@ -2117,16 +2115,7 @@ OUTPUTS_LONG_STRING_ARGUMENT = [
 def test_streaming_tool_call_arguments_are_not_withheld(
     tokenizer, request_for_sampling, sampling_params
 ):
-    """Every parser tool-call delta must reach the client as its own frame.
-
-    See https://github.com/ai-dynamo/dynamo/issues/13821
-
-    Pre-fix, ``StreamingPostProcessor`` published ``in_progress_tool_calls``
-    only on a chunk where the parser produced nothing, or at ``finish_reason``.
-    Inside a long string argument the parser never falls silent, so every chunk
-    below except the last returned ``None`` and the whole argument arrived in a
-    single terminal frame after an arbitrarily long silence.
-    """
+    """Stream every tool-call argument delta in its own frame."""
     tool_parser = Hermes2ProToolParser(tokenizer)
     proc = StreamingPostProcessor(
         tokenizer=tokenizer,
@@ -2146,7 +2135,6 @@ def test_streaming_tool_call_arguments_are_not_withheld(
             return None
         return result.get("delta", {}).get("tool_calls")
 
-    # -- 1. no tool-call-only chunk is withheld -----------------------------
     withheld = [
         i
         for i, (output, result) in enumerate(zip(outputs, results))
@@ -2159,7 +2147,6 @@ def test_streaming_tool_call_arguments_are_not_withheld(
         "falls silent or finish_reason arrives."
     )
 
-    # -- 2. cadence tracks the parser, it does not collapse to one frame ----
     frames = [r for r in results if _tool_calls_of(r)]
     assert len(frames) > 1, (
         "The whole argument arrived in a single frame; argument deltas must "
@@ -2170,15 +2157,12 @@ def test_streaming_tool_call_arguments_are_not_withheld(
         f"{len(frames)}."
     )
 
-    # -- 3. cadence changed, content did not ---------------------------------
     tool_calls = _collect_tool_calls([r for r in results if r is not None])
     assert len(tool_calls) == 1
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {
         "search_terms": ["".join(_LONG_ARGUMENT_FRAGMENTS)]
     }
 
-    # -- 4. OpenAI delta semantics survive the extra frames ------------------
-    # id, type and function.name belong on the first frame only.
     id_frames = [
         i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("id")
     ]
@@ -2198,8 +2182,6 @@ def test_streaming_tool_call_arguments_are_not_withheld(
         0
     ], f"'function.name' must appear on exactly one frame; got {name_frames}"
 
-    # -- 5. finish_reason is still remapped exactly once ---------------------
-    # See https://github.com/ai-dynamo/dynamo/issues/8636
     finish_reasons = [
         r["finish_reason"] for r in results if r and r.get("finish_reason")
     ]
