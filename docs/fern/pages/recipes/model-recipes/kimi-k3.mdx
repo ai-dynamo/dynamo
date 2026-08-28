@@ -9,7 +9,9 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. Tensor parallelism runs over NVLink (MNNVL) using Kubernetes ComputeDomains, and disaggregated KV transfer moves over NIXL — over MNNVL on GB300, over RDMA InfiniBand on GB200. Pick your GPU architecture and serving topology; every command on this page updates to match.
+
+K3 is a hybrid-attention MoE model: 93 layers of Kimi Delta Attention (KDA, linear attention with a short convolution state) with full MLA attention on 24 of them (every fourth layer), 896 routed experts (16 active per token) plus 2 shared experts, a vision tower for image input, and 1,048,576 max positions. Routed-expert weights are MXFP4-packed (`compressed-tensors`, group size 32); attention, shared experts, `lm_head`, and the vision tower stay BF16.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -21,48 +23,104 @@ Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a m
 <label htmlFor="recipe-sku-gb300">GB300</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
-<span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
-<span><b>GPUs</b> 16x GB200 (4 nodes), one worker</span>
-<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>Precision</b> MXFP4 + BF16, FP8 KV</span>
+<span><b>GPUs</b> 16x GB200 (4 nodes)</span>
+<span><b>Workers</b> 1</span>
+<span><b>Parallelism</b> TP16</span>
 <span><b>Routing</b> KV-aware</span>
+<span><b>Attention</b> `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization</span>
+<span><b>MoE backend</b> `flashinfer_trtllm`</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>CUDA graphs</b> `FULL_AND_PIECEWISE`, capture up to 8192</span>
+<span><b>Batching</b> 16384 batched tokens / 256 seqs</span>
+<span><b>GPU memory util</b> 0.92</span>
+<span><b>Max context</b> 1,048,576 (model default)</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
-<span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
-<span><b>GPUs</b> 16x GB200 prefill + 16x GB200 decode (1P1D)</span>
-<span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
+<span><b>Precision</b> MXFP4 + BF16, FP8 KV</span>
+<span><b>GPUs</b> 16x prefill + 16x decode</span>
+<span><b>Workers</b> 1P + 1D</span>
+<span><b>Parallelism</b> TP16 / TP16</span>
 <span><b>Routing</b> KV-aware, NIXL KV transfer over RDMA</span>
+<span><b>KV transfer</b> NIXL (`NixlConnector`, `kv_both`) over RDMA (IB); `UCX_TLS=^cuda_ipc`</span>
+<span><b>Attention</b> `FLASHINFER_MLA`; `TRTLLM_RAGGED` on prefill, `FLASHINFER` on decode</span>
+<span><b>MoE backend</b> `flashinfer_trtllm`</span>
+<span><b>AllReduce backend</b> NCCL (MNNVL + NVLS)</span>
+<span><b>CUDA graphs</b> `FULL_AND_PIECEWISE`, capture up to 2048 on decode</span>
+<span><b>Batching</b> 16384 tokens / 4 seqs prefill; 2048 tokens / 256 seqs decode</span>
+<span><b>GPU memory util</b> 0.90</span>
+<span><b>Max context</b> 1,048,576 (model default)</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
-<span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
-<span><b>GPUs</b> 16x GB300 — two 8-GPU replicas</span>
-<span><b>Parallelism</b> TP8 per replica, KV-routed</span>
+<span><b>Precision</b> MXFP4 + BF16, FP8 KV</span>
+<span><b>GPUs</b> 16x GB300 (2 replicas)</span>
+<span><b>Workers</b> 2 (KV-routed)</span>
+<span><b>Parallelism</b> TP8 per replica</span>
 <span><b>Routing</b> KV-aware across replicas</span>
+<span><b>Attention</b> `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization</span>
+<span><b>MoE backend</b> trtllm-gen cubins + K3 latent-MoE tail fusion (CuTeDSL)</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>CUDA graphs</b> `FULL_AND_PIECEWISE`, capture up to 8192</span>
+<span><b>Batching</b> 8192 batched tokens / 256 seqs</span>
+<span><b>GPU memory util</b> 0.85</span>
+<span><b>Max context</b> 1,048,576 (explicit `--max-model-len`)</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
-<span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
-<span><b>GPUs</b> 8x GB300 prefill + 16x GB300 decode (1P2D)</span>
-<span><b>Parallelism</b> TP8 per replica over MNNVL</span>
+<span><b>Precision</b> MXFP4 + BF16, FP8 KV</span>
+<span><b>GPUs</b> 8x prefill + 16x decode</span>
+<span><b>Workers</b> 1P + 2D</span>
+<span><b>Parallelism</b> TP8 per replica</span>
 <span><b>Routing</b> KV-aware, NIXL/MNNVL KV transfer</span>
+<span><b>KV transfer</b> NIXL (`NixlConnector`, `kv_both`) over MNNVL; UCX left at defaults</span>
+<span><b>Attention</b> `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization, on both roles</span>
+<span><b>MoE backend</b> trtllm-gen cubins; tail fusion on decode only</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>CUDA graphs</b> `FULL_DECODE_ONLY`, capture up to 2048 on decode; prefill runs eager</span>
+<span><b>Batching</b> 32768 tokens / 4 seqs prefill; 2048 tokens / 256 seqs decode</span>
+<span><b>GPU memory util</b> 0.90</span>
+<span><b>Max context</b> 1,048,576 (model default)</span>
 </div>
 </div>
+
+## Configurations
+
+All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, and prefix caching, with tensor parallelism over NVLink (MNNVL). The target picker at the top of this page carries the full per-target configuration.
+
+## Supported features
+
+- Modalities: text and image (`--enable-multimodal`; K3 ships a vision tower)
+- Reasoning, through the `kimi_k3` reasoning parser on both the engine and the frontend side
+- Tool calling, through the `kimi_k3` tool-call parser
+- KV-aware routing and prefix caching on every profile
+- Disaggregated serving
 
 ## Prerequisites
 
 <div data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated, 32x (8 nodes, 4 prefill + 4 decode) for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
+- Every profile spans multiple 4-GPU nodes over MNNVL — TP16 across four nodes on GB200 — so the tensor-parallel group crosses the node boundary on NVLink, which is why every worker pod set claims a DRA `ComputeDomain` channel.
 - A Hugging Face token with access to `moonshotai/Kimi-K3`.
 
 </div>
@@ -70,10 +128,129 @@ Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a m
 <div data-sku="gb300">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes) for aggregated, 24x (6 nodes) for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
-- A Hugging Face token with access to `moonshotai/Kimi-K3`.
+- Every profile spans multiple 4-GPU nodes over MNNVL — TP8 across two nodes on GB300 — so the tensor-parallel group crosses the node boundary on NVLink, which is why every worker pod set claims a DRA `ComputeDomain` channel.
+- A Hugging Face token with access to `moonshotai/Kimi-K3`. The workers read the weights from the `model-cache` PVC — see [Download the model](#3-download-the-model).
 
 </div>
+
+The NVIDIA DRA driver with ComputeDomain support provides that channel. Confirm the CRD is installed:
+
+```bash
+kubectl get crd | grep computedomain
+```
+
+Each manifest creates its own `ComputeDomain` and its workers claim that domain's channel. The names vary by profile — check the `metadata.name` fields in the `deploy.yaml` you are applying.
+
+## Cluster assumptions
+
+These manifests are written against a specific cluster shape per SKU, with a ReadWriteMany storage class for the weights. Every value below is expected to differ elsewhere; nothing outside this section is cluster-specific.
+
+<div data-sku="gb200">
+
+| Assumption | Where | Shipped value |
+| ---------- | ----- | ------------- |
+| GPU nodes carry a product label | `nodeSelector` on every pod | `NVIDIA-GB200` |
+| Pool taint | `tolerations` | `kubernetes.io/arch=arm64:NoSchedule` |
+| GPUs per node x nodes per TP group | `resources` and `multinode.nodeCount` | 4 GPUs x 4 nodes = TP16 |
+| A ReadWriteMany storage class exists for the weights | `model-cache/model-cache.yaml` | `your-storage-class-name` placeholder (PVC flow only) |
+
+</div>
+
+<div data-sku="gb300">
+
+| Assumption | Where | Shipped value |
+| ---------- | ----- | ------------- |
+| GPU nodes carry a product label | `nodeAffinity` on every worker | `NVIDIA-GB300` |
+| Pool taint | `tolerations` | none |
+| GPUs per node x nodes per TP group | `resources` and `multinode.nodeCount` | 4 GPUs x 2 nodes = TP8 |
+| A ReadWriteMany storage class exists for the weights | `model-cache/model-cache.yaml` | `your-storage-class-name` placeholder |
+
+</div>
+
+### Reading the values off your cluster
+
+<div data-sku="gb200">
+
+Read the values off your cluster:
+
+```bash
+# Which product label identifies the GPUs?
+kubectl get nodes -o custom-columns='NODE:.metadata.name,PRODUCT:.metadata.labels.nvidia\.com/gpu\.product'
+
+# Set this to whatever the command above reports, then reuse it below.
+export GPU_PRODUCT=NVIDIA-GB200
+
+# Allocatable GPUs per node, then any taints as key=value:effect.
+kubectl get nodes -l nvidia.com/gpu.product=${GPU_PRODUCT} \
+  -o go-template='{{range .items}}{{.metadata.name}}{{"\t"}}{{index .status.allocatable "nvidia.com/gpu"}}{{"\t"}}{{range .spec.taints}}{{.key}}={{.value}}:{{.effect}} {{end}}{{"\n"}}{{end}}'
+
+# Available storage classes — pick one whose provisioner supports ReadWriteMany
+# (a network filesystem, not block storage).
+kubectl get storageclass
+```
+
+If the product label differs from the shipped value, update the `nodeSelector` value in each `deploy.yaml`. If the first command reports no GPU nodes at all, the recipe has nothing to land on.
+
+</div>
+
+<div data-sku="gb300">
+
+Read the values off your cluster:
+
+```bash
+# Which product label identifies the GPUs?
+kubectl get nodes -o custom-columns='NODE:.metadata.name,PRODUCT:.metadata.labels.nvidia\.com/gpu\.product'
+
+# Set this to whatever the command above reports, then reuse it below.
+export GPU_PRODUCT=NVIDIA-GB300
+
+# Allocatable GPUs per node, then any taints as key=value:effect.
+kubectl get nodes -l nvidia.com/gpu.product=${GPU_PRODUCT} \
+  -o go-template='{{range .items}}{{.metadata.name}}{{"\t"}}{{index .status.allocatable "nvidia.com/gpu"}}{{"\t"}}{{range .spec.taints}}{{.key}}={{.value}}:{{.effect}} {{end}}{{"\n"}}{{end}}'
+
+# Available storage classes — pick one whose provisioner supports ReadWriteMany
+# (a network filesystem, not block storage).
+kubectl get storageclass
+```
+
+If the product label differs from the shipped value, update the `nodeAffinity` `values` list in each `deploy.yaml`. If the first command reports no GPU nodes at all, the recipe has nothing to land on.
+
+</div>
+
+### Tainted GPU pools
+
+<div data-sku="gb200">
+
+The GB200 manifests include a `kubernetes.io/arch=arm64:NoSchedule` toleration for the arm64 node pool.
+
+</div>
+
+<div data-sku="gb300">
+
+The GB300 manifests ship with no tolerations, which assumes an unreserved GPU pool.
+
+</div>
+
+If your GPU pool carries additional taints, add matching tolerations to **every** pod template in the `deploy.yaml` you are using:
+
+```yaml
+# In each podTemplate.spec
+tolerations:
+  - key: dedicated          # from the key=value:effect output above
+    operator: Equal
+    value: your-pool-name
+    effect: NoSchedule
+```
+
+To cover several pools at once, use `operator: Exists` with the key and drop `value`. Keep `effect: NoSchedule`: a bare `operator: Exists` with no key also tolerates `NoExecute` and `node.kubernetes.io/unschedulable`, which would schedule pods onto cordoned nodes and ignore eviction taints.
+
+<Note>
+A toleration only permits placement, it does not attract it — node selection stays with the node affinity or selector above. Adding one widens the candidate set to include reserved pools, so check that the pool is yours to consume.
+</Note>
+
+## Quick Start
+
+### 1. Create namespace and secret
 
 Create the namespace and token secret:
 
@@ -85,17 +262,19 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
+### 2. Create storage
+
 <Warning>
-If you use the `model-cache` PVC (required on GB300, optional on GB200), edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+If you use the `model-cache` PVC (required on GB300, optional on GB200), edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. The claim requests 3000Gi; the checkpoint is ~1.5 TB. Review namespace, image tags, node selectors, and resource claims in the manifests as well — see [Cluster assumptions](#cluster-assumptions).
 </Warning>
 
-## Deploy
+### 3. Download the model
 
 The two SKUs source the checkpoint differently, so follow the block for your target.
 
 <div data-sku="gb300">
 
-The GB300 manifests read the checkpoint from a `model-cache` PVC (`HF_HOME=/model-cache`, `--model moonshotai/Kimi-K3`). Create the cache and download the weights:
+The GB300 manifests read the checkpoint from a `model-cache` PVC: each worker pod mounts it at `/model-cache` with `HF_HOME=/model-cache` and passes the repo id (`MODEL_ID=moonshotai/Kimi-K3`) to `--model`, so vLLM loads the checkpoint out of the cache instead of downloading it. `envFrom: hf-token-secret` on the workers covers the hub lookup at startup, and the frontend does not mount the PVC. Create the cache and download the weights:
 
 ```bash
 # Edit storageClassName in model-cache/model-cache.yaml first.
@@ -104,6 +283,8 @@ kubectl apply -f recipes/kimi-k3/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
 
+The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache — which is why the workers resolve the repo id straight out of it.
+
 </div>
 
 <div data-sku="gb200">
@@ -111,7 +292,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 The GB200 manifests read the checkpoint from node-local storage, not the `model-cache` PVC: they mount the host path `/mnt/stateful_partition/kube-ephemeral-ssd/models` (a GKE layout) at `/models` and serve `--model /models/model_weight` with `HF_HUB_OFFLINE=1`. Pick one of:
 
 - **Pre-stage the weights on every GB200 node** in the deployment at `<host-path>/model_weight`, then edit the `models` `hostPath` in the deploy manifest to match your cluster's path.
-- **Switch the manifest to the PVC flow** used by the GB300 recipes: create the cache and run the download job below, then in the deploy manifest replace the `models` `hostPath` volume with a `persistentVolumeClaim` (`claimName: model-cache`) mounted at `/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_PATH` to `moonshotai/Kimi-K3`.
+- **Switch the manifest to the PVC flow** used by the GB300 recipes: create the cache and run the download job below — the Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache — then in the deploy manifest replace the `models` `hostPath` volume with a `persistentVolumeClaim` (`claimName: model-cache`) mounted at `/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_PATH` to `moonshotai/Kimi-K3`.
 
 ```bash
 # PVC flow only. Edit storageClassName in model-cache/model-cache.yaml first.
@@ -122,64 +303,87 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 </div>
 
-Then deploy the target DGD:
+### 4. Deploy the DGD
 
-<div data-sku="gb200" data-variant="agg">
+Then deploy the target DGD and wait for its pods to report Ready:
+
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=kimi-k3-agg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb200" data-variant="disagg">
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=kimi-k3-disagg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="agg">
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=kimi-k3-agg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="disagg">
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=kimi-k3-disagg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-First worker launch loads weights and captures CUDA graphs and can take tens of minutes.
+First launch loads ~1.5 TB of weights across the TP ranks and warms CuTeDSL kernels and CUDA graphs. The startup probes budget 120 minutes per worker (`failureThreshold: 720`), and the multinode pod set only reports Ready once all nodes have joined the TP group.
 
-## Smoke Test
+<div data-sku="gb200">
+
+The shipped GB200 manifests keep the checkpoint on node-local storage, which avoids the shared-filesystem cost. On the PVC conversion path, every worker pod pulls the full ~1.5 TB checkpoint over the PVC on each cold start, so first-load time is bounded by the storage backend rather than by the GPUs — raise `failureThreshold` if your storage class is slower, and keep the pods on nodes that already hold a warm page cache.
+
+</div>
+
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
+
+Serving ~1.5 TB of weights off a shared filesystem is the slow path: every worker pod pulls the full checkpoint over the PVC on each cold start — 4 pods for the aggregated profile — so first-load time is bounded by the storage backend rather than by the GPUs. Raise `failureThreshold` if your storage class is slower. Keeping the pods on nodes that already hold a warm page cache, or staging the checkpoint on node-local NVMe and mounting it as a `hostPath` instead, both cut this substantially.
+
+</div>
+
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
+
+Serving ~1.5 TB of weights off a shared filesystem is the slow path: every worker pod pulls the full checkpoint over the PVC on each cold start — 6 pods for the disaggregated profile — so first-load time is bounded by the storage backend rather than by the GPUs. Raise `failureThreshold` if your storage class is slower. Keeping the pods on nodes that already hold a warm page cache, or staging the checkpoint on node-local NVMe and mounting it as a `hostPath` instead, both cut this substantially.
+
+</div>
+
+<Note>
+The containers run as `runAsUser: 0` because the cached weight files are root-owned while the image defaults to uid 1000.
+</Note>
+
+### 5. Smoke test
 
 Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
 
-
-<div data-sku="gb200" data-variant="agg">
-
-```bash
-kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-<div data-sku="gb200" data-variant="disagg">
-
-```bash
-kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-<div data-sku="gb300" data-variant="agg">
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
@@ -187,7 +391,7 @@ kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="gb300" data-variant="disagg">
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
@@ -195,36 +399,137 @@ kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-All targets serve under the same model name, `moonshotai/Kimi-K3`:
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+All targets serve under the same model name, `moonshotai/Kimi-K3`.
+
+#### Text
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"moonshotai/Kimi-K3","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -d '{
+    "model": "moonshotai/Kimi-K3",
+    "messages": [{"role": "user", "content": "Hello, who are you?"}],
+    "max_tokens": 128
+  }'
 ```
 
-Kimi-K3 reasons before answering, and tool calling is supported — the deployment uses the `kimi_k3` reasoning and tool-call parsers at the frontend.
+Chain-of-thought lands in `choices[0].message.reasoning_content` and the answer in `choices[0].message.content`. If `reasoning_content` is `null` and raw `</think>` markers show up in `content`, the parsers are not wired — check `--reasoning-parser kimi_k3` and `--dyn-reasoning-parser kimi_k3` on the worker command.
 
-## Compare All Targets
+#### Image
 
-All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, prefix caching, and the FlashInfer TRT-LLM MoE backend, with tensor parallelism over NVLink (MNNVL):
+Images are sent as `image_url` content parts. Use a public HTTP(S) URL the deployment can fetch, or a base64 `data:` URI on air-gapped clusters.
 
-| | GB200 aggregated | GB200 disaggregated | GB300 aggregated | GB300 disaggregated |
-|---|---|---|---|---|
-| **GPUs** | 16x GB200 (4 nodes) | 16x prefill + 16x decode | 16x GB300 (2 replicas) | 8x prefill + 16x decode |
-| **Workers** | 1 | 1P + 1D | 2 (KV-routed) | 1P + 2D |
-| **Parallelism** | TP16 | TP16 / TP16 | TP8 per replica | TP8 per replica |
-| **KV transfer** | — | NIXL over RDMA (IB) | — | NIXL over MNNVL |
-| **Attention** | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA |
-| **Precision** | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV |
-| **Max context** | 1,048,576 | 1,048,576 | 1,048,576 | 1,048,576 |
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "moonshotai/Kimi-K3",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/cats.jpg"}},
+        {"type": "text", "text": "Describe what is in this image."}
+      ]
+    }],
+    "max_tokens": 512
+  }'
+```
 
-## Notes
+#### Tool calling
 
-- All targets use KV-aware routing at the Dynamo frontend with prefix caching and KV events enabled.
-- Kimi-K3 is multimodal — the deployments enable the multimodal encoder (`--enable-multimodal`) with data-parallel encoder sharding.
-- Multi-node tensor parallelism runs over NVLink (MNNVL) via Kubernetes ComputeDomains (DRA). Disaggregated KV transfer uses NIXL — over NVLink on GB300, over RDMA InfiniBand on GB200 (`UCX_TLS=^cuda_ipc`, GKE `rdma-*` network resources).
-- Kimi-K3 support requires the updated Dynamo frontend (tokenizer, `kimi_k3` reasoning and tool-call parsers) that ships with this release.
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "moonshotai/Kimi-K3",
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {"location": {"type": "string", "description": "City name"}},
+          "required": ["location"]
+        }
+      }
+    }],
+    "max_tokens": 300
+  }' | python3 -m json.tool
+```
+
+Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` with JSON arguments naming San Francisco, and `finish_reason` is `tool_calls`.
+
+## Configuration notes
+
+- Kimi-K3 is multimodal — every profile enables the vision tower with `--enable-multimodal`.
+- **KV routing.** Every profile runs the frontend with `--router-mode kv` and enables prefix caching, and every worker publishes KV cache events (`--kv-events-config`, `enable_kv_cache_events: true`).
+- **Frontend build.** Kimi-K3 support requires the updated Dynamo frontend (tokenizer, `kimi_k3` reasoning and tool-call parsers) that ships with this release — every manifest pins the dev image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1`.
+- Multi-node tensor parallelism runs over NVLink (MNNVL) via Kubernetes ComputeDomains (DRA).
+- **Pod networking.** DGD pods use CNI networking, so `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` are pinned to `eth0`.
+
+<div data-sku="gb200">
+
+- **Multimodal encoder.** The GB200 profiles shard the vision encoder data-parallel with `--mm-encoder-tp-mode data` and run it on `--mm-encoder-attn-backend TORCH_SDPA`. The GB300 profiles leave both at their defaults.
+- **Event-driven KV routing.** The GB200 frontend adds `--router-kv-events` (with `--router-temperature 0`, `--router-min-initial-workers 1`, and `--kv-cache-block-size 64`) so routing tracks the workers' published KV events. The GB300 frontends run `--router-mode kv` without the event feed.
+
+</div>
+
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
+
+- **MNNVL all-reduce.** The GB200 aggregated profile sets `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Do not enable the NCCL symmetric-memory knobs alongside it — `VLLM_USE_NCCL_SYMM_MEM=0` is required because symmetric memory breaks CUDA-graph capture on this build.
+
+</div>
+
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
+
+- **All-reduce.** The GB200 disaggregated profile uses NCCL directly (MNNVL + NVLS) instead of FlashInfer. `VLLM_USE_NCCL_SYMM_MEM=0` is still required, because symmetric memory breaks CUDA-graph capture on this build.
+- **UCX.** `UCX_TLS=^cuda_ipc` disables NVLink IPC so NIXL KV transfer routes over RDMA InfiniBand, allocated via `networking.gke.io.networks/rdma-*` resources.
+- **Asymmetric worker config.** Prefill and decode carry separate attention configs — `TRTLLM_RAGGED` MLA prefill on the prefill worker, `FLASHINFER` on decode — and both roles use `FULL_AND_PIECEWISE` graphs, captured up to 2048 on decode.
+
+</div>
+
+<div data-sku="gb300">
+
+- **MNNVL all-reduce.** The GB300 profiles set `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Do not enable the NCCL symmetric-memory knobs alongside it — `VLLM_USE_NCCL_SYMM_MEM=0` is required because symmetric memory breaks CUDA-graph capture on this build.
+- **Cubins.** `FLASHINFER_PRIVATE_CUBIN_DIR` points at the trtllm-gen MoE cubins bundled in the image, with `CUDA_HOME=/usr/local/cuda` for JIT.
+
+</div>
+
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
+
+- **UCX.** The GB300 disaggregated profile leaves UCX at its defaults for the NIXL transport.
+- **Asymmetric worker config.** Prefill runs `--enforce-eager` (no CUDA graphs) while decode captures `FULL_DECODE_ONLY` graphs up to 2048.
+
+</div>
+
+<div data-variant="disagg">
+
+- **KDA state transfer.** The disaggregated profiles set `VLLM_SSM_CONV_STATE_LAYOUT=DS` — the Mamba-style conv state needs the DS layout to move across NIXL.
+
+</div>
+
+## Known issues
+
+- Known issue — `dynamo.vllm`'s `InstrumentedScheduler.schedule(self)` is stale against this vLLM build's `schedule(self, throttle_prefills=False)` and raises a `TypeError` on the first request. Every profile works around it by forcing vLLM's native `AsyncScheduler` with `--scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler`, which gives up Dynamo scheduler instrumentation. Remove the override once the image carries a fix.
+- Known issue — every worker replica loads its own copy of the ~1.5 TB checkpoint on every cold start, with no shared or streamed loading between them. That makes pod restarts expensive, which matters most for benchmark sweeps that restart workers between concurrency points to reset prefix-cache state.
 
 ## Source
 
