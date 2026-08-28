@@ -77,7 +77,7 @@ Dynamo ***不是为供应商锁定而设计的***。Dynamo 旨在赋能更广泛
 | :--- | :--- |
 | 推理引擎 | SGLang、TensorRT-LLM、vLLM |
 | Kubernetes | Inference gateway |
-| 内存管理 | Dynamo KV Block Manager、[LMCache](/dynamo/dev/cli/kv-cache-offloading/overview)、[SGLang HiCache](/dynamo/dev/backends/sg-lang/hi-cache)、[FlexKV](/dynamo/dev/cli/kv-cache-offloading/overview) |
+| 内存管理 | Dynamo KV Block Manager、[LMCache](/dynamo/dev/cli/kv-cache-offloading/overview)、[SGLang HiCache](/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/hi-cache)、[FlexKV](/dynamo/dev/cli/kv-cache-offloading/overview) |
 | 网络和存储 | Mooncake、DOCA NetIO、GDS、POSIX、S3、3FS（[通过 NIXL 支持](https://github.com/ai-dynamo/nixl)） |
 | Multi-HW | Intel XPU、AMD |
 
@@ -145,7 +145,7 @@ Kubernetes 自带一些容错功能，但 LLM 部署需要专门的容错和韧�
 
 ### 可观测性
 
-Dynamo 提供内置指标、分布式追踪和日志，用于监控推理部署。请参阅 [Observability Guide](https://github.com/ai-dynamo/dynamo/blob/5c04471520b0d8715b03ce442781fe9811261ee4/docs/fern/pages/kubernetes/installation/observability.md) 了解设置详情。
+Dynamo 提供内置指标、分布式追踪和日志，用于监控推理部署。请参阅 [Observability Guide](https://github.com/ai-dynamo/dynamo/blob/c7848a082bcd74ef0c72ac45b3424bf7655eef92/docs/fern/pages/kubernetes/installation/observability.md) 了解设置详情。
 
 ## 接下来做什么？
 
