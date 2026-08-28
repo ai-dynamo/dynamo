@@ -341,7 +341,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Dynamo Operator](../docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md)
+- [Install Dynamo](../docs/fern/pages/kubernetes/installation/install-dynamo.md)
 - [Observability Documentation](../docs/fern/pages/kubernetes/operations/observability.mdx)
 
 ## Related Documentation
