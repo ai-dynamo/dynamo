@@ -55,6 +55,14 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_NATIVE_ENGINE_ROUTES = (
+    ("pause_generation", "pause_generation:tm"),
+    ("continue_generation", "continue_generation:tm"),
+    ("release_memory_occupation", "release_memory_occupation:tm"),
+    ("resume_memory_occupation", "resume_memory_occupation:tm"),
+)
+
+
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
@@ -976,6 +984,50 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return backend_error
         return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
 
+    async def _sync_discovery_with_sglang_pause_state(self) -> None:
+        """Make discovery match SGLang's authoritative generation pause state."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if (
+            self.generate_endpoint is None
+            or tokenizer_manager is None
+            or not hasattr(tokenizer_manager, "is_pause")
+        ):
+            return
+
+        if tokenizer_manager.is_pause:
+            await self.generate_endpoint.unregister_endpoint_instance()
+        else:
+            await self.generate_endpoint.register_endpoint_instance()
+
+    async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
+        """Invoke one engine route and then synchronize worker discovery."""
+        async with self._pause_lock:
+            try:
+                result = await route_handler(body)
+            except BaseException:
+                try:
+                    await self._sync_discovery_with_sglang_pause_state()
+                except Exception:
+                    logger.exception(
+                        "Failed to synchronize discovery after an engine route error"
+                    )
+                raise
+
+            await self._sync_discovery_with_sglang_pause_state()
+            return result
+
+    def _wrap_engine_route(self, route_handler):
+        """Add discovery synchronization to an SGLang route."""
+
+        async def synchronized_handler(body: dict) -> dict:
+            return await self._invoke_engine_route(route_handler, body)
+
+        return synchronized_handler
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -1003,9 +1055,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
             built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
-            built_in_routes[
-                "control/is_scaling_elastic_ep"
-            ] = self.is_scaling_elastic_ep
+            built_in_routes["control/is_scaling_elastic_ep"] = (
+                self.is_scaling_elastic_ep
+            )
         reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
         for path, _ in configured_routes:
             if path in reserved_routes:
@@ -1014,11 +1066,23 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     "with a built-in route"
                 )
 
+        configured_paths = {path for path, _ in configured_routes}
+        # Expose the SGLang lifecycle methods without requiring --engine-route.
+        # An explicit route with the same public path overrides the default.
+        default_native_routes = resolve_configured_engine_routes(
+            self.engine,
+            [
+                descriptor
+                for path, descriptor in _DEFAULT_NATIVE_ENGINE_ROUTES
+                if path not in configured_paths
+            ],
+        )
+
         register_model_taint_route(runtime, self.generate_endpoint)
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
-        for path, configured_handler in configured_routes:
-            runtime.register_engine_route(path, configured_handler)
+        for path, route_handler in [*default_native_routes, *configured_routes]:
+            runtime.register_engine_route(path, self._wrap_engine_route(route_handler))
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

@@ -319,7 +319,14 @@ def test_engine_generate_capability_registration_gate(
 
 def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     handler = object.__new__(DecodeWorkerHandler)
-    handler.engine = SimpleNamespace()
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            pause_generation=lambda: None,
+            continue_generation=lambda: None,
+            release_memory_occupation=lambda: None,
+            resume_memory_occupation=lambda: None,
+        )
+    )
     handler.generate_endpoint = object()
     handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
 
@@ -344,6 +351,10 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     assert {path for path, _ in registered_routes} >= {
         "control/start_profile",
         "control/stop_profile",
+        "pause_generation",
+        "continue_generation",
+        "release_memory_occupation",
+        "resume_memory_occupation",
     }
 
 
