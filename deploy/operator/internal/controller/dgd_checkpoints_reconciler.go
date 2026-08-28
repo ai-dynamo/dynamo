@@ -651,9 +651,10 @@ func (r *dgdCheckpointsReconciler) syncCheckpointGMSResourceClaimTemplate(
 	gpuCount int,
 	deviceClassName string,
 ) error {
+	// DynamoCheckpoint takes controller ownership after the DGD creates this template.
 	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dgd.Namespace, gpuCount, deviceClassName)
-	})
+	}, commoncontroller.WithSharedOwnership())
 	if err != nil {
 		return fmt.Errorf("failed to sync checkpoint GMS ResourceClaimTemplate %s/%s: %w", dgd.Namespace, claimTemplateName, err)
 	}

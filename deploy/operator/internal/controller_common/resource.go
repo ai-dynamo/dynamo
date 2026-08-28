@@ -31,13 +31,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -47,6 +50,8 @@ const (
 	// NvidiaAnnotationGenerationKey indicates annotation name for last applied generation by the operator
 	// This is used to detect manual changes to resources
 	NvidiaAnnotationGenerationKey = "nvidia.com/last-applied-generation"
+	// EventReasonOwnershipConflict identifies a resource that this reconciliation must not manage.
+	EventReasonOwnershipConflict = "OwnershipConflict"
 )
 
 type Reconciler interface {
@@ -59,9 +64,71 @@ type Reconciler interface {
 // if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
 type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
 
+// SyncOption configures an exceptional SyncResource ownership policy.
+type SyncOption func(*syncOptions)
+
+type syncOptions struct {
+	sharedOwnership bool
+}
+
+// WithSharedOwnership permits a caller to reconcile a resource whose controller
+// owner is another resource. Callers must use this only for a documented,
+// intentional shared-resource lifecycle.
+func WithSharedOwnership() SyncOption {
+	return func(options *syncOptions) {
+		options.sharedOwnership = true
+	}
+}
+
+func resolveSyncOptions(opts []SyncOption) syncOptions {
+	var options syncOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return options
+}
+
+// checkControllerOwnership verifies that existing is controlled by parentResource.
+// A namespaced name is not sufficient evidence of ownership: a resource with no
+// controller owner or one owned by a different parent is a collision.
+func checkControllerOwnership(existing, parentResource client.Object, scheme *runtime.Scheme) error {
+	if parentResource == nil {
+		return nil
+	}
+
+	existingOwner := metav1.GetControllerOf(existing)
+	if existingOwner == nil {
+		return fmt.Errorf(
+			"%T %s/%s has no controller owner; refusing to reconcile it for %T %s/%s",
+			existing,
+			existing.GetNamespace(),
+			existing.GetName(),
+			parentResource,
+			parentResource.GetNamespace(),
+			parentResource.GetName(),
+		)
+	}
+
+	parentGVK, err := apiutil.GVKForObject(parentResource, scheme)
+	if err != nil {
+		return fmt.Errorf("get parent GVK: %w", err)
+	}
+	existingOwnerGV, err := schema.ParseGroupVersion(existingOwner.APIVersion)
+	if err != nil ||
+		existingOwnerGV.Group != parentGVK.Group ||
+		existingOwner.Kind != parentGVK.Kind ||
+		existingOwner.Name != parentResource.GetName() ||
+		existingOwner.UID != parentResource.GetUID() {
+		return &controllerutil.AlreadyOwnedError{Object: existing, Owner: *existingOwner}
+	}
+
+	return nil
+}
+
 //nolint:nakedret
-func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T]) (modified bool, res T, err error) {
+func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T], opts ...SyncOption) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
+	options := resolveSyncOptions(opts)
 
 	resource, toDelete, err := generateResource(ctx)
 	if err != nil {
@@ -108,11 +175,19 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 		logs.Info("Resource not found. Creating a new one.")
 		var observed T
-		return SyncObservedResource(ctx, r, parentResource, observed, resource)
+		return SyncObservedResource(ctx, r, parentResource, observed, resource, opts...)
 	}
 
 	logs.Info(fmt.Sprintf("%s found.", resourceType))
 	if toDelete {
+		if !options.sharedOwnership {
+			err = checkControllerOwnership(oldResource, parentResource, r.Scheme())
+			if err != nil {
+				logs.Error(err, "Refusing to delete a resource with conflicting controller ownership")
+				recordResourceEvent(r, oldResource, corev1.EventTypeWarning, EventReasonOwnershipConflict, "Delete", "Refusing to delete %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+		}
 		logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
 		err = r.Delete(ctx, oldResource)
 		if err != nil {
@@ -126,7 +201,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		return
 	}
 
-	return SyncObservedResource(ctx, r, parentResource, oldResource, resource)
+	return SyncObservedResource(ctx, r, parentResource, oldResource, resource, opts...)
 }
 
 // SyncObservedResource synchronizes a desired resource against the exact
@@ -139,6 +214,7 @@ func SyncObservedResource[T client.Object](
 	parentResource client.Object,
 	observed T,
 	desired T,
+	opts ...SyncOption,
 ) (bool, T, error) {
 	resourceNamespace := desired.GetNamespace()
 	resourceName := desired.GetName()
@@ -180,6 +256,15 @@ func SyncObservedResource[T client.Object](
 		logs.Info(fmt.Sprintf("%s created.", resourceType))
 		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
 		return true, desired, nil
+	}
+
+	if !resolveSyncOptions(opts).sharedOwnership {
+		if err := checkControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
+			logs.Error(err, "Refusing to reconcile a resource with conflicting controller ownership")
+			recordResourceEvent(r, observed, corev1.EventTypeWarning, EventReasonOwnershipConflict, "Sync", "Refusing to reconcile %s %s: %s", resourceType, resourceNamespace, err)
+			var zero T
+			return false, zero, err
+		}
 	}
 
 	changeResult, err := GetSpecChangeResult(observed, desired)
