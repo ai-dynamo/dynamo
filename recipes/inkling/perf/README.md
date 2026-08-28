@@ -63,7 +63,7 @@ export NAMESPACE=your-namespace
 
 See the deployment instructions in the [recipe README](../README.md).
 
-### 2. Stage the trace on the PVC
+### 2. Stage the trace and the artifact directory on the PVC
 
 Copy `mooncake_agentic.jsonl` through a helper pod that mounts `model-cache`:
 
@@ -75,9 +75,20 @@ kubectl run pvc-helper -n ${NAMESPACE} \
 
 kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp mooncake_agentic.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
+
+# The Job writes artifacts as UID 1000; a fresh PVC root is root-owned, so
+# create ROOT_ARTIFACT_DIR now or the Job exits before warmup.
+kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/perf
+kubectl exec -n ${NAMESPACE} pvc-helper -- chown 1000:1000 /model-cache/perf
 ```
 
 Keep `pvc-helper` for fetching artifacts, or delete it after staging.
+
+> [!NOTE]
+> `securityContext.fsGroup: 1000` would also work but is the wrong tool here: it
+> recursively chowns the *whole* volume at mount, and this PVC holds the ~600 GB
+> checkpoint. `fsGroupChangePolicy: OnRootMismatch` does not avoid that, because
+> the volume root is exactly what mismatches.
 
 ### 3. Run the benchmark
 
