@@ -75,16 +75,6 @@ impl VllmSidecarEngine {
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.sidecar.common.disaggregation_mode.is_encode() {
-            return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM sidecar",
-            ));
-        }
-        if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_argument(
-                "route-to-encoder is not supported by the vLLM sidecar",
-            ));
-        }
         if args.sidecar.common.dyn_tool_call_parser.is_some()
             || args.sidecar.common.dyn_reasoning_parser.is_some()
         {
@@ -105,7 +95,7 @@ impl VllmSidecarEngine {
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
-            // Prefill/decode must register under fixed role components so the
+            // Disaggregated workers register under fixed role components so the
             // frontend can route the disaggregated handoff; aggregated keeps the
             // operator-configured component (`--component` / `DYN_COMPONENT`).
             component: match mode {
@@ -126,7 +116,7 @@ impl VllmSidecarEngine {
                 .exclude_tools_when_tool_choice_none,
             enable_kv_routing: true,
             disaggregation_mode: mode,
-            route_to_encoder: false,
+            route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl: args.sidecar.common.enable_rl,
             ..Default::default()
         };

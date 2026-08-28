@@ -45,12 +45,12 @@ pub(crate) fn build_generate_request(
     }
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
-    let max_new_tokens = if mode.is_prefill() {
+    let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.max_tokens.unwrap_or(0)
     };
-    let min_new_tokens = if mode.is_prefill() {
+    let min_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.min_tokens.unwrap_or(0)
@@ -66,6 +66,7 @@ pub(crate) fn build_generate_request(
 
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
+    let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
@@ -74,7 +75,7 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
-    let kv = build_kv_parameters(extra_args, prefill_result, cache_salt, mode)?;
+    let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
         request_id,
@@ -434,6 +435,7 @@ fn structured_output(
 fn build_kv_parameters(
     extra_args: Option<serde_json::Value>,
     prefill_result: Option<PrefillResult>,
+    encoder_result: Option<serde_json::Value>,
     cache_salt: Option<String>,
     mode: DisaggregationMode,
 ) -> Result<pb::KvCacheParameters, DynamoError> {
@@ -495,11 +497,20 @@ fn build_kv_parameters(
             stringify_remote_port(&mut params);
             Some(params)
         }
-        DisaggregationMode::Encode => {
-            return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM sidecar",
-            ));
-        }
+        DisaggregationMode::Encode => None,
+    };
+
+    let ec_transfer_params = match mode {
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill => match encoder_result {
+            None => None,
+            Some(serde_json::Value::Object(params)) => Some(serde_json::Value::Object(params)),
+            Some(_) => {
+                return Err(client::invalid_argument(
+                    "encoder_result must be a JSON object",
+                ));
+            }
+        },
+        DisaggregationMode::Decode | DisaggregationMode::Encode => None,
     };
 
     Ok(pb::KvCacheParameters {
@@ -508,7 +519,7 @@ fn build_kv_parameters(
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: None,
+        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
     })
 }
 
@@ -565,14 +576,23 @@ fn validate_request(
             "prompt embeddings are not supported by vLLM gRPC v0.25.1",
         ));
     }
-    if request.mm_processor_kwargs.is_some() || request.encoder_result.is_some() {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_argument(
             "preprocessed multimodal features are not supported by vLLM gRPC",
         ));
     }
-    if mode.is_encode() {
+    let has_media = request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+    if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
-            "encode mode is not supported by the vLLM sidecar",
+            "encode requests require multimodal media",
+        ));
+    }
+    if mode.is_encode() && request.encoder_result.is_some() {
+        return Err(client::invalid_argument(
+            "encode requests must not include encoder_result",
         ));
     }
     if request
@@ -635,7 +655,7 @@ pub(crate) struct ResponseState {
     has_media: bool,
     multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
-    is_prefill: bool,
+    mode: DisaggregationMode,
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
@@ -651,7 +671,7 @@ impl ResponseState {
                 .is_some_and(|media| media.values().any(|items| !items.is_empty())),
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
-            is_prefill: mode.is_prefill(),
+            mode,
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
@@ -659,7 +679,7 @@ impl ResponseState {
     }
 
     pub(crate) fn reported_completion_tokens(&self) -> u32 {
-        if self.is_prefill {
+        if self.mode.is_prefill() || self.mode.is_encode() {
             0
         } else {
             self.completion_tokens
@@ -694,8 +714,15 @@ impl ResponseState {
             )));
         }
 
+        if self.mode.is_encode() && output.num_tokens > 0 {
+            return Err(client::protocol_error(
+                "encode response produced output tokens",
+            ));
+        }
+
         let mapped_logprobs = if let Some(count) = self.output_logprobs
-            && !self.is_prefill
+            && !self.mode.is_prefill()
+            && !self.mode.is_encode()
         {
             Some(map_output_logprobs(&output, count > 0)?)
         } else {
@@ -711,12 +738,12 @@ impl ResponseState {
 
         self.completion_tokens = self.completion_tokens.saturating_add(num_tokens);
         let mut mapped = LLMEngineOutput {
-            token_ids: if self.is_prefill {
+            token_ids: if self.mode.is_prefill() || self.mode.is_encode() {
                 Vec::new()
             } else {
                 token_ids
             },
-            text: if self.is_prefill || text.is_empty() {
+            text: if self.mode.is_prefill() || self.mode.is_encode() || text.is_empty() {
                 None
             } else {
                 Some(text)
@@ -730,7 +757,7 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.is_prefill || num_tokens == 0 {
+            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 Ok(None)
             } else {
                 Ok(Some(mapped))
@@ -766,13 +793,30 @@ impl ResponseState {
             pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
+        if self.mode.is_encode() {
+            if matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Cancelled)
+            ) {
+                return Ok(Some(mapped));
+            }
+            let params = finish
+                .ec_transfer_params
+                .map(struct_to_json)
+                .transpose()?
+                .and_then(|value| value.as_object().cloned())
+                .ok_or_else(|| {
+                    client::protocol_error("encode terminal is missing valid ec_transfer_params")
+                })?;
+            return Ok(Some(LLMEngineOutput::encode_terminal(params)));
+        }
         mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
-        if self.is_prefill && mapped.disaggregated_params.is_none() {
+        if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
             ));
         }
-        if self.is_prefill && self.has_media {
+        if self.mode.is_prefill() && self.has_media {
             let token_ids = self.multimodal_prompt_token_ids.take().ok_or_else(|| {
                 client::protocol_error(
                     "multimodal prefill did not return expanded prompt token IDs",
@@ -815,7 +859,7 @@ impl ResponseState {
             // vLLM's count includes expanded media tokens.
             self.prompt_tokens = prompt.num_prompt_tokens;
         }
-        if self.is_prefill && self.has_media {
+        if self.mode.is_prefill() && self.has_media {
             if prompt.token_ids.len() != prompt.num_prompt_tokens as usize {
                 return Err(client::protocol_error(format!(
                     "multimodal prefill returned {} prompt token IDs for {} prompt tokens",
