@@ -17,7 +17,7 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 | **Nodes**                | 1                             | 2                                           | 1                           | 2                                       |
 | **Mode**                 | Aggregated                    | Prefill/decode disaggregated                | Aggregated                  | Prefill/decode disaggregated            |
 | **Framework**            | vLLM                          | vLLM                                        | vLLM                        | vLLM                                    |
-| **Precision**            | BF16 weights + BF16 KV cache | BF16 weights + BF16 KV cache                | FP8 weights + BF16 KV cache | FP8 weights + BF16 KV cache             |
+| **Precision**            | FP8-quantized checkpoint + BF16 KV cache | FP8-quantized checkpoint + BF16 KV cache | FP8-quantized checkpoint + BF16 KV cache | FP8-quantized checkpoint + BF16 KV cache |
 | **Parallelism**          | TP4                           | TP4 prefill / TP4 decode                    | TP8                         | TP8 prefill / TP8 decode                |
 | **Routing**              | KV-aware                      | KV-aware                                    | Round-robin                 | KV-aware                                |
 | **Speculative decoding** | None                          | None                                        | MTP7                        | MTP7 on prefill and decode              |
@@ -75,22 +75,6 @@ MODE=agg    # or disagg
 kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
-### 5. Benchmark
-
-See [perf/README.md](perf/README.md) for the full benchmark workflow.
-
-## Optimization targets
-
-| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
-| -------- | ---------- | ---------- | ----------------- | ----------------- |
-| Agentic  | 64k        | 400        | 90%               | TBD               |
-
-## Performance results
-
-| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
-| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
-|          |        |     |             |                         |                         |               |
-
 ## Limitations
 
 - GB200 disagg KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The image's UCX
@@ -104,3 +88,4 @@ See [perf/README.md](perf/README.md) for the full benchmark workflow.
 - `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
   decode workers; mismatching these produces silent garbage output.
 - `n>1` requests are not supported with the disaggregated recipe.
+- Performance is not validated.
