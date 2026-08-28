@@ -281,12 +281,17 @@ def send_cancellable_request(
 def read_streaming_responses(
     cancellable_req: CancellableRequest,
     expected_count: int = 5,
+    deadline_s: float | None = None,
 ) -> None:
     """Read a specific number of responses from a streaming request.
 
     Args:
         cancellable_req: The CancellableRequest object with an active stream
         expected_count: Number of responses to read before returning
+        deadline_s: Wall-clock budget for reading all expected_count chunks.
+            The `timeout` passed to requests only bounds the gap between two
+            chunks, so a slow but alive stream can run without a limit. This
+            deadline bounds the phase as a whole.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -300,6 +305,7 @@ def read_streaming_responses(
         )
 
     response = cast(requests.Response, response_raw)  # Type narrowing after checks
+    deadline = None if deadline_s is None else time.monotonic() + deadline_s
     response_count = 0
     for line in response.iter_lines():
         response_count += 1
@@ -309,6 +315,12 @@ def read_streaming_responses(
         if response_count >= expected_count:
             logger.info(f"Successfully read {response_count} responses")
             return
+        if deadline is not None and time.monotonic() > deadline:
+            cancellable_req.cancel()
+            pytest.fail(
+                f"Read only {response_count} of {expected_count} streaming responses "
+                f"within {deadline_s}s"
+            )
 
     # If we get here, stream ended too early
     pytest.fail(

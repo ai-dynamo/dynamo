@@ -46,12 +46,18 @@ XPU_CANCELLATION_MAX_TOKENS = 2096
 DECODE_CANCEL_FRONTEND_STARTUP_ALLOWANCE_S = 60
 DECODE_CANCEL_PREFILL_STARTUP_TIMEOUT_S = 180
 DECODE_CANCEL_DECODE_STARTUP_TIMEOUT_S = 270
+# Two different bounds on the behavioral phase. The read timeout is what
+# requests applies between two chunks; the allowance is the wall-clock deadline
+# read_streaming_responses applies across all of them. A stalled read can start
+# just under the deadline, so the worst case for the phase is their sum.
+DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 DECODE_CANCEL_TEST_TIMEOUT_S = (
     DECODE_CANCEL_FRONTEND_STARTUP_ALLOWANCE_S
     + DECODE_CANCEL_PREFILL_STARTUP_TIMEOUT_S
     + DECODE_CANCEL_DECODE_STARTUP_TIMEOUT_S
     + DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S
+    + DECODE_CANCEL_STREAM_READ_TIMEOUT_S
 )
 
 
@@ -87,13 +93,9 @@ class DynamoWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
-            kv_mark = request.node.get_closest_marker(
-                "requested_vllm_kv_cache_bytes"
-            )
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
             if kv_mark:
-                env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(
-                    int(kv_mark.args[0])
-                )
+                env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
 
         gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
         if not gpu_mem_args:
@@ -427,7 +429,7 @@ def test_request_cancellation_vllm_decode_cancel(
                     frontend.frontend_port,
                     "chat_completion_stream",
                     max_tokens=CANCELLATION_MAX_TOKENS,
-                    timeout_s=DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S,
+                    timeout_s=DECODE_CANCEL_STREAM_READ_TIMEOUT_S,
                 )
 
                 request_id, decode_log_offset = poll_for_pattern(
@@ -442,9 +444,15 @@ def test_request_cancellation_vllm_decode_cancel(
                 poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Prefill Request ID: {request_id}",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
                 )
 
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(
+                    cancellable_req,
+                    expected_count=5,
+                    deadline_s=DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S,
+                )
 
                 cancellable_req.cancel()
                 logger.info("Cancelled request ID: %s", request_id)
@@ -543,6 +551,8 @@ def test_request_cancellation_vllm_prefill_cancel(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
                     cancellable_request=cancellable_req,
                 )
 
