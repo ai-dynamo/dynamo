@@ -248,7 +248,10 @@ fn resolve_wildcard(
         });
     }
 
-    let advertise_ip = candidates.preferred_loopback().unwrap_or(DEFAULT_LOOPBACK);
+    let advertise_ip = candidates
+        .loopback_for(wildcard)
+        .or_else(|| candidates.preferred_loopback())
+        .unwrap_or_else(|| loopback_for(wildcard));
     Ok(ResolvedHost {
         bind_ip: unspecified_for(advertise_ip),
         advertise_ip,
@@ -351,8 +354,10 @@ pub fn local_ip_for_advertise() -> String {
 }
 
 /// TCP RPC host: `DYN_TCP_RPC_HOST` if set, otherwise the resolved local IP.
+#[deprecated(note = "DYN_TCP_RPC_HOST is resolved by the request-plane server at startup")]
 pub fn tcp_rpc_host_from_env() -> String {
-    std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| local_ip_for_advertise())
+    std::env::var(crate::config::environment_names::request_plane::DYN_TCP_RPC_HOST)
+        .unwrap_or_else(|_| local_ip_for_advertise())
 }
 
 fn cached_local_ip_for_advertise<R: IpResolver>(cache: &OnceLock<IpAddr>, resolver: &R) -> String {
@@ -558,6 +563,32 @@ mod tests {
             assert_eq!(resolved.bind_ip(), bind_ip);
             assert_eq!(resolved.advertise_ip(), advertise_ip);
         }
+    }
+
+    #[test]
+    fn wildcard_prefers_loopback_in_requested_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![("lo", ip("127.0.0.1")), ("lo", ip("::1"))];
+
+        for (literal, expected_bind, expected_advertise) in [
+            ("0.0.0.0", ip("0.0.0.0"), ip("127.0.0.1")),
+            ("::", ip("::"), ip("::1")),
+            ("[::]", ip("::"), ip("::1")),
+        ] {
+            let resolved = resolve_host_or_interface(literal, &resolver).unwrap();
+            assert_eq!(resolved.bind_ip(), expected_bind);
+            assert_eq!(resolved.advertise_ip(), expected_advertise);
+        }
+
+        resolver.interfaces = vec![("lo", ip("127.0.0.1"))];
+        let resolved = resolve_host_or_interface("::", &resolver).unwrap();
+        assert_eq!(resolved.bind_ip(), ip("0.0.0.0"));
+        assert_eq!(resolved.advertise_ip(), ip("127.0.0.1"));
+
+        resolver.interfaces.clear();
+        let resolved = resolve_host_or_interface("::", &resolver).unwrap();
+        assert_eq!(resolved.bind_ip(), ip("::"));
+        assert_eq!(resolved.advertise_ip(), ip("::1"));
     }
 
     #[test]

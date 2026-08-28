@@ -16,6 +16,7 @@
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 use super::ingress::unified_server::RequestPlaneServer;
+use crate::config::environment_names::request_plane;
 use crate::distributed::RequestPlaneMode;
 use crate::utils::ip_resolver::{DefaultIpResolver, resolve_host_or_interface, resolve_local_host};
 use anyhow::Result;
@@ -97,10 +98,10 @@ impl NetworkConfig {
         Self {
             // TCP server configuration
             // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
+            tcp_host: std::env::var(request_plane::DYN_TCP_RPC_HOST)
                 .ok()
                 .filter(|host| !host.is_empty()),
-            tcp_port: std::env::var("DYN_TCP_RPC_PORT")
+            tcp_port: std::env::var(request_plane::DYN_TCP_RPC_PORT)
                 .ok()
                 .and_then(|p| p.parse().ok()),
 
@@ -287,7 +288,7 @@ impl NetworkManager {
 
                 tracing::info!(
                     bind_addr = %bind_addr,
-                    port_source = if self.config.tcp_port.is_some() { "DYN_TCP_RPC_PORT" } else { "OS-assigned" },
+                    port_source = if self.config.tcp_port.is_some() { request_plane::DYN_TCP_RPC_PORT } else { "OS-assigned" },
                     "Creating TCP request plane server"
                 );
 

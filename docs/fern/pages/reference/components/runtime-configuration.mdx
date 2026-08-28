@@ -130,8 +130,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 
   A wildcard advertises a reachable address in its requested family. If only the other family has a
   usable non-loopback address, Dynamo switches the bind wildcard to that family. IPv4 link-local
-  addresses are accepted. Unspecified, multicast, broadcast, and unscoped IPv6 link-local
-  advertisement addresses are rejected.
+  addresses are accepted. Multicast, broadcast, and IPv6 link-local addresses are rejected.
+  Wildcards are accepted as bind addresses and are never advertised.
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected">
@@ -139,8 +139,10 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   selection and wildcard-family rules as `DYN_TCP_RPC_HOST`.
 </ParamField>
 
-Automatic local-address selection caches only successful non-loopback results. Dynamo retries after
-interface-enumeration errors and loopback fallbacks.
+Automatic selection for advertised URLs caches only successful non-loopback results and resolves
+again after interface-enumeration errors and loopback fallbacks. The TCP request-plane and
+response-stream servers resolve once at startup. A loopback fallback persists until restart, and an
+interface-enumeration error fails server startup.
 
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`

@@ -718,6 +718,15 @@ pub mod request_plane {
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
+
+    /// Host or interface for the TCP request-plane server.
+    /// The server resolves the value once at startup. A loopback fallback
+    /// persists until restart, and an enumeration error fails server startup.
+    pub const DYN_TCP_RPC_HOST: &str = "DYN_TCP_RPC_HOST";
+
+    /// Port for the TCP request-plane server.
+    /// If unset, the OS assigns a free ephemeral port.
+    pub const DYN_TCP_RPC_PORT: &str = "DYN_TCP_RPC_PORT";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -734,8 +743,9 @@ pub mod tcp_response_stream {
     /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
     /// loopback. A wildcard uses a reachable address in its requested family.
     /// If only the other family has a usable non-loopback address, the server
-    /// switches the bind wildcard to that family. Enumeration errors and
-    /// loopback fallbacks are retried and are not cached.
+    /// switches the bind wildcard to that family. The server resolves the value
+    /// once at startup. A loopback fallback persists until restart, and an
+    /// enumeration error fails server startup.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
     /// TCP request-plane TLS configuration
@@ -1035,6 +1045,8 @@ mod tests {
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
+            request_plane::DYN_TCP_RPC_HOST,
+            request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
