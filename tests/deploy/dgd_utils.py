@@ -485,9 +485,33 @@ class DeploymentSpec:
     def __init__(
         self, base: str, endpoint="/v1/chat/completions", port=8000, system_port=9090
     ):
-        """Load the deployment YAML file"""
+        """Load the deployment YAML file.
+
+        Recipe manifests are frequently multi-document -- a DynamoGraphDeployment
+        alongside ConfigMaps, Services or PVCs. Select the DGD document rather
+        than assuming a single-document file, otherwise ``yaml.safe_load``
+        raises ComposerError on the majority of ``recipes/*/deploy.yaml``.
+        """
         with open(base, "r") as f:
-            self._deployment_spec = yaml.safe_load(f)
+            docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
+        graph_deployments = [
+            d for d in docs if d.get("kind") == "DynamoGraphDeployment"
+        ]
+        if len(graph_deployments) > 1:
+            raise ValueError(
+                f"{base} contains {len(graph_deployments)} DynamoGraphDeployment "
+                "documents; expected exactly one"
+            )
+        if graph_deployments:
+            self._deployment_spec = graph_deployments[0]
+        elif len(docs) == 1:
+            # Preserve the original behaviour for manifests that omit `kind`.
+            self._deployment_spec = docs[0]
+        else:
+            raise ValueError(
+                f"{base} contains no DynamoGraphDeployment document "
+                f"(found kinds: {sorted({d.get('kind') for d in docs})})"
+            )
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
