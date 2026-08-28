@@ -29,6 +29,7 @@ from sglang.srt.parser.jinja_template_utils import (
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+from dynamo.common.utils.guided_json import admits_only_empty_object
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, random_call_id
@@ -52,6 +53,7 @@ class SglangPreprocessResult:
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -328,6 +330,20 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
         and isinstance(tool_choice.get("function"), dict)
         and bool(tool_choice["function"].get("name"))
     )
+
+
+def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
+    """Return the named tool when its only valid argument value is ``{}``."""
+    tool_choice = request.get("tool_choice", "auto")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+    chosen_name = tool_choice["function"]["name"]
+    for tool in convert_tools(request.get("tools")) or []:
+        if tool.function.name == chosen_name and admits_only_empty_object(
+            tool.function.parameters
+        ):
+            return chosen_name
+    return None
 
 
 def _guided_tool_choice_requires_reasoning(
@@ -609,6 +625,8 @@ def build_tool_call_guided_decoding(
 
     if isinstance(constraint, tuple) and len(constraint) == 2:
         if constraint[0] == "json_schema":
+            if named_closed_zero_arg_tool(request) is not None:
+                return {"regex": r"\{\}"}
             return {"json": constraint[1]}
         if constraint[0] == "structural_tag":
             tag_value = constraint[1]
@@ -844,6 +862,11 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        named_zero_arg_tool=(
+            named_closed_zero_arg_tool(request)
+            if guided_decoding == {"regex": r"\{\}"}
+            else None
+        ),
     )
 
 
@@ -958,6 +981,7 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        named_zero_arg_tool: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
@@ -970,6 +994,7 @@ class SglangStreamingPostProcessor:
         self._tool_call_parser_name = _normalize_sglang_parser_name(
             tool_call_parser_name
         )
+        self._named_zero_arg_tool = named_zero_arg_tool
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -1409,6 +1434,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
+            if self._named_zero_arg_tool is not None:
+                # The exact regex emits the argument object, not user-visible text.
+                content_text = ""
 
             for tc in tool_calls:
                 idx = tc.tool_index
@@ -1453,9 +1481,13 @@ class SglangStreamingPostProcessor:
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
             known_names = (
-                {t.function.name for t in self._sglang_tools}
-                if self._sglang_tools
-                else set()
+                {self._named_zero_arg_tool}
+                if self._named_zero_arg_tool is not None
+                else (
+                    {t.function.name for t in self._sglang_tools}
+                    if self._sglang_tools
+                    else set()
+                )
             )
             if known_names:
                 for idx in list(self._tool_call_names):
@@ -1493,7 +1525,19 @@ class SglangStreamingPostProcessor:
 
             if should_reparse:
                 if self._is_json_array_parser:
-                    final_calls = _parse_json_array_buffer(full_text)
+                    if (
+                        self._named_zero_arg_tool is not None
+                        and full_text.strip() == "{}"
+                    ):
+                        final_calls = [
+                            ToolCallItem(
+                                tool_index=0,
+                                name=self._named_zero_arg_tool,
+                                parameters="{}",
+                            )
+                        ]
+                    else:
+                        final_calls = _parse_json_array_buffer(full_text)
                     # Secondary fallback: when guided decoding did not
                     # constrain the output (e.g. the backend doesn't
                     # support it), the model may have produced tool calls
@@ -1567,6 +1611,15 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+            if self._named_zero_arg_tool is not None and not self._tool_call_names:
+                # A backend that cannot enforce the regex may return ordinary text.
+                # It was held back to avoid leaking the exact `{}` argument payload,
+                # so restore it when no zero-argument tool call was recovered.
+                fallback_content = "".join(self._tool_text_parts)
+                if fallback_content.strip() != "{}":
+                    delta["content"] = fallback_content
+                    has_content = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

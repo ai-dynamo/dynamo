@@ -26,6 +26,7 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
     StreamingPostProcessor,
@@ -2154,6 +2155,49 @@ class TestToolCallGuidedDecoding:
         assert set(guided) == {"json"}
         assert parser.requests == []
 
+    def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._request(
+                tokenizer,
+                tool_choice={"type": "function", "function": {"name": "get_weather"}},
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+            ),
+            tool_parser=None,
+        )
+
+        assert guided == {"regex": r"\{\}"}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"minProperties": 0},
+            {"maxProperties": 1},
+            {"examples": [{}]},
+        ],
+    )
+    def test_zero_arg_schema_allows_neutral_bounds_and_annotations(self, extra):
+        assert admits_only_empty_object(
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+                **extra,
+            }
+        )
+
     def test_required_choice_disables_parallel_calls_in_json_guidance(self, tokenizer):
         guided = build_tool_call_guided_decoding(
             self._request(
@@ -2290,6 +2334,63 @@ class TestToolCallGuidedDecoding:
         assert choice["delta"]["tool_calls"][0]["function"] == {
             "name": "get_weather",
             "arguments": '{"city":"Paris"}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_named_closed_zero_arg_regex_becomes_a_tool_call(self, tokenizer):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        request["tools"][0]["function"]["parameters"] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=None,
+            structural_tag_mode="off",
+        )
+
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=result.request_for_sampling,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=result.prompt_token_ids,
+            tool_parser=result.tool_parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs=result.chat_template_kwargs,
+            stream_response=False,
+            uses_dynamo_json_tool_call_fallback=(
+                result.uses_dynamo_json_tool_call_fallback
+            ),
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text="{}",
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": "{}",
         }
 
     # Explicit assistant constraints must override automatic tool-call guidance.
