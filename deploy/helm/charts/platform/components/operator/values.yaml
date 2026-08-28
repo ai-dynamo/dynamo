@@ -24,10 +24,13 @@ upgradeCRD: true
 
 # Experimental operator features. Disabled gates do not change existing stable APIs.
 featureGates:
-  # -- EXPERIMENTAL: Install the DGDR v1beta2 API schemas. When false, the CRD
-  # init container omits DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate
-  # and removes v1beta2 from DynamoGraphDeploymentRequest before installation.
-  # This gate exposes API schemas only; the operator does not reconcile v1beta2 resources.
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
+  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
+  # created through these schemas are persisted in etcd. Incompatible schema changes
+  # may make stored objects unreadable or block future CRD upgrades. When false, the
+  # CRD init container omits those resources and removes v1beta2 from
+  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
+  # v1beta2 resources.
   DGDRV1Beta2: false
 
 # Environment variables to pass to operator Deployment.

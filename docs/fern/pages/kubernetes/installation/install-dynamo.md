@@ -150,13 +150,18 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
-> [!NOTE]
-> **Experimental.** The DGDR v1beta2 schemas are disabled by default. To install them for API
-> development, add `--set "dynamo-operator.featureGates.DGDRV1Beta2=true"` to the Helm command.
+> [!WARNING]
+> **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
+> default. To install them for API development, add
+> `--set "dynamo-operator.featureGates.DGDRV1Beta2=true"` to the Helm command.
 > The gate adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
 > `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
 > (CRDs). It does not enable v1beta2 reconciliation, so the operator does not process resources
 > created with these schemas.
+>
+> Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
+> later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
+> this gate on production or shared clusters.
 >
 > Disabling the gate on a later Helm upgrade stops updating the experimental schemas but does not
 > delete CRDs that were previously installed. Remove those CRDs manually only after confirming

@@ -62,6 +62,14 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("crd-apply")
+	if gates[dgdrV1Beta2Gate] {
+		log.Info(
+			"WARNING: enabled experimental DGDR v1beta2 API schemas; use only on development clusters. "+
+				"DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects are persisted in etcd, "+
+				"and incompatible schema changes may block future CRD upgrades",
+			"featureGate", dgdrV1Beta2Gate,
+		)
+	}
 
 	config, err := ctrl.GetConfig()
 	if err != nil {
