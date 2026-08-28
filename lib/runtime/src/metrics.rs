@@ -9,6 +9,7 @@
 pub mod frontend_perf;
 pub mod otlp_export;
 pub mod prom_text;
+pub mod prom_typed;
 pub mod prometheus_names;
 pub mod request_plane;
 pub mod tokio_perf;
