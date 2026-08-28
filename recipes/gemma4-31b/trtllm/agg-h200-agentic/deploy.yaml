@@ -163,6 +163,8 @@ spec:
               args:
                 - -m
                 - dynamo.trtllm
+                - --endpoint-types
+                - chat
                 - --model-path
                 - google/gemma-4-31B-it
                 - --served-model-name

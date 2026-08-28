@@ -141,6 +141,8 @@ spec:
               args:
                 - -m
                 - dynamo.trtllm
+                - --endpoint-types
+                - chat
                 - --model-path
                 - nvidia/Gemma-4-31B-IT-NVFP4
                 - --served-model-name
