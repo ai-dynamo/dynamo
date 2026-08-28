@@ -2747,9 +2747,8 @@ impl JsonStructureScanner {
             if !self.root_started {
                 self.root_started = true;
                 if byte == b'}' || byte == b']' {
-                    // A closing token with nothing open — this is what makes
-                    // `}{"x":1}` a permanent non-dispatch rather than a call
-                    // that reads complete after clamping depth to zero.
+                    // A closing token with nothing open: `}{"x":1}` is a
+                    // permanent non-dispatch, not a depth-clamped completion.
                     self.malformed = true;
                     break;
                 }
@@ -2865,9 +2864,8 @@ fn update_tool_call_assembly(
     let entry = assemblies
         .entry((choice_index, chunk.index))
         .or_insert_with(|| ToolCallAssembly {
-            // An entry is created for *every* chunk. Requiring id and name to
-            // coexist in the chunk that opens the entry is the bug this
-            // replaces: arguments legally arrive before identity.
+            // An entry is created for *every* chunk: arguments legally
+            // arrive before identity.
             accumulated: ChatCompletionMessageToolCallChunk {
                 index: chunk.index,
                 id: None,
@@ -2882,11 +2880,8 @@ fn update_tool_call_assembly(
     match entry.state {
         AssemblyState::Invalid => return,
         AssemblyState::Emitted => {
-            // An exact replay of an already-dispatched chunk is the
-            // pre-existing duplicate-backend-chunk case and stays silent. A
-            // *different* continuation after emission is a producer violation:
-            // an SSE event that has already gone out cannot be retracted, so
-            // log and suppress.
+            // An exact replay is the duplicate-backend-chunk case; an emitted
+            // SSE event cannot be retracted, so a differing continuation is dropped.
             if !is_exact_replay(entry, chunk) {
                 tracing::warn!(
                     choice_index,
@@ -2900,9 +2895,8 @@ fn update_tool_call_assembly(
         AssemblyState::Accumulating => {}
     }
 
-    // Scan only the bytes of the arriving fragment, never the accumulated
-    // buffer. `merge_tool_call_chunk` is the same first-wins identity /
-    // concatenated-arguments policy the non-streaming aggregator uses.
+    // Scan only the arriving fragment's bytes, never the accumulated buffer.
+    // `merge_tool_call_chunk` is the aggregator's own first-wins policy.
     let fragment = chunk
         .function
         .as_ref()
@@ -2991,9 +2985,8 @@ fn finalize_choice_assemblies(
         }
 
         if finish_reason != FinishReason::ToolCalls {
-            // `length`, a backend error, a content filter: nothing valid is
-            // lost by clearing, because a syntactically complete call would
-            // already have dispatched early.
+            // `length`, a backend error, a content filter: a syntactically
+            // complete call would already have dispatched, so nothing is lost.
             entry.state = AssemblyState::Invalid;
             continue;
         }
@@ -3004,9 +2997,8 @@ fn finalize_choice_assemblies(
             .as_ref()
             .and_then(|f| f.arguments.as_deref());
         let usable = match accumulated_args {
-            // Absent or empty-string arguments for a parameterless tool. This
-            // is the only place that compatibility is safe: the choice has
-            // definitively stopped producing arguments.
+            // Absent or empty arguments for a parameterless tool: only safe
+            // here, where the choice has stopped producing arguments.
             None | Some("") => true,
             Some(args) => {
                 entry.json_confirmed || serde_json::from_str::<serde_json::Value>(args).is_ok()
@@ -8485,11 +8477,8 @@ mod tests {
 
     #[test]
     fn test_tool_dispatch_empty_arguments_dispatch_at_terminal_pass() {
-        // `arguments: Some("")` used to be treated as complete on arrival. It
-        // is ambiguous mid-stream — a parameterless call, or an empty opener
-        // about to be followed by real fragments — so the parameterless
-        // compatibility now resolves at `finish_reason: "tool_calls"`, where
-        // the choice has definitively stopped producing arguments.
+        // `Some("")` is ambiguous mid-stream, so the parameterless-tool
+        // compatibility resolves at `finish_reason: "tool_calls"`.
         let events = drive_to_tool_calls_finish(
             vec![make_choice_with_tool_call(
                 0,
@@ -8568,10 +8557,7 @@ mod tests {
     }
 
     // ── #13972: fragmented tool-call assembly ──
-    //
-    // The dispatcher assembles `function.arguments` across deltas instead of
-    // requiring id, name, and arguments on one chunk. Cases below are numbered
-    // to match the issue's regression list.
+    // Case numbers below match the issue's regression list.
 
     /// Read the assembled arguments for a key directly, so quoted-brace
     /// payloads never go through `extract_sse_data_json`'s brace-only,
@@ -8688,9 +8674,8 @@ mod tests {
         );
     }
 
-    // Case 5: quoted braces, escaped quotes, and a backslash split across
-    // fragments must not create a false boundary. Asserted on typed state, not
-    // on `extract_sse_data_json`.
+    // Case 5: quoted braces, escaped quotes, and a split backslash must not
+    // create a false boundary. Asserted on typed state.
     #[test]
     fn test_13972_quoted_and_escaped_braces_do_not_close_early() {
         let (events, assemblies) = feed_fragments(&[

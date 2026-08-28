@@ -78,11 +78,8 @@ pub(crate) fn merge_tool_call_chunk(
 
     match (&existing.id, incoming.id) {
         (None, Some(id)) => existing.id = Some(id),
-        // An empty value on *either* side is a producer no-op rather than a
-        // disagreement: a producer may open the call with `id: ""` and carry
-        // the real value in a later delta, or repeat the field as an empty
-        // placeholder once it has already been established. Both orderings are
-        // the same non-event, so the guard is symmetric.
+        // An empty value on *either* side is a producer no-op, not a
+        // disagreement, so the guard is symmetric.
         (Some(current), Some(id)) if !current.is_empty() && !id.is_empty() && *current != id => {
             note(ToolCallIdentityField::Id)
         }
@@ -90,10 +87,8 @@ pub(crate) fn merge_tool_call_chunk(
     }
     match (&existing.r#type, incoming.r#type) {
         (None, Some(ty)) => existing.r#type = Some(ty),
-        // Forward-compat only: `FunctionType` has exactly one variant in the
-        // OpenAI schema today, so this arm cannot fire and `Type` cannot be
-        // reported. It is kept so that a second variant does not silently
-        // acquire unreported first-wins semantics.
+        // Forward-compat only: `FunctionType` has one variant today, so this
+        // arm cannot fire. Kept so a second variant is not silently unreported.
         (Some(current), Some(ty)) if *current != ty => note(ToolCallIdentityField::Type),
         _ => {}
     }
@@ -196,10 +191,8 @@ mod tests {
 
     #[test]
     fn empty_established_identity_value_is_not_a_conflict() {
-        // A producer that opens the call with `id: ""` and carries the real id
-        // in a later delta is not disagreeing with itself. First-wins still
-        // keeps the empty opener, exactly as it did before conflict reporting
-        // existed; only the report changes.
+        // An empty opener followed by the real id is not a disagreement;
+        // first-wins still keeps the empty opener.
         let mut acc = chunk(0, Some(""), Some(""), None);
         assert_eq!(
             merge_tool_call_chunk(&mut acc, chunk(0, Some("call-1"), Some("calculator"), None)),

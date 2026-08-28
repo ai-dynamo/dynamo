@@ -367,10 +367,8 @@ impl DeltaAggregator {
                                             function: None,
                                         }
                                     });
-                                // The merge outcome is deliberately ignored here:
-                                // aggregation stays first-wins and lossless exactly
-                                // as it was in #8582/#8640. Only the streaming
-                                // dispatch side channel acts on identity conflicts.
+                                // The merge outcome is ignored: only the streaming
+                                // dispatch acts on identity conflicts.
                                 let _ = merge_tool_call_chunk(entry, chunk);
                             }
                         }
