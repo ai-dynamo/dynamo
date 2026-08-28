@@ -46,9 +46,9 @@ ISL, 400 median OSL, 90% KV cache hit):
 
 - Reasoning (`inkling` reasoning parser) — all profiles
 - Tool calling (`inkling` tool-call parser) — all profiles
-- Modalities: text, image, and audio input — **SGLang B200 only**. The vLLM
-  GB300 profiles are text-only by design; their target agentic workload is
-  text, so the vision and audio path is deliberately left off.
+- Modalities: text, image, and audio input — **SGLang B200 only**. The Dynamo
+  vLLM runtime does not support multimodal input yet, so the vLLM GB300
+  profiles are text-only.
 
 ## Prerequisites
 
@@ -149,9 +149,17 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
-    "max_tokens": 128
+    "max_tokens": 1500
   }'
 ```
+
+Inkling reasons before answering, so a small `max_tokens` is spent entirely on reasoning and
+returns empty `content` with `finish_reason: "length"`. The answer may also land in
+`reasoning_content` rather than `content`.
+
+> The image and audio tests below need the **SGLang B200** profile. On vLLM GB300 they are rejected
+> with `Received multimodal data but multimodal processing is not enabled` — that is expected; see
+> [Known Issues](#known-issues).
 
 #### Image
 
@@ -335,6 +343,12 @@ already set:
 Drop the second and the grammar is silently inert on a reasoning model — HTTP 200, no error, and
 the requested tool is not enforced. Both belong on the worker; the frontend does not accept
 `--dyn-enable-structural-tag`.
+
+**Image and audio input are not supported.** The Dynamo vLLM runtime has no multimodal support for
+this model yet, so the vLLM GB300 profiles are text-only; use the SGLang B200 profile for image and
+audio. Do not set `--enable-multimodal` to work around it — the flag only lifts the request
+rejection, so media is still never encoded and requests return HTTP 200 with an answer invented from
+the text prompt alone.
 
 ### SGLang B200 profile
 

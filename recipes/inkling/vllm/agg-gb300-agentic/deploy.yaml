@@ -27,7 +27,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-766bf8924e93152f2287162697080b69ad65115c-vllm-runtime
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -76,7 +76,7 @@ spec:
             nvidia.com/gpu.product: NVIDIA-GB300
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-766bf8924e93152f2287162697080b69ad65115c-vllm-runtime
               imagePullPolicy: Always
               command: [python3, -m, dynamo.vllm]
               args:

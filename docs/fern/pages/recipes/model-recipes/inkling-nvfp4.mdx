@@ -193,9 +193,11 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
-    "max_tokens": 64
+    "max_tokens": 1500
   }'
 ```
+
+Inkling reasons before answering, so a small `max_tokens` is spent entirely on reasoning and returns empty `content` with `finish_reason: "length"`. The answer may also land in `reasoning_content` rather than `content`.
 
 ### Reasoning effort
 
@@ -281,7 +283,8 @@ Aggregated outperformed every disaggregated split tested on this workload. Prefi
 
 <div data-sku="gb300">
 
-- These profiles are text-only by design: the agentic workload they target is text, so the vLLM manifests deliberately leave the vision and audio path off rather than pay for capacity nothing in this workload uses. Use the B200 SGLang profile for image and audio input.
+- Image and audio input are not supported: the Dynamo vLLM runtime has no multimodal support for this model yet, so these profiles are text-only. Use the B200 SGLang profile for image and audio. Do not set `--enable-multimodal` to work around it — the flag only lifts the request rejection, so media is still never encoded and requests return HTTP 200 with an answer invented from the text prompt alone.
+- Inkling reasons before answering, so a low `max_tokens` can be spent entirely on reasoning, returning empty `content` with `finish_reason: "length"`. Allow roughly 1500, and read the answer from `content`, `reasoning_content`, or `reasoning`.
 - `--kv-cache-memory-bytes` is required. Sizing the KV cache from `--gpu-memory-utilization` alone leaves too little headroom at 1M context and OOMs during CUDA graph capture. The value is measured for 288 GB GB300; re-measure it if you change the context length or GPU.
 - `--max-model-len 1048576` keeps the model's full 1M context available. Lowering it frees KV headroom if you do not need it.
 - Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
