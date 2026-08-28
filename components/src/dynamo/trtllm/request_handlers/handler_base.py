@@ -1265,9 +1265,8 @@ class HandlerBase(BaseGenerativeHandler):
             # before the response iteration starts means cancelled requests
             # still leave their mapping behind.
             # context.id() is the canonical request UUID (the payload's id field
-            # is not guaranteed on every path: observed absent on 1789/1789
-            # requests of a real GB300 run), and this handler already treats it
-            # as authoritative elsewhere.
+            # is not guaranteed on every path), and this handler already treats
+            # it as authoritative elsewhere.
             logging.info(
                 "Engine ID map: request_id=%s trtllm_client_id=%s disagg_request_id=%s",
                 context.id(),
