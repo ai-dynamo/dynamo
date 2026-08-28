@@ -141,6 +141,7 @@ ci: &ci
   # Ownership areas also define changed-path -> pytest marker routing.
   - '.github/codeowners/areas.yaml'
   - '.github/codeowners/codeowners_match.py'
+  - '.github/codeowners/pytest_markers.py'
   - '.github/codeowners/select_pytest.py'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'

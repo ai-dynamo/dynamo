@@ -32,9 +32,10 @@ jobs:
           python-version: "3.12"
       - name: Install ownership and marker-audit dependencies
         run: |
-          pip install \
-            pyyaml pytest pytest-asyncio tomli pydantic filelock \
-            'prometheus_client>=0.23.1' openai
+          python -m pip install \
+            'pyyaml==6.0.3' 'pytest==9.0.3' 'pytest-asyncio==1.3.0' \
+            'pydantic>=2.11.4,<2.13' 'filelock==3.25.1' \
+            'prometheus_client==0.23.1' 'openai==2.32.0'
 
       # Unit tests for the canonical matcher + the emitter's tree-independence
       # contract. These are the only piece the gates below trust -- if they

@@ -316,6 +316,7 @@ markers = [
     "token_budget_parity: compares native backend and Dynamo prompt/output overflow behavior",
     "weekly: marks tests to run weekly",
     "release: marks tests to run on release pipelines",
+    "local_only: marks developer tooling tests that are intentionally excluded from CI lifecycle selections",
     "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",

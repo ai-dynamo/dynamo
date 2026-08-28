@@ -145,6 +145,11 @@ const testCases = [
     expect: { core: true, ignore: true },
     desc: 'pytest ownership routing changes exercise the full CI fallback'
   },
+  {
+    file: '.github/codeowners/pytest_markers.py',
+    expect: { core: true, ignore: true },
+    desc: 'pytest marker vocabulary changes exercise the full CI fallback'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {

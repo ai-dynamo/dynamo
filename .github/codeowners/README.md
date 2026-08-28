@@ -26,6 +26,7 @@ adding required approvals.
 | File | What it is |
 |------|------------|
 | `areas.yaml` | The single source of truth: path globs to GitHub team and pytest markers, by subsystem. **Edit this.** |
+| `pytest_markers.py` | Canonical framework and selective-feature marker vocabulary allowed in `areas.yaml`. |
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
@@ -66,17 +67,20 @@ An area can associate its owned paths with pytest markers:
 
 The PR workflow evaluates every ownership area matching each changed path.
 Backend markers narrow a feature to that framework, while other markers select
-the affected feature tests. Different changed paths are unioned. Omit `pytest`
-for an area without a safe marker mapping; omission conservatively selects the
-full suite when changed-files detection has already triggered a backend lane.
+the affected feature tests. Different changed paths are unioned. An area with no
+`pytest` policy contributes no markers; selection falls back to the full suite
+only when none of the areas matching a changed path provides a marker mapping.
 
 The marker report collects effective pytest markers, including module, class,
 function, and parameter inheritance. Unit tests are the always-on smoke slice.
 Every non-unit test carrying a framework marker (`vllm`, `sglang`, or `trtllm`)
-must also carry at least one selective feature marker such as `core`, `router`,
-`multimodal`, `kvbm`, `lmcache`, `planner`, or `fault_tolerance`. Tests that span
-features may carry more than one. In selective mode, triggered backend lanes run
-their `unit` tests in addition to the selected feature expression.
+must also carry at least one selective feature marker. The allowed vocabulary is
+defined once in `pytest_markers.py`; `areas.yaml` maps those markers to paths.
+Policy validation, selection, and the marker audit share that vocabulary. The
+audit also fails if a configured feature has no runnable test or a mapped
+non-unit test does not intersect its path's feature and framework markers. Tests
+that span features may carry more than one. In selective mode, triggered backend
+lanes run their `unit` tests in addition to the selected feature expression.
 
 The selector exports one feature expression per backend. Lifecycle, framework,
 and GPU-count markers remain in `.github/workflows/pr.yaml`; the selector does
@@ -96,7 +100,9 @@ extensions (`.md`, `.mdx`, `.rst`, and `.txt`) do not participate in pytest
 selection; the existing CI path filters independently decide which jobs a
 documentation change triggers. The complete selection is uploaded
 as the `pytest-shadow-selection-<run id>` JSON artifact; the job summary shows
-counts and the first 200 node IDs per lane. Set repository variable
+counts and the first 200 node IDs per lane. Listed items are selected by the
+marker expression; pytest evaluates `skip` and `skipif` conditions later, so
+some may still skip at runtime. Set repository variable
 `PYTEST_SELECTION_MODE` to `selective` to apply it to backend pytest jobs.
 
 ## External contributors

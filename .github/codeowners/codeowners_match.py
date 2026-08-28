@@ -51,6 +51,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
+from pytest_markers import ALLOWED_AREA_MARKERS
+
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
 # ----------------------------------------------------------------------
@@ -421,6 +423,13 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             raise SystemExit(
                 f"areas.yaml: area {area['label']!r} pytest.markers must be a "
                 "list of pytest marker names"
+            )
+        unsupported_markers = set(markers) - ALLOWED_AREA_MARKERS
+        if unsupported_markers:
+            raise SystemExit(
+                f"areas.yaml: area {area['label']!r} pytest marker "
+                f"{min(unsupported_markers)!r} is not a framework or selective "
+                "feature marker"
             )
         areas.append(
             ResolvedArea(

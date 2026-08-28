@@ -245,6 +245,7 @@ Every test must have **at least**:
    - `nightly` -- runs nightly
    - `weekly` -- runs weekly
    - `release` -- runs on release pipelines
+   - `local_only` -- developer tooling checks intentionally excluded from CI
 
 2. **A GPU marker** -- how many GPUs are needed:
    - `gpu_0` -- no GPU required
@@ -260,7 +261,11 @@ Every test must have **at least**:
    exercises. This is required when a non-unit test also has a framework marker
    like `vllm`/`trtllm`/`sglang`. Pick at least one; tests that intentionally span
    features may carry multiple markers. Unit tests are always-on smoke tests and
-   do not require a component marker:
+   do not require a component marker. The canonical selective marker vocabulary
+   is [`.github/codeowners/pytest_markers.py`](../.github/codeowners/pytest_markers.py),
+   while [`.github/codeowners/areas.yaml`](../.github/codeowners/areas.yaml)
+   maps those markers to paths. The
+   descriptions below explain the common markers but do not define the set:
    - `multimodal` -- exercises image/video/audio paths, VL models, omni pipeline,
      multimodal embedding caches, multimodal hashing/routing
    - `router` -- exercises the dynamo request router (worker selection, KV-prefix

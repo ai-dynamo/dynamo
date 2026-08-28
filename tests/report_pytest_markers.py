@@ -27,6 +27,7 @@ from types import ModuleType
 from typing import List, Optional, Set
 
 import pytest
+import yaml
 
 try:
     import tomllib  # Python >=3.11
@@ -103,6 +104,10 @@ STUB_MODULES = [
     "nats",
     "dynamo._core",
     "psutil",
+    # Imported with pytest.importorskip at module scope by the SGLang tool
+    # calling tests. Stub it for collection so dependency resolution cannot
+    # silently remove that entire file from the marker audit.
+    "jsonschema",
     "requests",
     "numpy",
     "aiconfigurator",
@@ -301,6 +306,7 @@ FORCE_STUB_MODULES = {
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
+    os.path.join(os.getcwd(), ".github", "codeowners"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
     os.path.join(os.getcwd(), "tests", "wheels"),
@@ -314,18 +320,10 @@ sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
 # Must follow the sys.path bootstrap above: this file runs as
 # `python3 tests/report_pytest_markers.py`, so sys.path[0] is tests/, not the
 # repo root, and the `tests` package is not importable any earlier.
-from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
+from codeowners_match import ResolvedModel, compute_resolution  # noqa: E402
+from pytest_markers import FRAMEWORK_MARKERS, SELECTIVE_FEATURE_MARKERS  # noqa: E402
 
-FRAMEWORK_MARKERS = {"vllm", "sglang", "trtllm"}
-SELECTIVE_FEATURE_MARKERS = {
-    "core",
-    "fault_tolerance",
-    "kvbm",
-    "lmcache",
-    "multimodal",
-    "planner",
-    "router",
-}
+from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -506,6 +504,15 @@ class TestRecord:
 
 
 @dataclass
+class PathMarkerMismatch:
+    nodeid: str
+    mapped_features: List[str]
+    actual_features: List[str]
+    mapped_frameworks: List[str]
+    actual_frameworks: List[str]
+
+
+@dataclass
 class Report:
     total_checked: int
     total_skipped_mypy: int
@@ -514,6 +521,8 @@ class Report:
     collected_tests: List[TestRecord]
     undeclared_markers: Optional[List[str]] = None
     missing_in_project_config: Optional[List[str]] = None
+    unused_selective_markers: Optional[List[str]] = None
+    path_marker_mismatches: Optional[List[PathMarkerMismatch]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -532,13 +541,10 @@ class MarkerReportPlugin:
         for item in items:
             markers = {m.name for m in item.iter_markers()}
             nodeid = sanitize(item.nodeid, max_len=None)
-            collected_record = TestRecord(
-                nodeid=nodeid,
-                markers=sorted(markers),
-                missing=[],
+            self.collected_records.append(
+                TestRecord(nodeid=nodeid, markers=sorted(markers), missing=[])
             )
-            self.collected_records.append(collected_record)
-            if markers & {"mypy", "skip", "skipif"}:
+            if markers & {"mypy", "skip"}:
                 self.skipped_mypy += 1
                 continue
 
@@ -609,6 +615,59 @@ def validate_marker_definitions(report: Report, declared: Set[str]) -> None:
 
     report.undeclared_markers = sorted(used - declared) or None
     report.missing_in_project_config = sorted(required - declared) or None
+
+
+def validate_selective_marker_coverage(
+    report: Report, configured: Set[str] = SELECTIVE_FEATURE_MARKERS
+) -> None:
+    """Require every configured feature to select an audited, runnable test."""
+    used = {marker for test in report.tests for marker in test.markers}
+    report.unused_selective_markers = sorted(configured - used) or None
+
+
+def load_codeowners_model(
+    areas_path: Path = Path(".github/codeowners/areas.yaml"),
+) -> ResolvedModel:
+    """Load the path-to-marker policy used by selective pytest routing."""
+    return compute_resolution(yaml.safe_load(areas_path.read_text(encoding="utf-8")))
+
+
+def validate_path_feature_alignment(report: Report, model: ResolvedModel) -> None:
+    """Require non-unit tests to intersect their path's mapped marker axes."""
+    mismatches: List[PathMarkerMismatch] = []
+    for test in report.tests:
+        markers = set(test.markers)
+        if "unit" in markers:
+            continue
+
+        test_path = test.nodeid.split("::", 1)[0]
+        mapped_markers = {
+            marker
+            for area in model.matching_areas(test_path)
+            for marker in area.pytest_markers
+        }
+        mapped_features = {
+            marker for marker in mapped_markers if marker in SELECTIVE_FEATURE_MARKERS
+        }
+        mapped_frameworks = mapped_markers & FRAMEWORK_MARKERS
+        actual_features = markers & SELECTIVE_FEATURE_MARKERS
+        actual_frameworks = markers & FRAMEWORK_MARKERS
+        feature_mismatch = mapped_features and not mapped_features & actual_features
+        framework_mismatch = (
+            mapped_frameworks and not mapped_frameworks & actual_frameworks
+        )
+        if feature_mismatch or framework_mismatch:
+            mismatches.append(
+                PathMarkerMismatch(
+                    nodeid=test.nodeid,
+                    mapped_features=sorted(mapped_features),
+                    actual_features=sorted(actual_features),
+                    mapped_frameworks=sorted(mapped_frameworks),
+                    actual_frameworks=sorted(actual_frameworks),
+                )
+            )
+
+    report.path_marker_mismatches = mismatches or None
 
 
 class MarkerStrictValidator:
@@ -759,11 +818,33 @@ def print_human_report(report: Report, *, verbose: bool = False) -> None:
             print(f"{rec.nodeid}")
             print(f"  Missing: {', '.join(rec.missing)}")
 
+    if report.unused_selective_markers:
+        print("\n" + "=" * 80)
+        print("SELECTIVE MARKERS WITH NO AUDITED TESTS")
+        print("=" * 80)
+        for marker in report.unused_selective_markers:
+            print(f"  {marker}")
+
+    if report.path_marker_mismatches:
+        print("\n" + "=" * 80)
+        print("TESTS WITHOUT THEIR PATH-MAPPED FEATURE MARKER")
+        print("=" * 80)
+        for mismatch in report.path_marker_mismatches:
+            print(mismatch.nodeid)
+            if mismatch.mapped_features:
+                print(f"  Path features: {', '.join(mismatch.mapped_features)}")
+                actual = ", ".join(mismatch.actual_features) or "none"
+                print(f"  Test features: {actual}")
+            if mismatch.mapped_frameworks:
+                print(f"  Path frameworks: {', '.join(mismatch.mapped_frameworks)}")
+                actual = ", ".join(mismatch.actual_frameworks) or "none"
+                print(f"  Test frameworks: {actual}")
+
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
     print(f"  Tests checked: {report.total_checked}")
-    print(f"  Mypy skipped:  {report.total_skipped_mypy}")
+    print(f"  Audit-exempt:  {report.total_skipped_mypy} (mypy or unconditional skip)")
     print(f"  Missing sets:  {report.total_missing}")
     print("=" * 80)
 
@@ -776,6 +857,8 @@ def main() -> int:
     # Load and validate marker definitions
     declared = load_declared_markers(Path("."))
     validate_marker_definitions(report, declared)
+    validate_selective_marker_coverage(report)
+    validate_path_feature_alignment(report, load_codeowners_model())
 
     print_human_report(report, verbose=args.verbose)
 
@@ -794,7 +877,13 @@ def main() -> int:
         LOG.info("Wrote JSON report to %s", args.json)
 
     # Fail if any tests are missing required markers
-    return 1 if report.total_missing > 0 else exitcode
+    return (
+        1
+        if report.total_missing > 0
+        or report.unused_selective_markers
+        or report.path_marker_mismatches
+        else exitcode
+    )
 
 
 if __name__ == "__main__":

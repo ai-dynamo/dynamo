@@ -17,8 +17,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import ResolvedModel, compute_resolution  # noqa: E402
+from pytest_markers import FRAMEWORK_MARKERS  # noqa: E402
 
-BACKEND_MARKERS = frozenset({"vllm", "sglang", "trtllm"})
+BACKEND_MARKERS = FRAMEWORK_MARKERS
 SMOKE_MARKER = "unit"
 LANES = (*sorted(BACKEND_MARKERS), "generic")
 NON_TEST_DOC_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
@@ -283,7 +284,9 @@ def _write_summary(
             summary.write(
                 "These are the exact node IDs selected by each PR backend job's "
                 "smoke/feature, lifecycle, and GPU-marker intersection. Multi-GPU jobs "
-                "still honor the repository's `RUN_MULTIGPU_TESTS` switch.\n\n"
+                "still honor the repository's `RUN_MULTIGPU_TESTS` switch. Pytest "
+                "`skip` and `skipif` conditions are evaluated later at runtime, so a "
+                "listed item may still skip.\n\n"
             )
             if inventory_status and inventory_status != "success":
                 summary.write(
