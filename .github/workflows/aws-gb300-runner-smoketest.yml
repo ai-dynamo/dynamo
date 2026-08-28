@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CUDA_IMAGE: nvcr.io/nvidia/cuda@sha256:605fb0c8acf8674e164d822da8a8521f3a655056e569f0899e72ae940e1fe7dc
+  CUDA_IMAGE: nvcr.io/nvidia/cuda@sha256:1ca86773be1716af6cfff3d2eb8cd10d4d9cac181931d1ee9be792d3e33c7322
 
 jobs:
   arc-runner-smoke:
@@ -29,7 +29,7 @@ jobs:
     runs-on: aws-gb300-tester-amd-gpu-v2
     timeout-minutes: 15
     container:
-      image: nvcr.io/nvidia/cuda@sha256:605fb0c8acf8674e164d822da8a8521f3a655056e569f0899e72ae940e1fe7dc
+      image: nvcr.io/nvidia/cuda@sha256:1ca86773be1716af6cfff3d2eb8cd10d4d9cac181931d1ee9be792d3e33c7322
       env:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          test "$(uname -m)" = "x86_64"
+          test "$(uname -m)" = "aarch64"
 
           mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
           # The ARC hook intentionally reserves two GPUs for every job. The
