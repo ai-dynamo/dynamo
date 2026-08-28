@@ -137,3 +137,7 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 - For multimodal items, only public URLs are supported.
 - `reasoning_effort` has no effect beyond enabling or disabling reasoning, since Gemma 4's chat
   template does not support it.
+- On the MTP-enabled variants (B200 and GB200), one-model speculative decoding restricts some
+  sampling parameters: `min_p` and `min_tokens` are not supported, and `frequency_penalty`,
+  `presence_penalty` and `repetition_penalty` are rejected. `n > 1` and `best_of > 1` are also
+  rejected under greedy decoding (`temperature=0`).
