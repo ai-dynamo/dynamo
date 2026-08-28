@@ -153,6 +153,8 @@ pub struct DeltaAggregator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
+    /// Prompt logprobs captured from the terminal chunk.
+    prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -316,6 +318,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             service_tier: None,
             nvext: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -350,6 +353,10 @@ impl DeltaAggregator {
                     }
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+
+                    if let Some(prompt_logprobs) = delta.prompt_logprobs {
+                        aggregator.prompt_logprobs = Some(prompt_logprobs);
+                    }
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
@@ -839,6 +846,7 @@ impl DeltaAggregator {
                 choices,
                 service_tier: aggregator.service_tier,
             },
+            prompt_logprobs: aggregator.prompt_logprobs,
             nvext: aggregator.nvext,
         };
 
@@ -1029,6 +1037,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -1077,6 +1086,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -1198,6 +1208,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         let annotated = Annotated {
@@ -1256,6 +1267,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -1885,6 +1897,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 

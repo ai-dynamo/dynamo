@@ -2693,6 +2693,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: Some(LLMMetricAnnotation {
                 input_tokens: 10,
                 output_tokens: 4,
@@ -4115,6 +4116,7 @@ mod tests {
                         service_tier: None,
                     },
                     nvext: None,
+                    prompt_logprobs: None,
                     llm_metrics: None,
                 },
             ),
