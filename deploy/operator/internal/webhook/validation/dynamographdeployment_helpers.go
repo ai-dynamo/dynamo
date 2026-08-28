@@ -149,6 +149,11 @@ func grovePathwayForDynamoGraphDeployment(
 				"requires the Grove pathway, but workload provider %q is selected",
 				provider,
 			)
+		case consts.WorkloadProviderDisaggregatedSet:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
 		default:
 			return false, fmt.Sprintf(
 				"requires the Grove pathway, but annotation %q has unsupported value %q",

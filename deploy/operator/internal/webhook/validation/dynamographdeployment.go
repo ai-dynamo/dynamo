@@ -202,11 +202,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 
 	// Restrict the durable workload provider to programs implemented by the controller.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
-		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove {
+		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove && value != consts.WorkloadProviderDisaggregatedSet {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
 			value,
-			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove},
+			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove, consts.WorkloadProviderDisaggregatedSet},
 		))
 	}
 

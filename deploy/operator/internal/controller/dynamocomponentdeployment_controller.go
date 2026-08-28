@@ -228,28 +228,30 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 	modified := componentReconcileResult.modified
 
-	// create or update api-server service
-	serviceModified, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-	})
+	serviceModified := false
+	disaggregatedSetBacked, err := r.isDisaggregatedSetBacked(ctx, dynamoComponentDeployment)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to determine workload provider: %w", err)
 	}
+	if !disaggregatedSetBacked {
+		// Graph-level Services are rendered and owned by the DGD when the DS
+		// provider is selected. Standalone/component DCDs retain this path.
+		serviceModified, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+			dynamoComponentDeployment: dynamoComponentDeployment,
+			serviceTargetReady:        componentReconcileResult.status == metav1.ConditionTrue,
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
+		}
 
-	// create or update headless service for model endpoint discovery
-	componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-	componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-		componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
-	}
-	if err := dynamo.ReconcileModelServicesForComponents(
-		ctx,
-		r,
-		dynamoComponentDeployment,
-		componentMap,
-		dynamoComponentDeployment.Namespace,
-	); err != nil {
-		logs.Error(err, "Failed to reconcile model service")
-		return ctrl.Result{}, err
+		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
+		componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		}
+		if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dynamoComponentDeployment, componentMap, dynamoComponentDeployment.Namespace); err != nil {
+			logs.Error(err, "Failed to reconcile model service")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// create or update api-server ingresses
@@ -277,6 +279,24 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	return
+}
+
+func (r *DynamoComponentDeploymentReconciler) isDisaggregatedSetBacked(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	owner := metav1.GetControllerOf(dcd)
+	if owner == nil || owner.Kind != dynamoGraphDeploymentKind || owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() {
+		return false, nil
+	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: dcd.Namespace, Name: owner.Name}, dgd); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return dgd.Annotations[commonconsts.KubeAnnotationWorkloadProvider] == commonconsts.WorkloadProviderDisaggregatedSet, nil
 }
 
 type ComponentReconcileResult struct {
@@ -695,7 +715,11 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
 	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, opt)
+		service, deleted, err := r.generateService(ctx, opt)
+		if err != nil || deleted || service == nil || opt.serviceTargetReady {
+			return service, deleted, err
+		}
+		return service, false, nil
 	})
 	if err != nil {
 		return false, err
@@ -870,6 +894,7 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 
 type generateResourceOption struct {
 	dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment
+	serviceTargetReady        bool
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
@@ -910,7 +935,6 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
 

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -90,6 +92,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -228,6 +231,19 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 	).deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -241,7 +257,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			predicate.Or(
+				generationOrDeletionChangedPredicate(),
+				predicate.Funcs{UpdateFunc: workloadRoutingAnnotationsChanged},
+			),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -314,8 +333,24 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
-
-	// Register Grove-owned workload watches only when the Grove feature is enabled.
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		disaggregatedSetWatches := newDisaggregatedSetWatchMapper(mgr.GetClient())
+		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(ue event.UpdateEvent) bool { return disaggregatedSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).Watches(
+			&leaderworkersetv1.LeaderWorkerSet{},
+			handler.EnqueueRequestsFromMapFunc(disaggregatedSetWatches.MapChildLWSToDGD),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return true },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return leaderWorkerSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}

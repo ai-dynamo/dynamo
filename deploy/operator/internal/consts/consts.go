@@ -40,12 +40,14 @@ const (
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	KubeAnnotationEnableGrove            = "nvidia.com/enable-grove"
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
-	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
-	WorkloadProviderComponent      = "component"
-	WorkloadProviderGrove          = "grove"
+	KubeAnnotationWorkloadProvider   = "nvidia.com/workload-provider"
+	WorkloadProviderComponent        = "component"
+	WorkloadProviderGrove            = "grove"
+	WorkloadProviderDisaggregatedSet = "disaggregatedset"
 
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.

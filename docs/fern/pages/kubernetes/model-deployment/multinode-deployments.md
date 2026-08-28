@@ -75,14 +75,13 @@ Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It
 
 ### Orchestrator Selection Algorithm
 
-Dynamo automatically selects the best available orchestrator for multinode deployments using the following logic:
+Dynamo uses an ordered routing decision for multinode deployments:
 
-#### When Both Grove and LWS are Available:
-- **Grove is selected by default** (recommended for advanced AI workloads)
-- **LWS is selected** if you explicitly set `nvidia.com/enable-grove: "false"` annotation on your DGD resource
+1. **Grove:** selected when Grove is available and `nvidia.com/enable-grove` is not `"false"`.
+2. **DisaggregatedSet:** selected when Grove was not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`. Unsupported API or role requirements are reported through `DisaggregatedSetEligible=False` without silently changing pathways.
+3. **Standard DCD pathway:** used when neither Grove nor DS is selected. Multinode components on this pathway require LWS and Volcano.
 
-#### When Only One Orchestrator is Available:
-- The installed orchestrator (Grove or LWS) is automatically selected
+Grove and DS are not mutually exclusive features. Grove has higher priority during initial routing, while DS requires explicit opt-in. Dynamo persists the selected provider in `nvidia.com/workload-provider`; changing enable annotations or installing another provider does not move an existing deployment. If the selected provider is unavailable, the DGD reports `Ready=False` with `selected_workload_provider_unavailable` and does not fall back. Delete and recreate the DGD to select a different pathway.
 
 #### Scheduler Integration:
 - **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
