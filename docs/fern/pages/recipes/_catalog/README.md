@@ -82,8 +82,20 @@ python3 docs/fern/pages/recipes/_catalog/validate.py
 (The single script validates **both** catalogs.) It checks: index ↔ file
 correspondence (no orphans, no dangling entries), internal-`id`/filename match,
 no duplicate ids, schema conformance, that every `page:` resolves under `docs/fern/`,
-that every deploy/perf/benchmark asset path resolves in the repo, and
-cross-catalog referential integrity (recipe `related_benchmarks` ↔ benchmark
+that every deploy/perf/benchmark asset path resolves in the repo, that declared
+recipe-specific images are exact `image:` fields in their owning deploy assets,
+or have complete `github-release` provenance, and have non-overlapping,
+source-revision-backed ownership periods. GitHub release periods record
+`release_tag` and `release_state`; append one period and image per re-release so
+each tag retains independent pull history. Omit
+`effective_from` when the exact tag belongs to the recipe for all retained
+telemetry; use explicit dates for ownership handoffs. `source_revision` is the
+main-branch commit that introduced the recipe's image reference, not the image
+build revision. The offline validator checks its commit-SHA shape but does not
+prove that the commit exists or introduced the image. Verify new or changed
+revisions against repository history during review. The
+validator also checks cross-catalog referential integrity (recipe
+`related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
 recipe ids, including deferred). It exits non-zero on any failure.
 
@@ -92,10 +104,8 @@ The validator uses **stdlib only** and degrades gracefully: it prefers `pyyaml`
 parser and falls back to a required-keys check. It prints which mode it ran in.
 For full schema validation, `pip install pyyaml jsonschema`.
 
-> [!NOTE]
-> CI does not yet run this validator. **Follow-up:** wire
-> `python3 docs/fern/pages/recipes/_catalog/validate.py` into the docs CI job so catalog
-> changes are gated on it.
+The pre-merge recipe catalog tests run this validator, so catalog changes are
+gated on its path, attribution, and referential-integrity checks.
 
 ## Page blueprint
 

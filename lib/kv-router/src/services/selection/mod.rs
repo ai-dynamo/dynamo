@@ -26,12 +26,15 @@ pub use error::SelectionError;
 pub use input::PromptRequest;
 pub use pending::SelectionCacheConfig;
 pub use policy_registry::{
-    DYN_ROUTER_WORKER_SELECTION_POLICY, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProvider, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistryError,
 };
-pub use server::{AppState, run_server, run_server_with_service};
-pub use service::{SelectionService, SelectionServiceBuilder};
+pub use server::{AppState, run_server};
+pub use service::{
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
+};
 pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
     PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,

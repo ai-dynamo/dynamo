@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
                       type: string
                     resources:
                       description: |-
@@ -561,6 +561,20 @@ spec:
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
+                    kvRouter:
+                      description: |-
+                        KVRouter configures KV-cache-aware routing for the generated deployment.
+                        When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+                        Settings in spec.overrides.dgd take precedence: an override can replace
+                        DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+                        environment variable when both are present.
+                      properties:
+                        enabled:
+                          description: |-
+                            Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+                            KV routing optimizes request scheduling based on KV cache locality.
+                          type: boolean
+                      type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.
                       properties:
@@ -698,7 +712,7 @@ spec:
                 image:
                   description: |-
                     Image is the container image reference for the profiling job (planner image).
-                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
                     For Dynamo < 1.1.0, use dynamo-frontend.
                   type: string
                 model:

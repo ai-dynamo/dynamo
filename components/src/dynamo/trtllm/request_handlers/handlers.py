@@ -18,6 +18,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 configure_dynamo_logging()
 
@@ -67,6 +68,8 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -132,6 +135,8 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -219,6 +224,8 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

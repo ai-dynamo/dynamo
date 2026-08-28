@@ -21,12 +21,14 @@ if HAS_VLLM:
     )
     from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
+    from vllm.reasoning import ReasoningParserManager
     from vllm.sampling_params import SamplingParams
     from vllm.tokenizers.mistral import MistralTokenizer
     from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor
+
+    MistralReasoningParser = ReasoningParserManager.get_reasoning_parser("mistral")
 else:
     # Fake some types so that `pre-commit` passes
     class MistralTokenizer:
@@ -100,6 +102,32 @@ class MockMistralTokenizer(MistralTokenizer):
 
     def get_vocab(self):
         return dict(self._vocab_dict)
+
+    def decode(self, ids, skip_special_tokens=False):
+        del skip_special_tokens
+        if isinstance(ids, int):
+            ids = [ids]
+        token_text = {
+            TOOL_CALLS_TOKEN_ID: "[TOOL_CALLS]",
+            EOS_TOKEN_ID: "",
+            32: "",
+            1095: "_",
+            1125: "}",
+            2811: '":',
+            4964: '"]',
+            6415: "berg",
+            8318: "uten",
+            8928: "search",
+            11898: "_g",
+            12161: ' ["',
+            12796: " books",
+            19227: '{"',
+            31872: "James",
+            32493: "books",
+            58617: " Joyce",
+            62244: "terms",
+        }
+        return "".join(token_text[token_id] for token_id in ids)
 
     @property
     def all_special_tokens(self):

@@ -26,7 +26,7 @@ func isPythonCommand(cmd string) bool {
 	return matched
 }
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("sglang-backend")
 		logger.Info("Compilation cache configured for SGLang but not yet fully supported",
@@ -39,7 +39,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
-		return
+		return nil
 	}
 
 	// Remove probes for multinode worker
@@ -52,10 +52,11 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Generate the flags to add
 	flags, needsShell := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
 	if flags == "" {
-		return
+		return nil
 	}
 
 	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
+	return nil
 }
 
 func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {

@@ -3,7 +3,7 @@
 """NOTICES-Go.txt generator.
 
 Reads CycloneDX SBOMs produced by `cyclonedx-gomod app -licenses -json` in
-each Go builder stage (operator/snapshot-agent/EPP). Same shape as rust.py:
+each Go builder stage (operator/EPP). Same shape as rust.py:
 walk components, filter by purl prefix, normalize licenses, dedupe.
 
 Expected upstream Dockerfile pattern (in each Go builder):

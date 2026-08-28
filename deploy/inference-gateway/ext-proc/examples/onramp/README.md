@@ -17,7 +17,7 @@ For the user-facing walkthrough, start with
 
 This on-ramp is available for aggregated serving only at this time.
 
-The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.26.0` image. Replace it with the vLLM
+The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.27.1` image. Replace it with the vLLM
 image your platform standardizes on if you need another pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
 [selection service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md),

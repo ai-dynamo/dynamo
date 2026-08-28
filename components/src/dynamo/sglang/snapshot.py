@@ -16,6 +16,7 @@ from dynamo.common.snapshot.lifecycle import (
     SnapshotConfig,
     configure_snapshot_capture_env,
 )
+from dynamo.sglang._compat import override_server_args
 
 from .pause import SGLangEnginePauseController
 
@@ -138,7 +139,13 @@ async def prepare_snapshot_engine(
     # Enable memory_saver so GPU memory can be released for CRIU.
     # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
     # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    server_args.enable_memory_saver = True
+    snapshot_overrides = {
+        "enable_memory_saver": True,
+        # Snapshot engines are created before the Dynamo endpoint exists, so
+        # their FPM publisher cannot be wired to the relay. Disable it before
+        # SGLang publishes ServerArgs; 0.5.18 forbids changing it afterwards.
+        "enable_forward_pass_metrics": False,
+    }
     try:
         from gpu_memory_service.integrations.sglang import is_gms_active
 
@@ -146,7 +153,8 @@ async def prepare_snapshot_engine(
     except ImportError:
         _using_gms = False
     if not _using_gms:
-        server_args.enable_weights_cpu_backup = True
+        snapshot_overrides["enable_weights_cpu_backup"] = True
+    override_server_args(server_args, "dynamo.snapshot", **snapshot_overrides)
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)

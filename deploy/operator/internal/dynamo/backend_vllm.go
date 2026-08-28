@@ -34,7 +34,7 @@ type VLLMBackend struct {
 	ParentGraphDeploymentName string
 }
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than
 	// from disk.
@@ -55,9 +55,13 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
+		containerGPUs, err := containerGPUCount()
+		if err != nil {
+			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		}
+
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, &resources, numberOfNodes, annotations)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
 
 		if shouldUseMpBackend(annotations) {
 			container.Env = append(container.Env, corev1.EnvVar{
@@ -133,6 +137,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			"env-vars-set", true,
 			"env-vars", "VLLM_CACHE_ROOT")
 	}
+
+	return nil
 }
 
 const (
@@ -303,9 +309,9 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32, annotations map[string]string) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
-	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, resources)
+	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
@@ -323,8 +329,8 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
 		// so vLLM naturally places all initial DP workers on the leader node.
 		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
+	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -591,12 +597,11 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	// Calculate engines per node
-	containerGPUs := getContainerGPUs(resources)
 	worldSize := getWorldSize(expandedArgs) // TP * PP per engine
 	dataParallelSizeLocal := containerGPUs / worldSize
 
@@ -649,9 +654,8 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 }
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
-// exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
-func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
-	containerGPUs := getContainerGPUs(resources)
+// exceeds the GPU count of one engine container, requiring multi-node distribution (via mp or ray).
+func needsTensorParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
 	if containerGPUs == 0 {
 		return false
 	}
@@ -665,9 +669,8 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
+func needsDataParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
-	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
 	}
@@ -686,56 +689,4 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 		}
 	}
 	return flagValue
-}
-
-func getContainerGPUs(resources *corev1.ResourceRequirements) int64 {
-	return getGPUQuantity(resources)
-}
-
-func getGPUQuantity(resources *corev1.ResourceRequirements) int64 {
-	if resources == nil {
-		return 0
-	}
-	if value, ok := resourceListGPUValue(resources.Requests); ok {
-		return value
-	}
-	if value, ok := resourceListGPUValue(resources.Limits); ok {
-		return value
-	}
-	return 0
-}
-
-func resourceListGPUValue(resources corev1.ResourceList) (int64, bool) {
-	if q, ok := resources[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
-		return q.Value(), true
-	}
-	for name, q := range resources {
-		if resourceNameIsGPU(name) {
-			return q.Value(), true
-		}
-	}
-	return 0, false
-}
-
-func resourceNameIsGPU(name corev1.ResourceName) bool {
-	normalized := strings.ToLower(string(name))
-	return normalized == "gpu" ||
-		normalized == "nvidia/gpu" ||
-		strings.HasSuffix(normalized, "/gpu") ||
-		strings.Contains(normalized, ".com/gpu") ||
-		strings.HasPrefix(normalized, "mig-") ||
-		strings.Contains(normalized, "/mig-")
-}
-
-func resourceRequirementsWithFallback(resources, fallback corev1.ResourceRequirements) corev1.ResourceRequirements {
-	if len(resources.Requests) == 0 {
-		resources.Requests = fallback.Requests
-	}
-	if len(resources.Limits) == 0 {
-		resources.Limits = fallback.Limits
-	}
-	if len(resources.Claims) == 0 {
-		resources.Claims = fallback.Claims
-	}
-	return resources
 }

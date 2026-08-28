@@ -72,10 +72,6 @@ on:
         required: false
         type: string
         default: ''
-      snapshot_build_result:
-        required: false
-        type: string
-        default: ''
       vllm_efa_build_result:
         required: false
         type: string
@@ -268,7 +264,6 @@ jobs:
       OPERATOR_BUILD_RESULT: ${{ inputs.operator_build_result }}
       PLANNER_BUILD_RESULT: ${{ inputs.planner_build_result }}
       FRONTEND_BUILD_RESULT: ${{ inputs.frontend_build_result }}
-      SNAPSHOT_BUILD_RESULT: ${{ inputs.snapshot_build_result }}
       VLLM_EFA_BUILD_RESULT: ${{ inputs.vllm_efa_build_result }}
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
@@ -395,7 +390,7 @@ jobs:
           # their compliance-<sha>-<token> artifacts land on the nightly run
           # id that GitLab's OSRB attach resolves, and their -nightly ECR
           # tags can't fall through to a post-merge image).
-          # EFA/frontend/snapshot are built by post-merge and other workflows
+          # EFA/frontend are built by post-merge and other workflows
           # on release branches; for nightly we skip them so we don't try to
           # copy ECR tags that don't exist for the resolved SHA.
           if [[ "${NIGHTLY}" != "true" ]]; then
@@ -441,15 +436,9 @@ jobs:
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
 
-            # ---- Snapshot image ----
-            echo ""
-            echo "=== Snapshot Image ==="
-            SNAPSHOT_SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-snapshot-agent"
-            SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
-            copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
           else
-            # Optional nightly images — operator, planner, frontend, snapshot
-            # agent and the three runtime EFA variants — are built by THIS
+            # Optional nightly images — operator, planner, frontend, and the
+            # three runtime EFA variants — are built by THIS
             # nightly run (ordering-only needs of the release, deliberately
             # outside its success gate) and staged fail-soft: a build flake
             # must warn-skip here, not fail (a bare copy_image failure under
@@ -516,14 +505,6 @@ jobs:
                 "${NGC_BASE}/dynamo-frontend-nightly:${NGC_VERSION_TAG}" \
                 "${NGC_BASE}/dynamo-frontend:nightly" "dynamo-frontend:nightly"; then FRONTEND_STAGED=true; fi
 
-            # Snapshot agent is amd64-only by design (cuda-checkpoint has no
-            # arm64 binary); crane copies whatever manifest exists.
-            SNAPSHOT_STAGED=false
-            if stage_optional "snapshot-agent-nightly:${NGC_VERSION_TAG}" "${SNAPSHOT_BUILD_RESULT}" \
-                "${ECR_BASE}:${COMMIT_SHA}-snapshot-agent${NIGHTLY_TAG_SUFFIX}" \
-                "${NGC_BASE}/snapshot-agent-nightly:${NGC_VERSION_TAG}" \
-                "${NGC_BASE}/snapshot-agent:nightly" "snapshot-agent:nightly"; then SNAPSHOT_STAGED=true; fi
-
             # EFA variants live in the runtime -nightly repos under a -efa tag
             # suffix, mirroring the RC convention (vllm-runtime:<ver>-efa).
             VLLM_EFA_STAGED=false
@@ -551,7 +532,6 @@ jobs:
           echo "operator_staged=${OPERATOR_STAGED:-}" >> $GITHUB_OUTPUT
           echo "planner_staged=${PLANNER_STAGED:-}" >> $GITHUB_OUTPUT
           echo "frontend_staged=${FRONTEND_STAGED:-}" >> $GITHUB_OUTPUT
-          echo "snapshot_staged=${SNAPSHOT_STAGED:-}" >> $GITHUB_OUTPUT
           echo "vllm_efa_staged=${VLLM_EFA_STAGED:-}" >> $GITHUB_OUTPUT
           echo "sglang_efa_staged=${SGLANG_EFA_STAGED:-}" >> $GITHUB_OUTPUT
           echo "trtllm_efa_staged=${TRTLLM_EFA_STAGED:-}" >> $GITHUB_OUTPUT
@@ -614,7 +594,7 @@ jobs:
 
           helm repo remove "${REPO_ALIAS}"
 
-      # Nightly: package platform + snapshot at the dated pre-release version
+      # Nightly: package the platform chart at the dated pre-release version
       # and dual-push to NGC staging (ChartMuseum + OCI). Values are rewritten
       # in the workspace only, onto the *-nightly repos at this run's tag.
       # Fail-soft per chart via the copy step's *_staged flags; fully fail-soft
@@ -634,7 +614,6 @@ jobs:
           HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
           NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
           OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
-          SNAPSHOT_STAGED: ${{ steps.copy_images.outputs.snapshot_staged }}
         run: |
           set -euo pipefail
 
@@ -646,12 +625,6 @@ jobs:
           else
             echo "::warning::Skipping platform chart: kubernetes-operator-nightly:${NGC_VERSION_TAG} was not staged this run"
             SKIPPED_HELM="platform"
-          fi
-          if [[ "${SNAPSHOT_STAGED}" == "true" ]]; then
-            CHARTS="${CHARTS:+${CHARTS},}snapshot"
-          else
-            echo "::warning::Skipping snapshot chart: snapshot-agent-nightly:${NGC_VERSION_TAG} was not staged this run"
-            SKIPPED_HELM="${SKIPPED_HELM:+${SKIPPED_HELM},}snapshot"
           fi
 
           echo "staged_helm=" >> $GITHUB_OUTPUT
@@ -741,7 +714,6 @@ jobs:
           OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
           PLANNER_STAGED: ${{ steps.copy_images.outputs.planner_staged }}
           FRONTEND_STAGED: ${{ steps.copy_images.outputs.frontend_staged }}
-          SNAPSHOT_STAGED: ${{ steps.copy_images.outputs.snapshot_staged }}
           VLLM_EFA_STAGED: ${{ steps.copy_images.outputs.vllm_efa_staged }}
           SGLANG_EFA_STAGED: ${{ steps.copy_images.outputs.sglang_efa_staged }}
           TRTLLM_EFA_STAGED: ${{ steps.copy_images.outputs.trtllm_efa_staged }}
@@ -779,7 +751,7 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             _note() { [[ "$1" == "true" ]] && echo "" || echo " — **NOT staged this run** (see copy-step warnings)"; }
             OP_NOTE=$(_note "${OPERATOR_STAGED}");   PL_NOTE=$(_note "${PLANNER_STAGED}")
-            FE_NOTE=$(_note "${FRONTEND_STAGED}");   SA_NOTE=$(_note "${SNAPSHOT_STAGED}")
+            FE_NOTE=$(_note "${FRONTEND_STAGED}")
             VE_NOTE=$(_note "${VLLM_EFA_STAGED}");   SE_NOTE=$(_note "${SGLANG_EFA_STAGED}")
             TE_NOTE=$(_note "${TRTLLM_EFA_STAGED}")
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -787,7 +759,6 @@ jobs:
             echo "- \`kubernetes-operator-nightly:${NGC_VERSION_TAG}\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner-nightly:${NGC_VERSION_TAG}\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend-nightly:${NGC_VERSION_TAG}\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
-            echo "- \`snapshot-agent-nightly:${NGC_VERSION_TAG}\`${SA_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`vllm-runtime-nightly:${NGC_VERSION_TAG}-efa\`${VE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`sglang-runtime-nightly:${NGC_VERSION_TAG}-efa\`${SE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime-nightly:${NGC_VERSION_TAG}-efa\`${TE_NOTE}" >> $GITHUB_STEP_SUMMARY
@@ -805,7 +776,6 @@ jobs:
             echo "- \`kubernetes-operator:nightly\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner:nightly\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:nightly\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
-            echo "- \`snapshot-agent:nightly\`${SA_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Helm charts (staged fail-soft, dual-pushed to NGC ChartMuseum + OCI):" >> $GITHUB_STEP_SUMMARY
             if [[ -n "${NIGHTLY_STAGED_HELM}" ]]; then
@@ -1314,7 +1284,7 @@ jobs:
       - name: Sync issues to Linear release
         # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
         # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
-        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f # v0.14.5
+        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f  # v0.14.5
         with:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           version: ${{ needs.prepare-release.outputs.version }}

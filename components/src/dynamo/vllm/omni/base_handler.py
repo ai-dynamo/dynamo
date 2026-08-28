@@ -130,12 +130,18 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             if value is not None:
                 omni_kwargs[field] = value
 
-        # tensor_parallel_size comes from engine_args (vLLM's --tensor-parallel-size)
+        # These three fields are shared vLLM engine settings. Keep their CLI
+        # source in engine_args while forwarding them to Omni's diffusion
+        # topology explicitly.
         if DiffusionParallelConfig is not None:
             parallel_config = DiffusionParallelConfig(
                 tensor_parallel_size=getattr(
                     config.engine_args, "tensor_parallel_size", 1
                 ),
+                pipeline_parallel_size=getattr(
+                    config.engine_args, "pipeline_parallel_size", 1
+                ),
+                data_parallel_size=getattr(config.engine_args, "data_parallel_size", 1),
                 **dataclasses.asdict(config.parallel),
             )
             omni_kwargs["parallel_config"] = parallel_config

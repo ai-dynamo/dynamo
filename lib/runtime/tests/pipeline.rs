@@ -107,12 +107,31 @@ fn make_backend_engine() -> ServiceEngine<SingleIn<String>, ManyOut<Annotated<St
     ))
 }
 
+struct DistinctResponseContextBackend;
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error>
+    for DistinctResponseContextBackend
+{
+    async fn generate(
+        &self,
+        request: SingleIn<String>,
+    ) -> Result<ManyOut<Annotated<String>>, Error> {
+        let response_context =
+            Context::with_id_and_metadata((), request.id().to_string(), Default::default());
+        Ok(ResponseStream::new(
+            Box::pin(stream::iter([Annotated::Data("response".to_string())])),
+            response_context.context(),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn test_service_source_sink() {
     let source = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
     let sink = ServiceBackend::from_engine(make_backend_engine());
 
-    let service = source.link(sink).unwrap().link(source).unwrap();
+    let service = source.link(sink).unwrap().link_terminal(source).unwrap();
 
     let mut stream = service.generate("test".to_string().into()).await.unwrap();
 
@@ -168,7 +187,7 @@ fn make_service()
         .link(preprocess)?
         .link(backend)?
         .link(postprocess)?
-        .link(frontend)?;
+        .link_terminal(frontend)?;
 
     Ok(service)
 }
@@ -210,7 +229,7 @@ async fn test_disaggregated_service() {
         .unwrap()
         .link(postprocessor)
         .unwrap()
-        .link(frontend)
+        .link_terminal(frontend)
         .unwrap();
 
     // Node 1
@@ -222,7 +241,7 @@ async fn test_disaggregated_service() {
         .unwrap()
         .link(backend)
         .unwrap()
-        .link(start_node1.clone())
+        .link_terminal(start_node1.clone())
         .unwrap();
 
     let opts = mock::MockNetworkOptions::default();
@@ -280,7 +299,7 @@ fn make_service_with_operator()
         .link(backend)?
         .link(postprocess)?
         .link(operator.backward_edge())?
-        .link(frontend)?;
+        .link_terminal(frontend)?;
 
     Ok(service)
 }
@@ -303,4 +322,98 @@ async fn test_service_source_node_sink_with_operator() {
 
     assert_eq!(annotations_counter, 1);
     assert_eq!(counter, 48);
+}
+
+#[test]
+fn dropping_service_releases_operator_graph() {
+    let frontend = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
+    let backend = ServiceBackend::from_engine(make_backend_engine());
+    let operator = PipelineOperator::new(Arc::new(PreprocesOperator {}));
+    let frontend_weak = Arc::downgrade(&frontend);
+    let backend_weak = Arc::downgrade(&backend);
+    let operator_weak = Arc::downgrade(&operator);
+
+    let service = frontend
+        .link(operator.forward_edge())
+        .unwrap()
+        .link(backend)
+        .unwrap()
+        .link(operator.backward_edge())
+        .unwrap()
+        .link_terminal(frontend.clone())
+        .unwrap();
+
+    drop(operator);
+    drop(service);
+    drop(frontend);
+
+    assert!(frontend_weak.upgrade().is_none());
+    assert!(backend_weak.upgrade().is_none());
+    assert!(operator_weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn active_response_stream_retains_operator_graph() {
+    let frontend = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
+    let backend = ServiceBackend::from_engine(make_backend_engine());
+    let operator = PipelineOperator::new(Arc::new(PreprocesOperator {}));
+    let frontend_weak = Arc::downgrade(&frontend);
+    let backend_weak = Arc::downgrade(&backend);
+    let operator_weak = Arc::downgrade(&operator);
+
+    let service = frontend
+        .link(operator.forward_edge())
+        .unwrap()
+        .link(backend)
+        .unwrap()
+        .link(operator.backward_edge())
+        .unwrap()
+        .link_terminal(frontend.clone())
+        .unwrap();
+    drop(operator);
+    drop(frontend);
+
+    let mut stream = service.generate("test".to_string().into()).await.unwrap();
+    drop(service);
+
+    assert!(frontend_weak.upgrade().is_some());
+    assert!(backend_weak.upgrade().is_some());
+    assert!(operator_weak.upgrade().is_some());
+    while stream.next().await.is_some() {}
+    drop(stream);
+
+    assert!(frontend_weak.upgrade().is_none());
+    assert!(backend_weak.upgrade().is_none());
+    assert!(operator_weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn distinct_response_context_retains_operator_graph() {
+    let frontend = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
+    let backend = ServiceBackend::from_engine(Arc::new(DistinctResponseContextBackend));
+    let operator = PipelineOperator::new(Arc::new(PreprocesOperator {}));
+    let frontend_weak = Arc::downgrade(&frontend);
+    let backend_weak = Arc::downgrade(&backend);
+    let operator_weak = Arc::downgrade(&operator);
+    let service = frontend
+        .link(operator.forward_edge())
+        .unwrap()
+        .link(backend)
+        .unwrap()
+        .link(operator.backward_edge())
+        .unwrap()
+        .link_terminal(frontend.clone())
+        .unwrap();
+    drop(operator);
+    drop(frontend);
+
+    let stream = service.generate("test".to_string().into()).await.unwrap();
+    drop(service);
+    assert!(frontend_weak.upgrade().is_some());
+    assert!(backend_weak.upgrade().is_some());
+    assert!(operator_weak.upgrade().is_some());
+    drop(stream);
+    assert!(frontend_weak.upgrade().is_none());
+    assert!(backend_weak.upgrade().is_none());
+    assert!(operator_weak.upgrade().is_none());
 }

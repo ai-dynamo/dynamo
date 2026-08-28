@@ -27,7 +27,7 @@ use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, RawKvEventSink,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig};
+use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
@@ -623,7 +623,7 @@ impl MockerExecutionContext {
         Vec<Arc<Semaphore>>,
     )> {
         let args = &self.engine_args;
-        let mut engines = Vec::<LiveEngine>::with_capacity(args.dp_size as usize);
+        let mut engine_configs = Vec::with_capacity(args.dp_size as usize);
         let mut relay_publishers = Vec::with_capacity(args.dp_size as usize);
         let mut handoff_session_permits = Vec::with_capacity(args.dp_size as usize);
 
@@ -708,33 +708,22 @@ impl MockerExecutionContext {
                 None => (KvEventPublishers::default(), None),
             };
 
-            let engine = match LiveEngine::start_with_config(
-                args.clone(),
-                dp_rank,
-                LiveEngineConfig {
-                    kv_event_publishers,
-                    fpm_publisher,
-                },
-            ) {
-                Ok(engine) => engine,
-                Err(error) => {
-                    for engine in &engines {
-                        if let Err(shutdown_error) = engine.shutdown().await {
-                            tracing::error!(
-                                %shutdown_error,
-                                "failed to shut down live Mocker engine after startup error"
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
-            };
-
-            engines.push(engine);
+            engine_configs.push(LiveEngineConfig {
+                kv_event_publishers,
+                fpm_publisher,
+            });
             relay_publishers.push(relay_publisher);
             handoff_session_permits
                 .push(Arc::new(Semaphore::new(args.effective_handoff_capacity())));
         }
+        // One logical worker owns one attention-DP generalized engine. The
+        // returned rank-scoped LiveEngine handles share its single actor and
+        // grouped pass barrier.
+        let engines = LiveEngine::start_grouped_with_configs_and_request_output_buffering(
+            args.clone(),
+            engine_configs,
+            RequestOutputBuffering::FullResponse,
+        )?;
         Ok((engines, relay_publishers, handoff_session_permits))
     }
 
@@ -1285,7 +1274,7 @@ pub async fn make_mocker_engine(
     let engine = Arc::new(MockerExecutionContext::new(args));
     let startup_engine = Arc::clone(&engine);
     let cancel_token = distributed_runtime.primary_token();
-    tokio::spawn(async move {
+    distributed_runtime.runtime().primary().spawn(async move {
         let component = loop {
             if cancel_token.is_cancelled() {
                 tracing::debug!("Mocker engine startup cancelled");
@@ -1503,33 +1492,46 @@ mod tests {
             .speedup_ratio(1000.0)
             .build()
             .unwrap();
-        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engines = LiveEngine::start_grouped_with_configs_and_request_output_buffering(
+            args.clone(),
+            vec![LiveEngineConfig::default()],
+            RequestOutputBuffering::FullResponse,
+        )
+        .unwrap();
+        let live = engines[0].clone();
         let engine = MockerExecutionContext::new(args);
-        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        assert!(engine.engines.set(engines).is_ok());
 
-        let mut stream = engine
-            .generate(SingleIn::new(decode_request(1, 32)))
-            .await
-            .unwrap();
+        let mut streams = Vec::new();
+        for _ in 0..4 {
+            streams.push(
+                engine
+                    .generate(SingleIn::new(decode_request(1, 32)))
+                    .await
+                    .unwrap(),
+            );
+        }
         tokio::time::timeout(Duration::from_secs(2), async {
             while live.active_request_count() != 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("generation should finish while the response remains unread");
+        .expect("generations should finish while every response remains unread");
 
-        let mut output_tokens = 0;
-        let mut finish = None;
-        while let Some(output) = stream.next().await {
-            let output = output.data.unwrap();
-            output_tokens += output.token_ids.len();
-            if output.finish_reason.is_some() {
-                finish = output.finish_reason;
+        for mut stream in streams {
+            let mut output_tokens = 0;
+            let mut finish = None;
+            while let Some(output) = stream.next().await {
+                let output = output.data.unwrap();
+                output_tokens += output.token_ids.len();
+                if output.finish_reason.is_some() {
+                    finish = output.finish_reason;
+                }
             }
+            assert_eq!(output_tokens, 32);
+            assert_eq!(finish, LLMEngineOutput::length().finish_reason);
         }
-        assert_eq!(output_tokens, 32);
-        assert_eq!(finish, LLMEngineOutput::length().finish_reason);
     }
 
     #[test]

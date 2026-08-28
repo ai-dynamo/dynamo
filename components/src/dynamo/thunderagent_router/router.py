@@ -22,6 +22,7 @@ from dynamo.thunderagent_router.program_state import (
     ProgramLifecycle,
     ProgramStatus,
     ProgramTable,
+    RequestSnapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,14 @@ class ThunderAgentConfig:
     buffer_per_program: int = 100
 
 
+@dataclass
+class _AdmissionGate:
+    """Serialize admission transactions for one program."""
+
+    lock: asyncio.Lock
+    users: int = 0
+
+
 class ThunderAgentScheduler:
     def __init__(
         self,
@@ -62,6 +71,7 @@ class ThunderAgentScheduler:
         self._cfg = config
         self._table = ProgramTable()
         self._lock = asyncio.Lock()
+        self._admission_gates: dict[str, _AdmissionGate] = {}
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stat_forced_resumes = 0
         self._stat_programs_created = 0
@@ -72,6 +82,7 @@ class ThunderAgentScheduler:
         self._stat_resumes = 0
         self._stat_marked_for_pause = 0
         self._stat_worker_assignments = 0
+        self._stat_admissions_cancelled = 0
 
     def start(self) -> None:
         if self._scheduler_task is not None:
@@ -99,58 +110,133 @@ class ThunderAgentScheduler:
         program_id: str,
         estimated_prompt_tokens: int = 0,
     ) -> PauseDecision:
+        gate = self._admission_gates.get(program_id)
+        if gate is None:
+            gate = _AdmissionGate(lock=asyncio.Lock())
+            self._admission_gates[program_id] = gate
+        gate.users += 1
+        try:
+            async with gate.lock:
+                return await self._admit_request(program_id, estimated_prompt_tokens)
+        finally:
+            gate.users -= 1
+            if gate.users == 0 and self._admission_gates.get(program_id) is gate:
+                self._admission_gates.pop(program_id)
+
+    async def _admit_request(
+        self,
+        program_id: str,
+        estimated_prompt_tokens: int,
+    ) -> PauseDecision:
         wait_started = time.monotonic()
         async with self._lock:
+            snapshot = self._table.snapshot_request(program_id)
             wait_event, was_paused = self._admit_locked(
                 program_id, estimated_prompt_tokens
             )
+            # No await can replace this program before its identity is captured.
+            admitted = self._table.programs.get(program_id)
+            admitted_epoch = admitted.admission_epoch if admitted is not None else None
 
-        if wait_event is not None:
+        try:
+            if wait_event is not None:
+                try:
+                    await asyncio.wait_for(
+                        wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Forced resume for %s after %.1fs",
+                        program_id,
+                        self._cfg.resume_timeout_seconds,
+                    )
+                    async with self._lock:
+                        program = self._table.programs.get(program_id)
+                        if (
+                            program is not None
+                            and program.lifecycle == ProgramLifecycle.PAUSED
+                        ):
+                            worker_id = self._least_loaded_worker_locked(
+                                self._capacity.snapshot()
+                            )
+                            self._resume_program(program, worker_id)
+                            self._stat_forced_resumes += 1
+
+            waited = time.monotonic() - wait_started
+
+            async with self._lock:
+                program = self._table.programs.get(program_id)
+                if program is None:
+                    return PauseDecision(program_id=program_id, waited_seconds=waited)
+
+                self._stat_requests_admitted += 1
+                if was_paused:
+                    self._stat_requests_paused += 1
+
+                priority_jump = self._cfg.resume_priority_boost if was_paused else 0.0
+                soft_demoted = program.soft_demoted_until > time.monotonic()
+                if soft_demoted:
+                    priority_jump += self._cfg.soft_demote_priority_jump
+
+                return PauseDecision(
+                    program_id=program_id,
+                    priority_jump=priority_jump,
+                    waited_seconds=waited,
+                    was_paused=was_paused,
+                    was_soft_demoted=soft_demoted,
+                    assigned_worker_hint=program.assigned_worker_id,
+                )
+        except asyncio.CancelledError:
+            # Admission mutates shared state before the first cancellable wait.
+            await self._rollback_admission_shielded(
+                program_id, snapshot, admitted, admitted_epoch
+            )
+            raise
+
+    async def _rollback_admission_shielded(
+        self,
+        program_id: str,
+        snapshot: Optional[RequestSnapshot],
+        admitted: Optional[Program],
+        admitted_epoch: Optional[int],
+    ) -> None:
+        """Finish rollback even if request cancellation is delivered again."""
+        rollback = asyncio.ensure_future(
+            self._rollback_admission(program_id, snapshot, admitted, admitted_epoch)
+        )
+        while not rollback.done():
             try:
-                await asyncio.wait_for(
-                    wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Forced resume for %s after %.1fs",
-                    program_id,
-                    self._cfg.resume_timeout_seconds,
-                )
-                async with self._lock:
-                    program = self._table.programs.get(program_id)
-                    if (
-                        program is not None
-                        and program.lifecycle == ProgramLifecycle.PAUSED
-                    ):
-                        worker_id = self._least_loaded_worker_locked(
-                            self._capacity.snapshot()
-                        )
-                        self._resume_program(program, worker_id)
-                        self._stat_forced_resumes += 1
+                await asyncio.shield(rollback)
+            except asyncio.CancelledError:
+                if rollback.cancelled():
+                    break
+        if not rollback.cancelled():
+            rollback.result()
 
-        waited = time.monotonic() - wait_started
-
+    async def _rollback_admission(
+        self,
+        program_id: str,
+        snapshot: Optional[RequestSnapshot],
+        admitted: Optional[Program],
+        admitted_epoch: Optional[int],
+    ) -> None:
+        if admitted is None:
+            return
         async with self._lock:
-            program = self._table.programs.get(program_id)
-            if program is None:
-                return PauseDecision(program_id=program_id, waited_seconds=waited)
-
-            self._stat_requests_admitted += 1
-            if was_paused:
-                self._stat_requests_paused += 1
-
-            priority_jump = self._cfg.resume_priority_boost if was_paused else 0.0
-            soft_demoted = program.soft_demoted_until > time.monotonic()
-            if soft_demoted:
-                priority_jump += self._cfg.soft_demote_priority_jump
-
-            return PauseDecision(
-                program_id=program_id,
-                priority_jump=priority_jump,
-                waited_seconds=waited,
-                was_paused=was_paused,
-                was_soft_demoted=soft_demoted,
-                assigned_worker_hint=program.assigned_worker_id,
+            if self._table.programs.get(program_id) is not admitted:
+                return
+            if admitted.admission_epoch != admitted_epoch:
+                # A later admission owns the shared Program state.
+                return
+            self._table.rollback_request(program_id, snapshot)
+            self._stat_admissions_cancelled += 1
+            logger.info(
+                "thunderagent.program admission_cancelled program=%s "
+                "retained=%s active=%d paused=%d",
+                program_id,
+                snapshot is not None,
+                len(self._table.programs),
+                len(self._table.paused),
             )
 
     def _admit_locked(
@@ -174,18 +260,46 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
-        if not (was_new and program.assigned_worker_id is None):
+        needs_assignment = was_new and program.assigned_worker_id is None
+        stale_replacement = False
+        live_worker_ids: set[int] = set()
+        if program.assigned_worker_id is not None:
+            live_worker_ids = self._capacity.live_worker_ids()
+            if not live_worker_ids or program.assigned_worker_id in live_worker_ids:
+                return None, False
+            stale_worker_id = program.assigned_worker_id
+            program.assigned_worker_id = None
+            needs_assignment = True
+            stale_replacement = True
+            logger.info(
+                "thunderagent.worker stale_pin program=%s old_worker=%s "
+                "available_workers=%s",
+                program_id,
+                stale_worker_id,
+                sorted(live_worker_ids),
+            )
+
+        if not needs_assignment:
             return None, False
 
         capacities = self._capacity.snapshot()
+        if stale_replacement:
+            capacities = {
+                worker_id: capacity
+                for worker_id, capacity in capacities.items()
+                if worker_id in live_worker_ids
+            }
+
         if not capacities:
             # Cold start: MDC hasn't published yet. Let the request flow
             # through with no pin; the chunk-loop callback will populate
             # ``assigned_worker_id`` once the engine picks a worker, and
             # subsequent turns get the sticky pin.
             return None, False
-        worker_id = self._select_worker_for_new_program_locked(
-            capacities, program.token_total
+        worker_id = self._select_worker_for_admission_locked(
+            capacities,
+            program.token_total,
+            queue_behind_paused=not stale_replacement,
         )
         if worker_id is not None:
             program.assigned_worker_id = worker_id
@@ -305,13 +419,15 @@ class ThunderAgentScheduler:
             key=lambda w: capacities[w] - self._worker_used(w, decayed=True),
         )
 
-    def _select_worker_for_new_program_locked(
+    def _select_worker_for_admission_locked(
         self,
         capacities: dict[int, int],
         estimated_tokens: int,
+        *,
+        queue_behind_paused: bool,
     ) -> Optional[int]:
         # Fairness: new programs queue behind any existing paused program.
-        if self._table.paused:
+        if queue_behind_paused and self._table.paused:
             return None
         buffer = self._cfg.buffer_per_program
         required = estimated_tokens + buffer
@@ -657,6 +773,7 @@ class ThunderAgentScheduler:
                     "program_resumes_total": self._stat_resumes,
                     "programs_marked_for_pause_total": self._stat_marked_for_pause,
                     "forced_resumes_total": self._stat_forced_resumes,
+                    "admissions_cancelled_total": self._stat_admissions_cancelled,
                     "worker_assignments_total": self._stat_worker_assignments,
                 },
                 "gauges": {

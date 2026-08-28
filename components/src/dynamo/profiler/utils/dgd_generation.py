@@ -44,12 +44,14 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_main_container_dict,
     set_argument_value,
+    set_unique_env_value,
 )
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
+    is_kv_router_enabled,
     is_mocker_enabled,
     is_planner_enabled,
     needs_mocker_aic_perf_model,
@@ -115,12 +117,14 @@ def assemble_final_config(
        ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
-    4. **Planner** — inject the Planner service + planner-config ConfigMap.
+    4. **KV router** — configure the frontend for KV-cache-aware routing when
+       ``features.kvRouter.enabled`` is true.
+    5. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
        initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
-    5. **Profile data** — attach interpolation-data ConfigMap when mocker
+    6. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
        were produced on disk; rapid-mode deployments never emit it (the
@@ -132,12 +136,15 @@ def assemble_final_config(
 
     mocker = is_mocker_enabled(dgdr)
     planner = is_planner_enabled(dgdr)
+    kv_router = is_kv_router_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
     if not mocker and resolved_backend == "trtllm":
         enable_trtllm_chunked_prefill(dgd_config)
 
     if not mocker and not planner:
+        if kv_router:
+            enable_kv_router(dgd_config)
         apply_runtime_version_override(dgdr, dgd_config)
         return dgd_config
 
@@ -152,6 +159,9 @@ def assemble_final_config(
         base = generate_mocker_config(dgdr, aic_spec=aic_spec)
     else:
         base = dgd_config
+
+    if kv_router:
+        enable_kv_router(base)
 
     # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
     # the get_perf_metrics endpoint is available to the planner. Mocker
@@ -200,6 +210,44 @@ def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
     for component in components:
         if isinstance(component, dict):
             component["runtimeVersionOverride"] = override
+
+
+def enable_kv_router(config_dict: dict) -> None:
+    """Configure the generated frontend to use KV-cache-aware routing.
+
+    Sets ``DYN_ROUTER_MODE=kv`` on the frontend's main container rather than
+    editing its command/args. ``--router-mode`` reads ``DYN_ROUTER_MODE`` as its
+    env fallback, so this avoids reasoning about whether the module entrypoint
+    lives in ``command`` or ``args`` (e.g. the ``command``-form produced by the
+    PVC/model-path flow), and any explicit user ``--router-mode`` override still
+    wins because flags take precedence over env vars. Frontends with an
+    unexpected generated shape are left unchanged so this final assembly step
+    does not discard profiling results.
+    """
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        components = []
+
+    found_frontend = False
+    for component in components:
+        if not isinstance(component, dict) or component.get("type") != "frontend":
+            continue
+        found_frontend = True
+        container = get_main_container_dict(component)
+        if container is None:
+            logger.warning(
+                "Skipping KV router configuration for frontend %r because it has no main container",
+                component.get("name"),
+            )
+            continue
+        container["env"] = set_unique_env_value(
+            container.get("env"), "DYN_ROUTER_MODE", "kv"
+        )
+
+    if not found_frontend:
+        logger.warning(
+            "Skipping KV router configuration because the generated DGD has no frontend component"
+        )
 
 
 def _vllm_worker_roles() -> dict[str, str]:

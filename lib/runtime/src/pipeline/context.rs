@@ -6,7 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
-use crate::engine::AsyncEngineController;
+use crate::engine::{AsyncEngineController, EngineContextGuard};
 use async_trait::async_trait;
 
 use super::registry::Registry;
@@ -329,6 +329,10 @@ impl AsyncEngineContext for StreamContext {
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
         self.controller.link_child(child);
     }
+
+    fn retain(&self, guard: EngineContextGuard) {
+        self.controller.retain(guard);
+    }
 }
 
 impl AsyncEngineContextProvider for StreamContext {
@@ -361,6 +365,17 @@ pub struct Controller {
     tx: Sender<State>,
     rx: Receiver<State>,
     child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
+    retained: Mutex<Vec<RetainedGuard>>,
+}
+
+struct RetainedGuard {
+    _guard: EngineContextGuard,
+}
+
+impl std::fmt::Debug for RetainedGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetainedGuard")
+    }
 }
 
 impl Controller {
@@ -371,6 +386,7 @@ impl Controller {
             tx,
             rx,
             child_context: Mutex::new(Vec::new()),
+            retained: Mutex::new(Vec::new()),
         }
     }
 
@@ -472,6 +488,13 @@ impl AsyncEngineContext for Controller {
             .lock()
             .expect("Failed to lock child context")
             .push(child);
+    }
+
+    fn retain(&self, guard: EngineContextGuard) {
+        self.retained
+            .lock()
+            .expect("Failed to lock retained engine state")
+            .push(RetainedGuard { _guard: guard });
     }
 }
 

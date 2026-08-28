@@ -33,8 +33,7 @@ Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/con
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
 - [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- [CNCF Slack (`#ai-dynamo`)](https://slack.cncf.io)
-- [Discord](https://discord.gg/D92uqZRjCZ)
+- [Slack](https://ai-dynamo.org/slack)
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)
