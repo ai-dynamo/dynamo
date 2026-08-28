@@ -990,24 +990,23 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
             .unwrap_or_default();
-        if self.normalize_tool_call_args {
-            if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
-                tracing::error!(
-                    error = %e,
-                    "tool_call arguments normalization failed; template rendering may fail \
-                     if it calls .items() on a string"
-                );
-            }
+        if self.normalize_tool_call_args
+            && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
+        {
+            tracing::error!(
+                error = %e,
+                "tool_call arguments normalization failed; template rendering may fail \
+                 if it calls .items() on a string"
+            );
         }
-        if self.continue_final_message {
-            if let Err(e) =
+        if self.continue_final_message
+            && let Err(e) =
                 crate::preprocessor::prompt::append_continue_final_message_tag(&mut json)
-            {
-                tracing::debug!(
-                    error = %e,
-                    "continue_final_message marker not appended; truncation will reject the request"
-                );
-            }
+        {
+            tracing::debug!(
+                error = %e,
+                "continue_final_message marker not appended; truncation will reject the request"
+            );
         }
         minijinja::value::Value::from_serialize(&json)
     }
