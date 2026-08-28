@@ -4,7 +4,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # For omni models, we need to support raw_request parsing and json output format. We need to have these protocols defined here for serialization and deserialization.
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
@@ -37,6 +37,11 @@ class NvCreateImageRequest(BaseModel):
 
     Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
     """
+
+    model_config = ConfigDict(extra="allow")
+    """Unknown top-level fields are backend passthrough knobs. Keep them
+    so handlers can read and forward them instead of dropping them at
+    the worker boundary."""
 
     prompt: str
     """The text prompt for image generation."""

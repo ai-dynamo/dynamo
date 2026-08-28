@@ -50,15 +50,16 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 
-    /// Extra parameters passed through to the backend without strict
-    /// validation. Meant for backend-specific knobs that have no typed
-    /// field yet. Stable ones can be promoted to typed fields over time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
-
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Unknown top-level fields are retained here and forwarded to the
+    /// backend without strict validation. This matches the OpenAI client's
+    /// extra_body option, which merges into the top level of the body.
+    /// Stable knobs can be promoted to typed fields over time.
+    #[serde(default, flatten)]
+    pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Video data in response
@@ -218,41 +219,46 @@ mod tests {
             response_format: None,
             output_format: None,
             stream: None,
-            extra_body: None,
             nvext: None,
+            passthrough: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
     }
 
     #[test]
-    fn video_request_extra_body_round_trips() {
-        let json = r#"{"prompt":"cat","model":"cosmos","extra_body":{"generate_sound":true,"strength":0.7}}"#;
+    fn video_request_captures_unknown_top_level_fields() {
+        // The OpenAI client's extra_body option merges into the top level of
+        // the body, so that is where backend knobs arrive.
+        let json = r#"{"prompt":"cat","model":"cosmos","generate_sound":true,"strength":0.7}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
-        let extra = req.extra_body.as_ref().unwrap();
-        assert_eq!(extra["generate_sound"], serde_json::json!(true));
-        assert_eq!(extra["strength"], serde_json::json!(0.7));
+        assert_eq!(req.passthrough["generate_sound"], serde_json::json!(true));
+        assert_eq!(req.passthrough["strength"], serde_json::json!(0.7));
 
         let out = serde_json::to_string(&req).unwrap();
         let back: NvCreateVideoRequest = serde_json::from_str(&out).unwrap();
-        assert_eq!(back.extra_body, req.extra_body);
+        assert_eq!(back.passthrough, req.passthrough);
+        assert!(out.contains("\"generate_sound\":true"));
     }
 
     #[test]
-    fn video_request_extra_body_absent_is_none_and_omitted() {
+    fn video_request_typed_fields_stay_out_of_passthrough() {
+        let json = r#"{"prompt":"cat","model":"wan","stream":true,"custom_knob":1}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, Some(true));
+        assert!(!req.passthrough.contains_key("prompt"));
+        assert!(!req.passthrough.contains_key("stream"));
+        assert_eq!(req.passthrough["custom_knob"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn video_request_empty_passthrough_adds_nothing() {
         let json = r#"{"prompt":"cat","model":"wan"}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extra_body, None);
-        assert!(!serde_json::to_string(&req).unwrap().contains("extra_body"));
-    }
-
-    #[test]
-    fn video_request_unknown_top_level_fields_still_ignored() {
-        // extra_body is the explicit passthrough. Stray unknown fields keep
-        // getting dropped rather than captured.
-        let json = r#"{"prompt":"cat","model":"wan","not_a_field":1}"#;
-        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extra_body, None);
+        assert!(req.passthrough.is_empty());
+        let out: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(out, serde_json::json!({"prompt":"cat","model":"wan"}));
     }
 
     #[test]

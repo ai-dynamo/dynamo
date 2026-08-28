@@ -71,15 +71,16 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// Extra parameters passed through to the backend without strict
-    /// validation. Meant for backend-specific knobs that have no typed
-    /// field yet. Stable ones can be promoted to typed fields over time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
-
     /// NVIDIA extensions (reserved for future use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Unknown top-level fields are retained here and forwarded to the
+    /// backend without strict validation. This matches the OpenAI client's
+    /// extra_body option, which merges into the top level of the body.
+    /// Stable knobs can be promoted to typed fields over time.
+    #[serde(default, flatten)]
+    pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Audio data in response
@@ -251,32 +252,37 @@ mod tests {
             ref_text: None,
             max_new_tokens: None,
             user: None,
-            extra_body: None,
             nvext: None,
+            passthrough: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("data_source"));
     }
 
     #[test]
-    fn audio_request_extra_body_round_trips() {
-        let json = r#"{"input":"hello","extra_body":{"emotion":"calm","pitch":1.2}}"#;
+    fn audio_request_captures_unknown_top_level_fields() {
+        // The OpenAI client's extra_body option merges into the top level of
+        // the body, so that is where backend knobs arrive.
+        let json = r#"{"input":"hello","emotion":"calm","pitch":1.2}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        let extra = req.extra_body.as_ref().unwrap();
-        assert_eq!(extra["emotion"], serde_json::json!("calm"));
-        assert_eq!(extra["pitch"], serde_json::json!(1.2));
+        assert_eq!(req.passthrough["emotion"], serde_json::json!("calm"));
+        assert_eq!(req.passthrough["pitch"], serde_json::json!(1.2));
+        assert!(!req.passthrough.contains_key("input"));
 
         let out = serde_json::to_string(&req).unwrap();
         let back: NvCreateAudioSpeechRequest = serde_json::from_str(&out).unwrap();
-        assert_eq!(back.extra_body, req.extra_body);
+        assert_eq!(back.passthrough, req.passthrough);
+        assert!(out.contains("\"emotion\":\"calm\""));
     }
 
     #[test]
-    fn audio_request_extra_body_absent_is_none_and_omitted() {
+    fn audio_request_empty_passthrough_adds_nothing() {
         let json = r#"{"input":"hello"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extra_body, None);
-        assert!(!serde_json::to_string(&req).unwrap().contains("extra_body"));
+        assert!(req.passthrough.is_empty());
+        let out: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(out, serde_json::json!({"input":"hello"}));
     }
 
     // --- AudioData ---
