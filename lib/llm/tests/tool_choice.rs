@@ -43,6 +43,7 @@ fn drive_moved_jail(
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                 inner,
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             })
         })
@@ -514,6 +515,7 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
     }
 }
@@ -657,6 +659,7 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
             inner,
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         })
     })
