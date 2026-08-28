@@ -77,9 +77,9 @@ class Config:
         else:
             return DisaggregationMode.AGGREGATED
 
-    def use_resolved_server_args(self, engine: Any) -> Any:
-        """Switch post-engine Dynamo code to SGLang's resolved configuration."""
-        self.server_args = resolved_server_args(engine.server_args)
+    def use_resolved_server_args(self, server_args: Any) -> Any:
+        """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.server_args = resolved_server_args(server_args)
         return self.server_args
 
 
