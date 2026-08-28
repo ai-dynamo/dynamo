@@ -78,3 +78,19 @@ Key metrics to record per concurrency:
 
 The target operating point is the concurrency where system throughput peaks while TTFT
 P50 remains below 5000 ms for the 64K ISL agentic workload.
+
+## Reference Results
+
+### GB200 Aggregated (`agg-gb200-agentic`) — TP4, 4 GPUs
+
+Hardware: GB200 NVL72 | `vllm/vllm-openai:glm53-flash` + `ai-dynamo==1.4.1`  
+Workload: SSP=57600, ISL=6400, OSL=400, 90% KV reuse
+
+| Concurrency | tok/s/user | tok/s (total) | tok/s/GPU | ITL p50 (ms) | TTFT avg (ms) | SLA ≥50 |
+|-------------|-----------|---------------|-----------|--------------|---------------|---------|
+| 4  | 95.95 | 271.64  | 67.9  | 10.39 | 1,662 | ✓ |
+| 8  | 67.54 | 379.75  | 94.9  | 15.45 | 2,338 | ✓ |
+| 16 | 42.19 | 501.74  | 125.4 | 27.22 | 2,863 | ✗ |
+| 32 | 27.23 | 702.81  | 175.7 | 39.36 | 2,988 | ✗ |
+
+SLA (50 tok/s/user) crosses between C=8 and C=16. Interpolated tok/s/GPU at crossing ≈ **108**.
