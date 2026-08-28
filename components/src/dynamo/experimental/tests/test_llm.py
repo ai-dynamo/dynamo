@@ -7,16 +7,67 @@ from typing import Any
 
 import pytest
 
-from dynamo.experimental.llm import LLMUnaryClient
+from dynamo.experimental.llm import LLMUnaryClient, with_engine_data
 
 pytestmark = [
-    pytest.mark.asyncio,
     pytest.mark.parallel,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.core,
 ]
+
+
+def test_with_engine_data_preserves_completion_and_existing_values() -> None:
+    completion = {
+        "token_ids": [7, 8],
+        "finish_reason": "stop",
+        "engine_data": {"backend_timing_ms": 2.5},
+    }
+    values = {"classifier_scores": {"positive": 0.9}}
+
+    result = with_engine_data(completion, values)
+
+    assert result == {
+        "token_ids": [7, 8],
+        "finish_reason": "stop",
+        "engine_data": {
+            "backend_timing_ms": 2.5,
+            "classifier_scores": {"positive": 0.9},
+        },
+    }
+    assert completion["engine_data"] == {"backend_timing_ms": 2.5}
+
+
+def test_with_engine_data_rejects_duplicate_keys() -> None:
+    completion = {"engine_data": {"classifier_scores": {"positive": 0.8}}}
+
+    with pytest.raises(ValueError, match="classifier_scores"):
+        with_engine_data(
+            completion,
+            {"classifier_scores": {"positive": 0.9}},
+        )
+
+
+@pytest.mark.parametrize(
+    "completion, values, message",
+    [
+        ([], {}, "LLM completion must be an object"),
+        ({}, [], "engine_data values must be an object"),
+        (
+            {"engine_data": "not-an-object"},
+            {"classifier_scores": {}},
+            "existing engine_data must be an object",
+        ),
+    ],
+)
+def test_with_engine_data_rejects_non_object_values(
+    completion: Any,
+    values: Any,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        with_engine_data(completion, values)
 
 
 class _Stream:
@@ -66,6 +117,7 @@ def _request() -> dict[str, Any]:
     }
 
 
+@pytest.mark.asyncio
 async def test_llm_unary_client_collects_tokens_and_terminal_metadata() -> None:
     stream = _Stream(
         [
@@ -103,6 +155,7 @@ async def test_llm_unary_client_collects_tokens_and_terminal_metadata() -> None:
         ({"output_options": []}, "output_options must be an object"),
     ],
 )
+@pytest.mark.asyncio
 async def test_llm_unary_client_rejects_unsupported_request(
     request_value: Mapping[str, Any], message: str
 ) -> None:
@@ -134,6 +187,7 @@ async def test_llm_unary_client_rejects_unsupported_request(
         ),
     ],
 )
+@pytest.mark.asyncio
 async def test_llm_unary_client_rejects_invalid_stream(
     chunks: list[Any], message: str
 ) -> None:
@@ -145,6 +199,7 @@ async def test_llm_unary_client_rejects_invalid_stream(
     assert stream.closed
 
 
+@pytest.mark.asyncio
 async def test_llm_unary_client_propagates_cancellation() -> None:
     stream = _Stream([], terminal_error=asyncio.CancelledError())
 
