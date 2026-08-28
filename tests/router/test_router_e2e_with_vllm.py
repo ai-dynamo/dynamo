@@ -447,6 +447,12 @@ class VLLMProcess(ManagedEngineProcessMixin):
                         new_worker_id = new.pop()
                         known_ids.add(new_worker_id)
                         break
+                    # A dead worker never registers. Check liveness each poll so the
+                    # loop fails in one interval instead of waiting out the full
+                    # budget. Matches _check_port/_check_url/_check_func.
+                    process._check_process_alive(
+                        f"while waiting for vLLM worker {worker_idx} to register"
+                    )
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
