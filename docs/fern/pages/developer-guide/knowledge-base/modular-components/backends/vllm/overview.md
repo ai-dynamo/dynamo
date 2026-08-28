@@ -67,8 +67,11 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**Observability**](observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
-| [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
+| [**LoRA**](../../../../../cli/operations/lora-adapters.md) | ✅ | Dynamic loading/unloading from `file://`, `s3://`, and `hf://` sources; adapter-aware KV routing |
 | **GB200 Support** | ✅ | Container functional on main |
+
+> [!NOTE]
+> vLLM LoRA support applies to generative workers. `--enable-lora` cannot be combined with `--realtime` or `--classify-worker`; embedding and other pooling workers do not expose the LoRA lifecycle endpoints.
 
 ## Feature Interactions
 
