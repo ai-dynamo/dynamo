@@ -85,6 +85,11 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
+        // Set once a terminal failure arrives without an error of its own. A worker
+        // shutting down gracefully aborts the generation first and only then sends
+        // its typed error, so the terminal data frame is not the last frame.
+        let mut drainable_terminal = false;
+
         let completed = loop {
             tokio::select! {
                 biased;
@@ -96,20 +101,36 @@ where
 
                 item = response_stream.next() => {
                     let Some(item) = item else {
+                        if drainable_terminal {
+                            // No trailing error arrived. Account the request exactly as
+                            // the error-bearing path would have, so a shutdown-cancelled
+                            // request is not recorded as a clean completion.
+                            guard.record_migration_failure(None);
+                            guard.abort().await;
+                            break false;
+                        }
                         break true;
                     };
-                    let item_failed = response_item_failed(&item);
+                    let outcome = classify_response_item(&item);
                     guard.on_item(&item).await;
-                    if item_failed {
-                        guard.record_migration_failure(item.error.clone());
-                        // Release the failed attempt before Migration can observe
-                        // the item and start another one. This keeps serialized
-                        // retries free of stale-cleanup ABA races.
-                        guard.abort().await;
-                        yield item;
-                        break false;
+                    match outcome {
+                        ResponseItemOutcome::Failed => {
+                            guard.record_migration_failure(item.error.clone());
+                            // Release the failed attempt before Migration can observe
+                            // the item and start another one. This keeps serialized
+                            // retries free of stale-cleanup ABA races.
+                            guard.abort().await;
+                            yield item;
+                            break false;
+                        }
+                        ResponseItemOutcome::DrainableTerminal => {
+                            drainable_terminal = true;
+                            yield item;
+                        }
+                        ResponseItemOutcome::Healthy => {
+                            yield item;
+                        }
                     }
-                    yield item;
                 }
             }
         };
@@ -712,16 +733,41 @@ where
     }
 }
 
+enum ResponseItemOutcome {
+    /// The stream is healthy and must keep running.
+    Healthy,
+    /// A terminal failure signalled only by the data frame's finish reason.
+    ///
+    /// The frame carries no error for the migration layer to act on, and a
+    /// worker that aborts a generation during graceful shutdown sends its typed
+    /// error in a *later* frame. Ending the stream here would drop that error,
+    /// so this outcome keeps reading until the transport ends.
+    DrainableTerminal,
+    /// A terminal failure that carries the error itself. The migration layer can
+    /// act on it as soon as it is yielded, so the stream ends immediately.
+    Failed,
+}
+
+fn classify_response_item(item: &Annotated<LLMEngineOutput>) -> ResponseItemOutcome {
+    if item.error.is_some() || item.event.as_deref() == Some("error") {
+        return ResponseItemOutcome::Failed;
+    }
+    let terminal = item
+        .data
+        .as_ref()
+        .and_then(|data| data.finish_reason.as_ref())
+        .is_some_and(|reason| matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled));
+    if terminal {
+        ResponseItemOutcome::DrainableTerminal
+    } else {
+        ResponseItemOutcome::Healthy
+    }
+}
+
+/// Whether an item ends the response stream, whichever way it signals the failure.
+#[cfg(test)]
 fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
-    item.error.is_some()
-        || item.event.as_deref() == Some("error")
-        || item
-            .data
-            .as_ref()
-            .and_then(|data| data.finish_reason.as_ref())
-            .is_some_and(|reason| {
-                matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
-            })
+    !matches!(classify_response_item(item), ResponseItemOutcome::Healthy)
 }
 
 #[cfg(test)]
