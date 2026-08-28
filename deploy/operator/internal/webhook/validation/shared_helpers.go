@@ -53,7 +53,6 @@ type runtimeVersionValidationSource uint8
 const (
 	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
 	runtimeVersionSourceV1Alpha1
-	runtimeVersionSourceDisabled
 )
 
 // runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
@@ -80,6 +79,10 @@ func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVe
 }
 
 func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
+	return !v.ratchetRuntimeVersion && v.runtimeVersionSource == source
+}
+
+func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidationSource) bool {
 	return v.runtimeVersionSource == source
 }
 
@@ -123,21 +126,49 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	return err != nil
 }
 
-// eppRuntimeCompatibilityError returns the cross-field error for an EPP image/config mismatch.
+type eppRuntimeContract struct {
+	componentType          string
+	image                  string
+	runtimeVersionOverride string
+	hasEPPConfig           bool
+}
+
+// eppRuntimeContractV1Beta1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Beta1(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          string(spec.ComponentType),
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeContractV1Alpha1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          spec.ComponentType,
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeCompatibilityError returns the cross-field error for an EPP runtime-contract mismatch.
 // Invalid or unavailable runtime versions are reported by the runtime-version validator.
-func eppRuntimeCompatibilityError(
-	image string,
-	override string,
-	hasEPPConfig bool,
-	eppConfigPath *field.Path,
-) *field.Error {
-	version, err := runtimeversion.Resolve(image, override)
+func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *field.Path) *field.Error {
+	if contract.componentType != consts.ComponentTypeEPP {
+		return nil
+	}
+
+	version, err := runtimeversion.Resolve(contract.image, contract.runtimeVersionOverride)
 	if err != nil {
 		return nil
 	}
 
 	if runtimefeatures.NativeRustEPP.Enabled(&version) {
-		if hasEPPConfig {
+		if contract.hasEPPConfig {
 			return field.Forbidden(
 				eppConfigPath,
 				"must be omitted for native Rust EPP images with runtime version 1.5.0 or later",
@@ -146,13 +177,31 @@ func eppRuntimeCompatibilityError(
 		return nil
 	}
 
-	if !hasEPPConfig {
+	if !contract.hasEPPConfig {
 		return field.Required(
 			eppConfigPath,
 			"is required for legacy Go EPP images with runtime version earlier than 1.5.0",
 		)
 	}
 	return nil
+}
+
+// eppRuntimeCompatibilityUpdateError ratchets only an identical pre-existing contract violation.
+// eppConfigPath must not be nil. sameEPPConfig reports full source-version value equality.
+func eppRuntimeCompatibilityUpdateError(
+	newContract eppRuntimeContract,
+	oldContract eppRuntimeContract,
+	sameEPPConfig bool,
+	eppConfigPath *field.Path,
+) *field.Error {
+	newErr := eppRuntimeCompatibilityError(newContract, eppConfigPath)
+	if newErr == nil {
+		return nil
+	}
+	if newContract == oldContract && sameEPPConfig {
+		return nil
+	}
+	return newErr
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {

@@ -153,6 +153,13 @@ Keep this table current whenever a resource validator is migrated.
   validators add only rules that genuinely depend on old state, such as
   immutability, ratcheting, ownership transitions, or removal bypasses; do not
   duplicate a static rule behind field-change or tuple-change detection.
+- When a newly introduced static rule intentionally ratchets pre-existing
+  violations, keep its decision in one shared function. The update adapter may
+  suppress the new-state error only when the complete normalized rule inputs
+  and the invalid field value are identical in the old and new objects. Do not
+  approximate equality with a list of fields that happen to trigger the rule;
+  cover an unrelated edit, every contract-input transition, repair, and
+  rollback through the production admission chain.
 - Before adding version-specific or update-specific validation, trace the
   public admission call graph and existing typed conversion. Add the rule at
   the lowest single structural owner that all applicable paths already reach.

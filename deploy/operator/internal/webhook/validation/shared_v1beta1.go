@@ -30,6 +30,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -45,6 +46,7 @@ type sharedValidation struct {
 	mgr                                ctrl.Manager
 	warnings                           admission.Warnings
 	runtimeVersionSource               runtimeVersionValidationSource
+	ratchetRuntimeVersion              bool
 	allowMissingRuntimeVersionOverride bool
 }
 
@@ -131,8 +133,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		}
 	}
-	// Validate deprecated Go-EPP eppConfig when present; absence selects Rust EPP.
-	if spec.EPPConfig != nil {
+	// Validate the represented eppConfig once using the submitted API version's field path.
+	if spec.EPPConfig != nil && !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 
@@ -170,15 +172,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
-		if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
-			if err := eppRuntimeCompatibilityError(
-				image,
-				spec.RuntimeVersionOverride,
-				spec.EPPConfig != nil,
-				fldPath.Child("eppConfig"),
-			); err != nil {
-				allErrs = append(allErrs, err)
-			}
+		if err := eppRuntimeCompatibilityError(
+			eppRuntimeContractV1Beta1(spec, image),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
 		}
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -732,14 +730,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
-	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+	// Ratchet only complete, unchanged source-version runtime contract violations.
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
-		newHasEPPConfig := newComponent.EPPConfig != nil
-		oldHasEPPConfig := oldComponent.EPPConfig != nil
 		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
-		tupleChanged := newImage != oldImage || overrideChanged || newHasEPPConfig != oldHasEPPConfig
 
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -752,24 +747,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			))
 		}
 
-		// Only re-validate the image/eppConfig pairing when this update
-		// actually touches image, runtimeVersionOverride, or eppConfig
-		// presence -- an already-existing tuple that this update leaves
-		// untouched must not start failing on unrelated field changes. When
-		// it is touched, validate the new tuple (not a diff against the
-		// old): this accepts an unchanged compliant pair, accepts an atomic
-		// migration or rollback that changes image and eppConfig together,
-		// and rejects a split update that leaves image and eppConfig
-		// mismatched (see eppRuntimeCompatibilityError).
-		if newComponent.ComponentType == nvidiacomv1beta1.ComponentTypeEPP && tupleChanged {
-			if err := eppRuntimeCompatibilityError(
-				newImage,
-				newComponent.RuntimeVersionOverride,
-				newHasEPPConfig,
-				fldPath.Child("eppConfig"),
-			); err != nil {
-				allErrs = append(allErrs, err)
-			}
+		if err := eppRuntimeCompatibilityUpdateError(
+			eppRuntimeContractV1Beta1(newComponent, newImage),
+			eppRuntimeContractV1Beta1(oldComponent, oldImage),
+			apiequality.Semantic.DeepEqual(newComponent.EPPConfig, oldComponent.EPPConfig),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
 		}
 	}
 	return allErrs
