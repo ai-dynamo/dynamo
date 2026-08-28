@@ -299,7 +299,7 @@ ENV IMAGEIO_FFMPEG_EXE=
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
-ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl-capi${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership

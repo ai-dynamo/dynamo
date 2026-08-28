@@ -5,6 +5,7 @@
 set -euo pipefail
 
 readonly OUTPUT_DIR="${1:-/opt/dynamo/nixl-ucx-compat}"
+readonly CAPI_OUTPUT_DIR="${2:-/opt/dynamo/nixl-capi}"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 die() {
@@ -202,13 +203,33 @@ echo "nixl-ucx-compat: installed ${#ALIASES[@]} aliases for" \
     die "missing ${NIXL_CAPI_DIR}/libnixl_capi.so; NIXL wheel layout changed"
 [[ -d "${NIXL_CAPI_DIR}/plugins" ]] || \
     die "missing ${NIXL_CAPI_DIR}/plugins; NIXL wheel layout changed"
+# Expose the C API directory under a stable image path so the Dockerfile can put
+# it on LD_LIBRARY_PATH without knowing the wheel's private layout. A directory
+# symlink (not a per-file one) is required: ld.so expands $ORIGIN from the
+# resolved path, so libnixl_capi.so still finds its siblings through the link,
+# whereas a lone symlinked file would strand libnixl.so.
+if [[ -e "${CAPI_OUTPUT_DIR}" || -L "${CAPI_OUTPUT_DIR}" ]]; then
+    [[ -L "${CAPI_OUTPUT_DIR}" && "$(readlink -f "${CAPI_OUTPUT_DIR}")" == "${NIXL_CAPI_DIR}" ]] || \
+        die "refusing to replace existing output path: ${CAPI_OUTPUT_DIR}"
+else
+    mkdir -p "$(dirname "${CAPI_OUTPUT_DIR}")"
+    ln -s "${NIXL_CAPI_DIR}" "${CAPI_OUTPUT_DIR}"
+fi
+
 echo "${NIXL_CAPI_DIR}" > /etc/ld.so.conf.d/nixl.conf
 ldconfig
 
-# ld.so.cache is keyed by DT_SONAME. A soversioned rebuild would leave the
-# dlopen name uncached while the unversioned development symlink still exists,
-# so assert the name resolves rather than that the file is present.
-ldconfig -p | grep -qE '^[[:space:]]*libnixl_capi[.]so[[:space:]]' || \
-    die "libnixl_capi.so is not resolvable by SONAME after ldconfig"
+# Assert loadability, not cache membership. ld.so.cache is not a reliable oracle
+# inside an image build: ldconfig silently drops a directory whose (st_dev,
+# st_ino) matches one it already queued ("given more than once"), and it reuses
+# /var/cache/ldconfig/aux-cache entries keyed on (st_dev, st_ino, st_size,
+# st_ctime) -- this base image ships that cache pre-populated. Overlayfs recycles
+# those fields across layers, so a correct install can be skipped
+# nondeterministically, and BuildKit then caches the bad layer. LD_LIBRARY_PATH
+# above makes resolution independent of the cache; this check exercises the exact
+# bare dlopen nixl-sys performs, and proves the transitive NIXL deps resolve too.
+LD_LIBRARY_PATH="${CAPI_OUTPUT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' || \
+    die "libnixl_capi.so could not be dlopened by SONAME via ${CAPI_OUTPUT_DIR}"
 
-echo "nixl-ucx-compat: registered ${NIXL_CAPI_DIR} with the runtime linker"
+echo "nixl-ucx-compat: published ${NIXL_CAPI_DIR} via ${CAPI_OUTPUT_DIR}"
