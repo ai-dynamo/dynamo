@@ -6,8 +6,13 @@ subtitle: Engine behavior, timing sources, KV movement, and fidelity boundaries
 ---
 
 DynoSim builds a distributed serving simulation from Mocker engine cores. Each core owns
-engine-specific scheduler and KV-cache state. Offline replay and live Mocker drive the same core
-through virtual-time and wall-clock execution, respectively.
+engine-specific scheduler and KV-cache state. Offline prediction and the retained internal worker
+runtime drive the same core through virtual-time and wall-clock execution, respectively.
+
+> [!WARNING]
+> The public online Mocker CLI is temporarily unavailable. The internal online behavior described
+> here remains an implementation detail and will return through the unified AISimulate CLI in a
+> future release.
 
 ## Engine Behavior
 
@@ -24,8 +29,8 @@ vLLM-shaped core with a different capacity policy.
 | Aggregated simulation | Supported | Supported | Supported |
 | Prefill/decode disaggregation | Supported | Supported | Not supported |
 
-Data-parallel ranks own independent scheduler and KV-pool state. Live Mocker and offline replay
-compose those ranks into one logical worker with a shared pass barrier.
+Data-parallel ranks own independent scheduler and KV-pool state. The internal worker runtime and
+offline prediction compose those ranks into one logical worker with a shared pass barrier.
 
 ### KV Managers
 
@@ -73,8 +78,8 @@ batching, prefix hits, memory pressure, token emission, and handoff state.
 
 ## Prefill/Decode Handoff
 
-Live disaggregated Mocker has two handoff paths. The prefill worker's bootstrap configuration,
-rather than its engine type alone, selects the path.
+The retained internal disaggregated worker runtime has two handoff paths. The prefill worker's
+bootstrap configuration, rather than its engine type alone, selects the path.
 
 ### Direct Completion Path
 
@@ -120,7 +125,8 @@ an explicit value. Set `--kv-transfer-bandwidth 0` to disable P/D transfer delay
 
 ## Distributed Signals
 
-Live Mocker publishes the same categories of signals consumed by the distributed runtime:
+The internal worker runtime publishes the same categories of signals consumed by the distributed
+runtime:
 
 - stored and removed KV events for KV-aware routing;
 - engine-shaped Prometheus scheduler and request metrics;
@@ -136,7 +142,7 @@ Interpret simulation results within these boundaries:
 
 - Timing accuracy depends on the selected timing source and its calibration range.
 - KV capacity and state transitions are modeled; KV tensor payloads are not.
-- Live Mocker includes Dynamo component and transport overhead but does not measure GPU kernel or
+- The internal worker runtime includes Dynamo component and transport overhead but does not measure GPU kernel or
   inference-engine overhead.
 - Offline replay replaces external services and wall-clock concurrency with an event queue and
   shared logical clock.
@@ -144,5 +150,5 @@ Interpret simulation results within these boundaries:
 - Mocker simulates text-token processing; it does not model multimodal encoder or cross-attention
   compute.
 
-Use offline replay for broad algorithm and configuration exploration. Use live Mocker to validate
-the distributed path, then run focused GPU benchmarks for hardware conclusions.
+Use offline prediction for broad algorithm and configuration exploration. Validate the distributed
+path with focused GPU benchmarks until online simulation returns.

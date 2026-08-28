@@ -13,11 +13,15 @@ subtitle: Backend-neutral simulation and configuration-search tools
 AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
 simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
-For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
-Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share their base
-replay configuration; Dynamo extends it with adapter options. The selected runtime validates each
-`--*-engine-args` JSON payload, so runtime-specific fields can differ. For configuration search, call
-`Sweeper(runner_factory=...).run(config)`.
+Use `aisimulate predict --stack engine` for an engine-only prediction. Use `aisimulate predict
+--stack dynamo` to add Dynamo Router and Planner adapters. Both commands read the same YAML schema;
+the `ai-dynamo` package owns and validates the optional `router` and `planner` sections. Use
+`aisimulate recommend` with the same stack selection to search configuration domains.
+
+> [!WARNING]
+> The former Dynamo online replay adapter has no replacement in the unified CLI yet. `aisimulate
+> predict` and `aisimulate recommend` are offline-only. Online replay will return in a future
+> release.
 
 ## Sweeper
 
@@ -35,15 +39,15 @@ path. They have no adapter migration.
 
 ## Install
 
-The `dynamo-planner` image installs the published `aisimulate==0.1.0.dev1` wheel from its local
-wheelhouse. Dynamo builds `aisimulate-core==0.1.0-dev.1` from crates.io instead of vendoring the
+The `dynamo-planner` image installs the published `aisimulate==0.1.0.dev2` wheel from its local
+wheelhouse. Dynamo builds `aisimulate-core==0.1.0-dev.2` from crates.io instead of vendoring the
 AI Simulate source tree.
 
 For Dynamo source development, install the published AI Simulate wheel, Dynamo, and the Planner
 dependencies from the Dynamo repository root:
 
 ```bash
-uv pip install "aisimulate==0.1.0.dev1"
+uv pip install "aisimulate==0.1.0.dev2"
 uv pip install --no-deps -e .
 uv pip install -r container/deps/requirements.planner.txt
 ```
