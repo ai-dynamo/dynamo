@@ -84,11 +84,17 @@ not generate or replace them. An empty feature expression preserves that job's
 existing full-suite marker expression, so an unmapped or inapplicable selection
 fails safely by running the lane already triggered by changed-files detection.
 For example, `tests/router/**` is explicitly mapped to the `router` area and
-feature. The mixed-feature files under `tests/serve/**` remain in the broader
-`runtime` area, so changes to those files conservatively keep the full lanes.
+feature. Mixed-feature files such as `tests/serve/test_vllm.py` belong to each
+applicable feature area, so their mapping selects the union of their `core`,
+`router`, and `multimodal` tests in the vLLM lane.
 
-The default rollout mode reports the marker expressions and exact selected
-pytest node IDs without reducing coverage. The complete selection is uploaded
+The default rollout mode reports the effective feature markers for each backend
+and exact selected pytest node IDs without reducing coverage. Candidate marker
+clauses are kept in the JSON plan for debugging but are not presented as the
+effective selection when a full-suite fallback wins. Non-test documentation
+extensions (`.md`, `.mdx`, `.rst`, and `.txt`) do not participate in pytest
+selection; the existing CI path filters independently decide which jobs a
+documentation change triggers. The complete selection is uploaded
 as the `pytest-shadow-selection-<run id>` JSON artifact; the job summary shows
 counts and the first 200 node IDs per lane. Set repository variable
 `PYTEST_SELECTION_MODE` to `selective` to apply it to backend pytest jobs.

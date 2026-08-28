@@ -240,6 +240,16 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+- label: core-tests
+  github_team: '@ai-dynamo/dynamo-runtime-codeowners'
+  pytest:
+    markers:
+    - core
+  path_globs:
+  - tests/report_pytest_markers.py
+  - tests/serve/test_sample.py
+  - tests/serve/test_vllm.py
+  - tests/vllm_self_benchmark/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -569,6 +579,33 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 shared:
+- glob: components/src/dynamo/common/tests/memory/*multimodal*
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/tests/multimodal/
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/runtime/test_sample_multimodal_smoke.py
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/serve/test_sample.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_vllm.py
+  owners:
+  - runtime
+  - backend-vllm
+  - router
+  - multimodal
+- glob: tests/vllm_self_benchmark/
+  owners:
+  - runtime
+  - backend-vllm
+  - performance
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router

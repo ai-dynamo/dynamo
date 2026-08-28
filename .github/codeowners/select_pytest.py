@@ -21,6 +21,7 @@ from codeowners_match import ResolvedModel, compute_resolution  # noqa: E402
 BACKEND_MARKERS = frozenset({"vllm", "sglang", "trtllm"})
 SMOKE_MARKER = "unit"
 LANES = (*sorted(BACKEND_MARKERS), "generic")
+NON_TEST_DOC_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class SelectionPlan:
     clauses: tuple[str, ...]
     areas: tuple[str, ...]
     changed_test_files: tuple[str, ...]
+    ignored_paths: tuple[str, ...]
     fallback_reasons: tuple[str, ...]
 
 
@@ -134,8 +136,13 @@ def _is_test_file(path: str) -> bool:
     )
 
 
+def _is_non_test_documentation(path: str) -> bool:
+    """Match documentation extensions already excluded by CI path filters."""
+    return Path(path).suffix.lower() in NON_TEST_DOC_SUFFIXES
+
+
 def _lane_selection(clauses: set[MarkerClause], lane: str) -> LaneSelection:
-    expressions: set[str] = set()
+    features: set[str] = set()
     for clause in clauses:
         if lane == "generic":
             if clause.backends:
@@ -147,16 +154,13 @@ def _lane_selection(clauses: set[MarkerClause], lane: str) -> LaneSelection:
         # backend-only clause therefore means the whole lane is required.
         if not clause.features:
             return LaneSelection(mode="full")
-        expressions.add(_or_group(clause.features))
+        features.update(clause.features)
 
-    if not expressions:
+    if not features:
         return LaneSelection(mode="none")
     return LaneSelection(
         mode="markers",
-        expression=" or ".join(
-            f"({expression})" if " or " in expression else expression
-            for expression in sorted(expressions)
-        ),
+        expression=" or ".join(sorted(features)),
     )
 
 
@@ -165,8 +169,13 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
     clauses: set[MarkerClause] = set()
     matched_labels: set[str] = set()
     fallback_reasons: list[str] = []
+    unique_paths = sorted(set(paths))
+    ignored_paths = tuple(
+        path for path in unique_paths if _is_non_test_documentation(path)
+    )
+    selection_paths = [path for path in unique_paths if path not in ignored_paths]
 
-    for path in sorted(set(paths)):
+    for path in selection_paths:
         areas = model.matching_areas(path)
         if not areas:
             fallback_reasons.append(f"{path}: no explicit ownership area")
@@ -179,8 +188,8 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
         labels = ", ".join(area.label for area in areas)
         fallback_reasons.append(f"{path}: no marker mapping ({labels})")
 
-    changed_tests = tuple(sorted(path for path in set(paths) if _is_test_file(path)))
-    if fallback_reasons or not paths:
+    changed_tests = tuple(path for path in selection_paths if _is_test_file(path))
+    if fallback_reasons or not unique_paths:
         reasons = fallback_reasons or ["no changed paths were provided"]
         return SelectionPlan(
             mode="full",
@@ -188,7 +197,19 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
             clauses=tuple(sorted(clause.expression() for clause in clauses)),
             areas=tuple(sorted(matched_labels)),
             changed_test_files=changed_tests,
+            ignored_paths=ignored_paths,
             fallback_reasons=tuple(reasons),
+        )
+
+    if not selection_paths:
+        return SelectionPlan(
+            mode="none",
+            lanes={lane: LaneSelection(mode="none") for lane in LANES},
+            clauses=(),
+            areas=(),
+            changed_test_files=(),
+            ignored_paths=ignored_paths,
+            fallback_reasons=(),
         )
 
     lanes = {lane: _lane_selection(clauses, lane) for lane in LANES}
@@ -199,6 +220,7 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
         clauses=tuple(sorted(clause.expression() for clause in clauses)),
         areas=tuple(sorted(matched_labels)),
         changed_test_files=changed_tests,
+        ignored_paths=ignored_paths,
         fallback_reasons=(),
     )
 
@@ -228,17 +250,29 @@ def _write_summary(
 ) -> None:
     with path.open("a", encoding="utf-8") as summary:
         summary.write("## CODEOWNERS pytest selection\n\n")
-        summary.write(f"- Plan mode: `{plan.mode}`\n")
+        result = {
+            "full": "full suite (no feature filtering)",
+            "markers": "selective feature markers",
+            "none": "no pytest selection",
+        }[plan.mode]
+        summary.write(f"- Selection result: `{result}`\n")
         summary.write(
             f"- Matched areas: `{', '.join(plan.areas) if plan.areas else 'none'}`\n"
         )
         summary.write(f"- Changed paths evaluated: {len(set(paths))}\n")
-        if plan.clauses:
-            summary.write(f"- Marker clauses: `{' or '.join(plan.clauses)}`\n")
-        for lane, selection in plan.lanes.items():
-            detail = (
-                selection.expression if selection.mode == "markers" else selection.mode
+        if plan.ignored_paths:
+            summary.write(
+                f"- Ignored non-test documentation: {len(plan.ignored_paths)} path(s)\n"
             )
+        summary.write("\n### Backend feature markers\n\n")
+        for lane in sorted(BACKEND_MARKERS):
+            selection = plan.lanes[lane]
+            if selection.mode == "markers":
+                detail = selection.expression
+            elif selection.mode == "full":
+                detail = "none (full suite)"
+            else:
+                detail = "none (lane not selected)"
             summary.write(f"- `{lane}`: `{detail}`\n")
         if plan.fallback_reasons:
             summary.write("\nFull-suite fallback reasons:\n")

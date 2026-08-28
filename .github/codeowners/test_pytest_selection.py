@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import compute_resolution  # noqa: E402
 from select_pytest import (  # noqa: E402
     _write_github_output,
+    _write_summary,
     build_plan,
     selected_pr_tests,
     selected_tests_by_lane,
@@ -120,7 +121,7 @@ def test_unmapped_executable_area_falls_back_to_full() -> None:
 
 
 def test_area_without_pytest_markers_falls_back_to_full() -> None:
-    plan = build_plan(_model(), ["docs/overview.md"])
+    plan = build_plan(_model(), ["docs/config.yaml"])
 
     assert plan.mode == "full"
     assert all(selection.mode == "full" for selection in plan.lanes.values())
@@ -175,15 +176,88 @@ def test_repository_router_path_selects_router_marker() -> None:
     assert all(selection.expression == "router" for selection in plan.lanes.values())
 
 
-def test_repository_mixed_feature_serve_test_keeps_full_lanes() -> None:
+def test_repository_mixed_feature_serve_test_maps_every_feature() -> None:
     spec = yaml.safe_load(
         (REPO_ROOT / ".github/codeowners/areas.yaml").read_text(encoding="utf-8")
     )
     plan = build_plan(compute_resolution(spec), ["tests/serve/test_vllm.py"])
 
-    assert plan.areas == ("runtime",)
-    assert plan.mode == "full"
-    assert all(selection.mode == "full" for selection in plan.lanes.values())
+    assert set(plan.areas) == {
+        "backend-vllm",
+        "core-tests",
+        "multimodal",
+        "router",
+        "runtime",
+    }
+    assert plan.mode == "markers"
+    assert plan.lanes["vllm"].expression == "core or multimodal or router"
+    assert plan.lanes["sglang"].mode == "none"
+    assert not plan.fallback_reasons
+
+
+def test_repository_test_related_paths_have_explicit_marker_mappings() -> None:
+    spec = yaml.safe_load(
+        (REPO_ROOT / ".github/codeowners/areas.yaml").read_text(encoding="utf-8")
+    )
+    model = compute_resolution(spec)
+    expected = {
+        "components/src/dynamo/common/tests/memory/"
+        "test_multimodal_embedding_cache_manager.py": {
+            lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
+        },
+        "components/src/dynamo/common/tests/multimodal/"
+        "test_async_encoder_cache.py": {
+            lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
+        },
+        "components/src/dynamo/common/tests/multimodal/"
+        "test_nvdec_decoder_gpu.py": {
+            lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
+        },
+        "tests/report_pytest_markers.py": {
+            lane: "core" for lane in ("generic", "sglang", "trtllm", "vllm")
+        },
+        "tests/runtime/test_sample_multimodal_smoke.py": {
+            lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
+        },
+        "tests/serve/test_sample.py": {"vllm": "core"},
+        "tests/vllm_self_benchmark/test_self_benchmark_gpu.py": {"vllm": "core"},
+    }
+
+    for path, lane_expressions in expected.items():
+        plan = build_plan(model, [path])
+        assert plan.mode == "markers", path
+        assert not plan.fallback_reasons, path
+        assert {
+            lane: selection.expression
+            for lane, selection in plan.lanes.items()
+            if selection.mode == "markers"
+        } == lane_expressions, path
+
+
+def test_repository_test_readme_does_not_select_pytest() -> None:
+    spec = yaml.safe_load(
+        (REPO_ROOT / ".github/codeowners/areas.yaml").read_text(encoding="utf-8")
+    )
+    plan = build_plan(compute_resolution(spec), ["tests/README.md"])
+
+    assert plan.mode == "none"
+    assert plan.ignored_paths == ("tests/README.md",)
+    assert not plan.fallback_reasons
+    assert all(selection.mode == "none" for selection in plan.lanes.values())
+
+
+def test_summary_reports_effective_backend_markers_not_internal_clauses(
+    tmp_path: Path,
+) -> None:
+    summary = tmp_path / "summary"
+    plan = build_plan(_model(), ["lib/router/scheduler.rs"])
+
+    _write_summary(summary, ["lib/router/scheduler.rs"], plan)
+
+    rendered = summary.read_text(encoding="utf-8")
+    assert "Marker clauses" not in rendered
+    assert "### Backend feature markers" in rendered
+    assert "- `vllm`: `router`" in rendered
 
 
 def test_github_outputs_only_applied_backend_features(tmp_path: Path) -> None:
