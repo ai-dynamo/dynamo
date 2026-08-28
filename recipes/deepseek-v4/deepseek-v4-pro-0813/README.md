@@ -60,6 +60,23 @@ lands in `reasoning_content`) and with small `max_tokens`. Practical guidance:
   thinking costs roughly 21 points of GPQA accuracy. It is a debugging aid, not a
   production setting.
 
+### Known issue: an invalid `json_schema` returns HTTP 500
+
+A `response_format: json_schema` carrying a malformed regex — for example an
+unclosed character class such as `"pattern": "[unclosed["` — is rejected with:
+
+```json
+{"message":"Failed to generate completions","type":"Internal Server Error","code":500}
+```
+
+A client-side schema error should surface as HTTP 400 or 422, not 500. The
+validation itself is correct: vLLM raises a `ValueError` when it compiles the
+grammar, but the Dynamo HTTP service maps that to a 500 rather than a 4xx. There is
+no flag to change this; it needs an error-mapping fix in the frontend.
+
+Validate schemas client-side before submitting them. A 500 from this endpoint does
+not necessarily mean the deployment is unhealthy — check the schema first.
+
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
