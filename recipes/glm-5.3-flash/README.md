@@ -45,6 +45,7 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 ```bash
 export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
+kubectl label namespace ${NAMESPACE} kai.scheduler/enabled=true
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
   -n ${NAMESPACE}
@@ -75,6 +76,23 @@ MODE=agg    # or disagg
 kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
+### 5. Benchmark
+
+See [perf/README.md](perf/README.md) for the full aiperf benchmark workflow.
+
+## Accuracy
+
+Evaluated on GB200 aggregated recipe (TP4, BF16, `glm53-flash` image, temp=0.6, `ai-dynamo==1.4.1`):
+
+| Benchmark               | Metric                           | Score  |
+| ----------------------- | -------------------------------- | ------ |
+| GPQA Diamond (0-shot)   | lm_eval flexible-extract (±0.03) | 73.2%  |
+| GPQA Diamond (0-shot)   | NeMo evaluator pass@1            | 79.8%  |
+| GSM8K (5-shot)          | lm_eval flexible-extract         | 97.2%  |
+
+> lm_eval uses `local-chat-completions` with `apply_chat_template`; GPQA uses `gpqa_diamond_cot_zeroshot`.
+> NeMo uses `nel eval run --bench gpqa --max-tokens 16384 -O temperature=0.6 -O request_timeout=600`.
+
 ## Limitations
 
 - GB200 disagg KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The image's UCX
@@ -88,4 +106,3 @@ kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 - `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
   decode workers; mismatching these produces silent garbage output.
 - `n>1` requests are not supported with the disaggregated recipe.
-- Performance is not validated.
