@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -40,15 +41,14 @@ from pathlib import Path
 # inference-gateway ext-proc) that are not library crates consumers pull from the
 # registry, and whose build scripts (envoy/protoc codegen) aren't wired up here.
 EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
-# Workspace members never published from the on-demand flow: internal crates that
-# carry an independent version (not the workspace version) and that no published
-# crate depends on. kvbm-consolidator pins its own 1.2.0, so the version gate would
-# (correctly) abort the release; it is a leaf, so excluding it is closure-safe.
+# Workspace members never published from the on-demand flow: internal
+# service/tool crates that no published crate depends on (leaves — excluding
+# them is closure-safe) and that registry consumers never pull.
 EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
 # Artifactory < 7.148 rejects the `Content-Type: application/octet-stream` header
 # cargo >= 1.96 sends on publish with a 415 (JFrog RTDEV-83141, rust-lang/cargo#17086),
-# so the upload runs on the last pre-header toolchain. Remove once
-# artifactory.nvidia.com runs Artifactory 7.148+.
+# so the upload runs on the last pre-header toolchain. Remove once the
+# registry host runs Artifactory 7.148+.
 PUBLISH_TOOLCHAIN = "1.95.0"
 # No bare "HTTP/2" alternation here: cargo dumps the raw status line ("HTTP/2 415")
 # on every HTTP error, which made deterministic 4xx failures retry as transient.
@@ -106,9 +106,22 @@ def topo_order(pkgs: dict[str, dict]) -> list[str]:
 
 
 def write_cargo_config(root: Path, alias: str, index: str) -> None:
+    # Append to the workspace .cargo/config.toml -- it carries required build
+    # settings (rustflags, PCRE2_SYS_STATIC) that an overwrite would drop.
+    # The marker makes re-runs idempotent (no duplicated tables).
+    marker = "# --- stage_crates registry (generated) ---"
     cfg = root / ".cargo" / "config.toml"
     cfg.parent.mkdir(exist_ok=True)
+    text = cfg.read_text() if cfg.exists() else ""
+    if marker in text:
+        # Drop our previously generated tail (anything after the marker is ours).
+        text = text.split(marker)[0].rstrip() + "\n"
+    # Header-anchored so [registries.x]/[registry] count but comments don't;
+    # checked AFTER stripping our block so a re-run can't mask a foreign table.
+    if re.search(r"(?m)^\s*\[registr(?:y|ies)[\].]", text):
+        raise RuntimeError(".cargo/config.toml already defines registry tables; refusing to append conflicting ones")
     cfg.write_text(
+        f"{text}\n{marker}\n"
         f'[registries]\n{alias} = {{ index = "{index}" }}\n\n'
         f'[registry]\ndefault = "{alias}"\n'
         'global-credential-providers = ["cargo:token"]\n'
@@ -216,9 +229,11 @@ def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return False
-        raise RuntimeError(f"registry HEAD {url} failed: HTTP {e.code} (bad ARTIFACTORY_TOKEN or registry outage?)") from e
+        # Path only — the registry host is workflow-secret-derived and error
+        # strings end up in public Actions logs.
+        raise RuntimeError(f"registry HEAD {urllib.parse.urlparse(url).path} failed: HTTP {e.code} (bad ARTIFACTORY_TOKEN or registry outage?)") from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"registry HEAD {url} unreachable: {e.reason}") from e
+        raise RuntimeError(f"registry HEAD {urllib.parse.urlparse(url).path} unreachable: {e.reason}") from e
 
 
 def publish(manifest: str, alias: str, env: dict) -> str:
@@ -363,8 +378,9 @@ def main() -> int:
         [root / "Cargo.toml", *(Path(pkgs[n]["manifest_path"]) for n in order)],
         order, args.registry, {n: pkgs[n]["version"] for n in order},
     )
-    # cargo publish rejects deps without a registry version; drop the optional,
-    # private git deps (e.g. aiconfigurator-core) from the crates being published.
+    # cargo publish rejects deps without a registry version; drop optional,
+    # private git deps from the crates being published (none on current main;
+    # older release branches still carry e.g. aiconfigurator-core).
     strip_git_deps(root, [Path(pkgs[n]["manifest_path"]) for n in order])
 
     env = dict(os.environ)

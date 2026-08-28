@@ -133,8 +133,8 @@ on:
         default: ''
     outputs:
       # The exact NGC docker tag published for this run (nightly: <date>-<sha7>).
-      # Callers use it to reference what actually shipped instead of recomputing
-      # the date, which can drift across a UTC-midnight boundary.
+      # Informational for callers — recomputing the date can drift across a
+      # UTC-midnight boundary; no current caller consumes it.
       ngc_version_tag:
         description: 'NGC docker version tag published by this run.'
         value: ${{ jobs.prepare-release.outputs.ngc_version_tag }}
@@ -246,6 +246,7 @@ jobs:
             if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
               echo "Error: workflow_dispatch must be triggered from a release/X.Y.Z[.devN|.postN] branch (or main with nightly=true)"
               echo "Current branch: $BRANCH_NAME"
+              echo "Named releases are not dispatchable here — run on-demand-release.yml with a BARE v<X.Y.Z>[-<name>] release_branch (a release/X.Y.Z-<name> branch is treated as a throwaway test branch there too)."
               exit 1
             fi
             VERSION="${BRANCH_NAME#release/}"
@@ -289,6 +290,14 @@ jobs:
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
           if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
+            exit 1
+          fi
+          # rc dispatch derives VERSION from the branch name but stamps wheels from
+          # the tree at COMMIT_SHA — a mismatch ships wheels versioned differently
+          # from the image tags (e.g. a SHA pasted from the wrong branch, or a
+          # branch cut whose version bump hasn't landed yet).
+          if [[ "${NIGHTLY}" != "true" && "${BASE_VERSION}" != "${VERSION}" ]]; then
+            echo "Error: pyproject version '${BASE_VERSION}' at ${COMMIT_SHA:0:12} != release version '${VERSION}' — is the SHA on this release branch (post version-bump)?"
             exit 1
           fi
 
@@ -1140,19 +1149,19 @@ jobs:
             fi
           fi
 
-      # Runs last so charts still publish first. On-demand only: the operator named
-      # an explicit image set, so a partially-copied set must not report success and
-      # let GitLab open promotion MRs for images that never landed. rc/nightly keep
-      # their historical warn-and-continue behavior (a floating-tag hiccup there must
-      # not block the GitLab trigger, which requires this job to succeed).
-      - name: Fail on partially staged container selection (on-demand)
-        if: ${{ env.ON_DEMAND == 'true' && env.CONTAINER_SUBSET != 'none' }}
+      # Runs last so charts still publish first. rc and on-demand runs name an
+      # explicit image set, so a partially-copied set must not report success and
+      # let GitLab scan/promote images that never landed. Nightly stays warn-skip
+      # by design: its optional images are gated per-build-result upstream and a
+      # flake there must not block the GitLab trigger.
+      - name: Fail on partially staged container selection
+        if: ${{ env.NIGHTLY != 'true' && env.CONTAINER_SUBSET != 'none' }}
         env:
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
         run: |
           set -euo pipefail
           if [ "${FAILED_COUNT:-0}" -ne 0 ]; then
-            echo "::error::${FAILED_COUNT} selected container image(s) failed to copy to NGC — see 'Copy images to NGC'. Re-run with a fresh rc_round once fixed."
+            echo "::error::${FAILED_COUNT} selected container image(s) failed to copy to NGC — see 'Copy images to NGC'. Once fixed, re-stage with a fresh round (rc_round on on-demand-release.yml; rc_number on an rc dispatch)."
             exit 1
           fi
           echo "All selected container images copied."
@@ -1435,8 +1444,9 @@ jobs:
   # ARTIFACTORY STAGING: publish workspace crates to the Artifactory cargo registry
   # (from ARTIFACTORY_CARGO_INDEX), dependency-ordered. Artifactory only, never crates.io.
   # cargo needs the native toolchain, so we `docker run` the ECR build image on
-  # prod-builder-amd-v1 (the DinD builder release-publish uses) instead of a job-level
-  # `container:` on a k8s-hooks tester (its per-job pod stayed Pending). On-demand only.
+  # prod-builder-amd-v1 (the DinD builder release-publish uses). A job-level
+  # `container:` cannot pull the image on a delayed release dispatch (registry
+  # creds are only fresh in-step). On-demand only.
 
   stage-crates-artifactory:
     name: Stage Crates to Artifactory
@@ -1518,6 +1528,11 @@ jobs:
           # No `set -e`: outputs must be set even when the publish fails partway;
           # we exit with the real code afterwards.
           set -uo pipefail
+          # Mask the registry host: cargo error output embeds the index URL in
+          # forms (https://<host>/...config.json) that exact-secret masking of
+          # ARTIFACTORY_CARGO_INDEX does not catch.
+          CARGO_HOST=$(printf '%s' "${ARTIFACTORY_CARGO_INDEX}" | sed -E 's#^sparse\+##; s#^https?://##; s#[/:].*$##')
+          if [ -n "${CARGO_HOST}" ]; then echo "::add-mask::${CARGO_HOST}"; fi
           # Run stage_crates.py inside the ECR build image: repo mounted at /work, cargo uses
           # the image toolchain, root so it can write Cargo.lock/.cargo and the target dir.
           docker run --rm --user 0:0 \
@@ -1710,9 +1725,8 @@ jobs:
           GITLAB_TRIGGER_URL:   ${{ secrets.GITLAB_PIPELINE_URL }}
           GITLAB_TRIGGER_TOKEN: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
           # release-automation ref to run (var-overridable for testing a GitLab
-          # dev branch). GitLab does NOT force dry-run on non-default refs.
-          # The on-demand support landed on release-automation main (2026-07-08),
-          # so main is the correct default.
+          # dev branch). GitLab does NOT force dry-run on non-default refs, and
+          # only main carries its dry-run guards — keep the default on main.
           GITLAB_REF:           ${{ vars.GITLAB_RELEASE_AUTOMATION_REF || 'main' }}
           VERSION:              ${{ needs.prepare-release.outputs.version }}
           NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}

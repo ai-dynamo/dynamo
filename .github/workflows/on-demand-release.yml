@@ -6,7 +6,7 @@
 # release branch (v<X.Y.Z>[-<name>], pushed with a release/<branch> CI twin so
 # post-merge CI builds the images), then stage all artifacts and trigger the
 # GitLab release-automation pipeline via release.yml. Dispatch is restricted
-# to active members of the release-ops team (vars.RELEASE_OPS_TEAM).
+# to active members of the ai-dynamo/devops team.
 
 name: On-Demand Release
 
@@ -70,11 +70,14 @@ permissions:
 
 jobs:
   # ============================================================================
-  # OPS GATE — only active members of the release-ops GitHub team
-  # (vars.RELEASE_OPS_TEAM, in the repo's org) may run this workflow. Fail
-  # closed: an unset var, missing app org Members:read permission, or any API
-  # error denies. github.actor re-resolves on re-runs, so re-running someone
-  # else's run is re-checked too.
+  # OPS GATE — only active members of the org's devops team
+  # (github.com/orgs/ai-dynamo/teams/devops) may run this workflow. Fail
+  # closed: missing app org Members:read permission or any API error denies.
+  # On re-runs github.actor stays the ORIGINAL dispatcher and the
+  # re-runner appears as github.triggering_actor, so BOTH are checked. Caveat:
+  # "Re-run failed jobs" does not re-execute a previously successful authorize —
+  # the manual-release-approval environment is the backstop for replayed
+  # downstream jobs.
   # ============================================================================
   authorize:
     name: Verify release-ops membership
@@ -93,25 +96,24 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
-          TEAM: ${{ vars.RELEASE_OPS_TEAM }}
+          TEAM: devops
           ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
-          if [ -z "${TEAM}" ]; then
-            echo "::error::vars.RELEASE_OPS_TEAM is not configured; denying every dispatch (fail closed)."
-            exit 1
-          fi
-          HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${ACTOR}")
-          STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
-            "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
-          if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
-            echo "::error::@${ACTOR} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
-            exit 1
-          fi
-          echo "@${ACTOR} authorized via ${ORG}/${TEAM}"
+          for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
+            HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
+            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
+              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
+            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
+              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
+              exit 1
+            fi
+            echo "@${USER} authorized via ${ORG}/${TEAM}"
+          done
 
   # ============================================================================
   # CREATE RELEASE BRANCH + VERSION BUMP
@@ -234,7 +236,8 @@ jobs:
                       out.append(f"{fw}-{var}")
                   else:
                       fail(f"unknown variant in '{tok}' (use runtime|efa)")
-              return ",".join(dedupe(out))
+              # A separators-only spec (e.g. ',') is an empty selection, not 'all'.
+              return ",".join(dedupe(out)) or "none"
 
           def norm_simple(spec, universe, label):
               spec = (spec or "all").strip()
@@ -253,7 +256,7 @@ jobs:
               if label == "wheel" and "ai-dynamo" in sel and "ai-dynamo-runtime" not in sel:
                   fail("wheels=ai-dynamo requires ai-dynamo-runtime (ai-dynamo pins "
                        "ai-dynamo-runtime==<version>); add it or use wheels=all")
-              return ",".join(sel)
+              return ",".join(sel) or "none"
 
           def norm_crates(spec):
               spec = (spec or "all").strip()
@@ -267,7 +270,7 @@ jobs:
               bad = [t for t in sel if not re.fullmatch(r"[A-Za-z0-9_-]+", t)]
               if bad:
                   fail(f"invalid crate token(s) {bad}; crate names are [A-Za-z0-9_-]+")
-              return ",".join(sel)
+              return ",".join(sel) or "none"
 
           c = norm_containers(os.environ.get("CONTAINERS", "all"))
           w = norm_simple(os.environ.get("WHEELS", "all"), WHEEL_TOKENS, "wheel")
@@ -335,6 +338,7 @@ jobs:
             CI_BRANCH="release/${BRANCH}"
           else
             IS_TEST=true
+            echo "::warning::branch '${BRANCH}' is not release/X.Y.Z[.devN|.postN] or v<X.Y.Z>[-<name>] — treated as a THROWAWAY TEST branch: it is cut and built, but staging, approval and the GitLab trigger are all skipped."
           fi
 
           # Fetch the version-bump script from THIS workflow's commit (GITHUB_SHA);
@@ -345,8 +349,10 @@ jobs:
           # re-run only adds the diff (e.g. a newly-added script step lands on the branch
           # that was cut before it existed); otherwise base it on the checked-out
           # source_ref. We never delete/clobber — the diff (if any) is committed on top.
+          # refs/heads/ refspecs everywhere: a bare v-branch name can collide with
+          # a GA tag (v1.4.1), and short names would resolve/push ambiguously.
           if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            git fetch origin "${BRANCH}"
+            git fetch origin "refs/heads/${BRANCH}"
             git checkout -B "${BRANCH}" FETCH_HEAD
             EXISTED=1
           else
@@ -373,11 +379,9 @@ jobs:
           # pre-merge `cargo metadata --locked` matrix both pass. lib/bindings/python,
           # lib/bindings/kvbm and lib/runtime/examples are SEPARATE cargo workspaces
           # with their own lock files, so a root-only `cargo update --workspace` leaves
-          # their workspace-crate pins on the PREVIOUS version. That is what shipped in
-          # the 1.4.1 cut (9f6c6be7): three stale locks, and the clippy matrix — which
-          # runs `cargo metadata --locked` in each of those dirs — failed on all three.
-          # Discovered from git, not hardcoded, so a newly added nested workspace cannot
-          # silently regress the next release.
+          # their workspace-crate pins on the PREVIOUS version and their `--locked`
+          # checks fail. Discovered from git, not hardcoded, so a newly added nested
+          # workspace cannot silently regress the next release.
           git ls-files | grep -E '(^|/)Cargo\.lock$' | sort | while IFS= read -r lock; do
             manifest="$(dirname "${lock}")/Cargo.toml"
             manifest="${manifest#./}"
@@ -405,11 +409,11 @@ jobs:
               echo "${BRANCH} already matches the release scripts; nothing to commit (reuse, no push)."
             else
               git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}" -m "${SELECTION_MSG}"
-              git push origin "${BRANCH}"
+              git push origin "HEAD:refs/heads/${BRANCH}"
             fi
           else
             git commit -s -m "release: set version ${RELEASE_VERSION}" -m "${SELECTION_MSG}"
-            git push origin "${BRANCH}"
+            git push origin "HEAD:refs/heads/${BRANCH}"
           fi
           # Keep the CI twin of a bare named branch on this commit (fast-forward;
           # no-op when already there) so post-merge CI builds it.
@@ -534,8 +538,13 @@ jobs:
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${SHA}&per_page=1") || { API_OK=false; RUNS='{}'; }
-            COUNT=$(echo "${RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null || { API_OK=false; echo 0; })
-            STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null || { API_OK=false; echo pending; })
+            # Failure flags must be set in the parent shell, not inside $( ).
+            if ! COUNT=$(echo "${RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null); then
+              API_OK=false; COUNT=0
+            fi
+            if ! STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null); then
+              API_OK=false; STATUS=pending
+            fi
             if [ "${API_OK}" = "true" ]; then
               if [ "${COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
                 echo "::error::post-merge CI never started for ${SHA} (branch push may not have triggered it); required image(s) missing: ${missing[*]}"

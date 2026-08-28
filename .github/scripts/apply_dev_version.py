@@ -123,11 +123,11 @@ PLACEHOLDER_REGISTRY = "my-registry"
 # per-model dev lines (`tag: "1.4.0-inkling-dev.1"`, `releaseLine: "v1.4.0"`) and
 # dated nightlies (`version: "1.4.0.dev20260803"`) all carry the same version
 # literal, and each row repeats it in a `label:` beside the `clipboard:`.
-# rewrite_image_refs only understands `<reg>/<img>:<tag>`, so on a re-cut it moved
-# 7 clipboards and left every label behind -- publishing a page whose copy button
-# contradicts its own label, while the historical entries are ones that must never
-# move at all. Telling those apart needs a TS parse, not a regex, so the file is
-# skipped wholesale and the release owner is warned to update it by hand.
+# rewrite_image_refs only understands `<reg>/<img>:<tag>`, so on a re-cut it would
+# move each row's clipboard ref while leaving the `label:` beside it -- publishing
+# a page whose copy button contradicts its own label -- and the historical rows
+# must never move at all. Telling those apart needs a TS parse, not a regex, so
+# the file is skipped wholesale and the release owner is warned to update it by hand.
 IMAGE_REF_SKIP = frozenset({"docs/fern/components/releases.data.ts"})
 
 # .devN is a PRE-release (sorts before X.Y.Z) -> SemVer '-devN'; .postN is a
@@ -273,27 +273,34 @@ def _semver_form(new: str) -> str:
     return f"{base}-{suffix}" if suffix.startswith("dev") else f"{base}+{suffix}"
 
 
-def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> None:
-    text = VERSION_LINE_RE.sub(
-        lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
-        path.read_text(),
-        count=1,
-    )
+def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> int:
+    hits = 0
+
+    def _set(m: re.Match) -> str:
+        nonlocal hits
+        if m.group(2) != old:
+            return m.group(0)
+        hits += 1
+        return f"{m.group(1)}{new}{m.group(3)}"
+
+    text = VERSION_LINE_RE.sub(_set, path.read_text())
     if is_root:
         text = PY_ROOT_PIN_RE.sub(
             lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
             text,
         )
     path.write_text(text)
+    return hits
 
 
-def set_cargo(path: Path, old: str, new: str) -> None:
-    text = re.sub(
+def set_cargo(path: Path, old: str, new: str) -> int:
+    text, n = re.subn(
         rf'(\bversion\s*=\s*"){re.escape(old)}(")',
         lambda m: f"{m.group(1)}{new}{m.group(2)}",
         path.read_text(),
     )
     path.write_text(text)
+    return n
 
 
 def set_helm(path: Path, old: str, new: str) -> None:
@@ -495,23 +502,49 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
         print(f"set_release_version: skip {rel} (absent at this source ref)", file=sys.stderr)
         return False
 
+    # Cargo.toml holds the workspace version in SemVer form ('1.4.2-dev1'),
+    # pyprojects in PEP 440 form ('1.4.2.dev1'): re-stamping an already-stamped
+    # .devN/.postN branch must match each file's own spelling of the old version.
+    old_py = re.sub(r"[-+](dev|post)", r".\1", old)
+
+    # These files legitimately carry their own version (never the workspace's),
+    # so a zero-hit rewrite is expected for them. Anywhere else, zero hits with
+    # the new version also absent means the file holds some third version and
+    # the release would ship stale metadata.
+    independent = {"lib/gpu_memory_service/pyproject.toml",
+                   "lib/bindings/python/codegen/Cargo.toml"}
+
+    def _require(rel: str, hits: int, want: str) -> None:
+        if rel in independent or hits:
+            return
+        if want not in (root / rel).read_text():
+            raise RuntimeError(
+                f"{rel} carries neither the workspace version ('{old}'/'{old_py}') "
+                f"nor '{want}' -- refusing a partial stamp")
+
     # Package identity -- ALWAYS bumped, regardless of the wheels/crates selection:
     # the containers embed wheels built from this tree, so a container-only release
     # still needs the workspace/pyproject versions stamped or the shipped image would
     # carry the previous version. (wheels/crates are intentionally not passed in.)
     for rel in PYPROJECT_TARGETS:
         if rel == "pyproject.toml" or _exists(rel):
-            set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
-    set_cargo(root / "Cargo.toml", old, semver)
+            _require(rel, set_pyproject(root / rel, old_py, new_version,
+                                        is_root=(rel == "pyproject.toml")), new_version)
+    _require("Cargo.toml", set_cargo(root / "Cargo.toml", old, semver), semver)
     for rel in SUBCRATE_CARGO_TARGETS:
         if _exists(rel):
-            set_cargo(root / rel, old, semver)
+            _require(rel, set_cargo(root / rel, old, semver), semver)
     # Workspace-version pins in member manifests (inline dep tables, e.g.
     # backend-common's dynamo-llm pin) carry the same literal as the root
-    # pins; set_cargo's exact-string replace stamps them identically.
+    # pins; a pin pre-committed at the new version passes via the _require
+    # already-stamped tolerance. Older refs have a bare path dep with no
+    # version key at all — nothing to stamp (stage_crates injects the version
+    # at publish), so the guard only applies when a pin exists.
     for rel in WORKSPACE_PIN_CARGO_TARGETS:
         if _exists(rel):
-            set_cargo(root / rel, old, semver)
+            n = set_cargo(root / rel, old, semver)
+            if re.search(r"path\s*=[^}\n]*\bversion\s*=", (root / rel).read_text()):
+                _require(rel, n, semver)
     # Chart identity -- only for charts in the --helm subset.
     for token, rel in HELM_CHART_TARGETS:
         if token in helm and _exists(rel):
