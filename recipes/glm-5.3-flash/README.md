@@ -76,10 +76,6 @@ MODE=agg    # or disagg
 kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
-### 5. Benchmark
-
-See [perf/README.md](perf/README.md) for the full aiperf benchmark workflow.
-
 ## Limitations
 
 - GB200 disagg KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The image's UCX
