@@ -15,6 +15,7 @@ from dynamo.experimental.llm import LLMUnaryClient
 
 pytestmark = [
     pytest.mark.asyncio,
+    pytest.mark.forked,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
