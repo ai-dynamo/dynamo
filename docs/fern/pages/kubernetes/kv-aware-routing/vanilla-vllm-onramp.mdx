@@ -523,7 +523,8 @@ operator-generated resource contract; that contract does not configure standalon
 | Symptom | Check |
 |---|---|
 | EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-rust-epp` revision. |
-| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch pods, `InferencePool` resources, and `EndpointSlice` resources. |
+| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch pods and `InferencePool` resources. |
+| EPP replicas do not sync active load | Confirm `DYN_EPP_PEER_SERVICE` names the EPP Service and EPP RBAC grants `list` and `watch` access to `EndpointSlice` resources. |
 | EPP exits while validating its peer Service | Confirm the Service exists and EPP RBAC grants `get` access to Services. |
 | EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
 | Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |

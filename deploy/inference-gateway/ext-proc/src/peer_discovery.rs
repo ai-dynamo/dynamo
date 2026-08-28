@@ -144,9 +144,8 @@ fn is_ipv6(ip: &str) -> bool {
     ip.contains(':')
 }
 
-/// Collects peer IPs for the requested address family. Includes not-ready peers
-/// and terminating peers that are still serving to preserve synchronization
-/// while they start or drain.
+/// Collects peer IPs for the requested address family. Membership follows
+/// EndpointSlice membership regardless of endpoint conditions.
 fn peer_ips<'a>(
     slices: impl Iterator<Item = &'a EndpointSlice>,
     want_ipv6: bool,
