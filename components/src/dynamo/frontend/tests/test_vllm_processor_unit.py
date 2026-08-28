@@ -2947,9 +2947,10 @@ class _AccountingReasoningParser:
 
     engine_based_streaming = False
 
-    def __init__(self, tokenizer, *, chat_template_kwargs=None):
+    def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
         self.tokenizer = tokenizer
         self.chat_template_kwargs = chat_template_kwargs or {}
+        self.model_config = model_config
 
     def is_reasoning_end(self, prompt_token_ids):
         return False
