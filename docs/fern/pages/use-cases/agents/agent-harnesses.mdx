@@ -2,38 +2,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Harnesses
-subtitle: Point coding-agent CLIs at a Dynamo deployment
+subtitle: Deploy once, then connect your agent of choice
 ---
 
-Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
+Dynamo exposes OpenAI-compatible Chat Completions and Responses APIs plus an Anthropic-compatible Messages API. Deploy a supported recipe first, then point your preferred harness at the resulting endpoint and exact served model. Dynamo remains the inference service; the harness continues to own prompts, tools, permissions, and conversation state.
 
 <Steps toc={true}>
-<Step title="Start a local agent endpoint" id="local-setup">
-To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
+<Step title="Deploy a Dynamo recipe" id="deploy-recipe">
+Follow the [Kubernetes quickstart](../../kubernetes/getting-started/quickstart.mdx), then choose a supported model and topology from the [recipe catalog](../../recipes/model-recipes/overview.mdx). Complete the recipe through `DynamoGraphDeployment` readiness and frontend exposure. This guide does not create a second backend or assume a cluster, namespace, service name, storage class, or GPU provider.
 
-To start it, run:
+Record the frontend URL without a trailing `/v1` and the exact model ID returned by the deployment:
 
 ```bash
-bash examples/backends/sglang/launch/agg_agent.sh
+export DYNAMO_BASE_URL=https://your-dynamo-endpoint.example.com
+export DYNAMO_MODEL=your-recipe-served-model
+
+curl -fsS "${DYNAMO_BASE_URL%/}/v1/models" \
+  | jq -e --arg model "$DYNAMO_MODEL" '.data[]? | select(.id == $model)'
 ```
+
+If the endpoint requires bearer authentication, export `DYNAMO_API_KEY` and add `-H "Authorization: Bearer $DYNAMO_API_KEY"` to the readiness request. Keep the recipe running and reachable while you use the harness.
 
 </Step>
 <Step title="Configure a harness" id="configure-a-harness">
 <Tabs>
   <Tab title="Codex">
 
-    Codex uses the Responses API. Add a local provider in `~/.codex/config.toml`:
+    Codex uses the Responses API. Add a provider in `~/.codex/config.toml` and replace the example URL with `${DYNAMO_BASE_URL%/}/v1`:
 
     ```toml
     [model_providers.dynamo]
     name = "dynamo"
-    base_url = "http://localhost:8000/v1"
+    base_url = "https://your-dynamo-endpoint.example.com/v1"
     wire_api = "responses"
     ```
 
     ```bash
-    # replace -m <model> with your model
-    codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
+    codex -m "$DYNAMO_MODEL" -c model_provider=dynamo
     ```
 
     Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
@@ -53,23 +58,21 @@ bash examples/backends/sglang/launch/agg_agent.sh
     Point it at the Dynamo OpenAI-compatible endpoint and run Pi with the `dynamo` provider:
 
     ```bash
-    export DYNAMO_BASE_URL=http://localhost:8000/v1
-    export DYNAMO_API_KEY=dynamo-local
-
-    pi --model dynamo/zai-org/GLM-4.7-Flash
+    DYNAMO_BASE_URL="${DYNAMO_BASE_URL%/}/v1" \
+      pi --model "dynamo/$DYNAMO_MODEL"
     ```
 
   </Tab>
   <Tab title="Claude Code">
 
-    Claude Code uses the Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
+    Claude Code uses the Anthropic-compatible Messages API. Confirm that the selected recipe enables Dynamo's Anthropic API, then set:
 
     ```bash
-    export ANTHROPIC_BASE_URL=http://localhost:8000
-    export ANTHROPIC_MODEL=zai-org/GLM-4.7-Flash
-    export ANTHROPIC_SMALL_FAST_MODEL=zai-org/GLM-4.7-Flash
+    export ANTHROPIC_BASE_URL="$DYNAMO_BASE_URL"
+    export ANTHROPIC_MODEL="$DYNAMO_MODEL"
+    export ANTHROPIC_SMALL_FAST_MODEL="$DYNAMO_MODEL"
     export CLAUDE_CODE_ATTRIBUTION_HEADER=0 # preserve KV cache hits
-    export ANTHROPIC_API_KEY=
+    export ANTHROPIC_API_KEY="${DYNAMO_API_KEY:-dummy}"
 
     claude
     ```
@@ -88,13 +91,13 @@ bash examples/backends/sglang/launch/agg_agent.sh
           "npm": "@ai-sdk/openai-compatible",
           "name": "Dynamo",
           "models": {
-            "zai-org/GLM-4.7-Flash": {
-              "id": "zai-org/GLM-4.7-Flash",
-              "name": "GLM 4.7 Flash"
+            "your-recipe-served-model": {
+              "id": "your-recipe-served-model",
+              "name": "Dynamo recipe model"
             }
           },
           "options": {
-            "baseURL": "http://localhost:8000/v1"
+            "baseURL": "https://your-dynamo-endpoint.example.com/v1"
           }
         }
       },
@@ -107,7 +110,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
     Run OpenCode with the provider/model pair:
 
     ```bash
-    opencode -m dynamo/zai-org/GLM-4.7-Flash
+    opencode -m "dynamo/$DYNAMO_MODEL"
     ```
 
     Dynamo maps OpenCode's `x-session-id` header to `session_id` and `x-parent-session-id` to `parent_session_id`.
@@ -130,13 +133,13 @@ bash examples/backends/sglang/launch/agg_agent.sh
       "models": {
         "providers": {
           "dynamo": {
-            "baseUrl": "http://localhost:8000/v1",
-            "apiKey": "dynamo-local",
+            "baseUrl": "https://your-dynamo-endpoint.example.com/v1",
+            "apiKey": "your-dynamo-api-key",
             "api": "openai-responses",
             "models": [
               {
-                "id": "zai-org/GLM-4.7-Flash",
-                "name": "Dynamo GLM 4.7 Flash",
+                "id": "your-recipe-served-model",
+                "name": "Dynamo recipe model",
                 "reasoning": true,
                 "contextWindow": 128000,
                 "maxTokens": 8192
@@ -148,14 +151,14 @@ bash examples/backends/sglang/launch/agg_agent.sh
       "agents": {
         "defaults": {
           "model": {
-            "primary": "dynamo/zai-org/GLM-4.7-Flash"
+            "primary": "dynamo/your-recipe-served-model"
           }
         }
       }
     }
     ```
 
-    Run OpenClaw:
+    Replace the endpoint, key, model, context window, and output limit with values supported by the selected recipe, then run OpenClaw:
 
     ```bash
     openclaw chat
@@ -170,9 +173,9 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
     ```yaml
     model:
-      default: zai-org/GLM-4.7-Flash
+      default: your-recipe-served-model
       provider: custom
-      base_url: http://localhost:8000/v1
+      base_url: https://your-dynamo-endpoint.example.com/v1
       api_mode: chat_completions
     ```
 
@@ -197,13 +200,13 @@ bash examples/backends/sglang/launch/agg_agent.sh
 </Tabs>
 
 </Step>
+<Step title="Verify a read-only turn" id="verify-harness">
+Start the harness in a narrowly scoped worktree and ask it to read a file containing a unique marker without making changes. Confirm that the final answer contains the exact marker, the worktree remains unchanged, and the Dynamo frontend records a successful request on the expected API and model.
+
+An HTTP 200 response proves API connectivity. It does not prove that the selected model follows tool results, preserves context, or performs coding tasks reliably. Qualify those behaviors with the model and harness version you plan to use.
+
+</Step>
 </Steps>
-
-## Drive a Harness from Another Agent
-
-Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
-
-The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
 ## Compaction Signals
 
