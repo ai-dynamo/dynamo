@@ -358,6 +358,7 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
+  - tests/docs/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:

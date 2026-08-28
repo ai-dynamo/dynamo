@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers import ToolParser
 
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -1706,6 +1707,155 @@ class TestPreprocessRawRequestControls:
             default_thinking_mode="disabled",
         )
         assert "thinking_mode" not in result.chat_template_kwargs
+
+
+class _PassthroughStreamingToolParser(ToolParser):
+    """A tool parser that finds no tool call and passes the raw delta through.
+
+    Subclasses the real ToolParser so every attribute the postprocessor touches
+    exists, and returns the unstripped `delta_text` the way a real parser does.
+    """
+
+    def extract_tool_calls_streaming(self, **kwargs):
+        return prepost_module.DeltaMessage(content=kwargs["delta_text"])
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
+
+
+class _InactiveReasoningParser:
+    """A configured reasoning parser that never becomes active on a request.
+
+    `enable_thinking=False` and `response_reasoning_ended=True` both leave
+    StreamingPostProcessor.reasoning_parser None, so this is only ever passed as a
+    class -- constructing it is the bug this fake exists to catch.
+    """
+
+    def __init__(self, tokenizer, *, chat_template_kwargs):
+        raise AssertionError("must not be constructed for an inactive request")
+
+
+class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
+    """A tool parser that owns two of the tokenizer's special tokens."""
+
+    tool_call_start_token = "<|im_start|>"
+    tool_call_end_token = "<|im_end|>"
+
+
+class TestControlMarkerStrip:
+    """Unconsumed special tokens must not reach the client.
+
+    A text-grammar reasoning parser can only split the stream if the model's
+    content-kind markers survive detokenisation, which is why
+    ParserEngine.adjust_request forces skip_special_tokens=False. Nothing then
+    removes the markers the parser did not consume, so terminal ones leak into
+    visible content -- the report was content = "<|end_message|>408<|end_message|>",
+    a special token on that model's tokenizer. These use `<|im_end|>`, which is
+    the equivalent on Qwen3-0.6B.
+    """
+
+    @staticmethod
+    def _post(
+        tokenizer,
+        *,
+        tool_parser=None,
+        reasoning_parser_class=None,
+        response_reasoning_ended=None,
+        chat_template_kwargs=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request.pop("tools", None)
+        request, _, _, _, _ = _prepare_request(
+            request, tokenizer=tokenizer, tool_parser_class=None
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=tool_parser,
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs=chat_template_kwargs or {},
+            response_reasoning_ended=response_reasoning_ended,
+            stream_response=True,
+        )
+
+    @staticmethod
+    def _content(post, text):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        return choice["delta"].get("content")
+
+    def test_reported_leak_is_removed(self, tokenizer):
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
+
+    def test_non_special_literal_of_the_same_shape_survives(self, tokenizer):
+        """Looking like a control token is not proof of being one.
+
+        `<|not_a_real_special_token|>` is absent from all_special_tokens and
+        encodes to ordinary token IDs, so it is generated text and must reach the
+        client intact.
+        """
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        literal = "The literal is <|not_a_real_special_token|>."
+        assert self._content(post, literal) == literal
+
+    def test_parser_owned_markers_are_preserved(self, tokenizer):
+        """A marker the parser owns is wire format, consumed downstream."""
+        post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser(tokenizer))
+        assert (
+            post._strip_control_markers("<|im_start|>{}<|im_end|>")
+            == "<|im_start|>{}<|im_end|>"
+        )
+        # A special token it does not own is still removed.
+        assert post._strip_control_markers("<|endoftext|>x") == "x"
+
+    def test_no_parser_configured_is_passthrough(self, tokenizer):
+        """Only a *configured* parser forces skip_special_tokens off."""
+        post = self._post(tokenizer)
+        assert post.tool_parser is None and post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408") == "<|im_end|>408"
+
+    @pytest.mark.parametrize(
+        "inactive_kwargs",
+        [
+            {"response_reasoning_ended": True},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ],
+        ids=["reasoning-already-ended", "thinking-disabled"],
+    )
+    def test_configured_but_inactive_reasoning_parser_still_strips(
+        self, tokenizer, inactive_kwargs
+    ):
+        """The CONFIGURED parser forces skip_special_tokens off, not the instance.
+
+        preprocessor.rs::parser_requires_special_tokens keys the
+        skip_special_tokens=false default off the deployment's configured
+        reasoning_parser NAME; it never sees this request's enable_thinking or
+        response_reasoning_ended. But this class leaves self.reasoning_parser None on
+        exactly those requests, so gating the strip on the instance made it a no-op
+        precisely where markers still arrive undecoded.
+        """
+        post = self._post(
+            tokenizer,
+            reasoning_parser_class=_InactiveReasoningParser,
+            **inactive_kwargs,
+        )
+        assert post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
 
 
 class TestToolCallGuidedDecoding:

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Protocol, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -650,6 +652,22 @@ async def preprocess_chat_request(
     )
 
 
+@lru_cache(maxsize=64)
+def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | None":
+    """Alternation over the literals to remove, or None if there are none.
+
+    Memoised: the set is a property of (tokenizer, active parser), so a server
+    sees a handful of distinct values, but a StreamingPostProcessor is built per
+    request and re.compile over ~15 escaped literals is ~12 us -- worth paying
+    once per process rather than once per request.
+    """
+    if not strippable:
+        return None
+    # Longest-first so a marker that prefixes another cannot win.
+    ordered = sorted(strippable, key=len, reverse=True)
+    return re.compile("|".join(re.escape(m) for m in ordered))
+
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -717,6 +735,29 @@ class StreamingPostProcessor:
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
+
+        # Markers that may be removed from user-visible content: the tokenizer's
+        # actual special tokens, minus any the active parser owns. Membership in
+        # all_special_tokens is the test -- a literal that merely looks like a
+        # control token (`<|not_a_real_special_token|>`) is ordinary generated
+        # text and must survive. Built once: it cannot change for the lifetime of
+        # this postprocessor, and compiled once per process (see the memo above).
+        #
+        # Gate on the CONFIGURED parser, not on `self.reasoning_parser`. What forces
+        # skip_special_tokens=false is the deployment's parser NAME --
+        # preprocessor.rs::parser_requires_special_tokens (PRE.1) matches static
+        # names only, and vLLM's ParserEngine.adjust_request likewise -- so neither
+        # sees this request's enable_thinking or response_reasoning_ended. Those are
+        # exactly what null self.reasoning_parser just above, so an instance-keyed
+        # gate is a no-op precisely on the requests that still receive raw markers.
+        self._marker_strip_re: re.Pattern[str] | None = None
+        if reasoning_parser_class is not None or self.tool_parser is not None:
+            # A tool parser's own markers are its wire format, consumed
+            # downstream; removing them here would blind the tool-start scan.
+            owned = set(self._tool_start_markers()) | set(self._tool_end_markers())
+            self._marker_strip_re = _compile_marker_strip_re(
+                tuple(m for m in self._control_markers if m not in owned)
+            )
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -915,6 +956,27 @@ class StreamingPostProcessor:
             )
         )
 
+    # A text-grammar reasoning parser can only split the stream if the model's
+    # content-kind control markers survive detokenisation, which is why
+    # ParserEngine.adjust_request forces `skip_special_tokens = False`. But nothing
+    # then removes the markers the parser did NOT consume, so terminal ones leak
+    # into user-visible content, e.g.:
+    #     content = "<|end_message|>408<|end_message|>"
+    # As shipped the two settings are mutually exclusive: the default strips the
+    # markers before the parser can split (reasoning is silently dropped), and
+    # False leaks them into the answer. Keep the markers for the parser, then strip
+    # the residue afterwards.
+    #
+    # Scope is deliberately narrow: only when a parser is actually active (the only
+    # case where skip_special_tokens was forced off), and only over literals that
+    # are genuinely in `tokenizer.all_special_tokens`. `reasoning` is left untouched
+    # -- it is already clean, and rewriting it would risk mangling legitimate text
+    # the model quoted.
+    def _strip_control_markers(self, text: str | None) -> str | None:
+        if not text or self._marker_strip_re is None:
+            return text
+        return self._marker_strip_re.sub("", text)
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -1045,6 +1107,16 @@ class StreamingPostProcessor:
     def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
         if delta.get("tool_calls"):
             self._tool_call_choices_emitted.add(output.index)
+        # The single strip point. Every choice this class emits passes through here,
+        # so the invariant "no unconsumed control marker reaches the client" is
+        # enforced once at the funnel rather than at each producer -- stripping at
+        # the producers as well only re-scans text that is about to be scanned.
+        if isinstance(delta.get("content"), str):
+            stripped = self._strip_control_markers(delta["content"])
+            if stripped:
+                delta["content"] = stripped
+            else:
+                delta.pop("content", None)
         return {
             "index": output.index,
             "delta": delta,

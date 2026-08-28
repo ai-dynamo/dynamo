@@ -462,6 +462,7 @@
 # === Path overrides: a subsystem nested inside another area's tree.
 # More specific, so they win via last-match over area and file-type rules. ===
 /tests/rl/                                                                   @ai-dynamo/dynamo-rl-codeowners
+/tests/docs/                                                                 @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-operator-codeowners
 /tests/router/                                                               @ai-dynamo/dynamo-router-codeowners
 /tests/lmcache/                                                              @ai-dynamo/dynamo-kv-memory-codeowners
