@@ -121,7 +121,7 @@ spec:
         - name: TRACE_FILE
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: CONCURRENCY
-          value: "2"
+          value: "6"
         - name: REQUEST_TIMEOUT_SECONDS
           value: "1200"
         - name: AIPERF_VERSION

@@ -75,7 +75,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```bash
 MODE=agg         # or disagg
 SKU=h200         # or gb200 (agentic only)
-WORKLOAD=agentic # or 1m
+WORKLOAD=agentic
 kubectl apply -f vllm/${MODE}-${SKU}-${WORKLOAD}/deploy.yaml -n ${NAMESPACE}
 ```
 

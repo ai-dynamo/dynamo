@@ -20,8 +20,8 @@ Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `v
 
 | Variant target | `ENDPOINT` | Validated `CONCURRENCY` | `TRACE_FILE` |
 | --- | --- | --- | --- |
-| H200 aggregated (agentic + 1M) | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | `2` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| H200 disaggregated (agentic + 1M) | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `7` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 aggregated (agentic + 1M) | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | `6` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated (agentic + 1M) | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `6` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | GB200 aggregated agentic | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` | `8` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | GB200 disaggregated agentic | `dsv4-pro-0813-disagg-gb200-agentic-frontend:8000` | `12` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
@@ -88,8 +88,8 @@ kubectl wait --for=condition=Complete job/dsv4-pro-0813-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-The Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0` directly and does
-not install or patch AIPerf at runtime.
+The Job runs on `python:3.12-slim` and installs AIPerf at startup, pinned
+by the `AIPERF_VERSION` environment variable (default `0.10.0`).
 
 ### 4. Fetch artifacts
 
@@ -114,7 +114,7 @@ frontend/router state between independent runs:
 ```bash
 kubectl delete job dsv4-pro-0813-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=dsv4-pro-0813-agg-b200-agentic # Choose one of the four variant names above.
+DGD=dsv4-pro-0813-agg-h200-agentic # Choose one of the four variant names above.
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -137,8 +137,8 @@ errored, and unfinished requests before reporting aggregate throughput.
 | `ENDPOINT` | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
-| `CONCURRENCY` | `64` | Single value; reset server state between values |
-| `TARGET_MODEL` | `zai-org/DeepSeek-V4-Pro-0813` | Must match `--served-model-name` |
+| `CONCURRENCY` | `6` | Single value; reset server state between values |
+| `TARGET_MODEL` | `deepseek-ai/DeepSeek-V4-Pro-0813` | Must match `--served-model-name` |
 
 ## Artifacts
 
