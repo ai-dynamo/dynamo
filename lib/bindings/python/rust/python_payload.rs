@@ -207,13 +207,28 @@ pub(crate) fn encode_annotated_response<T: Serialize>(
     codec: RequestPlanePayloadCodec,
     annotated: Annotated<T>,
 ) -> Result<(Vec<u8>, bool), anyhow::Error> {
+    let mut bytes = Vec::new();
+    let is_error = write_annotated_response(codec, annotated, &mut bytes)?;
+    Ok((bytes, is_error))
+}
+
+/// Same as [`encode_annotated_response`], but writes into a buffer the caller
+/// owns so the push path can reuse one allocation across a request's frames.
+///
+/// This is where the wrapper shape is defined; `encode_annotated_response` just
+/// calls it, so the two can never disagree about what a frame looks like.
+pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
+    codec: RequestPlanePayloadCodec,
+    annotated: Annotated<T>,
+    writer: &mut W,
+) -> Result<bool, anyhow::Error> {
     let is_error = annotated.is_error();
     let wrapper = NetworkStreamWrapper {
         data: Some(annotated),
         complete_final: false,
     };
-    let bytes = codec.encode(&wrapper)?;
-    Ok((bytes, is_error))
+    codec.encode_into(&wrapper, writer)?;
+    Ok(is_error)
 }
 
 fn encode_python_response(
