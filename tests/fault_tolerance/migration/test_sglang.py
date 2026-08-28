@@ -609,7 +609,7 @@ def test_request_migration_sglang_kv_transfer(
 
 
 @pytest.mark.timeout(150)  # >3x the measured 40-44s local runtime
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(8.0)  # measured NVML peak with three workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @DECODE_MIGRATION_PARAMETERS
