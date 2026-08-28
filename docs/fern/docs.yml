@@ -1156,6 +1156,16 @@ redirects:
 
   # Retired Backends and Observability tab URLs map back to the restored
   # locations. Specific entries precede the catch-alls; first match wins.
+  - source: "/dynamo/dev/backends/sg-lang"
+    destination: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview"
+  - source: "/dynamo/dev/backends/tensor-rt-llm"
+    destination: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview"
+  - source: "/dynamo/dev/backends/v-llm"
+    destination: "/dynamo/dev/knowledge-base/modular-components/backends/v-llm/overview"
+  - source: "/dynamo/dev/backends/mocker"
+    destination: "/dynamo/dev/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture"
+  - source: "/dynamo/dev/backends/writing-custom-backends"
+    destination: "/dynamo/dev/advanced-customizations/writing-custom-backends/overview"
   - source: "/dynamo/dev/observability/getting-started/kubernetes"
     destination: "/dynamo/dev/kubernetes/operations/observability"
   - source: "/dynamo/dev/observability/getting-started/local-deployment"

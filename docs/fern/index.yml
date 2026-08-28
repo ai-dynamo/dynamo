@@ -500,71 +500,71 @@ navigation:
               - section: Backends
                 collapsed: open-by-default
                 contents:
-              - section: SGLang
-                collapsed: true
-                contents:
-                  - page: Overview
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md
-                  - page: Sidecar
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md
-                  - page: Reference Guide
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md
-                  - page: Agents on SGLang
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
-                  - page: Chat Processor
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md
-                  - page: Disaggregation
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/disaggregation.md
-                  - page: HiCache
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md
-                  - page: Observability
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/observability.md
-                  - page: Multimodal
-                    slug: sglang-multimodal
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md
-              - section: TensorRT-LLM
-                collapsed: true
-                contents:
-                  - page: Overview
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md
-                  - page: Sidecar
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md
-                  - page: Reference Guide
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md
-                  - page: Observability
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md
-                  - page: Known Issues
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md
-                  - page: Multimodal
-                    slug: tensorrt-llm-multimodal
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
-              - section: vLLM
-                collapsed: true
-                contents:
-                  - page: Overview
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md
-                  - page: Sidecar
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md
-                  - page: Reference Guide
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md
-                  - page: Chat Processor
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md
-                  - page: KV Cache Offloading
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md
-                  - page: Native KV Offloading
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/native-kv-offloading.md
-                  - page: Observability
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/observability.md
-                  - page: Multimodal
-                    slug: vllm-multimodal
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md
-                  - page: vLLM-Omni Disaggregated Serving
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md
-              - section: Mocker
-                collapsed: true
-                contents:
-                  - page: Mocker Engine Architecture
-                    path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
+                  - section: SGLang
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md
+                      - page: Sidecar
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md
+                      - page: Reference Guide
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md
+                      - page: Agents on SGLang
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
+                      - page: Chat Processor
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md
+                      - page: Disaggregation
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/disaggregation.md
+                      - page: HiCache
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md
+                      - page: Observability
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/observability.md
+                      - page: Multimodal
+                        slug: sglang-multimodal
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md
+                  - section: TensorRT-LLM
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md
+                      - page: Sidecar
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md
+                      - page: Reference Guide
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md
+                      - page: Observability
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md
+                      - page: Known Issues
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md
+                      - page: Multimodal
+                        slug: tensorrt-llm-multimodal
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
+                  - section: vLLM
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md
+                      - page: Sidecar
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md
+                      - page: Reference Guide
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md
+                      - page: Chat Processor
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md
+                      - page: KV Cache Offloading
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md
+                      - page: Native KV Offloading
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/native-kv-offloading.md
+                      - page: Observability
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/observability.md
+                      - page: Multimodal
+                        slug: vllm-multimodal
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md
+                      - page: vLLM-Omni Disaggregated Serving
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md
+                  - section: Mocker
+                    collapsed: true
+                    contents:
+                      - page: Mocker Engine Architecture
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
       - section: Developing and Extending Dynamo
         slug: advanced-customizations
         icon: sliders
