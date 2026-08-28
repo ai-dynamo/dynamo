@@ -50,8 +50,8 @@ use crate::discovery::{
 use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::ip_resolver::{
-    DefaultIpResolver, IpResolver, host_override_from_env, resolve_host_or_interface,
-    resolve_advertise_ip_for_bind,
+    DefaultIpResolver, IpResolver, host_override_from_env, resolve_advertise_ip_for_bind,
+    resolve_host_or_interface,
 };
 
 fn event_plane_host_from_env() -> Result<IpAddr> {
@@ -60,7 +60,10 @@ fn event_plane_host_from_env() -> Result<IpAddr> {
 
 fn event_plane_host_from_env_with_resolver<R: IpResolver>(resolver: &R) -> Result<IpAddr> {
     let Some(host) = host_override_from_env(DYN_EVENT_PLANE_HOST)? else {
-        return Ok(resolve_advertise_ip_for_bind("0.0.0.0".parse().unwrap(), resolver)?);
+        return Ok(resolve_advertise_ip_for_bind(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            resolver,
+        )?);
     };
 
     resolve_host_or_interface(&host, resolver)
@@ -967,11 +970,19 @@ mod tests {
         ];
 
         assert_eq!(
-            direct_zmq_public_endpoint(resolve_advertise_ip_for_bind("0.0.0.0".parse().unwrap(), &resolver).unwrap(), "tcp://0.0.0.0:4321").unwrap(),
+            direct_zmq_public_endpoint(
+                resolve_advertise_ip_for_bind("0.0.0.0".parse().unwrap(), &resolver).unwrap(),
+                "tcp://0.0.0.0:4321"
+            )
+            .unwrap(),
             "tcp://127.0.0.1:4321"
         );
         assert_eq!(
-            direct_zmq_public_endpoint(resolve_advertise_ip_for_bind("::".parse().unwrap(), &resolver).unwrap(), "tcp://[::]:4321").unwrap(),
+            direct_zmq_public_endpoint(
+                resolve_advertise_ip_for_bind("::".parse().unwrap(), &resolver).unwrap(),
+                "tcp://[::]:4321"
+            )
+            .unwrap(),
             "tcp://[2001:db8::20]:4321"
         );
     }
