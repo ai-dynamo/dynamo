@@ -10,6 +10,8 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
+
+    _OMNI_AVAILABLE = True
 except (ImportError, OSError, NotImplementedError, RuntimeError):
     # RuntimeError matters: diffusers imports its pipelines lazily and re-raises
     # ANY underlying failure as RuntimeError("Failed to import ... because of the
@@ -17,7 +19,7 @@ except (ImportError, OSError, NotImplementedError, RuntimeError):
     # ImportError here. Without it this module ERRORS instead of skipping --
     # which is what happened once vllm-omni became installable and its diffusers
     # pin moved ahead of the base image's huggingface_hub.
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+    _OMNI_AVAILABLE = False
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -34,6 +36,17 @@ from tests.utils.payloads import (
 )
 
 logger = logging.getLogger(__name__)
+
+# skipif, NOT `pytest.skip(allow_module_level=True)`. A module-level skip removes
+# this file from COLLECTION entirely, so a marker selection whose only match lives
+# here collects nothing and pytest exits 5 ("no tests ran") -- which CI reports as a
+# job failure, not as a skip. The CI step `-m "(pre_merge and vllm and gpu_1) and not
+# profiled_vram_gib"` is exactly that case: its sole match is the omni_audio
+# parametrization below. Skipping at setup keeps the items collected and reported as
+# skipped, which is what the runner expects.
+pytestmark = pytest.mark.skipif(
+    not _OMNI_AVAILABLE, reason="vLLM omni dependencies not available"
+)
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"

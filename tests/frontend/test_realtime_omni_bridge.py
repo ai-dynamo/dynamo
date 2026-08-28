@@ -41,8 +41,10 @@ try:
     import vllm_omni.outputs.mm_outputs  # noqa: F401
 
     from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler  # noqa: F401
+
+    _OMNI_AVAILABLE = True
 except (ImportError, OSError, NotImplementedError, RuntimeError):
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+    _OMNI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,12 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_0,
+    # skipif rather than a module-level skip, so the tests stay COLLECTED and are
+    # reported as skipped. A module-level skip can empty a marker selection, and
+    # pytest then exits 5 ("no tests ran"), which CI reports as a failure.
+    pytest.mark.skipif(
+        not _OMNI_AVAILABLE, reason="vLLM omni dependencies not available"
+    ),
 ]
 
 
