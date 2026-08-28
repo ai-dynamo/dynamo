@@ -91,12 +91,15 @@ vllm:
     # 0.28.0rc1 into the xpu/cpu images, which are still on vLLM 0.27.1, and
     # reproduce the very mismatch this pins away from.
     vllm_omni_ref: "v0.28.0rc1"
-    # PER-DEVICE for the same reason as vllm_omni_ref. The 5.14.1 pin below
-    # exists because vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous
-    # Gemma 4 config support; vllm#49797 landed that and IS in 0.28.0, so this
-    # stanza takes 5.15.1 -- which is also what the validated Inkling image
-    # runs, so the shipped container matches what was measured.
-    transformers_version: "5.15.1"
+    # MUST stay <5.15 while vLLM-Omni is pinned to 0.28.0rc1: that release
+    # declares `transformers>=5.10.1,<5.15`, so 5.15.x makes the image
+    # unbuildable -- "No solution found when resolving dependencies".
+    # vllm#49797 (the Gemma 4 heterogeneous-config fix) IS in 0.28.0, which makes
+    # 5.15 permissible for vLLM itself (it only needs >=5.5.3) but NOT required.
+    # OMNI is the binding constraint here, not vLLM. Revisit when an omni release
+    # relaxes the bound. Note the thin dev image that carries 5.15.1 does not
+    # install omni at all, so it is not evidence that this combination resolves.
+    transformers_version: "5.14.1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
