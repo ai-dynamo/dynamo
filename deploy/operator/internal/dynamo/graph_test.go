@@ -1836,7 +1836,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
-func TestAddStandardEnvVars_TLS(t *testing.T) {
+func TestAddTransportTLSEnvVars(t *testing.T) {
 	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
 	tlsCases := []struct {
 		env  string
@@ -1869,7 +1869,7 @@ func TestAddStandardEnvVars_TLS(t *testing.T) {
 				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 			}
 			tc.set(&operatorConfig.Infrastructure)
-			AddStandardEnvVars(container, operatorConfig)
+			AddTransportTLSEnvVars(container, operatorConfig)
 			envByName := envVarsToMap(container.Env)
 			assert.Equal(t, tc.want, envByName[tc.env])
 		})
@@ -1881,7 +1881,7 @@ func TestAddStandardEnvVars_TLS(t *testing.T) {
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 		}
-		AddStandardEnvVars(container, operatorConfig)
+		AddTransportTLSEnvVars(container, operatorConfig)
 		envByName := envVarsToMap(container.Env)
 		for _, tc := range tlsCases {
 			assert.NotContains(t, envByName, tc.env)

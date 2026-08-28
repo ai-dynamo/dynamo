@@ -85,11 +85,14 @@ spec:
         containers:
         - name: main
           volumeMounts:
-          - name: tls-certs
+          - name: tls-server-certs
             mountPath: /etc/certs/server
             readOnly: true
+          - name: tls-ca-cert
+            mountPath: /etc/certs/ca
+            readOnly: true
         volumes:
-        - name: tls-certs
+        - name: tls-server-certs
           secret:
             secretName: dynamo-tls-server
             # cert-manager Secrets use tls.crt / tls.key; map them to the
@@ -99,7 +102,20 @@ spec:
               path: cert.pem
             - key: tls.key
               path: key.pem
+        - name: tls-ca-cert
+          secret:
+            secretName: dynamo-tls-ca
+            # Mount the CA certificate at the path tcpTLSCAPath / natsTLSCAPath
+            # point at (e.g. /etc/certs/ca/ca.pem).
+            items:
+            - key: ca.crt
+              path: ca.pem
 ```
+
+This example shows a single component (`Frontend`); every component that
+receives the TLS env vars needs the same volume mounts. If you are using the
+operator's auto-injection, apply these mounts in each component's
+`podTemplate`.
 
 > [!NOTE]
 > For NATS TLS to work, the NATS server itself must also be
