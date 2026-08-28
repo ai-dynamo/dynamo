@@ -51,21 +51,6 @@ pytestmark = [
 ]
 
 
-@pytest.mark.asyncio
-async def test_cancellation_monitor_preserves_shutdown_during_cleanup():
-    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.shutdown_event = asyncio.Event()
-    request_id_future = asyncio.get_running_loop().create_future()
-    request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
-
-    with pytest.raises(EngineShutdown, match="shut down during token generation"):
-        async with handler._cancellation_monitor(request_id_future, context):
-            # Exit the generator in the same event-loop turn as shutdown. The
-            # monitor task has not had a chance to raise EngineShutdown yet.
-            handler.shutdown_event.set()
-
-
 def _read_zstd_payload(path):
     import zstandard as zstd
 
@@ -282,6 +267,31 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    handler.shutdown_event.set()
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(stream(), context):
+            pass
 
 
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():

@@ -5,9 +5,9 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 
 import pytest
 import requests
@@ -43,24 +43,15 @@ def managed_processes_concurrently(
                 if startup_error is None:
                     startup_error = error
 
-    active_processes = [process for process in entered if process is not None]
-    try:
+    with ExitStack() as stack:
+        for process in entered:
+            if process is not None:
+                stack.callback(process.__exit__, None, None, None)
+
         if startup_error is not None:
             raise startup_error
 
-        yield tuple(active_processes)
-    finally:
-        # ManagedProcess teardown can spend several seconds waiting for each
-        # independent process tree. Stop sibling workers concurrently just as
-        # they are started concurrently, while still waiting for every cleanup
-        # before leaving the context.
-        with ThreadPoolExecutor(max_workers=len(active_processes) or 1) as executor:
-            cleanup_futures = [
-                executor.submit(process.__exit__, None, None, None)
-                for process in reversed(active_processes)
-            ]
-            for future in cleanup_futures:
-                future.result()
+        yield tuple(process for process in entered if process is not None)
 
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
@@ -620,31 +611,6 @@ def _parse_migration_max_seq_len_exceeded_metric(
     return int(match.group(1)) if match else 0
 
 
-def wait_for_http_server_shutdown(
-    url: str,
-    max_wait_time: float = 10.0,
-) -> None:
-    """Wait until a process has closed its HTTP listener."""
-    deadline = time.monotonic() + max_wait_time
-    last_status: int | None = None
-    poll_event = threading.Event()
-
-    while time.monotonic() < deadline:
-        try:
-            response = requests.get(url, timeout=0.5)
-            last_status = response.status_code
-        except requests.RequestException:
-            logger.info("HTTP server shut down: %s", url)
-            return
-
-        poll_event.wait(timeout=0.1)
-
-    pytest.fail(
-        f"HTTP server remained reachable for {max_wait_time}s: "
-        f"{url} (last status={last_status})"
-    )
-
-
 def verify_migration_metrics(
     frontend_port: int,
     expected_ongoing_request_count: int = 0,
@@ -735,8 +701,8 @@ def run_migration_test(
     long_prompt_repetitions: int = 8_000,
     wait_for_new_response_before_stop: bool = False,
     expected_ongoing_request_count: int | None = None,
-    graceful_shutdown_endpoint: tuple[str, str] | None = None,
-    wait_for_worker_health_shutdown: bool = False,
+    graceful_shutdown: Callable[[ManagedProcess], AbstractContextManager[None]]
+    | None = None,
     verify_replacement_worker: bool = False,
 ) -> None:
     """
@@ -759,11 +725,9 @@ def run_migration_test(
         expected_ongoing_request_count: Exact expected count for callers that
             opt into strict metric validation. When omitted, preserve the
             shared helper's historical backend-agnostic lower-bound behavior.
-        graceful_shutdown_endpoint: Discovery endpoint whose removal proves a
-            SIGTERM was observed before severing the parent transport. When
-            omitted, preserve the historical fixed parent grace period.
-        wait_for_worker_health_shutdown: Also wait for the selected worker's
-            health listener to close, proving active handlers have unwound.
+        graceful_shutdown: Optional backend-specific context that initiates
+            graceful shutdown before response validation and performs final
+            cleanup after the request outcome is known.
         verify_replacement_worker: Require the surviving worker to accept the
             exact request ID and expose one completed generate request with
             nonzero response bytes. Intended for isolated per-test workers.
@@ -803,6 +767,7 @@ def run_migration_test(
         ), "Request completed before the worker fault was injected"
 
     # Step 4: Stop the worker (kill or graceful shutdown)
+    shutdown_context: AbstractContextManager[None] = nullcontext()
     if immediate_kill:
         logger.info("Killing %s with PID %s", worker_name, worker.get_pid())
         terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
@@ -812,75 +777,35 @@ def run_migration_test(
             worker_name,
             worker.get_pid(),
         )
-        if graceful_shutdown_endpoint is None:
-            # Preserve the historical backend-agnostic behavior for callers
-            # that have not opted into structured discovery synchronization.
+        if graceful_shutdown is None:
             terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=2)
         else:
-            response = requests.get(
-                f"http://localhost:{frontend.frontend_port}/health",
-                timeout=1,
-            )
-            response.raise_for_status()
-            instances = response.json().get("instances", [])
-            previous_count = sum(
-                1
-                for instance in instances
-                if (
-                    instance.get("component"),
-                    instance.get("endpoint"),
-                )
-                == graceful_shutdown_endpoint
-            )
-
-            def wait_for_graceful_shutdown_observation() -> None:
-                wait_for_endpoint_instance_reduction(
-                    frontend.frontend_port,
-                    graceful_shutdown_endpoint,
-                    previous_count,
-                )
-                if wait_for_worker_health_shutdown:
-                    worker_health_port = getattr(worker, "system_port", None)
-                    assert isinstance(worker_health_port, int), (
-                        "Worker health shutdown synchronization requires "
-                        "an integer system_port"
-                    )
-                    wait_for_http_server_shutdown(
-                        f"http://localhost:{worker_health_port}/health"
-                    )
-
-            terminate_process_tree(
-                worker.get_pid(),
-                immediate_kill=False,
-                timeout=2,
-                after_parent_signal=wait_for_graceful_shutdown_observation,
-                force_parent_after_callback=True,
-                children_immediate_kill=True,
-            )
+            shutdown_context = graceful_shutdown(worker)
 
     # Step 5: Validate the request outcome via its response (the user-facing
     # contract). Migration is expected to succeed only when it is enabled and the
     # request does not exceed the migration seq-len cap; otherwise the in-flight
     # request must fail.
-    if migration_limit > 0 and migration_max_seq_len != 1:
-        if verify_replacement_worker:
-            wait_for_worker_request_id(
-                replacement_worker,
-                receiving_pattern,
-                request_id,
-            )
-        validate_response(request_thread, response_list)
-        if verify_replacement_worker:
-            worker_system_port = getattr(replacement_worker, "system_port", None)
-            assert isinstance(
-                worker_system_port, int
-            ), "Replacement-worker verification requires an integer system_port"
-            wait_for_worker_generate_completion(worker_system_port)
-    else:
-        # openai.APIError covers both mid-stream structured error frames and
-        # HTTP non-200 responses.
-        with pytest.raises(APIError):
+    with shutdown_context:
+        if migration_limit > 0 and migration_max_seq_len != 1:
+            if verify_replacement_worker:
+                wait_for_worker_request_id(
+                    replacement_worker,
+                    receiving_pattern,
+                    request_id,
+                )
             validate_response(request_thread, response_list)
+            if verify_replacement_worker:
+                worker_system_port = getattr(replacement_worker, "system_port", None)
+                assert isinstance(
+                    worker_system_port, int
+                ), "Replacement-worker verification requires an integer system_port"
+                wait_for_worker_generate_completion(worker_system_port)
+        else:
+            # openai.APIError covers both mid-stream structured error frames and
+            # HTTP non-200 responses.
+            with pytest.raises(APIError):
+                validate_response(request_thread, response_list)
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on

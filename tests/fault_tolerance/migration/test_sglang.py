@@ -11,9 +11,14 @@ Test Execution Times (Last Run: 2026-01-13):
 
 import logging
 import os
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
+import psutil
 import pytest
+import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
@@ -26,6 +31,7 @@ from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
     run_migration_test,
+    wait_for_endpoint_instance_reduction,
     wait_for_endpoint_instances,
 )
 
@@ -33,6 +39,53 @@ logger = logging.getLogger(__name__)
 
 AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 64
+
+
+@contextmanager
+def _sglang_graceful_shutdown(
+    frontend: DynamoFrontendProcess,
+    worker: ManagedProcess,
+) -> Iterator[None]:
+    """Keep the failed worker alive until the request outcome is observable."""
+    endpoint = ("backend", "generate")
+    response = requests.get(
+        f"http://localhost:{frontend.frontend_port}/health",
+        timeout=1,
+    )
+    response.raise_for_status()
+    previous_count = sum(
+        1
+        for instance in response.json().get("instances", [])
+        if (instance.get("component"), instance.get("endpoint")) == endpoint
+    )
+
+    pid = worker.get_pid()
+    parent = psutil.Process(pid)
+    process_groups = {os.getpgid(pid)}
+    try:
+        for child in parent.children(recursive=True):
+            try:
+                process_groups.add(os.getpgid(child.pid))
+            except (ProcessLookupError, OSError):
+                pass
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        pass
+
+    try:
+        parent.terminate()
+        wait_for_endpoint_instance_reduction(
+            frontend.frontend_port,
+            endpoint,
+            previous_count,
+        )
+        yield
+    finally:
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
 
 # Cover each distinct migration policy with complementary lifecycle, API,
 # response, and transport values. Together these eight rows cover every pair
@@ -340,8 +393,8 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(180)  # includes the measured 88s cold-start path
-@pytest.mark.pre_merge
+@pytest.mark.timeout(180)  # 2.9x the measured 62s average
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(5.4)  # measured NVML peak with two workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @MIGRATION_PARAMETERS
@@ -412,8 +465,9 @@ def test_request_migration_sglang_aggregated(
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
                 expected_ongoing_request_count=1,
-                graceful_shutdown_endpoint=("backend", "generate"),
-                wait_for_worker_health_shutdown=True,
+                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                    frontend, worker
+                ),
                 verify_replacement_worker=True,
             )
 
