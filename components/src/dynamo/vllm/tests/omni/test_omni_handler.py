@@ -248,17 +248,20 @@ class TestStreamedAudioIsResolved:
             },
         )
 
-    async def _run(self, handler, stage_outputs):
+    async def _run(self, handler, stage_outputs, *, reuse_formatter=False):
         """Drive the handler over ``stage_outputs`` and collect the responses.
 
         Uses a real OutputFormatter so the buffering path under test is the
         production one; only the engine and the abort monitor are stubbed.
+        ``reuse_formatter`` keeps the formatter from a previous call, so a
+        second request runs against the state the first one left behind.
         """
         from contextlib import asynccontextmanager
 
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
-        handler.output_formatter = OutputFormatter(model_name="test-model")
+        if not reuse_formatter:
+            handler.output_formatter = OutputFormatter(model_name="test-model")
 
         async def fake_generate(**kwargs):
             """Replay the scripted stage outputs as the engine's stream."""
@@ -340,11 +343,33 @@ class TestStreamedAudioIsResolved:
         assert [c["status"] for c in chunks] == ["failed"]
 
     @pytest.mark.asyncio
-    async def test_buffer_is_released_after_the_request(self):
-        """The formatter is shared, so a finished request must leave no state."""
+    async def test_audio_does_not_leak_into_the_next_request(self):
+        """The formatter is shared across requests, so its audio must not be.
+
+        Buffering lives in a per-request AudioAggregateState the handler
+        creates, so a second request through the same formatter must answer
+        with its own waveform only. The longer waveform goes first on purpose:
+        keep-longest de-duplication would otherwise let the second request win
+        on length alone, and shared state would go unnoticed.
+        """
+        import base64
+        import io
+
+        import numpy as np
+        import soundfile as sf
+
         handler = _make_handler()
-        await self._run(handler, [self._audio_output([0.1] * 1200)])
-        assert handler.output_formatter.audio._pending == {}
+        await self._run(handler, [self._audio_output([0.2] * 2400)])
+        chunks = await self._run(
+            handler, [self._audio_output([0.1] * 1200)], reuse_formatter=True
+        )
+
+        assert len(chunks) == 1
+        audio, _ = sf.read(
+            io.BytesIO(base64.b64decode(chunks[0]["data"][0]["b64_json"]))
+        )
+        assert len(audio) == 1200
+        assert np.allclose(audio, 0.1, atol=1e-3)
 
 
 class _AsyncReturn:

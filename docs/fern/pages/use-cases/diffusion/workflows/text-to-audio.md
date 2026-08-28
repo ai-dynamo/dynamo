@@ -33,7 +33,7 @@ bash examples/backends/vllm/launch/agg_omni_audio.sh --model nvidia/Nemotron-Lab
 Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage configuration. Otherwise auto-detection selects the 2B-tuned file. vLLM-Omni ships the configuration, so resolve it from the installed package and pass it through to the worker:
 
 ```bash
-AUDEX_30B_CFG=$(python -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+AUDEX_30B_CFG=$(python3 -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
 bash examples/backends/vllm/launch/agg_omni_audio.sh \
   --model nvidia/Nemotron-Labs-Audex-30B-A3B \
   --stage-configs-path "$AUDEX_30B_CFG"
@@ -138,10 +138,10 @@ The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/pro
   Maximum tokens to generate (1–4096).
 </ParamField>
 <ParamField path="cfg_scale" type="float">
-  Classifier-free guidance scale for Nemotron Audex (1.0–10.0). `1.0` disables guidance, and omitting the field decodes unguided. Ignored by other audio models.
+  Classifier-free guidance scale for Nemotron Audex (1.0–10.0). `1.0` disables guidance. Omitting the field decodes unguided on an Audex speech deployment, but an Audex text-to-audio (TTA) deployment falls back to its default of `3.0`. Ignored by other audio models.
 </ParamField>
 
-Available voices and languages are loaded dynamically from the model's `config.json` at startup. Nemotron Audex builds its own prompt and accepts only `input`, `model`, `response_format`, `max_new_tokens`, and `cfg_scale`; speech models additionally tolerate `voice` when it is omitted or `default`, while text-to-audio rejects `voice` outright. Other non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
+Available voices and languages are loaded dynamically from the model's `config.json` at startup. Nemotron Audex builds its own prompt and accepts only `input`, `model`, `response_format`, `speed`, `max_new_tokens`, and `cfg_scale`; speech models additionally tolerate `voice` when it is omitted or `default`, while an Audex TTA deployment rejects `voice` outright. Other non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
 > [!NOTE]
 > Audio streaming (`stream: true`) and the Base task (voice cloning) are not yet supported.

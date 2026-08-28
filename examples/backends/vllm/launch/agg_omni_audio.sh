@@ -19,7 +19,7 @@
 # the 2B-tuned yaml. vLLM-Omni ships that config, so resolve it from the
 # installed package rather than hardcoding a site-packages path:
 #
-#   AUDEX_30B_CFG=$(python -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+#   AUDEX_30B_CFG=$(python3 -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
 #   ./agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-30B-A3B \
 #       --stage-configs-path "$AUDEX_30B_CFG"
 
