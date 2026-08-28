@@ -85,9 +85,8 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
-        // Set once a terminal failure arrives without an error of its own. A worker
-        // shutting down gracefully aborts the generation first and only then sends
-        // its typed error, so the terminal data frame is not the last frame.
+        // Set when a terminal frame carries no error of its own: a later frame may
+        // still carry the typed error, so the stream keeps reading.
         let mut drainable_terminal = false;
 
         let completed = loop {
@@ -102,9 +101,8 @@ where
                 item = response_stream.next() => {
                     let Some(item) = item else {
                         if drainable_terminal {
-                            // No trailing error arrived. Account the request exactly as
-                            // the error-bearing path would have, so a shutdown-cancelled
-                            // request is not recorded as a clean completion.
+                            // No trailing error arrived. Account it as the error-bearing
+                            // path would, not as a clean completion.
                             guard.record_migration_failure(None);
                             guard.abort().await;
                             break false;
