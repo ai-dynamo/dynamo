@@ -494,3 +494,29 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        See VllmV1ConfigModifier.set_config_model for why this call exists:
+        without it, the base template's placeholder model name survives
+        untouched into the materialized DGD.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
