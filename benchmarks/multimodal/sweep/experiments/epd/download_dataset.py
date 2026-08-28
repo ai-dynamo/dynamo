@@ -12,6 +12,7 @@ import io
 import json
 import shutil
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 DATASET_ID = "lmms-lab-encoder/DocVQA"
@@ -23,6 +24,22 @@ DEFAULT_IMAGE_COUNT = 50
 
 class DatasetDownloadError(RuntimeError):
     """The source or output does not satisfy this small dataset contract."""
+
+
+@dataclass(frozen=True)
+class ImageManifestRow:
+    index: int
+    dataset_id: str
+    dataset_revision: str
+    source_shard: str
+    source_shard_sha256: str
+    source_row: int
+    source_sha256: str
+    image_file: str
+    output_sha256: str
+    width: int
+    height: int
+    source_mode: str
 
 
 def _sha256_file(path: Path) -> str:
@@ -155,20 +172,22 @@ def _extract(
             path = images_dir / f"{len(rows):03d}.png"
             normalized.save(path, format="PNG", optimize=False, compress_level=9)
             rows.append(
-                {
-                    "index": len(rows),
-                    "dataset_id": DATASET_ID,
-                    "dataset_revision": DATASET_REVISION,
-                    "source_shard": SOURCE_SHARD,
-                    "source_shard_sha256": source_shard_sha256,
-                    "source_row": row,
-                    "source_sha256": source_sha,
-                    "image_file": path.relative_to(output_dir).as_posix(),
-                    "output_sha256": _sha256_file(path),
-                    "width": normalized.width,
-                    "height": normalized.height,
-                    "source_mode": source_mode,
-                }
+                asdict(
+                    ImageManifestRow(
+                        index=len(rows),
+                        dataset_id=DATASET_ID,
+                        dataset_revision=DATASET_REVISION,
+                        source_shard=SOURCE_SHARD,
+                        source_shard_sha256=source_shard_sha256,
+                        source_row=row,
+                        source_sha256=source_sha,
+                        image_file=path.relative_to(output_dir).as_posix(),
+                        output_sha256=_sha256_file(path),
+                        width=normalized.width,
+                        height=normalized.height,
+                        source_mode=source_mode,
+                    )
+                )
             )
             if len(rows) == count:
                 break

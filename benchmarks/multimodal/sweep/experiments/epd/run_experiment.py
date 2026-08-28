@@ -27,6 +27,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
+from PIL import Image
+from transformers import AutoTokenizer
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXPECTED_AIPERF_VERSION = "0.10.0"
 TOPOLOGY_ALIASES = {
@@ -75,8 +78,6 @@ class Tokenizer(Protocol):
 
 
 def load_tokenizer(path: str) -> Tokenizer:
-    from transformers import AutoTokenizer
-
     return AutoTokenizer.from_pretrained(
         path, trust_remote_code=True, local_files_only=True
     )
@@ -133,8 +134,6 @@ def text_blocks(tokenizer: Tokenizer, isl: int) -> tuple[str, str, str]:
 
 
 def select_images(image_dir: Path, count: int) -> list[Path]:
-    from PIL import Image
-
     paths = sorted(image_dir.glob("*.png"))
     if count <= 0 or len(paths) < count:
         raise ValueError(f"requested {count} images; found {len(paths)} in {image_dir}")
@@ -229,6 +228,11 @@ def _tokens(raw: Sequence[str]) -> list[str]:
     return values
 
 
+def _reject_normalized_duplicates(values: Sequence[Any], name: str) -> None:
+    if len(values) != len(set(values)):
+        raise ValueError(f"duplicate {name} after normalization")
+
+
 def _positive_ints(raw: Sequence[str], name: str, minimum: int = 1) -> list[int]:
     try:
         values = [int(value) for value in _tokens(raw)]
@@ -236,6 +240,7 @@ def _positive_ints(raw: Sequence[str], name: str, minimum: int = 1) -> list[int]
         raise ValueError(f"{name} values must be integers") from error
     if any(value < minimum for value in values):
         raise ValueError(f"{name} values must be >= {minimum}")
+    _reject_normalized_duplicates(values, name)
     return values
 
 
@@ -246,27 +251,30 @@ def _image_token_budgets(raw: Sequence[str]) -> list[int | None]:
         raise ValueError("image-token-budget values must be integers") from error
     if any(value != -1 and value < 64 for value in values):
         raise ValueError("image-token-budget values must be -1 or >= 64")
-    return [None if value == -1 else value for value in values]
+    normalized = [None if value == -1 else value for value in values]
+    _reject_normalized_duplicates(normalized, "image-token-budget")
+    return normalized
 
 
 def build_cells(args: argparse.Namespace) -> list[Cell]:
     backends = [value.lower() for value in _tokens(args.backend)]
     if any(value not in {"vllm", "sglang"} for value in backends):
         raise ValueError("backend must be vllm or sglang")
+    _reject_normalized_duplicates(backends, "backend")
     try:
         topologies = [
             TOPOLOGY_ALIASES[value.lower()] for value in _tokens(args.topology)
         ]
     except KeyError as error:
         raise ValueError("topology must be aggregate/epd (alias: agg)") from error
-    if len(topologies) != len(set(topologies)):
-        raise ValueError("duplicate topology after alias normalization")
+    _reject_normalized_duplicates(topologies, "topology")
     try:
         qps_values = [Decimal(value).normalize() for value in _tokens(args.qps)]
     except InvalidOperation as error:
         raise ValueError("QPS values must be decimal numbers") from error
     if any(not value.is_finite() or value <= 0 for value in qps_values):
         raise ValueError("QPS values must be finite and positive")
+    _reject_normalized_duplicates(qps_values, "QPS")
 
     counts = _positive_ints(args.image_count, "image-count")
     budgets = _image_token_budgets(args.image_token_budget)
@@ -334,8 +342,8 @@ class ImageServer(http.server.ThreadingHTTPServer):
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
+    def log_message(self, _format: str, *args: object) -> None:
+        del _format, args
 
 
 @contextlib.contextmanager
