@@ -171,9 +171,15 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
   Last observed inter-token latency per worker, in seconds.
 </ParamField>
 
-### Model configuration metrics
+### Model metrics
 
-`dynamo_frontend_model_*` gauges are populated from worker backend registration and all carry a `model` label. When multiple workers register the same model name, only the first instance's configuration is recorded.
+All `dynamo_frontend_model_*` gauges carry a `model` label.
+
+<ParamField path="dynamo_frontend_model_ready" type="gauge">
+  Whether the frontend can currently route at least one inference request for the model. A value of `1` means at least one complete serving topology with a live worker and serving engine is available; `0` means the model is registered but not currently routable. The frontend evaluates this gauge from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape.
+</ParamField>
+
+The remaining model gauges are populated from worker backend registration. When multiple workers register the same model name, only the first instance's configuration is recorded.
 
 <ParamField path="dynamo_frontend_model_total_kv_blocks" type="gauge">
   Total KV blocks available for a worker serving the model.

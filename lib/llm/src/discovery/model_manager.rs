@@ -1031,6 +1031,22 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
+    /// Snapshot the serving readiness of every registered model.
+    ///
+    /// Each value is derived from [`Model::is_ready_to_serve`], the same
+    /// selection gate used by request routing and KServe model readiness.
+    /// Results are sorted by model name so scrape output is deterministic.
+    pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
+        let catalog = self.catalog.load();
+        let mut readiness = catalog
+            .models
+            .iter()
+            .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
+            .collect::<Vec<_>>();
+        readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        readiness
+    }
+
     /// Whether any registered model can serve at least one inference request
     /// right now. See [`Model::is_ready_to_serve`].
     pub fn has_any_ready_model(&self) -> bool {

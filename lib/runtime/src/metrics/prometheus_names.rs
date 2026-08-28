@@ -171,6 +171,9 @@ pub mod frontend_service {
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
 
+    /// Whether the frontend can route at least one inference request for a model
+    pub const MODEL_READY: &str = "model_ready";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 

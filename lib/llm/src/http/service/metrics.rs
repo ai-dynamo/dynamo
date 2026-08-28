@@ -16,6 +16,8 @@ use dynamo_runtime::{
 };
 use prometheus::{
     Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    core::{Collector, Desc},
+    proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use serde::Serialize;
 use std::{
@@ -23,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -68,6 +71,80 @@ use super::RouteDoc;
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+
+const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+
+fn model_ready_metric_name() -> String {
+    format!(
+        "{}_{}",
+        name_prefix::FRONTEND,
+        frontend_service::MODEL_READY
+    )
+}
+
+/// Collects current model readiness directly from the frontend's routing catalog.
+///
+/// This is evaluated at scrape time so worker registration and removal are
+/// reflected without maintaining a second, potentially stale readiness state.
+struct ModelReadyCollector {
+    manager: Arc<ModelManager>,
+    desc: Desc,
+}
+
+impl ModelReadyCollector {
+    fn new(manager: Arc<ModelManager>) -> Result<Self, prometheus::Error> {
+        let desc = Desc::new(
+            model_ready_metric_name(),
+            MODEL_READY_HELP.to_string(),
+            vec!["model".to_string()],
+            Default::default(),
+        )?;
+        Ok(Self { manager, desc })
+    }
+}
+
+impl Collector for ModelReadyCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let readiness = self.manager.registered_model_readiness();
+        if readiness.is_empty() {
+            return Vec::new();
+        }
+
+        let mut metrics = Vec::with_capacity(readiness.len());
+        for (model, ready) in readiness {
+            let mut model_label = LabelPair::default();
+            model_label.set_name("model".to_string());
+            model_label.set_value(model);
+
+            let mut gauge = Gauge::default();
+            gauge.set_value(if ready { 1.0 } else { 0.0 });
+
+            let mut metric = Metric::default();
+            metric.set_label(vec![model_label]);
+            metric.set_gauge(gauge);
+            metrics.push(metric);
+        }
+
+        let mut family = MetricFamily::default();
+        family.set_name(model_ready_metric_name());
+        family.set_help(MODEL_READY_HELP.to_string());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(metrics);
+        vec![family]
+    }
+}
+
+/// Register the scrape-time model readiness collector with the frontend registry.
+pub fn register_model_ready_metric(
+    registry: &Registry,
+    manager: Arc<ModelManager>,
+) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(ModelReadyCollector::new(manager)?))
+}
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -2283,6 +2360,52 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == model_ready_metric_name())?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "model" && label.value() == model)
+            })
+            .map(|metric| metric.get_gauge().value())
+    }
+
+    #[test]
+    fn model_ready_metric_tracks_live_routing_catalog() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone()).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), None);
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        assert!(manager.add_worker_set("test-model", "watched", worker_set));
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+
+        worker_tx.send(vec![1]).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+
+        worker_tx.send(Vec::new()).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+    }
 
     #[test]
     fn test_round_to_sig_figs() {
