@@ -71,9 +71,18 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    # Inkling needs 0.28.0: its tool parser and structural-tag registry (which the
-    # Inkling structural-tag patch extends) only exist from that release. Multi-arch
-    # manifest list (linux/arm64 + linux/amd64), so GB300 aarch64 is covered.
+    # Inkling requires 0.28.0. The Inkling NVIDIA path moved substantially after
+    # 0.27.1, and the MTP support this recipe runs on (MTP 8) is part of it:
+    #   * models/inkling/nvidia/mtp.py -- InklingMTP gains
+    #     SupportsMultiModalEmbeddings, from "Restore multimodal draft capability
+    #     detection" (vllm#50417), which also reworks v1/spec_decode/llm_base_proposer
+    #   * models/inkling/nvidia/ops/fa4_rel_attention.py (+400) and attention.py --
+    #     FA4 warmup migration (vllm#49315)
+    #   * model.py / moe.py / ops/lamport.py -- shared-expert partial addition fused
+    #     into the Lamport collective (vllm#50697)
+    #   * configs.py -- HF-config compat for Inkling (vllm#51850)
+    # Three Inkling parser fixes also land in this range (vllm#49876, #50528, #51391).
+    # Multi-arch manifest list (linux/arm64 + linux/amd64), so GB300 aarch64 is covered.
     # xpu/cpu below stay at 0.27.1 -- untested at 0.28.0, and Inkling does not use them.
     runtime_image_tag: v0.28.0-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
