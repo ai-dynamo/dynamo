@@ -421,7 +421,6 @@ fn test_chat_completions_generation_prompt_fields_from_common() {
 
     assert_eq!(request.common.add_generation_prompt, Some(false));
     assert_eq!(request.common.continue_final_message, Some(true));
-    assert_eq!(request.get_add_generation_prompt(), Some(false));
     assert_eq!(request.get_continue_final_message(), Some(true));
 }
 

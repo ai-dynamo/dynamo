@@ -89,16 +89,24 @@ pub struct CommonExt {
     pub prompt_logprobs: Option<u32>,
 
     /// If true, append the assistant generation prompt after the last message.
-    /// Defaults to true when omitted, matching vLLM / HuggingFace `apply_chat_template`.
-    /// Incompatible with `continue_final_message`.
+    /// Defaults to true when omitted, matching vLLM 0.27.1 and the Python
+    /// frontend (HuggingFace Transformers defaults this flag to false).
+    /// Incompatible with `continue_final_message`. Chat-only: runtime-rejected
+    /// on `/v1/completions`. Hidden from the shared OpenAPI schema so
+    /// completions does not advertise these fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
     #[builder(default, setter(strip_option))]
     pub add_generation_prompt: Option<bool>,
 
-    /// If true, leave the last message open so the model continues it instead of
-    /// starting a new turn. Incompatible with omitted or `true`
-    /// `add_generation_prompt` (vLLM 0.27.1 finalizes the omitted field to true).
+    /// If true, leave the last message open so the model continues that turn
+    /// instead of starting a new one. Any final message role can be continued.
+    /// Incompatible with omitted or `true` `add_generation_prompt` (vLLM 0.27.1
+    /// finalizes the omitted field to true). Chat-only: runtime-rejected on
+    /// `/v1/completions`. Hidden from the shared OpenAPI schema so completions
+    /// does not advertise these fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
     #[builder(default, setter(strip_option))]
     pub continue_final_message: Option<bool>,
 }
@@ -137,13 +145,7 @@ pub trait CommonExtProvider {
         None
     }
 
-    /// Whether to append the assistant generation prompt. Unset means the vLLM default (`true`).
-    fn get_add_generation_prompt(&self) -> Option<bool> {
-        self.common_ext()
-            .and_then(|common| common.add_generation_prompt)
-    }
-
-    /// Whether to continue the last assistant message instead of starting a new turn.
+    /// Whether to continue the last message instead of starting a new turn.
     fn get_continue_final_message(&self) -> Option<bool> {
         self.common_ext()
             .and_then(|common| common.continue_final_message)

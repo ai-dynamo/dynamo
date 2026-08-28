@@ -972,67 +972,82 @@ fn attach_agent_context_from_context(
     }
 }
 
-/// Thin wrapper that normalizes `function.arguments` in historical tool-calls
-/// from a JSON string to an object before passing messages to a MiniJinja
-/// template.  Only used when `OpenAIPreprocessor::normalize_tool_call_args` is
-/// true (e.g. GLM-5.2); all other trait methods delegate directly to the inner
-/// request so routing, sampling, and annotation behavior is unchanged.
-struct NormalizedArgsRequest<'a, R>(&'a R);
+/// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
+/// `function.arguments` when the model opts in (GLM-5.2), and appends
+/// HuggingFace's unique continue-final-message marker when that flag is set.
+/// All other trait methods delegate to the inner request.
+struct NormalizedArgsRequest<'a, R> {
+    inner: &'a R,
+    normalize_tool_call_args: bool,
+    continue_final_message: bool,
+}
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
     fn model(&self) -> String {
-        self.0.model()
+        self.inner.model()
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json =
-            serde_json::to_value(self.0.typed_messages().unwrap_or_default()).unwrap_or_default();
-        if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
-            tracing::error!(
-                error = %e,
-                "tool_call arguments normalization failed; template rendering may fail \
-                 if it calls .items() on a string"
-            );
+        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
+            .unwrap_or_default();
+        if self.normalize_tool_call_args {
+            if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
+                tracing::error!(
+                    error = %e,
+                    "tool_call arguments normalization failed; template rendering may fail \
+                     if it calls .items() on a string"
+                );
+            }
+        }
+        if self.continue_final_message {
+            if let Err(e) =
+                crate::preprocessor::prompt::append_continue_final_message_tag(&mut json)
+            {
+                tracing::debug!(
+                    error = %e,
+                    "continue_final_message marker not appended; truncation will reject the request"
+                );
+            }
         }
         minijinja::value::Value::from_serialize(&json)
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.0.typed_messages()
+        self.inner.typed_messages()
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
-        self.0.tools()
+        self.inner.tools()
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
-        self.0.tool_choice()
+        self.inner.tool_choice()
     }
 
     fn response_format(&self) -> Option<minijinja::value::Value> {
-        self.0.response_format()
+        self.inner.response_format()
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        self.0.should_add_generation_prompt()
+        self.inner.should_add_generation_prompt()
     }
 
     fn extract_text(&self) -> Option<TextInput> {
-        self.0.extract_text()
+        self.inner.extract_text()
     }
 
     fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.0.chat_template_args()
+        self.inner.chat_template_args()
     }
 
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
-        self.0.mm_processor_kwargs()
+        self.inner.mm_processor_kwargs()
     }
 }
 
 impl<R: AnnotationsProvider> AnnotationsProvider for NormalizedArgsRequest<'_, R> {
     fn annotations(&self) -> Option<Vec<String>> {
-        self.0.annotations()
+        self.inner.annotations()
     }
 }
 
@@ -1040,33 +1055,33 @@ impl<R: SamplingOptionsProvider> SamplingOptionsProvider for NormalizedArgsReque
     fn extract_sampling_options(
         &self,
     ) -> anyhow::Result<crate::protocols::common::SamplingOptions> {
-        self.0.extract_sampling_options()
+        self.inner.extract_sampling_options()
     }
 }
 
 impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest<'_, R> {
     fn extract_stop_conditions(&self) -> anyhow::Result<crate::protocols::common::StopConditions> {
-        self.0.extract_stop_conditions()
+        self.inner.extract_stop_conditions()
     }
 }
 
 impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
     fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
-        self.0.extract_output_options()
+        self.inner.extract_output_options()
     }
 }
 
 impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
     fn nvext(&self) -> Option<&crate::protocols::common::extensions::NvExt> {
-        self.0.nvext()
+        self.inner.nvext()
     }
 
     fn raw_prompt(&self) -> Option<String> {
-        self.0.raw_prompt()
+        self.inner.raw_prompt()
     }
 
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.0.unsupported_fields()
+        self.inner.unsupported_fields()
     }
 }
 
@@ -2462,18 +2477,23 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
-        let formatted_prompt = if self.normalize_tool_call_args {
-            self.apply_template_inner(&NormalizedArgsRequest(request))?
+        let continue_final = request.get_continue_final_message() == Some(true);
+        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
+            self.apply_template_inner(&NormalizedArgsRequest {
+                inner: request,
+                normalize_tool_call_args: self.normalize_tool_call_args,
+                continue_final_message: continue_final,
+            })?
         } else {
             self.apply_template_inner(request)?
         };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
-        if request.get_continue_final_message() != Some(true) {
+        if !continue_final {
             return Ok(Some(prompt));
         }
-        apply_continue_final_message(prompt, request.typed_messages())
+        apply_continue_final_message(prompt)
             .map_err(|error| invalid_argument_error(format!("{error:#}")))
             .map(Some)
     }
@@ -8593,27 +8613,6 @@ mod tests {
     }
 
     #[test]
-    fn continue_final_message_without_explicit_add_generation_prompt_is_rejected() {
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [
-                {"role": "user", "content": "Continue this sentence"},
-                {"role": "assistant", "content": "LLM-Native Interaction"}
-            ],
-            "continue_final_message": true
-        }))
-        .unwrap();
-
-        let err = crate::engines::ValidateRequest::validate(&request)
-            .expect_err("omitted add_generation_prompt must conflict with continue_final_message");
-        assert!(
-            err.to_string()
-                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
     fn should_add_generation_prompt_defaults_true_and_continue_forces_false() {
         use dynamo_renderer::OAIChatLikeRequest;
 
@@ -8676,11 +8675,21 @@ mod tests {
         request: &NvCreateChatCompletionRequest,
     ) -> RenderedPrompt {
         use crate::protocols::openai::common_ext::CommonExtProvider;
-        use dynamo_renderer::OAIChatLikeRequest;
 
-        let rendered = formatter.render_prompt(request).unwrap();
-        if request.get_continue_final_message() == Some(true) {
-            apply_continue_final_message(rendered, request.typed_messages()).unwrap()
+        let continue_final = request.get_continue_final_message() == Some(true);
+        let rendered = if continue_final {
+            formatter
+                .render_prompt(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: false,
+                    continue_final_message: true,
+                })
+                .unwrap()
+        } else {
+            formatter.render_prompt(request).unwrap()
+        };
+        if continue_final {
+            apply_continue_final_message(rendered).unwrap()
         } else {
             rendered
         }
@@ -8730,6 +8739,37 @@ mod tests {
         assert_eq!(
             continue_prompt.as_str(),
             "<|im_start|>user\nContinue this sentence<|im_end|>\n<|im_start|>assistant\nLLM-Native Interaction"
+        );
+    }
+
+    /// Raw turns `same / previous / same`; the template uppercases the last
+    /// turn to `SAME`. Searching rendered text for `same` would cut at the
+    /// first copy. The HuggingFace marker must keep the full conversation.
+    #[test]
+    fn continue_final_message_marker_survives_rewritten_final_turn() {
+        const TEMPLATE: &str = "\
+{%- for message in messages -%}\
+{%- if loop.last -%}{{ message.content | upper }}|{%- else -%}{{ message.content }}|{%- endif -%}\
+{%- endfor -%}closed";
+        let formatter = test_prompt_formatter(TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "same"},
+                {"role": "user", "content": "previous"},
+                {"role": "assistant", "content": "same"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .unwrap();
+
+        let prompt = render_with_continue_final_message(formatter.as_ref(), &request);
+        assert_eq!(prompt.as_str(), "same|previous|SAME");
+        assert!(
+            !prompt.as_str().contains("CONTINUE_FINAL_MESSAGE_TAG"),
+            "marker must be stripped from the prompt sent to the model, got {:?}",
+            prompt.as_str()
         );
     }
 
