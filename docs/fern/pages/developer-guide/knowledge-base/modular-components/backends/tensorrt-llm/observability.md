@@ -211,7 +211,9 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
 - **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `metric_prefix_filter=["trtllm_"]`
-- **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
+- **Engine Configuration**: `LlmArgs.return_perf_metrics` defaults to `False`. It enables TensorRT-LLM's detailed per-step timing collector, whose `time_breakdown_metrics` payload Dynamo never reads, and which costs measurable throughput. Set `return_perf_metrics: true` in `--extra-engine-args` or `--override-engine-args` to re-enable engine-level collection for custom worker instrumentation.
+- **Per-request Metrics**: `SamplingParams.return_perf_metrics` is a separate switch that shares the same name. It follows `--publish-kv-events`, because its only consumer — the KV-transfer histogram — is registered only when publishing is enabled. Token usage reporting, including `usage.prompt_tokens_details.cached_tokens`, is unaffected either way: it comes from the engine's own cached-token count, not from `request_perf_metrics`.
+- **Request Arrival Timestamp**: When engine-level metrics are off, TensorRT-LLM stamps request arrival during C++ request construction rather than at Python submission, so E2E latency, TTFT, and queue time exclude some submission and IPC time. Other request timing fields keep their existing anchors.
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
 

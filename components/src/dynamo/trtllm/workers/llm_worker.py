@@ -353,7 +353,15 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
+        # Engine-level perf metrics turn on the PyExecutor detailed per-step timing
+        # collector: growing `step_metrics` / `ctx_chunk_metrics` lists that get
+        # attached to the final response, then pickled for the rank gather and again
+        # for worker->proxy IPC under attention DP. Nothing in Dynamo reads
+        # `time_breakdown_metrics`, so default it off rather than tying it to
+        # publishing. This is a default, not a hard disable: `--extra-engine-args`
+        # and `--override-engine-args` are merged over `arg_map` below and can set
+        # it back to true for custom instrumentation.
+        "return_perf_metrics": False,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
         # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
@@ -512,9 +520,18 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Request-level perf metrics are a *separate* switch that merely shares the
+    # engine flag's name. Tie it to KV-event publishing, not to the engine flag
+    # (which now defaults to False above): its one consumer is the KV-transfer
+    # histogram in HandlerBase, whose AdditionalMetricsCollector is built only under
+    # `if config.publish_events_and_metrics`. So with publishing off nothing reads
+    # `request_perf_metrics` and filling it is pure waste. `cached_tokens` is
+    # unaffected either way -- it comes from `res.cached_tokens`, not from
+    # `request_perf_metrics`. An explicit engine-level override still forces these
+    # back on: TRT-LLM resolves the effective value as `sampling or engine` in
+    # `LLM._prepare_sampling_params`.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+        default_sampling_params.return_perf_metrics = config.publish_events_and_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers

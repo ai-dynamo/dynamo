@@ -383,6 +383,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-x86asm \
         --disable-network \
         --disable-bsfs \
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
