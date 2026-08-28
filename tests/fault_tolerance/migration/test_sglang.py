@@ -693,7 +693,9 @@ def test_request_migration_sglang_decode(
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
                 expected_ongoing_request_count=1,
-                graceful_shutdown_endpoint=("backend", "generate"),
-                wait_for_worker_health_shutdown=True,
+                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                    frontend, worker
+                ),
                 verify_replacement_worker=True,
+                force_max_output_tokens=True,
             )

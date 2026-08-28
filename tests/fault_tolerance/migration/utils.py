@@ -103,6 +103,7 @@ def start_completion_request(
     use_long_prompt: bool = False,
     max_tokens: int | None = None,
     long_prompt_repetitions: int = 8_000,
+    force_max_output_tokens: bool = False,
 ) -> tuple:
     """
     Start a long-running completion request in a separate thread.
@@ -116,6 +117,8 @@ def start_completion_request(
         use_long_prompt: Whether to use a long prompt (~8000 tokens)
         max_tokens: Explicit output-token cap, or the backend default when unset
         long_prompt_repetitions: Number of repeated words in the long prompt
+        force_max_output_tokens: Disable EOS and require the full output-token
+            budget. Requires max_tokens.
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
@@ -149,6 +152,13 @@ def start_completion_request(
             }
             if max_tokens is not None:
                 request_args["max_tokens"] = max_tokens
+            if force_max_output_tokens:
+                if max_tokens is None:
+                    raise ValueError("force_max_output_tokens requires max_tokens")
+                request_args["extra_body"] = {
+                    "ignore_eos": True,
+                    "min_tokens": max_tokens,
+                }
             if stream:
                 for chunk in client.completions.create(**request_args):
                     text = chunk.choices[0].text if chunk.choices else None
@@ -179,6 +189,7 @@ def start_chat_completion_request(
     use_long_prompt: bool = False,
     max_tokens: int | None = None,
     long_prompt_repetitions: int = 8_000,
+    force_max_output_tokens: bool = False,
 ) -> tuple:
     """
     Start a long-running chat completion request in a separate thread.
@@ -192,6 +203,8 @@ def start_chat_completion_request(
         use_long_prompt: Whether to use a long prompt (~8000 tokens)
         max_tokens: Explicit output-token cap, or the backend default when unset
         long_prompt_repetitions: Number of repeated words in the long prompt
+        force_max_output_tokens: Disable EOS and require the full output-token
+            budget. Requires max_tokens.
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
@@ -225,6 +238,13 @@ def start_chat_completion_request(
             }
             if max_tokens is not None:
                 request_args["max_tokens"] = max_tokens
+            if force_max_output_tokens:
+                if max_tokens is None:
+                    raise ValueError("force_max_output_tokens requires max_tokens")
+                request_args["extra_body"] = {
+                    "ignore_eos": True,
+                    "min_tokens": max_tokens,
+                }
             if stream:
                 for chunk in client.chat.completions.create(**request_args):
                     content = chunk.choices[0].delta.content if chunk.choices else None
@@ -706,6 +726,7 @@ def run_migration_test(
     graceful_shutdown: Callable[[ManagedProcess], AbstractContextManager[None]]
     | None = None,
     verify_replacement_worker: bool = False,
+    force_max_output_tokens: bool = False,
 ) -> None:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -733,6 +754,8 @@ def run_migration_test(
         verify_replacement_worker: Require the surviving worker to accept the
             exact request ID and expose one completed generate request with
             nonzero response bytes. Intended for isolated per-test workers.
+        force_max_output_tokens: Disable EOS and require the request's full
+            max_tokens budget so fault injection cannot race an early EOS.
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -742,6 +765,7 @@ def run_migration_test(
             use_long_prompt=use_long_prompt,
             max_tokens=max_tokens,
             long_prompt_repetitions=long_prompt_repetitions,
+            force_max_output_tokens=force_max_output_tokens,
         )
     else:
         request_thread, response_list = start_completion_request(
@@ -750,6 +774,7 @@ def run_migration_test(
             use_long_prompt=use_long_prompt,
             max_tokens=max_tokens,
             long_prompt_repetitions=long_prompt_repetitions,
+            force_max_output_tokens=force_max_output_tokens,
         )
 
     # Step 2: Determine which worker received the request
