@@ -34,6 +34,32 @@ Dynamo + vLLM deployment profiles.
 - Reasoning
 - Tool calling
 
+### Known issue: `message.content` can be `null`
+
+These recipes pass `--dyn-reasoning-parser deepseek_v4`, which splits the model's
+thinking trace into `message.reasoning_content`. A generation that never emits a
+closing `</think>` — because it was truncated by `max_tokens`, or because the whole
+reply is a short constrained value — routes **everything** to `reasoning_content` and
+leaves `message.content` as `null`. The answer is still produced; it is in the wrong
+field.
+
+This is an upstream vLLM parser bug, not a recipe or serving fault: the grammar and
+the generation both work. Tracked as
+[vllm-project/vllm#48645](https://github.com/vllm-project/vllm/issues/48645), with a
+fix proposed in [vllm-project/vllm#50753](https://github.com/vllm-project/vllm/pull/50753).
+Both are open as of 2026-08-28, so the fix is absent from the pinned runtime image.
+
+It shows up most often with `response_format: json_schema` for short values (an enum
+lands in `reasoning_content`) and with small `max_tokens`. Practical guidance:
+
+- Read `reasoning_content` as a fallback when `content` is `null`.
+- Give reasoning room. This model spends a large budget thinking — `max_tokens` of
+  1-2K is frequently consumed before any content token is emitted. Our accuracy runs
+  needed a 64K cap to drive the no-answer rate to zero.
+- `chat_template_kwargs: {"thinking": false}` populates `content`, but disabling
+  thinking costs roughly 21 points of GPQA accuracy. It is a debugging aid, not a
+  production setting.
+
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
