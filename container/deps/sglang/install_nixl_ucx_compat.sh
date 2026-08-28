@@ -232,4 +232,18 @@ LD_LIBRARY_PATH="${CAPI_OUTPUT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' || \
     die "libnixl_capi.so could not be dlopened by SONAME via ${CAPI_OUTPUT_DIR}"
 
+# The ld.so.cache route only matters for a caller that clears the environment,
+# so check it too -- but as a warning, never fatally. Failing the build here is
+# exactly what made this step flake: the miss is a property of how overlayfs laid
+# out this particular set of layers, not of the install. One retry with the
+# aux-cache dropped repairs the stale-entry case; a (st_dev, st_ino) collision is
+# not repairable from here, and LD_LIBRARY_PATH already covers it.
+if ! env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null; then
+    rm -f /var/cache/ldconfig/aux-cache
+    ldconfig
+    env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null || \
+        echo "nixl-ucx-compat: warning: ldconfig did not cache libnixl_capi.so;" \
+             "${CAPI_OUTPUT_DIR} on LD_LIBRARY_PATH remains the supported path" >&2
+fi
+
 echo "nixl-ucx-compat: published ${NIXL_CAPI_DIR} via ${CAPI_OUTPUT_DIR}"
