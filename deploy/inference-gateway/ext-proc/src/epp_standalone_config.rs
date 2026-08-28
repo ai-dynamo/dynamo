@@ -125,6 +125,10 @@ pub struct EppStandaloneConfig {
     ))]
     pub replay_port: Option<u16>,
     /// Optional per-worker total KV blocks.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_TOTAL_KV_BLOCKS must be greater than zero when set"
+    ))]
     pub total_kv_blocks: Option<u64>,
     /// Optional per-worker max batched tokens.
     #[validate(range(
@@ -366,6 +370,24 @@ mod tests {
                 ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
                 ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn zero_total_kv_blocks_fails() {
+        // Zero is not "unset": decode_load_exceeds multiplies by it, so every
+        // worker reads as decode-overloaded instead of failing at startup.
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+                ("DYN_EPP_TOTAL_KV_BLOCKS", "0"),
             ])
             .is_err()
         );
