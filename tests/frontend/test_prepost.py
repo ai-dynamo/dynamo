@@ -2078,19 +2078,8 @@ def test_streaming_parallel_tool_calls_no_think(
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
 
 
-# ---------------------------------------------------------------------------
-# Cadence of tool-call argument deltas.
-# See https://github.com/ai-dynamo/dynamo/issues/13821
-#
-# The vLLM streaming tool parser produces an argument delta for nearly every
-# token, so the chunks inside a long string value are *consecutive*
-# tool-call-only deltas with no quiet chunk between them. That is the shape
-# that starved the old flush condition, which published the accumulator only
-# when the parser fell silent or at finish_reason.
-#
-# Token IDs are arbitrary non-special ints — the hermes parser operates on the
-# text attribute, not decoded tokens.
-# ---------------------------------------------------------------------------
+# Consecutive tool-call-only parser deltas with no quiet chunk between them.
+# Token IDs are arbitrary; the hermes parser reads text, not decoded tokens.
 _LONG_ARGUMENT_FRAGMENTS = [
     "James",
     " Joyce",
@@ -2158,8 +2147,6 @@ def test_streaming_tool_call_arguments_are_not_withheld(
         return result.get("delta", {}).get("tool_calls")
 
     # -- 1. no tool-call-only chunk is withheld -----------------------------
-    # These are the chunks the parser fed a delta for while finish_reason was
-    # still None; pre-fix every one of them returned None.
     withheld = [
         i
         for i, (output, result) in enumerate(zip(outputs, results))
@@ -2191,8 +2178,7 @@ def test_streaming_tool_call_arguments_are_not_withheld(
     }
 
     # -- 4. OpenAI delta semantics survive the extra frames ------------------
-    # id, type and function.name belong on the first frame only; every later
-    # frame carries index plus an arguments fragment.
+    # id, type and function.name belong on the first frame only.
     id_frames = [
         i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("id")
     ]
