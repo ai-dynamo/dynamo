@@ -664,12 +664,9 @@ mod tests {
     #[tokio::test]
     async fn s3_source_uses_bucket_qualified_virtual_hosted_endpoint() {
         let mut server = mockito::Server::new_async().await;
-        let mut endpoint = Url::parse(&server.url()).unwrap();
-        endpoint.set_host(Some("localhost")).unwrap();
-        let expected_host = format!("bucket.localhost:{}", endpoint.port().unwrap());
         let list = server
             .mock("GET", "/")
-            .match_header("host", expected_host.as_str())
+            .match_header("host", "bucket.s3.example")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("list-type".into(), "2".into()),
                 Matcher::UrlEncoded("prefix".into(), "adapter/".into()),
@@ -694,9 +691,11 @@ mod tests {
                 ("AWS_SHARED_CREDENTIALS_FILE", None),
                 ("AWS_CONFIG_FILE", None),
                 ("AWS_PROFILE", None),
-                ("AWS_ENDPOINT_URL", Some(endpoint.as_str())),
+                ("AWS_ENDPOINT_URL", Some("http://s3.example")),
                 ("AWS_ALLOW_HTTP", Some("true")),
                 ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
+                ("AWS_PROXY_URL", Some(server.url().as_str())),
+                ("AWS_PROXY_EXCLUDES", None),
                 ("AWS_EC2_METADATA_DISABLED", Some("true")),
             ],
             async {
