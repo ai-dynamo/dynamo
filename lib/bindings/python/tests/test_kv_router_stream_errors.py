@@ -63,6 +63,40 @@ async def error_router_endpoint(temp_file_store):
         worker_runtime.shutdown()
 
 
+async def _drain_once(router, response_buffer_size):
+    stream = await router.generate(
+        [1, 2, 3],
+        "test-model",
+        response_buffer_size=response_buffer_size,
+    )
+    return [response async for response in stream]
+
+
+async def _drain_when_routable(router, response_buffer_size, timeout=10.0):
+    """Drain the router once it has a worker to route to.
+
+    The endpoint fixture waits on discovery, but KvRouter tracks workers on its
+    own background task, so a generate() issued right after construction can lose
+    that race and fail with "no endpoints available to route work" instead of the
+    stream error under test. Retry only that condition; every other exception --
+    including the intentional failure this test asserts on -- propagates
+    immediately, so a genuine regression still fails the test.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            return await _drain_once(router, response_buffer_size)
+        except Exception as exc:
+            if "no endpoints available to route work" not in str(exc):
+                raise
+            if loop.time() >= deadline:
+                raise AssertionError(
+                    f"KvRouter never discovered a worker within {timeout}s: {exc}"
+                ) from exc
+            await asyncio.sleep(0.02)
+
+
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("response_buffer_size", [0, 100])
@@ -76,9 +110,4 @@ async def test_kv_router_propagates_stream_errors(
     )
 
     with pytest.raises(ValueError, match="intentional KV-router failure"):
-        stream = await router.generate(
-            [1, 2, 3],
-            "test-model",
-            response_buffer_size=response_buffer_size,
-        )
-        _ = [response async for response in stream]
+        await _drain_when_routable(router, response_buffer_size)
