@@ -74,12 +74,10 @@ const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
 
-fn model_ready_metric_name() -> String {
-    format!(
-        "{}_{}",
-        name_prefix::FRONTEND,
-        frontend_service::MODEL_READY
-    )
+fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    format!("{}_{}", prefix, frontend_service::MODEL_READY)
 }
 
 /// Collects current model readiness directly from the frontend's routing catalog.
@@ -89,17 +87,26 @@ fn model_ready_metric_name() -> String {
 struct ModelReadyCollector {
     manager: Arc<ModelManager>,
     desc: Desc,
+    metric_name: String,
 }
 
 impl ModelReadyCollector {
-    fn new(manager: Arc<ModelManager>) -> Result<Self, prometheus::Error> {
+    fn new(
+        manager: Arc<ModelManager>,
+        metrics_prefix: Option<String>,
+    ) -> Result<Self, prometheus::Error> {
+        let metric_name = model_ready_metric_name(metrics_prefix.as_deref());
         let desc = Desc::new(
-            model_ready_metric_name(),
+            metric_name.clone(),
             MODEL_READY_HELP.to_string(),
             vec!["model".to_string()],
             Default::default(),
         )?;
-        Ok(Self { manager, desc })
+        Ok(Self {
+            manager,
+            desc,
+            metric_name,
+        })
     }
 }
 
@@ -130,7 +137,7 @@ impl Collector for ModelReadyCollector {
         }
 
         let mut family = MetricFamily::default();
-        family.set_name(model_ready_metric_name());
+        family.set_name(self.metric_name.clone());
         family.set_help(MODEL_READY_HELP.to_string());
         family.set_field_type(MetricType::GAUGE);
         family.set_metric(metrics);
@@ -142,8 +149,9 @@ impl Collector for ModelReadyCollector {
 pub fn register_model_ready_metric(
     registry: &Registry,
     manager: Arc<ModelManager>,
+    metrics_prefix: Option<String>,
 ) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(ModelReadyCollector::new(manager)?))
+    registry.register(Box::new(ModelReadyCollector::new(manager, metrics_prefix)?))
 }
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
@@ -2361,11 +2369,15 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 mod tests {
     use super::*;
 
-    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+    fn model_ready_value_with_name(
+        registry: &Registry,
+        metric_name: &str,
+        model: &str,
+    ) -> Option<f64> {
         registry
             .gather()
             .into_iter()
-            .find(|family| family.name() == model_ready_metric_name())?
+            .find(|family| family.name() == metric_name)?
             .get_metric()
             .iter()
             .find(|metric| {
@@ -2377,11 +2389,15 @@ mod tests {
             .map(|metric| metric.get_gauge().value())
     }
 
+    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+        model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
     #[test]
     fn model_ready_metric_tracks_live_routing_catalog() {
         let manager = Arc::new(ModelManager::new());
         let registry = Registry::new();
-        register_model_ready_metric(&registry, manager.clone()).unwrap();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
 
         assert_eq!(model_ready_value(&registry, "test-model"), None);
 
@@ -2399,6 +2415,23 @@ mod tests {
         )));
         assert!(manager.add_worker_set("test-model", "watched", worker_set));
         assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+
+        let custom_registry = Registry::new();
+        register_model_ready_metric(
+            &custom_registry,
+            manager.clone(),
+            Some("custom_frontend".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            model_ready_value_with_name(
+                &custom_registry,
+                "custom_frontend_model_ready",
+                "test-model"
+            ),
+            Some(0.0)
+        );
+        assert_eq!(model_ready_value(&custom_registry, "test-model"), None);
 
         worker_tx.send(vec![1]).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));

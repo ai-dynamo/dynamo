@@ -1113,6 +1113,7 @@ impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
+        let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let vllm_generate_enabled =
@@ -1184,7 +1185,7 @@ impl HttpServiceConfigBuilder {
         state.metrics_clone().register(&registry)?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
-        register_model_ready_metric(&registry, state.manager_clone())?;
+        register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
 
         // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
         // These are updated by KvWorkerMonitor when receiving ActiveLoad events
