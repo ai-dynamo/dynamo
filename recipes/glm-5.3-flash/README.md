@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -11,17 +11,18 @@ Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash).
 
 Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
-|                          | GB200 aggregated agentic        | GB200 disaggregated agentic              | H200 aggregated agentic | H200 disaggregated agentic |
-| ------------------------ | ------------------------------- | ---------------------------------------- | ----------------------- | -------------------------- |
-| **GPU** (per worker)     | 4x GB200                        | 4x GB200 prefill + 4x GB200 decode       | TBD                     | TBD                        |
-| **Mode**                 | Aggregated                      | Prefill/decode disaggregated             | Aggregated              | Prefill/decode disaggregated |
-| **Framework**            | vLLM                            | vLLM                                     | vLLM                    | vLLM                       |
-| **Precision**            | bf16 + bf16 KV                  | bf16 + bf16 KV                           | TBD                     | TBD                        |
-| **Parallelism**          | TP4                             | TP4 prefill / TP4 decode                 | TBD                     | TBD                        |
-| **Routing**              | KV-aware                        | KV-aware                                 | KV-aware                | KV-aware                   |
-| **Speculative decoding** | None                            | None                                     | None                    | None                       |
-| **Context length**       | 128,000                         | 128,000                                  | TBD                     | TBD                        |
-| **KV transfer**          | N/A                             | NIXL/UCX over tcp (MNNVL upgrade: see README) | N/A              | TBD                        |
+|                          | GB200 Aggregated              | GB200 Disaggregated                         | H200 Aggregated             | H200 Disaggregated                      |
+| ------------------------ | ----------------------------- | ------------------------------------------- | --------------------------- | --------------------------------------- |
+| **GPU**                  | 4x GB200                      | 4x GB200 prefill + 4x GB200 decode          | 8x H200                     | 8x H200 prefill + 8x H200 decode        |
+| **Nodes**                | 1                             | 2                                           | 1                           | 2                                       |
+| **Mode**                 | Aggregated                    | Prefill/decode disaggregated                | Aggregated                  | Prefill/decode disaggregated            |
+| **Framework**            | vLLM                          | vLLM                                        | vLLM                        | vLLM                                    |
+| **Precision**            | BF16 weights + BF16 KV cache | BF16 weights + BF16 KV cache                | FP8 weights + BF16 KV cache | FP8 weights + BF16 KV cache             |
+| **Parallelism**          | TP4                           | TP4 prefill / TP4 decode                    | TP8                         | TP8 prefill / TP8 decode                |
+| **Routing**              | KV-aware                      | KV-aware                                    | Round-robin                 | KV-aware                                |
+| **Speculative decoding** | None                          | None                                        | MTP7                        | MTP7 on prefill and decode              |
+| **Context length**       | 128,000                       | 128,000                                     | 1,048,576                   | 1,048,576                               |
+| **KV transfer**          | N/A                           | NIXL/UCX over TCP (MNNVL upgrade: see below) | N/A                         | NIXL with GPU buffers and RDMA resources |
 
 
 ## Supported features
@@ -66,7 +67,7 @@ kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-### 4. Deploy the DGD
+### 4. Deploy
 
 ```bash
 SKU=gb200   # or h200
@@ -102,5 +103,4 @@ See [perf/README.md](perf/README.md) for the full benchmark workflow.
   profiling on GB200. This workaround does not affect image inference.
 - `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
   decode workers; mismatching these produces silent garbage output.
-- H200 recipes are in progress.
 - `n>1` requests are not supported with the disaggregated recipe.
