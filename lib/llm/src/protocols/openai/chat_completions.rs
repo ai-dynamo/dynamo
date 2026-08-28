@@ -285,6 +285,21 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
+/// Synthetic chunks reuse a real response envelope but consume no backend data.
+/// Clear copied transport and per-chunk fields so clients do not count them twice.
+pub(crate) fn scrub_synthetic_chunk_metadata(
+    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
+) -> Option<()> {
+    response.event = None;
+    response.comment = None;
+    response.error = None;
+    let data = response.data.as_mut()?;
+    data.inner.usage = None;
+    data.llm_metrics = None;
+    data.nvext = None;
+    Some(())
+}
+
 /// Build one synthetic stream choice from an existing response template.
 ///
 /// Both streaming tool-call paths use this constructor when an engine omits a
@@ -299,8 +314,6 @@ pub(super) fn stream_choice_chunk_from_template(
     finish_reason: Option<FinishReason>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     let mut response = template.clone();
-    response.inner.usage = None;
-    response.llm_metrics = None;
     #[allow(deprecated)]
     let choice = ChatChoiceStream {
         index,
@@ -316,13 +329,15 @@ pub(super) fn stream_choice_chunk_from_template(
         logprobs: None,
     };
     response.inner.choices = vec![choice];
-    Annotated {
+    let mut chunk = Annotated {
         data: Some(response),
         id: None,
         event: None,
         comment: None,
         error: None,
-    }
+    };
+    scrub_synthetic_chunk_metadata(&mut chunk);
+    chunk
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,

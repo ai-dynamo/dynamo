@@ -42,6 +42,8 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
+| Fri, Sep 4, 2026 | **[Dynamo Community Demos](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Community+Demos&dates=20260904T160000Z%2F20260904T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fgsv-tkfy-bqi%0AOr+dial%3A+%28US%29+%2B1+484-800-1908+PIN%3A+479201144%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fgsv-tkfy-bqi%3Fpin%3D3402175147371%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | – |
+| Thu, Sep 10, 2026 | **[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)** | [Luma](https://luma.com/BaseDynSGL) |
 | Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
 | Thu, Jul 30, 2026 | ~~[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)~~ | [Luma](https://luma.com/JulyDynamoAfterHours) |
 <!-- EVENTS:END -->

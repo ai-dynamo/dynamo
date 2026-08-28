@@ -89,7 +89,9 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
-use dynamo_protocols::types::responses::ErrorObject;
+use dynamo_protocols::types::responses::{
+    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -3261,6 +3263,25 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+/// OpenAI Responses input-token counting handler.
+///
+/// Handles `POST /v1/responses/input_tokens` and returns an estimated input
+/// token count using a len/3 heuristic.
+///
+/// Like the Anthropic `/v1/messages/count_tokens` handler, this deliberately
+/// performs neither a readiness nor a model-serving check: clients routinely
+/// send routing names this frontend does not serve, and a pre-flight estimate
+/// does not need a live model.
+async fn handler_responses_input_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
+    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -4244,7 +4265,8 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoints
+/// (`/v1/responses` and `/v1/responses/input_tokens`).
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
     state: Arc<service_v2::State>,
@@ -4252,13 +4274,23 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    // Derive the subroute from the parent with any trailing slash trimmed.
+    // `DYN_HTTP_SVC_RESPONSES_PATH=/custom/` is a working configuration for the
+    // parent — axum matches `POST /custom/` — but naively appending would
+    // register `/custom//input_tokens`, and axum does not treat that as
+    // equivalent to the `/custom/input_tokens` a client would actually call.
+    // The parent is registered verbatim, so trimming here changes only the
+    // derived path and leaves existing configurations behaving as they do now.
+    let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&input_tokens_path, post(handler_responses_input_tokens))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, input_tokens_doc], router)
 }
 
 async fn images(

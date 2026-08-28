@@ -1697,6 +1697,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
+ "url",
 ]
 
 [[package]]
@@ -1813,6 +1814,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "libc",
+ "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
  "lru",
@@ -1954,9 +1956,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.3.1"
+version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
+checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1987,6 +1989,8 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
+ "dynamo-sidecar-common",
+ "dynamo-vllm-sidecar",
  "dynamo-worker-selection-policy-catalog",
  "futures",
  "once_cell",
@@ -2130,6 +2134,7 @@ dependencies = [
  "futures",
  "prost 0.13.5",
  "rand 0.9.4",
+ "reqwest 0.12.28",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -2195,6 +2200,28 @@ name = "dynamo-truthy"
 version = "1.5.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-vllm-sidecar"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tonic-health",
+ "tracing",
 ]
 
 [[package]]
@@ -8070,6 +8097,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -8289,6 +8317,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "tonic-health"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb87334d340313fefa513b6e60794d44a86d5f039b523229c99c323e4e19ca4b"
+dependencies = [
+ "prost 0.13.5",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
 ]
 
 [[package]]
