@@ -970,6 +970,10 @@ navigation:
         icon: microchip
         path: ../pages-dev/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
+      - page: Agent Skills
+        icon: robot
+        path: ../pages-dev/reference/general/agent-skills.mdx
+        slug: agent-skills
       - page: Examples
         icon: file-code
         path: ../pages-dev/reference/general/examples.md
