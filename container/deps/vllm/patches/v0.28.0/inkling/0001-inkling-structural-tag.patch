@@ -22,7 +22,7 @@ index ab760015af7..517854500bc 100644
 +    # setting it here is both redundant and silently overwritten.
 +    structural_tag_model = "inkling"
 diff --git a/vllm/tool_parsers/structural_tag_registry.py b/vllm/tool_parsers/structural_tag_registry.py
-index 1f9a651ee46..7a0688bb447 100644
+index 1f9a651ee46..bc70a07c249 100644
 --- a/vllm/tool_parsers/structural_tag_registry.py
 +++ b/vllm/tool_parsers/structural_tag_registry.py
 @@ -70,7 +70,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
@@ -63,7 +63,7 @@ index 1f9a651ee46..7a0688bb447 100644
      ]
  
  
-@@ -577,6 +583,111 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
+@@ -577,6 +583,119 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
      )
  
  
@@ -91,8 +91,16 @@ index 1f9a651ee46..7a0688bb447 100644
 +_INKLING_CONTENT_TEXT = "<|content_text|>"
 +_INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
 +_INKLING_END_MESSAGE = "<|end_message|>"
++_INKLING_END_SAMPLING = "<|content_model_end_sampling|>"
 +_INKLING_TOOL_OPEN = _INKLING_TOOL_JSON
 +_INKLING_TEXT_OPEN = _INKLING_CONTENT_TEXT
++# BOTH terminators, because the parser treats them as co-equal: it documents
++# that "sampling may also end a block with the standalone
++# <|content_model_end_sampling|> token", `is_reasoning_end` returns True on it,
++# and `count_reasoning_tokens` closes a reasoning block on either. Permitting
++# only <|end_message|> would mask a valid natural terminator -- and would remove
++# one of the two paths that flip is_reasoning_end.
++_INKLING_ENDS = [_INKLING_END_MESSAGE, _INKLING_END_SAMPLING]
 +
 +
 +def _inkling_call_schema(tool: FunctionToolParam) -> dict[str, Any]:
@@ -116,7 +124,7 @@ index 1f9a651ee46..7a0688bb447 100644
 +    return TagFormat(
 +        begin=_INKLING_TOOL_OPEN,
 +        content=JSONSchemaFormat(json_schema=_inkling_call_schema(tool)),
-+        end=_INKLING_END_MESSAGE,
++        end=_INKLING_ENDS,
 +    )
 +
 +
@@ -132,8 +140,8 @@ index 1f9a651ee46..7a0688bb447 100644
 +def _inkling_text_block() -> TagFormat:
 +    return TagFormat(
 +        begin=_INKLING_TEXT_OPEN,
-+        content=AnyTextFormat(excludes=[_INKLING_END_MESSAGE]),
-+        end=_INKLING_END_MESSAGE,
++        content=AnyTextFormat(excludes=_INKLING_ENDS),
++        end=_INKLING_ENDS,
 +    )
 +
 +

@@ -2980,6 +2980,21 @@ class _AccountingReasoningParser:
             return reasoning, content
         return text, ""
 
+    def count_reasoning_tokens(self, token_ids):
+        """Everything up to and including the end marker counts as reasoning.
+
+        The production code delegates to this, so the fake has to provide it --
+        a fake that omits it inherits ReasoningParser's base, which returns 0.
+        """
+        end = self.tokenizer.encode("</think>", add_special_tokens=False)
+        end_id = end[-1] if end else None
+        count = 0
+        for tid in token_ids:
+            count += 1
+            if tid == end_id:
+                break
+        return count
+
 
 class _PassthroughToolParser:
     """Finds no tool calls; returns the text as content.
@@ -3043,12 +3058,21 @@ class TestReasoningTokenAccounting:
 
     # -- streaming classification ------------------------------------------
 
-    def test_streaming_counts_reasoning_chunks_only(self, tokenizer):
-        post = self._post(tokenizer)
-        post.process_output(self._out("thinking", [1, 2, 3]))
-        post.process_output(self._out("more", [4, 5]))
-        post.process_output(self._out("</think>answer", [6, 7, 8, 9]))
-        assert post.reasoning_token_total == 5
+    def test_streaming_counts_reasoning_only_not_the_answer(self, tokenizer):
+        """Real parser, real ids: the visible answer must not be counted."""
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning = tokenizer.encode("<think>abc</think>", add_special_tokens=False)
+        answer = tokenizer.encode("the answer", add_special_tokens=False)
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(reasoning + answer)
+
+        post = self._qwen3_post(tokenizer)
+        for tid in reasoning + answer:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native
+        assert 0 < native < len(reasoning + answer)
 
     # -- P1 #1: account before the include_reasoning projection ------------
 
@@ -3093,10 +3117,99 @@ class TestReasoningTokenAccounting:
         post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
         assert post.reasoning_token_total > 0
 
-    def test_content_only_counts_nothing(self, tokenizer):
-        post = self._post(tokenizer)
-        post.process_output(self._out("</think>hi", [1, 2, 3, 4]))
+    def test_no_reasoning_parser_counts_nothing(self, tokenizer):
+        """Without a reasoning parser there is nothing to delegate to -> 0.
+
+        Note the counterpart is NOT true: with a parser, plain content is not
+        automatically zero. Qwen3's parser counts an unopened span as reasoning
+        (the model is trained to reason first), so delegating means inheriting
+        that contract -- which is the point, since it is what vLLM itself
+        reports.
+        """
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        for tid in tokenizer.encode("just an answer", add_special_tokens=False):
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
         assert post.reasoning_token_total == 0
+
+    # -- the parser's OWN counter, not a re-derivation -----------------------
+
+    @staticmethod
+    def _qwen3_post(tokenizer):
+        from vllm.reasoning import ReasoningParserManager
+
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+
+    def test_count_matches_the_parser_for_split_marker_tokens(self, tokenizer):
+        """`<think>`, `abc`, `<`, `x` -- the parser counts 3.
+
+        A per-chunk classifier that adds len(delta_token_ids) whenever the chunk
+        carried reasoning reported 2 here. Delegating to the parser's own
+        count_reasoning_tokens is what makes this exact.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        ids = [
+            i
+            for piece in ("<think>", "abc", "<", "x")
+            for i in tokenizer.encode(piece, add_special_tokens=False)
+        ]
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        assert native == 3, f"fixture drift: parser now counts {native}"
+
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 3
+
+    def test_count_survives_non_injective_detokenisation(self, tokenizer):
+        """Generated id 77150 decodes to '１０', which RE-ENCODES to two tokens.
+
+        Counting by re-encoding the decoded reasoning text therefore reported 2
+        for a single generated token. The ledger keeps the original ids, so the
+        parser sees exactly what was generated.
+        """
+        think = tokenizer.encode("<think>", add_special_tokens=False)
+        ids = think + [77150]
+        assert (
+            len(tokenizer.encode(tokenizer.decode([77150]), add_special_tokens=False))
+            == 2
+        ), "fixture drift: 77150 no longer re-encodes to 2 tokens"
+
+        from vllm.reasoning import ReasoningParserManager
+
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 1
 
     # -- annotation ---------------------------------------------------------
 

@@ -853,18 +853,13 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
-        # Reasoning tokens attributed to THIS choice, accumulated where the
-        # reasoning parser CLASSIFIES output -- deliberately not where the
-        # response is projected. Two projections would otherwise lose the count
-        # entirely (NVBug 6678449b):
-        #   * `_suppress_reasoning_output` (include_reasoning=false) drops the
-        #     parsed reasoning from the emitted delta, so a response with hidden
-        #     reasoning would report zero;
-        #   * the non-streaming tool path buffers every generated chunk and
-        #     emits once on the terminal delta, so per-chunk observation sees
-        #     only a zero-token terminal frame.
-        # Counting at classification is invariant to both.
-        self.reasoning_token_total = 0
+        # Every ORIGINAL generated token id for this choice (NVBug 6678449b).
+        # The count is delegated to the pinned vLLM parser's own
+        # count_reasoning_tokens, never re-derived from parser output: the
+        # response projections drop or defer it, a per-chunk classifier
+        # over-counts a mixed chunk, and re-encoding decoded text drifts from
+        # the original ids (detokenisation is not injective).
+        self._reasoning_token_ids: list[int] = []
 
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
@@ -907,6 +902,13 @@ class StreamingPostProcessor:
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    @property
+    def reasoning_token_total(self) -> int:
+        """Reasoning tokens for this choice, per the parser's own counter."""
+        if self.reasoning_parser is None:
+            return 0
+        return self.reasoning_parser.count_reasoning_tokens(self._reasoning_token_ids)
 
     def _decode_dynamo_json_fallback_tool_calls(
         self, text: str
@@ -1278,15 +1280,6 @@ class StreamingPostProcessor:
                 current_text,
                 request=self.request_for_sampling,
             )
-            # This path buffers every generated chunk and parses once here, so
-            # there is no per-chunk classification to count. The reasoning text
-            # IS known now, so count it exactly -- and do it before the
-            # include_reasoning projection on the next line, which would
-            # otherwise hide it.
-            if saved_reasoning:
-                self.reasoning_token_total += len(
-                    self.tokenizer.encode(saved_reasoning, add_special_tokens=False)
-                )
             if not self.request_for_sampling.include_reasoning:
                 saved_reasoning = None
 
@@ -1312,6 +1305,10 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        # BEFORE any branch: every path must feed the ledger, including the ones
+        # that emit nothing for this chunk.
+        if self.reasoning_parser is not None:
+            self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback:
             return self._process_dynamo_json_fallback_tool_calls(output)
         if self._should_buffer_for_non_streaming_tool_parse():
@@ -1478,14 +1475,6 @@ class StreamingPostProcessor:
                     self._finish_engine_parser(self.tool_parser),
                 )
                 self._tool_parser_streaming_started = False
-
-        # Account BEFORE the projection below. `delta_message` is the parser's
-        # classification; `reasoning` is what survives include_reasoning. Reading
-        # the latter is what reported zero for hidden reasoning.
-        # Chunk-granular, matching the Rust estimator: a chunk carrying both
-        # reasoning and visible content counts entirely as reasoning.
-        if delta_message is not None and delta_message.reasoning:
-            self.reasoning_token_total += len(delta_token_ids)
 
         choice = None
         if delta_message is None:
