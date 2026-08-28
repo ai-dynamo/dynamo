@@ -231,7 +231,7 @@ cargo run -p dynamo-llm --bin generate-frontend-openapi
 
 ## 服务发现与消息传递
 
-Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)）负责服务发现。对大多数部署来说，外部服务是可选的：
+Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)）负责服务发现。对大多数部署来说，外部服务是可选的：
 
 | 部署 | etcd | NATS | 说明 |
 |------|------|------|------|

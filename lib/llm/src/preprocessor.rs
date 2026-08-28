@@ -4923,12 +4923,15 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
+            debug_assert!(a.error.is_none(), "terminal errors must bypass the jail");
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
                 id: a.id,
                 event: a.event,
                 comment: a.comment,
-                error: a.error.map(|e| e.to_string()),
+                // Terminal errors were removed by `take_while` above and are
+                // chained back as the original typed Dynamo annotation below.
+                error: None,
             }
         });
 
@@ -4964,6 +4967,10 @@ impl OpenAIPreprocessor {
         let pending_out = Arc::clone(&pending);
         let pending_eof = Arc::clone(&pending);
         let jailed_output = jailed.flat_map(move |a| {
+            debug_assert!(
+                a.error.is_none(),
+                "dynamo-parsers must not construct errors"
+            );
             // Metrics can ride on payload-only usage chunks because the HTTP
             // layer observes them before removing the chunk. Client-visible
             // nvext must wait for a non-payload-usage output with a choice.
@@ -4995,7 +5002,9 @@ impl OpenAIPreprocessor {
                 id: a.id,
                 event: a.event,
                 comment: a.comment,
-                error: a.error.map(DynamoError::msg),
+                // dynamo-parsers never constructs errors; Dynamo's original
+                // typed terminal annotation bypasses this conversion.
+                error: None,
             };
 
             // glm47: on finish_reason=length, recover the last incomplete

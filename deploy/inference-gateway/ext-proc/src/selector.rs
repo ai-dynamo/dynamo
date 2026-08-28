@@ -9,9 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
@@ -21,6 +20,7 @@ use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
     WorkerSelectionPolicyRegistry, warn_for_unserved_worker_selection_policies,
 };
+use kube::Client;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -82,10 +82,6 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
-    /// Peer-discovery readiness in replicated mode: `None` when replication is
-    /// disabled (single replica, always ready), or `Some(flag)` that latches
-    /// `true` once the initial peer-set sync completes. ANDed into EPP health.
-    peer_ready: Option<Arc<AtomicBool>>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -118,12 +114,30 @@ impl Selector {
         Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
 
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
-        let replication = Self::replication(cfg).await?;
+        let peer_replication = cfg.peer_replication.as_ref();
+        let peer_client = if peer_replication.is_some() {
+            Some(
+                Client::try_default()
+                    .await
+                    .context("building Kubernetes client for EPP peer replication")?,
+            )
+        } else {
+            None
+        };
+        if let (Some(peer_client), Some(peer_replication)) = (&peer_client, peer_replication) {
+            crate::peer_discovery::ensure_peer_service_exists(
+                peer_client.clone(),
+                &cfg.namespace,
+                &peer_replication.service_name,
+            )
+            .await?;
+        }
+
         let mut builder =
             SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
                 .indexer_threads(cfg.selector_threads);
-        if let Some((_, peer_sync_port)) = &replication {
-            builder = builder.replica_sync(*peer_sync_port, Vec::new());
+        if let Some(peer_replication) = peer_replication {
+            builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
         }
         let service = Arc::new(
             builder
@@ -131,7 +145,30 @@ impl Selector {
                 .await
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
-        Self::from_service_with_replication(cfg, service, replication).await
+
+        let cancel = CancellationToken::new();
+        if let (Some(peer_client), Some(peer_replication)) = (peer_client, peer_replication) {
+            crate::peer_discovery::spawn(
+                peer_client,
+                service.clone(),
+                &cfg.namespace,
+                &peer_replication.service_name,
+                peer_replication.sync_port,
+                peer_replication.pod_ip.clone(),
+                cancel.clone(),
+            )
+            .await?;
+        }
+        tracing::info!(
+            replicated = peer_replication.is_some(),
+            "Initialized in-process selection service"
+        );
+
+        Ok(Self {
+            service,
+            cancel,
+            reconcile_state: Mutex::new(ReconcileState::default()),
+        })
     }
 
     fn validate_queueing_worker_capacity(
@@ -150,68 +187,6 @@ impl Selector {
             );
         }
         Ok(())
-    }
-
-    async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
-        match &cfg.peer_service {
-            Some(name) => Ok(Some((
-                name.clone(),
-                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
-            ))),
-            None => Ok(None),
-        }
-    }
-
-    async fn from_service_with_replication(
-        cfg: &EppStandaloneConfig,
-        service: Arc<SelectionService>,
-        replication: Option<(String, u16)>,
-    ) -> Result<Self> {
-        let cancel = CancellationToken::new();
-
-        let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
-            // In replicated mode, we need to exclude ourselves from the peer set which requires the POD_IP
-            let self_ip = std::env::var("POD_IP")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; inject POD_IP \
-                         via the downward API (fieldRef status.podIP) so this replica can \
-                         exclude itself from its peer set"
-                    )
-                })?;
-            Some(
-                crate::peer_discovery::spawn(
-                    service.clone(),
-                    &cfg.namespace,
-                    &service_name,
-                    peer_sync_port,
-                    self_ip,
-                    cancel.clone(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        tracing::info!(
-            replicated = peer_ready.is_some(),
-            "Initialized in-process selection service"
-        );
-
-        Ok(Self {
-            service,
-            cancel,
-            reconcile_state: Mutex::new(ReconcileState::default()),
-            peer_ready,
-        })
-    }
-
-    pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
-        self.peer_ready.clone()
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
@@ -435,7 +410,7 @@ models:
     fn test_config() -> EppStandaloneConfig {
         EppStandaloneConfig {
             selector_threads: 1,
-            peer_service: None,
+            peer_replication: None,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "test-model".to_string(),
@@ -828,12 +803,25 @@ worker_selection:
     }
 
     #[tokio::test]
+    async fn selector_without_peer_replication_disables_replica_sync() {
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+            .await
+            .expect("selector should build");
+
+        assert_eq!(selector.service.replica_sync_port(), None);
+    }
+
+    #[tokio::test]
     async fn queueing_model_rejects_missing_capacity_before_peer_discovery() {
         let policy_file = model_policy_file();
         let mut cfg = test_config();
         cfg.model_name = "queueing-model".to_string();
         cfg.max_num_batched_tokens = None;
-        cfg.peer_service = Some("unreachable-peer-service".to_string());
+        cfg.peer_replication = Some(crate::epp_standalone_config::PeerReplicationConfig {
+            service_name: "unreachable-peer-service".to_string(),
+            pod_ip: "10.0.0.10".to_string(),
+            sync_port: 9092,
+        });
 
         let error = Selector::new_with_kv_router_config(
             &cfg,

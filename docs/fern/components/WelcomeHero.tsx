@@ -203,6 +203,15 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
               <path d="m9 18 6-6-6-6" />
             </svg>
           </a>
+          <a
+            className="dynamo-welcome__cta dynamo-welcome__cta--secondary"
+            href="/dynamo/dev/reference/enterprise/overview"
+          >
+            Dynamo Enterprise
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+          </a>
         </div>
       </section>
 
