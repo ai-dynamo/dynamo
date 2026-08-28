@@ -3430,6 +3430,71 @@ async fn request_admission_and_unload_cannot_race() {
 }
 
 #[tokio::test]
+async fn multimodal_kv_sources_carry_the_resolved_image_token() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({
+            "model_type": "qwen2_5_vl",
+            "vision_token_id": 151654,
+            "image_token_id": 151655
+        })
+        .to_string(),
+    )
+    .expect("write model config");
+    std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}")
+        .expect("write processor config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+    engine.start(0).await.expect("start");
+
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: Some(151655),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn unresolved_multimodal_routing_token_falls_back_without_source_metadata() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({"model_type": "qwen2_5_vl", "image_token_id": 151655}).to_string(),
+    )
+    .expect("write model config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+
+    engine.start(0).await.expect("start without routing token");
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: None,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeVllm::default();
     service.reject.store(true, Ordering::SeqCst);
@@ -4071,9 +4136,11 @@ async fn preprocessed_multimodal_features_require_model_support() {
 
 #[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
-    let server = FakeServer::start(FakeVllm::default()).await;
+    let service = FakeVllm::default();
     let mut discovered = model_info();
     discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
     let engine = engine(
         &server.endpoint,
         DisaggregationMode::Aggregated,

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { path = "../../llm", default-features = false, features = ["mm-routing"] }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 
