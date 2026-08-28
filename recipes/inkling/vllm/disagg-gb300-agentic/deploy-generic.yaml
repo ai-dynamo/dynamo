@@ -74,7 +74,7 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
           imagePullPolicy: Always
           name: main
           ports:
@@ -142,6 +142,9 @@ spec:
               --dyn-reasoning-parser inkling \
               --dyn-tool-call-parser inkling \
               --reasoning-parser inkling \
+              --dyn-enable-structural-tag \
+              --structured-outputs-config \
+              '{"enable_in_reasoning": true}' \
               --tensor-parallel-size 4 \
               --max-model-len 1048576 \
               --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
@@ -196,7 +199,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
           imagePullPolicy: Always
           name: main
           ports:
@@ -218,7 +221,7 @@ spec:
             runAsGroup: 0
             runAsUser: 0
           startupProbe:
-            failureThreshold: 720
+            failureThreshold: 1080
             httpGet:
               path: /live
               port: system
@@ -276,6 +279,9 @@ spec:
               --dyn-reasoning-parser inkling \
               --dyn-tool-call-parser inkling \
               --reasoning-parser inkling \
+              --dyn-enable-structural-tag \
+              --structured-outputs-config \
+              '{"enable_in_reasoning": true}' \
               --tensor-parallel-size 4 \
               --max-model-len 1048576 \
               --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
@@ -330,7 +336,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
           imagePullPolicy: Always
           name: main
           ports:
@@ -352,7 +358,7 @@ spec:
             runAsGroup: 0
             runAsUser: 0
           startupProbe:
-            failureThreshold: 720
+            failureThreshold: 1080
             httpGet:
               path: /live
               port: system

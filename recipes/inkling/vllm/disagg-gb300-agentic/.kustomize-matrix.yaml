@@ -2,6 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 source: kustomize/base
 nameTemplate: "${variant}"
+# Emit the ResourceClaimTemplate and ComputeDomain ahead of the DGD, so a single
+# `kubectl apply -f` creates the claims the workers reference before the DGD that
+# references them. Under the default fifo order the Component's claim template
+# lands last, which surfaces a transient resource-claim-template-not-found event.
+sortOptions:
+  order: legacy
+  legacySortOptions:
+    orderFirst: [ResourceClaimTemplate, ComputeDomain]
+    orderLast: []
 matrix:
   variant:
     - name: generic

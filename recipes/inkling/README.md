@@ -303,8 +303,43 @@ For a one-shot cleanup run see [`cleanup.sh`](cleanup.sh).
 
 ## Known Issues
 
-1. `deploy.yaml` overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value. This override is
-   required for MTP/EAGLE speculative decoding with SGLang because the forward-pass metrics reporter
-   (auto-enabled by the operator-injected port) crashes the scheduler on speculative batches
-   (`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost. Remove the override
-   once the container image carries a fix.
+### vLLM GB300 profiles
+
+**Disable reasoning with `reasoning_effort: "none"`, not with a zero thinking budget.**
+`nvext.max_thinking_tokens: 0` returns HTTP 200 but no usable answer: the model emits empty
+thinking blocks until it hits `max_tokens` (`finish_reason: "length"`). Inkling's end-of-thinking
+token also ends the message, so a zero budget closes the message on the first token and the cycle
+repeats. `chat_template_kwargs: {"thinking": false}` is not a substitute either — the model still
+reasons, and the reasoning text lands in `content`.
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "reasoning_effort": "none",
+    "max_tokens": 128
+  }'
+```
+
+**Keep both structured-output flags on the worker.** `tool_choice: "required"` and named
+`tool_choice` are enforced through a structural-tag grammar that needs both flags the manifests
+already set:
+
+```
+--dyn-enable-structural-tag
+--structured-outputs-config '{"enable_in_reasoning": true}'
+```
+
+Drop the second and the grammar is silently inert on a reasoning model — HTTP 200, no error, and
+the requested tool is not enforced. Both belong on the worker; the frontend does not accept
+`--dyn-enable-structural-tag`.
+
+### SGLang B200 profile
+
+`deploy.yaml` overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value. This override is
+required for MTP/EAGLE speculative decoding with SGLang because the forward-pass metrics reporter
+(auto-enabled by the operator-injected port) crashes the scheduler on speculative batches
+(`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost. Remove the override
+once the container image carries a fix.

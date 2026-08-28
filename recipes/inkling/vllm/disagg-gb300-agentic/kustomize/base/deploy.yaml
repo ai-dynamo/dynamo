@@ -42,7 +42,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -98,7 +98,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:
@@ -131,6 +131,9 @@ spec:
                     --dyn-reasoning-parser inkling \
                     --dyn-tool-call-parser inkling \
                     --reasoning-parser inkling \
+                    --dyn-enable-structural-tag \
+                    --structured-outputs-config \
+                    '{"enable_in_reasoning": true}' \
                     --tensor-parallel-size 4 \
                     --max-model-len 1048576 \
                     --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
@@ -177,7 +180,7 @@ spec:
                 httpGet: {path: /live, port: system}
                 periodSeconds: 10
                 timeoutSeconds: 5
-                failureThreshold: 720
+                failureThreshold: 1080
               securityContext: &workerSecurityContext
                 runAsUser: 0
                 runAsGroup: 0
@@ -208,7 +211,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:
@@ -237,6 +240,9 @@ spec:
                     --dyn-reasoning-parser inkling \
                     --dyn-tool-call-parser inkling \
                     --reasoning-parser inkling \
+                    --dyn-enable-structural-tag \
+                    --structured-outputs-config \
+                    '{"enable_in_reasoning": true}' \
                     --tensor-parallel-size 4 \
                     --max-model-len 1048576 \
                     --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \

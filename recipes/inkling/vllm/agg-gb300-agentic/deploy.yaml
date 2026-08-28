@@ -28,7 +28,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -78,7 +78,7 @@ spec:
             nvidia.com/gpu.product: NVIDIA-GB300
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-unified-v0280-dyn150dev0827-l5-v1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.vllm]
               args:
@@ -95,6 +95,9 @@ spec:
                 - inkling
                 - --reasoning-parser
                 - inkling
+                - --dyn-enable-structural-tag
+                - --structured-outputs-config
+                - '{"enable_in_reasoning": true}'
                 - --tensor-parallel-size
                 - "4"
                 # 1M context is a model capability this recipe keeps available.
@@ -132,7 +135,7 @@ spec:
                 httpGet: {path: /live, port: system}
                 periodSeconds: 10
                 timeoutSeconds: 5
-                failureThreshold: 720
+                failureThreshold: 1080
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
