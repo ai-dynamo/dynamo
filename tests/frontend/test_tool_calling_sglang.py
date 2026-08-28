@@ -10,6 +10,8 @@ Validates:
   - tool_choice variants: auto / required / none / named function
   - Multi-turn conversations carrying tool results
   - Multi-tool parallel calls
+  - End-to-end tool execution: a real subprocess runs and the model must
+    report a value only that execution could have produced
 
 """
 
@@ -20,7 +22,10 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
+import sys
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Generator
 
@@ -1034,3 +1039,269 @@ class TestToolCallingMultiTurn:
         assert result.content.strip()
         lower = result.content.lower()
         assert "tokyo" in lower or "paris" in lower
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tool execution
+# ---------------------------------------------------------------------------
+# Everything above tests the tool-calling *protocol*: that a well-formed
+# tool_calls object comes back, and that a hand-written `role: tool` message is
+# consumed. Nothing is executed -- the "tool result" is a literal the test
+# author typed, so a model that ignored the result entirely and produced a
+# plausible-looking answer would still pass.
+#
+# The tests below close that loop. A real subprocess runs, and the value it
+# returns is generated per run and never appears in any prompt. The model
+# cannot reach it by guessing, memorisation or reasoning; the only path from
+# the question to the answer runs through the tool actually executing.
+
+MAX_TOOL_TURNS = 6
+
+# These shell out deliberately. An in-process Python function would leave
+# "did anything outside the test actually run?" unanswered.
+_LOOKUP_CODE = (
+    "import os, sys; "
+    "print(os.environ['ACCESS_CODE'] if sys.argv[1].strip().lower() == 'alice' "
+    "else 'DENIED')"
+)
+_LOOKUP_ID = (
+    "import os, sys; "
+    "print(os.environ['USER_ID'] if sys.argv[1].strip().lower() == 'alice' "
+    "else 'UNKNOWN')"
+)
+_LOOKUP_QUOTA = (
+    "import os, sys; "
+    "print(os.environ['QUOTA'] if sys.argv[1].strip() == os.environ['USER_ID'] "
+    "else '-1')"
+)
+
+
+def run_tool_cli(script: str, arg: str, env_extra: dict[str, str]) -> str:
+    result = subprocess.run(
+        [sys.executable, "-c", script, arg],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, **env_extra},
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def run_tool_loop(
+    client: OpenAI,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    dispatch: dict[str, Any],
+    max_turns: int = MAX_TOOL_TURNS,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Drive a real tool-execution loop until the model answers with text.
+
+    Returns (final_text, calls), where `calls` records every tool the model
+    asked for and what that tool actually returned -- so a test can assert the
+    tool ran, not merely that the final answer looks right.
+    """
+    calls: list[dict[str, Any]] = []
+    convo = list(messages)
+    for _ in range(max_turns):
+        result = stream_chat(client, model, messages=convo, tools=tools)
+        if not result.tool_calls:
+            return (result.content or ""), calls
+
+        # Echo the assistant turn back, tool_calls included, or the model has
+        # no record of having asked.
+        convo.append(assistant_tool_message_from_result(result))
+        for tc in result.tool_calls:
+            name = tc["function"]["name"]
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as e:
+                raise AssertionError(
+                    f"model emitted unparseable arguments for {name}: "
+                    f"{tc['function']['arguments']!r}"
+                ) from e
+            assert name in dispatch, (
+                f"model called {name!r}, which was never offered. "
+                f"Offered: {sorted(dispatch)}"
+            )
+            output = dispatch[name](args)  # the tool really runs here
+            calls.append({"name": name, "args": args, "output": output})
+            convo.append(
+                {"role": "tool", "tool_call_id": tc["id"], "content": str(output)}
+            )
+
+    raise AssertionError(
+        f"model never produced a final text answer within {max_turns} turns; "
+        f"calls so far: {calls}"
+    )
+
+
+class TestToolExecutionE2E:
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
+    def test_model_call_executes_a_real_tool_and_uses_its_output(
+        self, client: OpenAI, model: str
+    ):
+        """The answer must contain a secret only the executed tool could supply.
+
+        The secret is generated per run and never appears in any prompt, so the
+        assertion cannot be satisfied by hallucination, memorisation or luck.
+        """
+        secret = uuid.uuid4().hex[:12]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup_access_code",
+                    "description": (
+                        "Look up the access code for a user. This is the only "
+                        "way to obtain an access code."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "user": {"type": "string", "description": "the username"}
+                        },
+                        "required": ["user"],
+                    },
+                },
+            }
+        ]
+
+        def lookup_access_code(args: dict[str, Any]) -> str:
+            return run_tool_cli(
+                _LOOKUP_CODE, str(args.get("user", "")), {"ACCESS_CODE": secret}
+            )
+
+        text, calls = run_tool_loop(
+            client,
+            model,
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "Look up the access code for user alice, then tell me "
+                        "the code exactly as returned."
+                    ),
+                }
+            ],
+            tools,
+            {"lookup_access_code": lookup_access_code},
+        )
+
+        assert calls, "the model never called the tool, so nothing was executed"
+        assert calls[0]["name"] == "lookup_access_code"
+        assert calls[0]["args"].get("user", "").strip().lower() == "alice", (
+            f"model passed an unusable argument: {calls[0]['args']!r} -- "
+            "schema-valid but wrong, which protocol-only tests cannot catch"
+        )
+        assert calls[0]["output"] == secret, (
+            f"tool returned {calls[0]['output']!r}, expected the generated "
+            "secret; the subprocess did not get the argument it should have"
+        )
+        assert secret in text, (
+            "final answer did not contain the executed tool's output.\n"
+            f"secret={secret!r}\nanswer={text[:400]!r}"
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason=(
+            "Qwen3-0.6B calls both tools in the correct order with schema-valid "
+            "arguments, but substitutes a hallucinated placeholder (observed: "
+            "'alice_user_id', '123456') for the id the first tool actually "
+            "returned. This is a model capability limit, not a frontend defect: "
+            "the protocol is handled correctly end to end. Kept as a capability "
+            "signal rather than relaxed, because relaxing the id assertion is "
+            "exactly what would make the test stop measuring anything. "
+            "strict=False so a stronger model XPASSes instead of breaking CI."
+        ),
+    )
+    def test_chained_tools_second_call_uses_first_calls_real_output(
+        self, client: OpenAI, model: str
+    ):
+        """Two real executions, the second satisfiable only via the first.
+
+        get_quota returns -1 unless handed the exact id get_user_id produced,
+        and both values are random per run. A correct final number therefore
+        proves the model threaded real output from one execution into the next.
+        """
+        user_id = f"U-{uuid.uuid4().hex[:8]}"
+        quota = str(uuid.uuid4().int % 9000 + 1000)  # 4 digits, unguessable
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_user_id",
+                    "description": "Resolve a username to its internal user id.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_quota",
+                    "description": (
+                        "Get the storage quota for an internal user id. "
+                        "Requires the id from get_user_id, not a username."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"user_id": {"type": "string"}},
+                        "required": ["user_id"],
+                    },
+                },
+            },
+        ]
+
+        dispatch = {
+            "get_user_id": lambda a: run_tool_cli(
+                _LOOKUP_ID, str(a.get("name", "")), {"USER_ID": user_id}
+            ),
+            "get_quota": lambda a: run_tool_cli(
+                _LOOKUP_QUOTA,
+                str(a.get("user_id", "")),
+                {"USER_ID": user_id, "QUOTA": quota},
+            ),
+        }
+
+        text, calls = run_tool_loop(
+            client,
+            model,
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "What is alice's storage quota? Look up her user id "
+                        "first, then use that id to get the quota. Report the "
+                        "number."
+                    ),
+                }
+            ],
+            tools,
+            dispatch,
+        )
+
+        names = [c["name"] for c in calls]
+        assert "get_user_id" in names, f"never resolved the id; calls={names}"
+        assert "get_quota" in names, f"never fetched the quota; calls={names}"
+        assert names.index("get_user_id") < names.index(
+            "get_quota"
+        ), f"called get_quota before get_user_id: {names}"
+
+        quota_call = calls[names.index("get_quota")]
+        assert quota_call["args"].get("user_id") == user_id, (
+            f"second call used {quota_call['args'].get('user_id')!r} instead of "
+            f"the id the first call actually returned ({user_id!r})"
+        )
+        assert (
+            quota_call["output"] == quota
+        ), f"get_quota returned {quota_call['output']!r} -- it was handed the wrong id"
+        assert quota in text, (
+            "final answer omitted the quota the tool actually returned.\n"
+            f"quota={quota!r}\nanswer={text[:400]!r}"
+        )
