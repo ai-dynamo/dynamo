@@ -76,19 +76,17 @@ kubectl run pvc-helper -n ${NAMESPACE} \
 kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp mooncake_agentic.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
 
-# The Job writes artifacts as UID 1000; a fresh PVC root is root-owned, so
-# create ROOT_ARTIFACT_DIR now or the Job exits before warmup.
+# Artifact root. The Job creates a per-run subdirectory here as UID 1000, so it
+# needs write access -- creating the directory alone is not enough.
 kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/perf
 kubectl exec -n ${NAMESPACE} pvc-helper -- chown 1000:1000 /model-cache/perf
 ```
 
 Keep `pvc-helper` for fetching artifacts, or delete it after staging.
 
-> [!NOTE]
-> `securityContext.fsGroup: 1000` would also work but is the wrong tool here: it
-> recursively chowns the *whole* volume at mount, and this PVC holds the ~600 GB
-> checkpoint. `fsGroupChangePolicy: OnRootMismatch` does not avoid that, because
-> the volume root is exactly what mismatches.
+UID 1000 is the `aiperf:0.11.0` runtime user. If your storage backend ignores
+POSIX ownership, make the directory writable by that user another way; the Job
+exits at `mkdir` with `Permission denied` if it cannot write there.
 
 ### 3. Run the benchmark
 
