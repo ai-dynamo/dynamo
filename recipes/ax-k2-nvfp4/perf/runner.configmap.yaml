@@ -14,7 +14,8 @@ data:
     benchmark:
       model: skt/A.X-K2-NVFP4
       tokenizer:
-        name: /tmp/axk2-tokenizer
+        name: skt/A.X-K2-NVFP4
+        revision: 9e2e804e80f8d1b3afba5d7938173cec1ed46b49
         trustRemoteCode: false
       endpoint:
         url: http://${ENDPOINT}/v1/chat/completions
@@ -48,7 +49,8 @@ data:
     benchmark:
       model: skt/A.X-K2-NVFP4
       tokenizer:
-        name: /tmp/axk2-tokenizer
+        name: skt/A.X-K2-NVFP4
+        revision: 9e2e804e80f8d1b3afba5d7938173cec1ed46b49
         trustRemoteCode: false
       endpoint:
         url: http://${ENDPOINT}/v1/chat/completions
@@ -135,12 +137,15 @@ data:
 
     python3 - <<'PY'
     import os
+    import shutil
+    from pathlib import Path
     from huggingface_hub import snapshot_download
 
+    tokenizer_files = Path("/tmp/axk2-tokenizer-files")
     snapshot_download(
         repo_id=os.environ["MODEL"],
         revision=os.environ["MODEL_REVISION"],
-        local_dir="/tmp/axk2-tokenizer",
+        local_dir=tokenizer_files,
         allow_patterns=[
             "tokenizer.json",
             "tokenizer_config.json",
@@ -148,22 +153,48 @@ data:
             "chat_template.jinja",
         ],
     )
+
+    tokenizer_snapshot = (
+        Path("/tmp/axk2-tokenizer-hf/hub")
+        / "models--skt--A.X-K2-NVFP4"
+        / "snapshots"
+        / os.environ["MODEL_REVISION"]
+    )
+    tokenizer_snapshot.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+    ):
+        shutil.copy2(tokenizer_files / name, tokenizer_snapshot / name)
     PY
 
+    export HF_HOME=/tmp/axk2-tokenizer-hf
+    export HF_HUB_CACHE=/tmp/axk2-tokenizer-hf/hub
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+
     python3 - <<'PY'
+    import os
     from aiperf.common.tokenizer import Tokenizer
 
     tokenizer = Tokenizer.from_pretrained(
-        "/tmp/axk2-tokenizer",
+        os.environ["MODEL"],
         trust_remote_code=False,
-        revision="main",
+        revision=os.environ["MODEL_REVISION"],
         resolve_alias=False,
     )
     if tokenizer._tokenizer.vocab_size != 163840:
         raise SystemExit(
             f"TOKENIZER_VOCAB_MISMATCH actual={tokenizer._tokenizer.vocab_size}"
         )
-    print("TOKENIZER_OK path=/tmp/axk2-tokenizer vocab_size=163840")
+    print(
+        "TOKENIZER_OK "
+        f"repo={os.environ['MODEL']} "
+        f"revision={os.environ['MODEL_REVISION']} "
+        "vocab_size=163840"
+    )
     PY
 
     AIPERF_VERSION="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("aiperf"))')"
