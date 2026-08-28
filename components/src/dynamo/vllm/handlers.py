@@ -119,6 +119,10 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+# Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
+# that endpoint, so an unbounded wait on a degraded GCS would pile up control
+# requests; a capacity read is advisory and stale-or-absent beats slow.
+_EP_CAPACITY_RAY_TIMEOUT_S = 5.0
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
@@ -1556,7 +1560,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         prefill-context parallelism, so tensor_parallel_size is the full rank world
         size here). Top-level ``available_gpus`` is the cluster-wide total and can be
         fragmented across nodes -- it is reported for observability, not as a
-        placement predicate.
+        placement predicate. The per-node entries are deliberately anonymous: how many
+        GPUs are free where is a capacity question, but *which* host they sit on is a
+        cluster-topology detail this endpoint has no reason to publish.
 
         ``data_parallel_size`` is the live size, not the launch-time one: vLLM's
         AsyncLLM.scale_elastic_ep writes the new size back onto this same
@@ -1609,7 +1615,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             result["message"] = f"GPU capacity query failed: {e}"
             return result
 
-        try:
+        def _snapshot() -> dict:
+            """Take all three GCS readings. Runs off the event loop -- see below."""
             idle_by_node_id = available_resources_per_node()
             total_gpus = 0.0
             nodes = []
@@ -1623,16 +1630,39 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 node_idle = idle_by_node_id.get(node.get("NodeID"), {})
                 nodes.append(
                     {
-                        "node_ip": node.get("NodeManagerAddress"),
                         "total_gpus": node_gpus,
                         "available_gpus": float(node_idle.get("GPU", 0.0)),
                     }
                 )
             available_gpus = float(ray.available_resources().get("GPU", 0.0))
-            result["total_gpus"] = total_gpus
-            result["available_gpus"] = available_gpus
-            result["used_gpus"] = total_gpus - available_gpus
-            result["nodes"] = nodes
+            return {
+                "total_gpus": total_gpus,
+                "available_gpus": available_gpus,
+                "used_gpus": total_gpus - available_gpus,
+                "nodes": nodes,
+            }
+
+        # ray.nodes(), available_resources_per_node() and ray.available_resources()
+        # are blocking gRPC round-trips to the Ray GCS. Running them inline would
+        # park this worker's event loop for the duration, stalling token generation
+        # and every other control route -- and the reconciler polls this endpoint, so
+        # a degraded GCS would do it repeatedly. Off-load to a thread and bound the
+        # wait. Note the timeout frees the caller, not the thread: asyncio cannot
+        # interrupt a blocking C call, so the orphan finishes on its own in the
+        # default executor.
+        try:
+            snapshot = await asyncio.wait_for(
+                asyncio.to_thread(_snapshot), timeout=_EP_CAPACITY_RAY_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ElasticEP] capacity query timed out after %ss",
+                _EP_CAPACITY_RAY_TIMEOUT_S,
+            )
+            msg = f"GPU capacity query timed out after {_EP_CAPACITY_RAY_TIMEOUT_S}s"
+            result["status"] = "error"
+            result["message"] = msg
+            return result
         except RayError as e:
             # A degraded Ray cluster is the one failure this endpoint can report in
             # band -- dp/tp are already populated and still useful to the caller.
@@ -1640,6 +1670,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.warning("[ElasticEP] capacity query failed: %s", e)
             result["status"] = "error"
             result["message"] = f"GPU capacity query failed: {e}"
+            return result
+
+        result.update(snapshot)
         return result
 
     async def wake_up(self, body: dict) -> dict:

@@ -10,10 +10,13 @@ and the ``ray`` package is stubbed in ``sys.modules``.
 
 import asyncio
 import sys
+import threading
+import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from dynamo.vllm import handlers as vllm_handlers
 from dynamo.vllm.handlers import BaseWorkerHandler
 
 pytestmark = [
@@ -32,32 +35,52 @@ class _StubRayError(Exception):
     """Stands in for ray.exceptions.RayError, the only failure handled in band."""
 
 
-def _install_ray_stub(monkeypatch, nodes=(), idle_by_node_id=None, raises=None):
+def _install_ray_stub(
+    monkeypatch,
+    nodes=(),
+    idle_by_node_id=None,
+    raises=None,
+    delay=0.0,
+    thread_log=None,
+):
     """Register a fake ``ray`` package tree covering everything the handler imports.
 
-    ``raises``, when set to an exception instance, is raised by every query so a test
-    can prove either that a path never touches Ray or how a failure is reported.
+    ``raises``   -- exception instance raised by every query, so a test can prove a
+                    path never touches Ray, or assert how a failure is reported.
+    ``delay``    -- seconds each query blocks for, to model a slow GCS.
+    ``thread_log`` -- list that each query appends its thread ident to.
     """
+    idle = dict(idle_by_node_id or {})
+
+    def _enter():
+        if thread_log is not None:
+            thread_log.append(threading.get_ident())
+        if delay:
+            time.sleep(delay)
+        if raises is not None:
+            raise raises
+
+    def _nodes():
+        _enter()
+        return list(nodes)
+
+    def _available_resources():
+        _enter()
+        return {"GPU": sum(r.get("GPU", 0.0) for r in idle.values())}
+
+    def _available_resources_per_node():
+        _enter()
+        return dict(idle)
+
     ray_mod = ModuleType("ray")
     private_mod = ModuleType("ray._private")
     state_mod = ModuleType("ray._private.state")
     exceptions_mod = ModuleType("ray.exceptions")
+
     exceptions_mod.RayError = _StubRayError
-
-    if raises is not None:
-
-        def _boom(*_a, **_k):
-            raise raises
-
-        ray_mod.nodes = _boom
-        ray_mod.available_resources = _boom
-        state_mod.available_resources_per_node = _boom
-    else:
-        ray_mod.nodes = lambda: list(nodes)
-        ray_mod.available_resources = lambda: {
-            "GPU": sum(r.get("GPU", 0.0) for r in (idle_by_node_id or {}).values())
-        }
-        state_mod.available_resources_per_node = lambda: dict(idle_by_node_id or {})
+    ray_mod.nodes = _nodes
+    ray_mod.available_resources = _available_resources
+    state_mod.available_resources_per_node = _available_resources_per_node
 
     private_mod.state = state_mod
     ray_mod._private = private_mod
@@ -117,9 +140,10 @@ def test_ray_backend_reports_per_node_gpu_capacity(monkeypatch):
     assert r["data_parallel_external_lb"] is False
     assert r["total_gpus"] == 16.0  # 2 alive x 8 GPUs; dead node excluded
     assert r["used_gpus"] == 16.0 - r["available_gpus"]
-    assert [n["node_ip"] for n in r["nodes"]] == ["10.0.0.1", "10.0.0.2"]
     assert [n["available_gpus"] for n in r["nodes"]] == [4.0, 2.0]
-    # The point of the per-node numbers: only node 1 can take another tp=4 rank,
+    # Capacity only -- node identity is not part of this payload.
+    assert all(set(n) == {"total_gpus", "available_gpus"} for n in r["nodes"])
+    # The point of the per-node numbers: only one node can take another tp=4 rank,
     # even though the cluster-wide idle count would suggest room for more.
     placeable = sum(int(n["available_gpus"]) // 4 for n in r["nodes"])
     assert placeable == 1
@@ -133,10 +157,80 @@ def test_fully_consumed_node_reports_zero_available(monkeypatch):
     r = _run(_make_self(dp=2, tp=1, backend="ray"))
 
     assert r["status"] == "ok"
-    assert r["nodes"] == [
-        {"node_ip": "10.0.0.1", "total_gpus": 2.0, "available_gpus": 0.0}
-    ]
+    assert r["nodes"] == [{"total_gpus": 2.0, "available_gpus": 0.0}]
     assert r["used_gpus"] == 2.0
+
+
+def test_ray_queries_run_off_the_event_loop(monkeypatch):
+    """A slow GCS must not stall the worker: the queries belong in a thread.
+
+    The reconciler polls this endpoint, so blocking the loop here would stall token
+    generation and every other control route on this worker.
+    """
+    nodes = [_node("n1", "10.0.0.1", 4.0)]
+    call_threads: list[int] = []
+    _install_ray_stub(
+        monkeypatch,
+        nodes=nodes,
+        idle_by_node_id={"n1": {"GPU": 4.0}},
+        delay=0.1,
+        thread_log=call_threads,
+    )
+
+    async def _drive():
+        ticks = 0
+
+        async def _ticker():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.005)
+
+        task = asyncio.create_task(_ticker())
+        await asyncio.sleep(0)  # let the ticker reach its first await
+        res = await BaseWorkerHandler.get_ep_capacity(_make_self(backend="ray"), {})
+        task.cancel()
+        return res, ticks
+
+    r, ticks = asyncio.run(_drive())
+
+    assert r["status"] == "ok"
+    # Three blocking calls at 0.1s each; the loop stayed free to run the ticker.
+    assert ticks > 5, f"event loop appears blocked (only {ticks} ticks)"
+    assert call_threads, "ray was never queried"
+    loop_thread = threading.get_ident()
+    assert all(t != loop_thread for t in call_threads)
+
+
+def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
+    monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.05)
+    _install_ray_stub(
+        monkeypatch,
+        nodes=[_node("n1", "10.0.0.1", 4.0)],
+        idle_by_node_id={"n1": {"GPU": 4.0}},
+        delay=0.2,
+    )
+
+    async def _timed():
+        started = time.monotonic()
+        res = await BaseWorkerHandler.get_ep_capacity(
+            _make_self(dp=3, tp=2, backend="ray"), {}
+        )
+        return res, time.monotonic() - started
+
+    r, elapsed = asyncio.run(_timed())
+
+    assert r["status"] == "error"
+    assert "timed out" in r["message"].lower()
+    # The caller is released at the timeout instead of waiting out the GCS stall.
+    # Timed around the await, not around asyncio.run: the timeout frees the caller,
+    # not the thread, so loop shutdown still joins the orphaned executor thread.
+    assert elapsed < 0.15, f"caller waited {elapsed:.2f}s, expected to bail at 0.05s"
+    # dp/tp still reported even though the GPU query timed out.
+    assert r["data_parallel_size"] == 3
+    assert r["tensor_parallel_size"] == 2
+    assert r["total_gpus"] is None
+    assert r["nodes"] is None
 
 
 def test_mp_backend_is_reported_and_skips_ray(monkeypatch):
