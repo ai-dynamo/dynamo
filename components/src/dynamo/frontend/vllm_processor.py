@@ -39,11 +39,13 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -667,9 +669,26 @@ class VllmProcessor:
             sampling_params.logprobs = top_logprobs
         # TODO: Support logprobs in the distributed vLLM chat processor by
         # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
+        #
+        # Until then, REJECT rather than warn-and-continue. Proceeding emits a
+        # response whose logprobs structure is empty, which the HTTP layer cannot
+        # deserialize ("invalid length 0, expected struct ChatChoiceLogprobs with
+        # 2 elements") -- so the client saw a 500 for a request the server simply
+        # does not implement, with no usable explanation.
+        #
+        # 400, NOT the 501 this API uses for other unimplemented fields
+        # (`previous_response_id`, `background`, `prompt`). Those are raised inside
+        # the Rust HTTP service; a status asserted by a Python engine is triaged by
+        # SanitizedError::for_backend_status (lib/llm/src/http/service/error.rs),
+        # where only 4xx is forwarded verbatim -- a 5xx has its body replaced with
+        # the generic internal-error message, so a 501 here reaches the client as an
+        # opaque 500 and the reason is lost. Verified live: 501 -> "Internal server
+        # error" with backend_status=501 buried in the log.
         if sampling_params.logprobs is not None:
-            logger.warning(
-                "Logprobs requested but not supported in distributed inference mode"
+            raise HttpError(
+                400,
+                "Validation: `logprobs` and `top_logprobs` are not supported by the "
+                "vLLM chat processor (--dyn-chat-processor vllm).",
             )
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
@@ -1053,6 +1072,18 @@ class VllmProcessor:
             # below is reserved for genuine internal failures.
             raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))
         finally:
