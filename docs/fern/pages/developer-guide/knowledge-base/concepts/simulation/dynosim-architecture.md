@@ -53,6 +53,10 @@ Mooncake-compatible formats carry request timing, token lengths, prefix hashes, 
 or dependency fields. Dynamo request traces are loaded directly from one or more JSONL or JSONL.GZ
 shards. The loader maps Dynamo's sequence-aware hashes to compact replay IDs without writing an
 intermediate Mooncake file and validates that every shard uses the same embedded trace block size.
+When a request trace includes optional completion-sequence hashes, the loader also reconstructs
+privacy-safe synthetic output tokens. A later request containing that exact generated continuation
+therefore reuses the same simulated cache blocks. Older traces without completion hashes retain the
+historical deterministic synthetic-output behavior.
 
 Context-free Dynamo records become independent requests. When every request contains
 `agent_context`, the loader reconstructs session dependencies and tool waits. It rejects mixed traces

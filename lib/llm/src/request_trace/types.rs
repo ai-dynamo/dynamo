@@ -123,6 +123,12 @@ pub struct RequestReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
+    /// Sequence-aware hashes for the full input plus generated output at request completion.
+    ///
+    /// Older traces omit this field. Replay then retains its historical deterministic
+    /// synthetic-output behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_sequence_hashes: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -338,6 +344,7 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 4,
                     input_sequence_hashes: vec![11, 22],
+                    completion_sequence_hashes: None,
                 }),
                 finish_reason_metadata: None,
             }),

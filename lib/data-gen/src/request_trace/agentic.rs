@@ -10,6 +10,7 @@ use crate::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
+use super::mooncake::replay_hash_ids_and_output_tokens;
 
 /// Streams agentic Mooncake-compatible rows into the replay builder.
 ///
@@ -261,14 +262,20 @@ where
     }
 
     let mut mapper = RollingHashIdMapper::new(trace_block_size);
+    for request in &loaded.requests {
+        mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
+    }
     for (idx, request) in loaded.requests.iter().enumerate() {
-        let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
         let output_length = request.request.output_tokens.ok_or_else(|| {
             anyhow!(
                 "request {} is missing output length",
                 request.request.request_id
             )
         })?;
+        let output_length =
+            usize::try_from(output_length).context("output length does not fit in usize")?;
+        let (hash_ids, output_token_ids) =
+            replay_hash_ids_and_output_tokens(&mut mapper, &request.replay, output_length)?;
         let session_id = session_id_for(request);
         let dep_end_ms = wait_for[idx]
             .iter()
@@ -311,10 +318,8 @@ where
                 request_id: request.request.request_id.clone(),
                 session_id: Some(session_id.clone()),
                 input_length: Some(request.replay.input_length),
-                output_length: Some(
-                    usize::try_from(output_length)
-                        .context("output length does not fit in usize")?,
-                ),
+                output_length: Some(output_length),
+                output_token_ids,
                 hash_ids: Some(hash_ids),
                 request_kind: Some(
                     if background_sessions.contains(&session_id) {
@@ -517,6 +522,7 @@ mod tests {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
+                completion_sequence_hashes: None,
             },
         }
     }

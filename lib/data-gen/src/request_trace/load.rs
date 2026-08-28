@@ -125,6 +125,8 @@ pub(crate) struct RequestTraceReplayMetrics {
     pub(crate) trace_block_size: usize,
     pub(crate) input_length: usize,
     pub(crate) input_sequence_hashes: Vec<u64>,
+    #[serde(default)]
+    pub(crate) completion_sequence_hashes: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -395,6 +397,30 @@ fn request_entry(record: RequestTraceRecord) -> Result<RequestEntry> {
     }
     if request.output_tokens.is_none() {
         bail!("request trace is missing output_tokens");
+    }
+    if let Some(completion_hashes) = replay.completion_sequence_hashes.as_ref() {
+        let output_tokens = usize::try_from(request.output_tokens.unwrap_or_default())
+            .context("output_tokens does not fit in usize")?;
+        let completion_length = replay
+            .input_length
+            .checked_add(output_tokens)
+            .context("request replay completion length overflow")?;
+        let expected_completion_hashes = completion_length.div_ceil(replay.trace_block_size);
+        if completion_hashes.len() != expected_completion_hashes {
+            bail!(
+                "completion length {} with trace_block_size {} requires exactly {} replay hashes, got {}",
+                completion_length,
+                replay.trace_block_size,
+                expected_completion_hashes,
+                completion_hashes.len()
+            );
+        }
+        let full_input_blocks = replay.input_length / replay.trace_block_size;
+        if completion_hashes[..full_input_blocks]
+            != replay.input_sequence_hashes[..full_input_blocks]
+        {
+            bail!("completion replay hashes do not preserve the full input-block prefix");
+        }
     }
 
     let (start_ms, end_ms) = request_times(record.event_time_unix_ms, &request);

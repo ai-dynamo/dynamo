@@ -6410,8 +6410,18 @@ impl
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
-        // Extract context once
+        // Extract context before wrapping the stream.
         let context = response_stream.context();
+        let trace_output_token_ids = crate::request_trace::output_token_ids_handle(&trace_state);
+        let response_stream = response_stream.map(move |response| {
+            if let Some(output) = response.data.as_ref() {
+                crate::request_trace::record_output_token_ids(
+                    trace_output_token_ids.as_ref(),
+                    &output.token_ids,
+                );
+            }
+            response
+        });
 
         // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream_with_image_tokens(
@@ -6600,9 +6610,18 @@ impl
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
-
-        // Extract context once
+        // Extract context before wrapping the stream.
         let context = response_stream.context();
+        let trace_output_token_ids = crate::request_trace::output_token_ids_handle(&trace_state);
+        let response_stream = response_stream.map(move |response| {
+            if let Some(output) = response.data.as_ref() {
+                crate::request_trace::record_output_token_ids(
+                    trace_output_token_ids.as_ref(),
+                    &output.token_ids,
+                );
+            }
+            response
+        });
 
         // transform the postprocessor stream. Legacy `/v1/completions` is
         // text-only, so multimodal counts are always zero here.

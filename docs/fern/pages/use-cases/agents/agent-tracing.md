@@ -170,6 +170,11 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
       "input_sequence_hashes": [
         14879255164371896291,
         274632075616497421
+      ],
+      "completion_sequence_hashes": [
+        14879255164371896291,
+        274632075616497421,
+        1380959123701298937
       ]
     }
   }
@@ -177,6 +182,11 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 ```
 
 </details>
+
+`completion_sequence_hashes` is optional and contains sequence-aware hashes for the input plus the
+exact generated tokens observed when the request ends. It lets replay reproduce cache reuse when a
+later turn includes the generated answer, without recording the answer or its token IDs. Traces from
+older Dynamo versions omit the field and keep the historical synthetic-output behavior.
 
 ### Compaction Metadata
 

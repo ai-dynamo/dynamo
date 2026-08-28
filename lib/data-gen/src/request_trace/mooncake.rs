@@ -6,6 +6,37 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::load::RequestEntry;
 
+pub(crate) fn replay_hash_ids_and_output_tokens(
+    mapper: &mut RollingHashIdMapper,
+    replay: &super::load::RequestTraceReplayMetrics,
+    output_length: usize,
+) -> Result<(Vec<u64>, Option<Vec<u32>>)> {
+    let mut input_hash_ids = mapper.ids_for_sequence_hashes(&replay.input_sequence_hashes);
+    let Some(completion_sequence_hashes) = replay.completion_sequence_hashes.as_ref() else {
+        return Ok((input_hash_ids, None));
+    };
+
+    let completion_hash_ids = mapper.ids_for_sequence_hashes(completion_sequence_hashes);
+    let partial_input_block = !replay.input_length.is_multiple_of(replay.trace_block_size);
+    let first_output_block = replay.input_length / replay.trace_block_size;
+    if partial_input_block && output_length > 0 {
+        input_hash_ids[first_output_block] = completion_hash_ids[first_output_block];
+    }
+
+    let output_token_ids = (0..output_length)
+        .map(|offset| {
+            let sequence_position = replay
+                .input_length
+                .checked_add(offset)
+                .context("request replay output position overflow")?;
+            let block_index = sequence_position / replay.trace_block_size;
+            u32::try_from(completion_hash_ids[block_index])
+                .context("request replay hash ID does not fit in u32")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((input_hash_ids, Some(output_token_ids)))
+}
+
 /// Streams each request through a Mooncake-compatible row into the replay builder.
 ///
 /// This is an in-memory compatibility layer; it does not write a Mooncake trace.
@@ -38,23 +69,30 @@ where
     });
 
     let mut mapper = RollingHashIdMapper::new(trace_block_size);
+    // Seed only authored input hashes first. The downstream Mooncake interner
+    // sees these rows in the same order, so the compact IDs remain stable when
+    // completion hashes are lowered into synthetic output token IDs.
+    for request in &requests {
+        mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
+    }
     for request in requests {
-        let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
         let output_length = request.request.output_tokens.ok_or_else(|| {
             anyhow!(
                 "request {} is missing output length",
                 request.request.request_id
             )
         })?;
+        let output_length =
+            usize::try_from(output_length).context("output length does not fit in usize")?;
+        let (hash_ids, output_token_ids) =
+            replay_hash_ids_and_output_tokens(&mut mapper, &request.replay, output_length)?;
         emit(
             trace_block_size,
             MooncakeRow {
                 session_id: None,
                 input_length: Some(request.replay.input_length),
-                output_length: Some(
-                    usize::try_from(output_length)
-                        .context("output length does not fit in usize")?,
-                ),
+                output_length: Some(output_length),
+                output_token_ids,
                 hash_ids: Some(hash_ids),
                 timestamp: Some((request.start_ms - global_start_ms) as f64),
                 delay: None,
@@ -94,6 +132,7 @@ mod tests {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
+                completion_sequence_hashes: None,
             },
         }
     }
@@ -123,5 +162,79 @@ mod tests {
             entries[0].hash_ids.as_ref().unwrap()[0],
             entries[2].hash_ids.as_ref().unwrap()[0]
         );
+    }
+
+    #[test]
+    fn lowering_makes_an_exact_generated_continuation_reusable() {
+        let mut first = request("req-parent", 1_000, 1_100, vec![11]);
+        first.request.output_tokens = Some(2);
+        first.replay.completion_sequence_hashes = Some(vec![11, 22]);
+
+        let mut second = request("req-child", 1_200, 1_300, vec![11, 22]);
+        second.request.output_tokens = Some(1);
+        second.replay.completion_sequence_hashes = Some(vec![11, 22, 33]);
+
+        let mut rows = Vec::new();
+        lower_mooncake_rows(vec![first, second], |_, row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+
+        let parent_prompt = rows[0]
+            .hash_ids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|hash_id| [*hash_id as u32; 2])
+            .collect::<Vec<_>>();
+        let mut completed_parent = parent_prompt;
+        completed_parent.extend(rows[0].output_token_ids.as_ref().unwrap());
+        let child_prompt = rows[1]
+            .hash_ids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|hash_id| [*hash_id as u32; 2])
+            .collect::<Vec<_>>();
+
+        assert_eq!(completed_parent, child_prompt);
+    }
+
+    #[test]
+    fn lowering_completes_a_partial_input_block_with_generated_tokens() {
+        let mut first = request("req-parent", 1_000, 1_100, vec![11, 12]);
+        first.replay.input_length = 3;
+        first.request.output_tokens = Some(1);
+        first.replay.completion_sequence_hashes = Some(vec![11, 22]);
+
+        let mut second = request("req-child", 1_200, 1_300, vec![11, 22]);
+        second.request.output_tokens = Some(1);
+        second.replay.completion_sequence_hashes = Some(vec![11, 22, 33]);
+
+        let mut rows = Vec::new();
+        lower_mooncake_rows(vec![first, second], |_, row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+
+        let parent_hash_ids = rows[0].hash_ids.as_ref().unwrap();
+        let parent_output_ids = rows[0].output_token_ids.as_ref().unwrap();
+        let child_hash_ids = rows[1].hash_ids.as_ref().unwrap();
+        assert_eq!(parent_hash_ids[1], child_hash_ids[1]);
+        assert_eq!(u64::from(parent_output_ids[0]), child_hash_ids[1]);
+    }
+
+    #[test]
+    fn lowering_preserves_legacy_synthetic_output_behavior() {
+        let mut rows = Vec::new();
+        lower_mooncake_rows(vec![request("legacy", 1_000, 1_100, vec![11])], |_, row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(rows[0].output_token_ids.is_none());
     }
 }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
+use parking_lot::Mutex;
 
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
@@ -20,7 +21,11 @@ use crate::request_trace::{
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
     replay_metrics: Arc<RequestReplayMetrics>,
+    input_token_ids: Arc<[crate::protocols::TokenIdType]>,
+    output_token_ids: SharedOutputTokenIds,
 }
+
+type SharedOutputTokenIds = Arc<Mutex<Vec<crate::protocols::TokenIdType>>>;
 
 pub(crate) struct RequestEndTraceState {
     agent: Option<AgentContextTraceState>,
@@ -120,9 +125,47 @@ fn build_request_end_trace_state_for_policy(
     let request = RequestTraceRequestEndState {
         request_tracker,
         replay_metrics,
+        input_token_ids: Arc::from(common_request.token_ids.clone()),
+        output_token_ids: SharedOutputTokenIds::default(),
     };
 
     Some(RequestEndTraceState { agent, request })
+}
+
+pub(crate) fn output_token_ids_handle(
+    trace_state: &Option<RequestEndTraceState>,
+) -> Option<SharedOutputTokenIds> {
+    trace_state
+        .as_ref()
+        .map(|state| Arc::clone(&state.request.output_token_ids))
+}
+
+pub(crate) fn record_output_token_ids(
+    output_token_ids: Option<&SharedOutputTokenIds>,
+    chunk_token_ids: &[crate::protocols::TokenIdType],
+) {
+    let Some(output_token_ids) = output_token_ids else {
+        return;
+    };
+    output_token_ids.lock().extend_from_slice(chunk_token_ids);
+}
+
+fn completed_replay_metrics(state: RequestTraceRequestEndState) -> RequestReplayMetrics {
+    let mut replay = super::into_owned_replay_metrics(state.replay_metrics);
+    let output_token_ids = state.output_token_ids.lock();
+    let mut completed_token_ids = Vec::with_capacity(
+        state
+            .input_token_ids
+            .len()
+            .saturating_add(output_token_ids.len()),
+    );
+    completed_token_ids.extend_from_slice(&state.input_token_ids);
+    completed_token_ids.extend_from_slice(&output_token_ids);
+    replay.completion_sequence_hashes = Some(super::replay::input_sequence_hashes(
+        &completed_token_ids,
+        replay.trace_block_size,
+    ));
+    replay
 }
 
 pub(crate) fn finish_reason_metadata_handle(
@@ -153,15 +196,14 @@ where
         if let Some(agent_state) = trace_state.agent {
             let (agent_context, mut metrics) =
                 super::request_metrics_from_agent_state(agent_state, request_id.clone());
-            metrics.replay = Some(super::into_owned_replay_metrics(
-                request_state.replay_metrics,
-            ));
+            metrics.replay = Some(completed_replay_metrics(request_state));
             super::record::emit_agent_request_end(agent_context, metrics);
         } else {
+            let tracker = Arc::clone(&request_state.request_tracker);
             super::record::emit_request_end(
                 request_id.clone(),
-                &request_state.request_tracker,
-                super::into_owned_replay_metrics(request_state.replay_metrics),
+                &tracker,
+                completed_replay_metrics(request_state),
             );
         }
     });
@@ -326,7 +368,10 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 2,
                     input_sequence_hashes: vec![11],
+                    completion_sequence_hashes: None,
                 }),
+                input_token_ids: Arc::from(vec![1_u32, 2]),
+                output_token_ids: SharedOutputTokenIds::default(),
             },
         };
         let stream = TrackerDropStream {
@@ -355,6 +400,31 @@ mod tests {
         let request = record.request.as_ref().expect("request payload");
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(request.output_tokens, Some(9));
+    }
+
+    #[test]
+    fn completion_hashes_include_captured_generated_tokens() {
+        let input_token_ids = vec![10_u32, 11, 12];
+        let replay_metrics = shared_replay_metrics(&input_token_ids, 2).unwrap();
+        let output_token_ids = SharedOutputTokenIds::default();
+        record_output_token_ids(Some(&output_token_ids), &[20, 21]);
+        record_output_token_ids(Some(&output_token_ids), &[22]);
+        let state = RequestTraceRequestEndState {
+            request_tracker: Arc::new(RequestTracker::new()),
+            replay_metrics,
+            input_token_ids: Arc::from(input_token_ids.clone()),
+            output_token_ids,
+        };
+
+        let completed = completed_replay_metrics(state);
+        let expected = input_token_ids
+            .into_iter()
+            .chain([20, 21, 22])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completed.completion_sequence_hashes,
+            Some(super::super::replay::input_sequence_hashes(&expected, 2))
+        );
     }
 
     #[tokio::test]

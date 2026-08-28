@@ -2383,6 +2383,55 @@ mod tests {
     }
 
     #[test]
+    fn exact_generated_continuation_is_reused_after_parent_completes() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "session_1".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 8,
+                        output_token_ids: Some(vec![2; 4].into_iter().chain(vec![3; 4]).collect()),
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 12,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2, 3],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                ],
+            }],
+        };
+
+        let report = simulate_loaded_trace_live_with_router_mode_and_options(
+            MockEngineArgs {
+                enable_prefix_caching: true,
+                ..replay_test_args()
+            },
+            None,
+            None,
+            trace,
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        let parent = &report.per_request[0];
+        let child = &report.per_request[1];
+        assert!(child.first_admit_ms.unwrap() >= parent.terminal_time_ms);
+        assert_eq!(child.reused_input_tokens, 8);
+    }
+
+    #[test]
     fn loaded_dynamo_disagg_trace_validates_timestamps() {
         let error = simulate_loaded_trace_disagg_with_router_mode_and_options(
             disagg_test_config(),
