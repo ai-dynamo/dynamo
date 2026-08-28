@@ -24,44 +24,55 @@ Dynamo also connects to a growing RL framework ecosystem. [NeMo RL](https://gith
 | A colocated framework already owns policy transfer | Use Dynamo for generation and routing while keeping the proven framework update path. |
 | An external rollout fleet needs discovery and direct control | Integrate Dynamo's request, discovery, and worker-administration surfaces explicitly. |
 
-Before adopting Dynamo, name the bottleneck and the metric that would justify the change. Endpoint connectivity alone does not justify another serving layer.
+Start with a specific bottleneck and a baseline metric. Measure cache reuse, worker imbalance, policy-refresh time, or time to diagnose a failure before adding Dynamo.
 
-## Understand the Ownership Boundary
+## Who Owns What
 
-| Responsibility | RL framework | Dynamo | Inference backend |
-|---|---|---|---|
-| Training, rewards, checkpoints, and sample acceptance | Owns | — | — |
-| Rollout requests, retries, and policy freshness | Owns | Transports and reports failures | Executes accepted requests |
-| Shared frontend, routing, and request-plane health | Integrates | Owns | Publishes worker state |
-| Token IDs, log probabilities, and backend metadata | Verifies | Transports where supported | Produces |
-| Policy refresh and fleet-wide update barrier | Orchestrates | Exposes control surfaces | Applies the update |
+<CardGroup cols={2}>
+  <Card title="RL framework" icon="regular terminal">
+    Owns training, rewards, environments, retries, policy freshness, checkpoints, and sample acceptance.
+  </Card>
+  <Card title="Dynamo" icon="regular sliders">
+    Owns the shared frontend, request routing, worker management, serving health, and telemetry.
+  </Card>
+  <Card title="Inference backend" icon="regular microchip">
+    Generates tokens and log probabilities, publishes worker state, and applies backend-specific weight updates.
+  </Card>
+  <Card title="Policy refresh" icon="regular database">
+    The framework selects and gates the policy, Dynamo exposes serving controls and health, and the backend applies the update.
+  </Card>
+</CardGroup>
 
 > [!IMPORTANT]
 > Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
 
-## Choose a Framework
+## Framework Integrations
 
 | Framework | Status | Start here |
 |---|---|---|
-| verl | Experimental | [Integrate with verl](verl.md) for the public colocated Dynamo/vLLM recipe. |
-| NeMo RL | Experimental | [Integrate with NeMo RL](nemo-rl.md) for the managed Slurm/Ray Dynamo backend. |
+| verl | Experimental | [verl Integration](verl.md) for the public colocated Dynamo/vLLM recipe. |
+| NeMo RL | Experimental | [NeMo RL Integration](nemo-rl.md) for the managed Slurm/Ray Dynamo backend. |
 | SLIME | Integration in progress | Review the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
-| Prime-RL | Integration in progress | Review the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
+| Prime-RL | Routing available; integration in progress | See [Prime-RL's routing overview](https://www.primeintellect.ai/blog/rl-at-1t-scale) and the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
 
 Experimental guides have runnable upstream artifacts but do not make a general compatibility promise. Integrations in progress remain in the compatibility table until a maintained path lands.
-
-## Choose Your Task
-
-| Goal | Guide |
-|---|---|
-| Implement or review a framework adapter | [RL Integration Reference](integration-reference.md) |
-| Improve cache reuse or worker balance | [Route RL Rollouts](routing.md) |
-| Refresh rollout workers after training | [Update Rollout Weights](weight-updates.md) |
-| Diagnose a live run or reproduce its serving workload | [Observe and Simulate RL Rollouts](operations-and-simulation.md) |
 
 > [!NOTE]
 > Kubernetes is optional for these RL integrations. Use it only when the selected framework or deployment environment requires it.
 
-## Next Step
+## Next Steps
 
-Start with the guide for your framework. If you are building a new integration, begin with the [RL Integration Reference](integration-reference.md) and preserve the framework's existing token, retry, and policy-update contracts before changing its serving path.
+<CardGroup cols={2}>
+  <Card title="Enable KV-Aware Load Balancing" icon="regular sliders" href="routing.md">
+    Route repeated rollout prefixes to cache-rich workers while accounting for live load and queue pressure.
+  </Card>
+  <Card title="Distribute and Update Rollout Weights" icon="regular database" href="weight-updates.md">
+    Use ModelExpress for fleet distribution, then coordinate integration-specific live policy refresh and recovery.
+  </Card>
+  <Card title="Profile RL Rollouts" icon="regular chart-line" href="operations-and-simulation.md">
+    Join framework records with Dynamo traces and metrics, inspect Perfetto timelines, and replay or simulate the serving workload.
+  </Card>
+  <Card title="Build a Framework Integration" icon="regular terminal" href="integration-reference.md">
+    Preserve token, retry, discovery, and policy-update contracts when adding Dynamo to another RL framework.
+  </Card>
+</CardGroup>

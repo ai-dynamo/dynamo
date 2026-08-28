@@ -716,17 +716,17 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/reinforcement-learning/overview.md
-          - page: Integrate with verl
+          - page: verl Integration
             path: pages/use-cases/reinforcement-learning/verl.md
-          - page: Integrate with NeMo RL
+          - page: NeMo RL Integration
             path: pages/use-cases/reinforcement-learning/nemo-rl.md
           - page: RL Integration Reference
             path: pages/use-cases/reinforcement-learning/integration-reference.md
-          - page: Route RL Rollouts
+          - page: KV-Aware Load Balancing
             path: pages/use-cases/reinforcement-learning/routing.md
-          - page: Update Rollout Weights
+          - page: Rollout Weight Updates
             path: pages/use-cases/reinforcement-learning/weight-updates.md
-          - page: Observe and Simulate RL Rollouts
+          - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: RL Implementation Guide
             path: pages/use-cases/reinforcement-learning/implementation-guide.md

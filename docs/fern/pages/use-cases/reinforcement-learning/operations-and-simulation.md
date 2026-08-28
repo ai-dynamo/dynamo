@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Observe and Simulate RL Rollouts
-subtitle: Diagnose a live serving run, then replay its request-plane workload
+title: Profile and Simulate RL Rollouts
+subtitle: Inspect a live rollout in Perfetto, then replay its request-plane workload
 ---
 
 Start with the live run: correlate framework and Dynamo identity, localize the bottleneck, and validate the capture. Then replay or simulate the request plane. Dynamo does not reproduce the trainer, reward pipeline, policy transitions, sample acceptance, or model-dependent decisions.
@@ -49,6 +49,18 @@ export DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz
 Use [Request Trace Reference](../../reference/observability/request-traces.mdx) for the exact schema and sink settings. Validate trace counts against framework attempts before interpreting timing. Canceled, failed, retried, and accepted attempts must remain distinguishable.
 
 The OpenAI chat-completion path can also capture explicitly allowlisted application headers on `request_payload` rows. Those records can contain unredacted request and response data. Use opaque IDs and follow the workload's retention and access policy; never capture credentials or sensitive prompts by default.
+
+## Profile a Rollout in Perfetto
+
+Convert the trace into a timeline:
+
+```bash title="Create a Perfetto trace"
+python3 benchmarks/request_trace/convert_to_perfetto.py \
+  /tmp/rl-run/request-trace.*.jsonl.gz \
+  --output /tmp/rl-run/request-trace.perfetto.json
+```
+
+Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Agent Tracing](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
 
 ## Diagnose the Live Run
 

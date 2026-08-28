@@ -1,21 +1,23 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Update Rollout Weights
-subtitle: Coordinate policy transfer, cache invalidation, readiness, and recovery
+title: Distribute and Update Rollout Weights
+subtitle: Move policy weights into the fleet, then coordinate refresh and recovery
 ---
 
 A live policy refresh is more than tensor transfer. The RL framework must select the target workers, gate generation, apply one policy, clear stale cache state, verify readiness, and decide when new rollouts can begin. Dynamo exposes backend controls but does not provide a fleet-wide atomic update.
 
-## Distinguish Loading from Refresh
+## Use ModelExpress for Fleet Distribution
+
+[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) accelerates worker startup, scale-out, and deployment updates by distributing model weights from storage or another compatible worker. Use it to get a model revision into the rollout fleet quickly.
+
+Live policy refresh is a separate step. The RL framework must still gate requests, apply the new policy through its framework- or backend-specific update path, clear stale cache state, and decide when generation can resume. ModelExpress is not the live-update mechanism used by the verl or NeMo RL integrations documented here.
 
 | Job | Trigger | Dynamo role |
 |---|---|---|
 | Initial model load | Worker startup or scale-up | Backend loading, model caching, ModelExpress, and readiness |
 | Deployment rollout | A new serving revision | Deployment-level rollout and rollback |
 | Live RL policy refresh | Trainer produces a new policy during a running job | Direct backend controls plus framework-owned orchestration |
-
-[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) can accelerate initial distribution. It is not the live-update mechanism used by the verl or NeMo RL integrations documented here.
 
 ## Choose the Update Path
 
@@ -81,13 +83,13 @@ For distributed vLLM updates, use the advertised group lifecycle and distributed
 
 The public verl recipe sends generation through Dynamo but keeps sleep, wake, and weight transfer in recipe-owned Ray actors and a ZMQ/CUDA IPC bridge. Do not replace this path with public worker discovery unless the integration itself changes.
 
-Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [Integrate with verl](verl.md#verify-the-run).
+Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [verl Integration](verl.md#verify-the-run).
 
 ## NeMo RL Managed Update
 
 NeMo RL records a fixed vLLM fleet, creates one trainer-plus-inference NCCL world, drains generation, applies the checkpoint to every engine, clears cache state in a separate pause phase, and resumes only after the framework collects all results.
 
-This path prevents a dead or replaced worker from silently joining with initial weights, but it is not elastic and has no fleet-wide rollback. Keep the rollout phase gated after any worker, refit, cache, or resume failure. See [Integrate with NeMo RL](nemo-rl.md#policy-refit).
+This path prevents a dead or replaced worker from silently joining with initial weights, but it is not elastic and has no fleet-wide rollback. Keep the rollout phase gated after any worker, refit, cache, or resume failure. See [NeMo RL Integration](nemo-rl.md#policy-refit).
 
 ## Keep Cache and Version State Correct
 

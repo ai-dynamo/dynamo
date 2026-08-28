@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Integrate with verl
+title: verl Integration
 subtitle: Run the public verl-recipe Dynamo rollout backend
 ---
 
@@ -92,7 +92,7 @@ Check three boundaries before scaling:
 2. **Policy update:** Every intended rollout shard receives the same trainer step through the recipe's CUDA IPC path, stale KV state is handled, and post-update generation succeeds.
 3. **Routing:** With ThunderAgent disabled, compare `round-robin` and `kv` using the same prompts, concurrency, cache state, and update cadence. Report useful framework output, not only request throughput.
 
-Set `request_completion_token_ids=true` when the framework must score the exact engine tokens. Use [RL Integration Reference](integration-reference.md#preserve-token-authority) for the shared response checks and [Route RL Rollouts](routing.md) for the routing experiment.
+Set `request_completion_token_ids=true` when the framework must score the exact engine tokens. Use [RL Integration Reference](integration-reference.md#preserve-token-authority) for the shared response checks and [KV-Aware Load Balancing for RL Rollouts](routing.md) for the routing experiment.
 
 ## Observe and Recover
 
@@ -114,7 +114,7 @@ python3 recipe/dynamo/metrics_sidecar.py \
 | Cache reuse drops after update | Cache reset, worker wake-up, and the warm-up boundary |
 | Shutdown leaves processes | Recipe watchdog and frontend, worker, NATS, then etcd teardown |
 
-See [Observe and Simulate RL Rollouts](operations-and-simulation.md) for request tracing and [Update Rollout Weights](weight-updates.md#verl-colocated-update) for the policy-update boundary.
+See [Profile and Simulate RL Rollouts](operations-and-simulation.md) for request tracing and [Distribute and Update Rollout Weights](weight-updates.md#verl-colocated-update) for the policy-update boundary.
 
 ## Current Limitations
 

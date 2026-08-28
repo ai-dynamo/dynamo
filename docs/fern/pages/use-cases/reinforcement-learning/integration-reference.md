@@ -109,7 +109,7 @@ The framework owns the fleet-level lifecycle:
 5. Invalidate stale KV state.
 6. Verify every worker and run post-update generation before reopening the fleet.
 
-Per-worker success is not fleet-wide atomicity. Keep generation gated when membership changes, an update fails, cache reset fails, or post-update generation does not pass. See [Update Rollout Weights](weight-updates.md) for the supported paths and recovery rules.
+Per-worker success is not fleet-wide atomicity. Keep generation gated when membership changes, an update fails, cache reset fails, or post-update generation does not pass. See [Distribute and Update Rollout Weights](weight-updates.md) for the supported paths and recovery rules.
 
 ## Framework Compatibility
 
@@ -118,7 +118,7 @@ Per-worker success is not fleet-wide atomicity. Keep generation gated when membe
 | [verl](verl.md) | Experimental | Shared Dynamo frontend with colocated vLLM rollout workers | The public recipe owns CUDA IPC updates through Ray/ZMQ control. Choose native Dynamo routing or ThunderAgent as distinct variants. |
 | [NeMo RL](nemo-rl.md) | Experimental | NeMo RL-managed Dynamo/vLLM fleet on Slurm and Ray | Fixed non-colocated fleet with framework-owned NCCL refit; not an external Dynamo deployment. |
 | [SLIME](https://github.com/THUDM/slime) | Integration in progress | Proposed shared SGLang `/generate` path with direct engine control | No merged, maintained Dynamo recipe yet; discovery and update ownership remain unsettled. |
-| [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Integration in progress | Proposed Dynamo/vLLM sidecar with worker discovery and external updates | The integration remains in upstream development and is not a released compatibility surface. |
+| [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Router available; full integration in progress | Prime-RL documents the Dynamo router as a drop-in option; a proposed Dynamo/vLLM sidecar adds worker discovery and external updates | Routing can be evaluated today, but the full adapter remains in upstream development and is not a released compatibility surface. |
 | [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/fleet-ai/miles-fleet), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
 
 The table was last reviewed on 2026-08-27. A status reflects the documented integration, not whether the framework can call a generic HTTP endpoint.

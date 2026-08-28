@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Route RL Rollouts
-subtitle: Match routing and cache reuse to the shape of the rollout workload
+title: KV-Aware Load Balancing for RL Rollouts
+subtitle: Balance cache reuse, live worker load, and queue pressure
 ---
 
 Dynamo uses the same router for RL and other inference workloads. What changes is the objective: measure serving efficiency together with framework-owned sample freshness and acceptance. Dynamo routes requests; it does not decide whether a trajectory is on-policy or useful for training.
@@ -110,4 +110,4 @@ The router does not filter workers by RL policy version. Gate synchronous update
 | Throughput rises but accepted sample rate falls | Framework update barrier, served policy identity, and acceptance logic |
 | Cache reuse drops after policy update | Required cache invalidation and the post-update warm-up window |
 
-Use the [metrics catalog](../../reference/observability/metrics-catalog.mdx#router-metrics) for exact metric names and [Observe and Simulate RL Rollouts](operations-and-simulation.md) to correlate framework, router, and worker behavior.
+Use the [metrics catalog](../../reference/observability/metrics-catalog.mdx#router-metrics) for exact metric names and [Profile and Simulate RL Rollouts](operations-and-simulation.md) to correlate framework, router, and worker behavior.

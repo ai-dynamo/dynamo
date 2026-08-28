@@ -12,11 +12,11 @@ subtitle: Find the task-specific RL integration, optimization, and operations gu
 | Task | Go to |
 |---|---|
 | Implement an RL framework adapter or check a framework/backend combination | [RL integration reference](integration-reference.md) |
-| Run the public verl recipe | [Integrate with verl](verl.md) |
-| Run the managed NeMo RL backend | [Integrate with NeMo RL](nemo-rl.md) |
+| Run the public verl recipe | [verl Integration](verl.md) |
+| Run the managed NeMo RL backend | [NeMo RL Integration](nemo-rl.md) |
 | Review framework availability, including SLIME and Prime-RL | [Framework compatibility](integration-reference.md#framework-compatibility) |
-| Select and tune rollout routing | [Route RL rollouts](routing.md) |
-| Pause workers, refresh policy weights, verify versions, and recover | [Update rollout weights](weight-updates.md) |
-| Correlate a rollout with traces and metrics, troubleshoot it, or replay/simulate its request plane | [Observe and simulate RL rollouts](operations-and-simulation.md) |
+| Select and tune rollout routing | [KV-aware load balancing for RL rollouts](routing.md) |
+| Distribute weights, refresh a live policy, verify versions, and recover | [Distribute and update rollout weights](weight-updates.md) |
+| Correlate a rollout with traces and metrics, troubleshoot it, or replay/simulate its request plane | [Profile and simulate RL rollouts](operations-and-simulation.md) |
 
 Start at the [RL overview](overview.md) if you need the system boundary, maturity legend, or framework chooser.

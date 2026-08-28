@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Integrate with NeMo RL
+title: NeMo RL Integration
 subtitle: Run NeMo RL's managed Dynamo vLLM backend on Slurm
 ---
 
@@ -136,7 +136,7 @@ Compare the example's `kv` router with `round-robin` while holding prompts, conc
 | Worker exits | Ray actor, GPU reservation, process group, and frontend registration |
 | Shutdown leaves processes | Managed teardown, ports, temporary directories, and next-job startup |
 
-Keep new rollout admission gated after any refit or cache-control failure. See [Update Rollout Weights](weight-updates.md#nemo-rl-managed-update) and [Observe and Simulate RL Rollouts](operations-and-simulation.md) for the shared lifecycle and telemetry boundaries.
+Keep new rollout admission gated after any refit or cache-control failure. See [Distribute and Update Rollout Weights](weight-updates.md#nemo-rl-managed-update) and [Profile and Simulate RL Rollouts](operations-and-simulation.md) for the shared lifecycle and telemetry boundaries.
 
 ## Current Limitations
 
