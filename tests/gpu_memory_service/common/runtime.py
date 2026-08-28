@@ -466,7 +466,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
     def pause(self) -> dict:
         result = self._post_engine(
             "pause_generation",
-            {},
+            {"mode": "retract"},
             30,
             "pause generation",
         )

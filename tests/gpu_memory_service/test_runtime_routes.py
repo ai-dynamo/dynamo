@@ -31,7 +31,7 @@ def test_sglang_pause_resume_use_native_engine_routes():
     assert process.pause() == {"status": "ok"}
     assert process.resume(timeout=45) == {"status": "ok"}
     assert process._post_engine.call_args_list == [
-        call("pause_generation", {}, 30, "pause generation"),
+        call("pause_generation", {"mode": "retract"}, 30, "pause generation"),
         call("release_memory_occupation", {}, 30, "release memory occupation"),
         call("resume_memory_occupation", {}, 45, "resume memory occupation"),
         call("continue_generation", {}, 45, "continue generation"),
