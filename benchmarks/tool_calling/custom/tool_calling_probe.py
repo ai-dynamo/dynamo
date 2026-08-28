@@ -43,6 +43,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from case_profile_loader import available_case_profiles, load_case_profile
 from model_profiles import INLINE_CASE_PROFILES, model_case_profile
 
 DEFAULT_BASE_URL = "https://inference-api.nvidia.com/v1"
@@ -195,6 +196,20 @@ def local_timestamp() -> str:
 
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _normalize_string_values(value: Any) -> Any:
+    """Normalize prose-like string leaves without weakening typed values."""
+    if isinstance(value, str):
+        normalized = value.casefold().rstrip()
+        if normalized.endswith((".", "!")):
+            return normalized[:-1]
+        return normalized
+    if isinstance(value, dict):
+        return {key: _normalize_string_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_string_values(item) for item in value]
+    return value
 
 
 def trunc(value: Any, max_chars: int) -> Any:
@@ -625,6 +640,10 @@ class Case:
     expect_reasoning: bool | None = None
     forbidden_output_fragments: tuple[str, ...] = ()
     validate_schema: bool = True
+    # This is deliberately opt-in. Typed values and exact-string cases retain
+    # strict equality; only prose-valued arguments tolerate case and one final
+    # sentence mark.
+    normalize_argument_strings: bool = False
     max_tokens: int | None = None
     execute_tools: bool = False
     max_agent_turns: int = 4
@@ -636,6 +655,10 @@ class Case:
 
 
 def build_cases(profile: str = "generic") -> tuple[Case, ...]:
+    declarative_cases = load_case_profile(profile, Case)
+    if declarative_cases is not None:
+        return declarative_cases
+
     book_flight = TOOLS["book_flight"]
     weather = TOOLS["get_weather"]
     calculate = TOOLS["calculate"]
@@ -3026,15 +3049,21 @@ def validate_result(
             )
 
     if case.expected_tool_calls:
+
+        def canonical_arguments(arguments: Any) -> str:
+            if case.normalize_argument_strings:
+                arguments = _normalize_string_values(arguments)
+            return json_dumps(arguments)
+
         expected_calls = Counter(
             (
                 str(call.get("name") or ""),
-                json_dumps(call.get("arguments") or {}),
+                canonical_arguments(call.get("arguments") or {}),
             )
             for call in case.expected_tool_calls
         )
         actual_calls = Counter(
-            (name, json_dumps(arguments)) for name, arguments in decoded_calls
+            (name, canonical_arguments(arguments)) for name, arguments in decoded_calls
         )
         if actual_calls != expected_calls:
             errors.append(
@@ -4093,6 +4122,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "auto",
             *INLINE_CASE_PROFILES,
+            *available_case_profiles(),
             "all",
         ),
         help="Case profile to run. auto infers from --model.",

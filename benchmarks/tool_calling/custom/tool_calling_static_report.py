@@ -372,7 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--case-profile",
         default="auto",
-        choices=("auto", *probe.INLINE_CASE_PROFILES, "all"),
+        choices=(
+            "auto",
+            *probe.INLINE_CASE_PROFILES,
+            *probe.available_case_profiles(),
+            "all",
+        ),
     )
     parser.add_argument("--modes", default="nonstream,stream")
     parser.add_argument("--iterations", type=int, default=1)

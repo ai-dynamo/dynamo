@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -211,6 +212,66 @@ def test_natural_language_fragment_matching_normalizes_unicode_dashes() -> None:
     errors, _warnings = probe.validate_result(case, result)
     assert errors == []
     assert probe.validate_agent_final(case, result) == []
+
+
+def test_argument_string_normalization_is_opt_in_and_preserves_types() -> None:
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "report_status",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["body", "count"],
+            },
+        },
+    }
+    case = probe.Case(
+        case_id="normalized_prose",
+        description="normalize only prose-valued string arguments",
+        messages=(),
+        tools=(tool,),
+        expected_finish_reasons=("tool_calls",),
+        expected_tool_calls=(
+            {"name": "report_status", "arguments": {"body": "All green", "count": 7}},
+        ),
+        normalize_argument_strings=True,
+    )
+
+    def result(arguments: dict) -> probe.ChatResult:
+        return probe.ChatResult(
+            finish_reason="tool_calls",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "report_status",
+                        "arguments": json.dumps(arguments),
+                    },
+                }
+            ],
+        )
+
+    normalized_errors, _ = probe.validate_result(
+        case, result({"body": "all GREEN!", "count": 7})
+    )
+    assert "unexpected_tool_calls" not in error_kinds(normalized_errors)
+
+    strict_errors, _ = probe.validate_result(
+        dataclasses.replace(case, normalize_argument_strings=False),
+        result({"body": "all GREEN!", "count": 7}),
+    )
+    assert "unexpected_tool_calls" in error_kinds(strict_errors)
+
+    wrong_type_errors, _ = probe.validate_result(
+        case, result({"body": "All green.", "count": "7"})
+    )
+    assert "unexpected_tool_calls" in error_kinds(wrong_type_errors)
+    assert "schema_validation" in error_kinds(wrong_type_errors)
 
 
 def test_failure_classifier_separates_failure_ownership() -> None:

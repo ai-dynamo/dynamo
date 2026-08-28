@@ -33,7 +33,7 @@ benchmark scores.
 
 | Suite | Fixed coverage | Target |
 |---|---:|---:|
-| Custom | 25 generic cases in streaming and nonstreaming modes, plus matching model-specific cases | 5–7 min |
+| Custom | 24 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 5–7 min |
 | BFCL | 50 BFCL v3 cases across 8 categories | 3–5 min |
 | tau2 | 9 tasks: 3 each from airline, retail, and telecom | 10–12 min |
 
@@ -50,9 +50,11 @@ multi-turn tool execution.
 ```mermaid
 flowchart LR
     M[Served model ID] --> P[Resolve model profile]
-    G[25 generic cases] --> S[Exact selection]
+    G[24 generic cases] --> S[Exact selection]
     P --> X[Matching model-specific cases]
     X --> S
+    P --> F[Optional complete model profile]
+    F --> S
     S --> Q[Merge model request controls]
     Q --> N[Nonstream run]
     Q --> R[Stream run]
@@ -64,6 +66,10 @@ Applicability and provenance are separate:
 - **Generic** cases run for every model.
 - **Model-specific** cases run only for the resolved model profile. Kimi K2
   currently adds two multi-turn cases.
+- **Complete profiles** replace the generic selection when a model's protocol
+  requires a different contract. Muse Glimmer runs 61 declarative cases in
+  streaming and nonstreaming modes, uses always-on reasoning, and sends no
+  thinking-control kwargs.
 - A `customer_` prefix identifies a customer regression. A customer case can
   be generic or model-specific.
 
@@ -151,6 +157,9 @@ flowchart LR
 |---|---|
 | `custom/tool_calling_probe.py` | Custom cases, requests, streaming assembly, and assertions |
 | `custom/model_profiles.py` | Served-model name to Custom profile mapping |
+| `custom/case_profile_loader.py` | Declarative profile loading and validation |
+| `custom/configs/case_profiles/` | Generated complete model profiles |
+| `tools/gen_*_profile.py` | Deterministic declarative-profile generators |
 | `custom/tool_calling_static_report.py` | Detailed Custom JSON, JSONL, and static HTML artifacts |
 | `custom_runner.py` | Per-model request-contract adapter |
 | `e2e_verifier/profiles.json` | Fixed qualification selections and evaluator images |
@@ -161,8 +170,9 @@ flowchart LR
 ## Extend coverage
 
 1. Add a reusable Custom case and assertion in `tool_calling_probe.py`.
-2. Add universal cases to `generic_cases`, or profile-only cases to
-   `model_specific_cases`, in `profiles.json`.
+2. Add universal cases to `generic_cases`, additive profile cases to
+   `model_specific_cases`, or register a declarative replacement under
+   `complete_case_profiles` in `profiles.json`.
 3. Add a `customer_` prefix when preserving a customer regression.
 4. Update the focused tests and verify the exact selection and record counts.
 

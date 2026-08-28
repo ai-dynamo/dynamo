@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -27,9 +28,8 @@ CUSTOM_SELECTION_FILE = "custom-case-ids.json"
 CUSTOM_GENERIC_CASE_COUNT = 24
 CUSTOM_MODES = ("nonstream", "stream")
 CUSTOM_ITERATIONS = 1
-CUSTOM_GENERIC_RECORD_COUNT = (
-    CUSTOM_GENERIC_CASE_COUNT * len(CUSTOM_MODES) * CUSTOM_ITERATIONS
-)
+DECLARATIVE_PROFILE_ROOT = ROOT.parent / "custom" / "configs" / "case_profiles"
+_CASE_PROFILE_NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 CUSTOM_FAILURE_CATEGORIES = (
     "dynamo_api",
     "infrastructure",
@@ -184,6 +184,29 @@ def _case_id_group(value: Any, *, label: str) -> tuple[str, ...]:
     return case_ids
 
 
+def _complete_profile_case_ids(profile: str) -> tuple[str, ...]:
+    if _CASE_PROFILE_NAME.fullmatch(profile) is None:
+        raise ValueError(f"invalid complete custom case profile: {profile!r}")
+    path = DECLARATIVE_PROFILE_ROOT / f"{profile}.json"
+    payload = _load_object(path)
+    if payload.get("profile") != profile:
+        raise ValueError(f"case profile metadata mismatch in {path}")
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list):
+        raise ValueError(f"case profile cases must be a list in {path}")
+    case_ids = _case_id_group(
+        [case.get("case_id") if isinstance(case, dict) else None for case in raw_cases],
+        label=f"{profile} complete profile",
+    )
+    expected = int(payload.get("logical_cases") or 0)
+    if len(case_ids) != expected:
+        raise ValueError(
+            f"case profile {profile} declares {expected} cases but contains "
+            f"{len(case_ids)}"
+        )
+    return case_ids
+
+
 def _custom_selection(
     config: Mapping[str, Any], model: str
 ) -> tuple[dict[str, Any], str]:
@@ -214,14 +237,56 @@ def _custom_selection(
                 f"{profile} model-specific: " + ", ".join(overlap)
             )
 
+    raw_complete_profiles = config.get("complete_case_profiles") or []
+    if not isinstance(raw_complete_profiles, list) or not all(
+        isinstance(profile, str) and profile for profile in raw_complete_profiles
+    ):
+        raise ValueError(
+            "custom qualification complete_case_profiles must be a string list"
+        )
+    complete_profiles = tuple(raw_complete_profiles)
+    if len(complete_profiles) != len(set(complete_profiles)):
+        raise ValueError("custom qualification has duplicate complete case profiles")
+    overlap = sorted(set(complete_profiles) & set(model_specific_groups))
+    if overlap:
+        raise ValueError(
+            "custom profiles cannot be both complete and model-specific: "
+            + ", ".join(overlap)
+        )
+
+    raw_profile_temperatures = config.get("profile_temperatures") or {}
+    if not isinstance(raw_profile_temperatures, dict) or not all(
+        isinstance(profile, str)
+        and profile
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= float(value) <= 2
+        for profile, value in raw_profile_temperatures.items()
+    ):
+        raise ValueError(
+            "custom qualification profile_temperatures must map profile names "
+            "to numbers between 0 and 2"
+        )
+
     configured_profile = str(config.get("case_profile", "auto"))
     resolved_profile = (
         model_case_profile(model)
         if configured_profile == "auto"
         else configured_profile
     )
-    model_specific_case_ids = model_specific_groups.get(resolved_profile, ())
-    case_ids = tuple(sorted((*generic_case_ids, *model_specific_case_ids)))
+    complete_profile_case_ids: tuple[str, ...] = ()
+    if resolved_profile in complete_profiles:
+        selected_generic_case_ids: tuple[str, ...] = ()
+        model_specific_case_ids: tuple[str, ...] = ()
+        complete_profile_case_ids = _complete_profile_case_ids(resolved_profile)
+        case_ids = complete_profile_case_ids
+    else:
+        selected_generic_case_ids = generic_case_ids
+        model_specific_case_ids = model_specific_groups.get(resolved_profile, ())
+        case_ids = tuple(sorted((*generic_case_ids, *model_specific_case_ids)))
+    temperature = float(
+        raw_profile_temperatures.get(resolved_profile, config["temperature"])
+    )
 
     raw_modes = config.get("modes")
     if not isinstance(raw_modes, list) or not raw_modes:
@@ -242,31 +307,45 @@ def _custom_selection(
     hash_payload = {
         "resolved_case_profile": resolved_profile,
         "case_groups": {
-            "generic": generic_case_ids,
+            "generic": selected_generic_case_ids,
             "model_specific": model_specific_case_ids,
+            "complete_profile": complete_profile_case_ids,
         },
         "modes": modes,
         "iterations": iterations,
+        "temperature": temperature,
     }
     selection_hash = hashlib.sha256(
         json.dumps(hash_payload, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()
+    generic_record_count = len(selected_generic_case_ids) * len(modes) * iterations
     model_specific_record_count = len(model_specific_case_ids) * len(modes) * iterations
+    complete_profile_record_count = (
+        len(complete_profile_case_ids) * len(modes) * iterations
+    )
     selection = {
         "case_profile": configured_profile,
         "resolved_case_profile": resolved_profile,
         "case_groups": {
-            "generic": list(generic_case_ids),
+            "generic": list(selected_generic_case_ids),
             "model_specific": list(model_specific_case_ids),
+            "complete_profile": list(complete_profile_case_ids),
         },
         "case_ids": list(case_ids),
         "modes": list(modes),
         "iterations": iterations,
-        "generic_case_count": len(generic_case_ids),
+        "temperature": temperature,
+        "generic_case_count": len(selected_generic_case_ids),
         "model_specific_case_count": len(model_specific_case_ids),
-        "generic_record_count": CUSTOM_GENERIC_RECORD_COUNT,
+        "complete_profile_case_count": len(complete_profile_case_ids),
+        "generic_record_count": generic_record_count,
         "model_specific_record_count": model_specific_record_count,
-        "record_count": CUSTOM_GENERIC_RECORD_COUNT + model_specific_record_count,
+        "complete_profile_record_count": complete_profile_record_count,
+        "record_count": (
+            generic_record_count
+            + model_specific_record_count
+            + complete_profile_record_count
+        ),
         "selection_hash": selection_hash,
     }
     return selection, selection_hash
@@ -303,9 +382,12 @@ def _record_custom_selection(
             "case_groups": selection["case_groups"],
             "generic_case_count": selection["generic_case_count"],
             "model_specific_case_count": selection["model_specific_case_count"],
+            "complete_profile_case_count": selection["complete_profile_case_count"],
             "generic_record_count": selection["generic_record_count"],
             "model_specific_record_count": selection["model_specific_record_count"],
+            "complete_profile_record_count": selection["complete_profile_record_count"],
             "selection_hash": selection_hash,
+            "resolved_temperature": selection["temperature"],
         }
     )
     result.setdefault("provenance", {})["selection_hash"] = selection_hash
@@ -353,7 +435,7 @@ def _custom_command(
         "--concurrency",
         str(config["concurrency"]),
         "--temperature",
-        str(config["temperature"]),
+        str(selection["temperature"]),
         "--max-tokens",
         str(config["max_tokens"]),
         "--timeout-seconds",

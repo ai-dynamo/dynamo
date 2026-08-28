@@ -103,6 +103,29 @@ def test_custom_selection_appends_matching_model_specific_cases() -> None:
     assert len(selection_hash) == 64
 
 
+def test_muse_uses_complete_profile_without_generic_thinking_controls() -> None:
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+
+    selection, selection_hash = _custom_selection(
+        profile["custom"], "meta-models/Muse-Glimmer-30B"
+    )
+
+    assert selection["resolved_case_profile"] == "muse_glimmer"
+    assert selection["case_groups"]["generic"] == []
+    assert selection["case_groups"]["model_specific"] == []
+    assert len(selection["case_groups"]["complete_profile"]) == 61
+    assert len(selection["case_ids"]) == 61
+    assert selection["generic_case_count"] == 0
+    assert selection["model_specific_case_count"] == 0
+    assert selection["complete_profile_case_count"] == 61
+    assert selection["generic_record_count"] == 0
+    assert selection["model_specific_record_count"] == 0
+    assert selection["complete_profile_record_count"] == 122
+    assert selection["record_count"] == 122
+    assert selection["temperature"] == 1.0
+    assert len(selection_hash) == 64
+
+
 def test_custom_selection_rejects_cross_group_overlap() -> None:
     profile, _ = _profile(DEFAULT_PROFILES, "qualification")
     config = {
@@ -405,6 +428,42 @@ def test_custom_dry_run_appends_model_specific_matrix(tmp_path: Path) -> None:
     assert result["coverage"]["resolved_case_count"] == 26
     assert result["coverage"]["generic_case_count"] == 24
     assert result["coverage"]["model_specific_case_count"] == 2
+
+
+def test_muse_custom_dry_run_uses_complete_sampled_matrix(tmp_path: Path) -> None:
+    output_dir = tmp_path / "custom-muse"
+
+    exit_code = main(
+        [
+            "--suite",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:8000/v1",
+            "--model",
+            "meta-models/Muse-Glimmer-30B",
+            "--runtime",
+            "dynamo-vllm",
+            "--request-contract-json",
+            '{"enabled":{},"disabled":{},"require_reasoning_exercised":true}',
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads((output_dir / "suite-result.json").read_text())
+    selection = json.loads((output_dir / "custom-case-ids.json").read_text())
+    command = result["artifacts"]["command"]
+    case_ids = command[command.index("--cases") + 1].split(",")
+    assert selection["resolved_case_profile"] == "muse_glimmer"
+    assert selection["case_ids"] == case_ids
+    assert len(case_ids) == 61
+    assert selection["record_count"] == 122
+    assert command[command.index("--temperature") + 1] == "1.0"
+    assert result["coverage"]["generic_case_count"] == 0
+    assert result["coverage"]["complete_profile_case_count"] == 61
+    assert result["coverage"]["resolved_temperature"] == 1.0
 
 
 def test_custom_normalizes_the_complete_detailed_report(

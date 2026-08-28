@@ -44,6 +44,8 @@
             "customer_kimi_parallel_weather_final_answer"
           ]
         },
+        "complete_case_profiles": ["muse_glimmer"],
+        "profile_temperatures": {"muse_glimmer": 1.0},
         "modes": ["nonstream", "stream"],
         "iterations": 1,
         "concurrency": 8,

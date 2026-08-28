@@ -40,4 +40,6 @@ def model_case_profile(model: str) -> str:
         return "minimax_m2"
     if "gpt-oss" in normalized or "gptoss" in normalized:
         return "gpt_oss"
+    if "muse-glimmer" in normalized or normalized == "muse":
+        return "muse_glimmer"
     return "generic"
