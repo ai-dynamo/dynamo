@@ -33,9 +33,9 @@ impl ToolCallIdentityField {
 
 /// Result of merging one incoming chunk into an accumulator.
 ///
-/// The merge itself is infallible: identity stays first-wins and argument
-/// fragments are always concatenated. The outcome is *reporting only*, so a
-/// caller that ignores it observes exactly the pre-existing behaviour.
+/// The merge itself is infallible: the first *non-empty* value of each identity
+/// field wins and argument fragments are always concatenated. The outcome is
+/// *reporting only* — a caller that ignores it still gets the merged chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolCallMergeOutcome {
     /// The incoming chunk was consistent with what had already accumulated.
@@ -53,8 +53,10 @@ pub(crate) enum ToolCallMergeOutcome {
 /// all on the same chunk, and thus the argument-fragment deltas were dropped
 /// and the client saw `arguments: ""`.
 ///
-/// The fix here merges by `index` across deltas: `id`, `type`, `function.name`
-/// first-wins; `function.arguments` concatenated across fragments. This matches
+/// The fix here merges by `index` across deltas: the first non-empty `id`,
+/// `type`, and `function.name` win; `function.arguments` are concatenated
+/// across fragments. An empty identity value is treated as absent rather than
+/// established, because consumers test identity by presence alone. This matches
 /// the OpenAI streaming spec and vLLM/SGLang hermes emission:
 ///
 /// * delta 1: `{index, id, type, function: { name }}`
@@ -76,14 +78,16 @@ pub(crate) fn merge_tool_call_chunk(
         }
     };
 
-    match (&existing.id, incoming.id) {
-        (None, Some(id)) => existing.id = Some(id),
-        // An empty value on *either* side is a producer no-op, not a
-        // disagreement, so the guard is symmetric.
-        (Some(current), Some(id)) if !current.is_empty() && !id.is_empty() && *current != id => {
-            note(ToolCallIdentityField::Id)
+    // An empty incoming value is a producer no-op rather than a disagreement,
+    // and an empty accumulated value is not yet an identity: consumers test
+    // only for presence, so letting `Some("")` stand would dispatch a call
+    // whose id and name are blank and suppress the real ones.
+    if let Some(id) = incoming.id.filter(|id| !id.is_empty()) {
+        match existing.id.as_deref() {
+            None | Some("") => existing.id = Some(id),
+            Some(current) if current != id => note(ToolCallIdentityField::Id),
+            Some(_) => {}
         }
-        _ => {}
     }
     match (&existing.r#type, incoming.r#type) {
         (None, Some(ty)) => existing.r#type = Some(ty),
@@ -93,21 +97,25 @@ pub(crate) fn merge_tool_call_chunk(
         _ => {}
     }
 
-    let Some(incoming_fn) = incoming.function else {
+    let Some(mut incoming_fn) = incoming.function else {
         return outcome(conflict);
     };
     match &mut existing.function {
-        None => existing.function = Some(incoming_fn),
+        None => {
+            // Adopting the first `function` wholesale would smuggle in an empty
+            // name that the arm below would have refused.
+            if incoming_fn.name.as_deref() == Some("") {
+                incoming_fn.name = None;
+            }
+            existing.function = Some(incoming_fn);
+        }
         Some(existing_fn) => {
-            match (&existing_fn.name, incoming_fn.name) {
-                (None, Some(name)) => existing_fn.name = Some(name),
-                // Symmetric with the `id` arm above.
-                (Some(current), Some(name))
-                    if !current.is_empty() && !name.is_empty() && *current != name =>
-                {
-                    note(ToolCallIdentityField::Name)
+            if let Some(name) = incoming_fn.name.filter(|name| !name.is_empty()) {
+                match existing_fn.name.as_deref() {
+                    None | Some("") => existing_fn.name = Some(name),
+                    Some(current) if current != name => note(ToolCallIdentityField::Name),
+                    Some(_) => {}
                 }
-                _ => {}
             }
             if let Some(args_fragment) = incoming_fn.arguments {
                 existing_fn
@@ -174,7 +182,6 @@ mod tests {
                 field: ToolCallIdentityField::Id
             }
         );
-        // ...but the merge result is unchanged from the pre-extraction behaviour.
         assert_eq!(acc.id.as_deref(), Some("call-1"));
         assert_eq!(acc.function.unwrap().name.as_deref(), Some("calculator"));
     }
@@ -190,16 +197,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_established_identity_value_is_not_a_conflict() {
-        // An empty opener followed by the real id is not a disagreement;
-        // first-wins still keeps the empty opener.
+    fn empty_established_identity_value_is_replaced_by_the_real_one() {
+        // An empty opener carries no identity, so the real id and name that
+        // follow it fill the accumulator instead of being discarded.
         let mut acc = chunk(0, Some(""), Some(""), None);
         assert_eq!(
             merge_tool_call_chunk(&mut acc, chunk(0, Some("call-1"), Some("calculator"), None)),
             ToolCallMergeOutcome::Merged
         );
-        assert_eq!(acc.id.as_deref(), Some(""));
-        assert_eq!(acc.function.unwrap().name.as_deref(), Some(""));
+        assert_eq!(acc.id.as_deref(), Some("call-1"));
+        assert_eq!(acc.function.unwrap().name.as_deref(), Some("calculator"));
+    }
+
+    #[test]
+    fn an_only_ever_empty_identity_never_becomes_established() {
+        // Consumers test identity by presence alone, so an empty value must
+        // leave the accumulator without one rather than pass as an identity.
+        let mut acc = chunk(0, None, None, None);
+        assert_eq!(
+            merge_tool_call_chunk(&mut acc, chunk(0, Some(""), Some(""), Some("{}"))),
+            ToolCallMergeOutcome::Merged
+        );
+        assert_eq!(acc.id, None);
+        assert_eq!(acc.function.unwrap().name, None);
     }
 
     #[test]

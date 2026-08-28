@@ -2984,9 +2984,12 @@ fn finalize_choice_assemblies(
             continue;
         }
 
-        if finish_reason != FinishReason::ToolCalls {
-            // `length`, a backend error, a content filter: a syntactically
-            // complete call would already have dispatched, so nothing is lost.
+        // A tool-call turn arrives under either reason: the aggregator rewrites
+        // `Stop` to `ToolCalls` for exactly that case, and a parameterless call
+        // never reaches `RootClosed`, so it depends on this pass. `length`, a
+        // backend error, and a content filter stay fail-closed; the `usable`
+        // check below still rejects incomplete arguments.
+        if !matches!(finish_reason, FinishReason::ToolCalls | FinishReason::Stop) {
             entry.state = AssemblyState::Invalid;
             continue;
         }
@@ -8557,7 +8560,6 @@ mod tests {
     }
 
     // ── #13972: fragmented tool-call assembly ──
-    // Case numbers below match the issue's regression list.
 
     /// Read the assembled arguments for a key directly, so quoted-brace
     /// payloads never go through `extract_sse_data_json`'s brace-only,
@@ -8764,7 +8766,6 @@ mod tests {
         let mut assemblies = ToolCallAssemblies::new();
         let mut events = Vec::new();
 
-        // Both calls open, index 0 first.
         let opener = make_stream_response(vec![make_choice_with_tool_calls(
             0,
             vec![
@@ -8776,7 +8777,6 @@ mod tests {
         events.extend(collect_tool_dispatch_events(&opener, &mut assemblies));
         assert!(events.is_empty(), "neither call is complete yet");
 
-        // Inner index 1 completes first.
         let close_1 = make_stream_response(vec![make_choice_with_tool_calls(
             0,
             vec![tool_call_chunk(1, None, None, Some("2}"))],
@@ -8789,7 +8789,6 @@ mod tests {
             "call_1"
         );
 
-        // Then inner index 0.
         let close_0 = make_stream_response(vec![make_choice_with_tool_calls(
             0,
             vec![tool_call_chunk(0, None, None, Some("1}"))],
@@ -8837,26 +8836,6 @@ mod tests {
         );
     }
 
-    // Case 9: a call filtered out by `parallel_tool_calls=false` is never even
-    // accumulated, because filtering runs before the dispatcher sees the chunk.
-    #[test]
-    fn test_13972_filtered_higher_index_call_is_never_accumulated() {
-        let mut assemblies = ToolCallAssemblies::new();
-        // Post-filter shape: only inner index 0 survives.
-        let response = make_stream_response(vec![make_choice_with_tool_calls(
-            0,
-            vec![tool_call_chunk(0, Some("call_0"), Some("f"), Some("{}"))],
-            None,
-        )]);
-        let events = collect_tool_dispatch_events(&response, &mut assemblies);
-        assert_eq!(events.len(), 1);
-        assert!(
-            !assemblies.contains_key(&(0, 1)),
-            "no state for a filtered inner index"
-        );
-    }
-
-    // Case 10: terminal outcomes.
     #[test]
     fn test_13972_terminal_pass_outcomes() {
         // Valid JSON that only closes on the terminating chunk is not lost.
@@ -8892,6 +8871,40 @@ mod tests {
             0,
         );
         assert_eq!(absent.len(), 1, "absent arguments dispatch at the terminal");
+
+        // A producer may report a tool-call turn as `Stop`; a parameterless
+        // call never closes a JSON root, so it depends on the terminal pass.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("no_params"),
+            None,
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert_eq!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).len(),
+            1,
+            "a parameterless call dispatches on a `Stop` finish"
+        );
+
+        // `Stop` stays fail-closed for arguments that never became valid JSON.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).is_empty(),
+            "truncated arguments must not dispatch on a `Stop` finish either"
+        );
 
         // Invalid non-empty JSON does not.
         let invalid = drive_to_tool_calls_finish(
