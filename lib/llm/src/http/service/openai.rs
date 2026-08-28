@@ -8690,6 +8690,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9340,6 +9341,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9430,6 +9432,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9841,6 +9844,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -10475,6 +10479,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }

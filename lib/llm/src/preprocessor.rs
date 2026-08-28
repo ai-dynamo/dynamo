@@ -5660,6 +5660,7 @@ impl OpenAIPreprocessor {
             metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
             nvext: Option<serde_json::Value>,
+            prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
             response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
@@ -5713,10 +5714,9 @@ impl OpenAIPreprocessor {
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer Dynamo metadata)
         let jail_input = stream.map(move |mut a| {
-            let has_metadata = a
-                .data
-                .as_ref()
-                .is_some_and(|nv| nv.llm_metrics.is_some() || nv.nvext.is_some());
+            let has_metadata = a.data.as_ref().is_some_and(|nv| {
+                nv.llm_metrics.is_some() || nv.nvext.is_some() || nv.prompt_logprobs.is_some()
+            });
             if has_metadata {
                 let mut p = pending_in
                     .lock()
@@ -5741,6 +5741,9 @@ impl OpenAIPreprocessor {
                         p.metrics_template = Some(metrics);
                     }
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
+                    if let Some(prompt_logprobs) = nv.prompt_logprobs.take() {
+                        p.prompt_logprobs = Some(prompt_logprobs);
+                    }
                 }
             }
             if is_glm47 && let Some(data) = &a.data {
@@ -5845,6 +5848,7 @@ impl OpenAIPreprocessor {
             // nvext must wait for a non-payload-usage output with a choice.
             let has_choices = a.data.as_ref().is_some_and(|data| !data.choices.is_empty());
             let is_payload_usage = a.event.as_deref() == Some(ANNOTATION_PAYLOAD_USAGE);
+            let mut prompt_logprobs = None;
             let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
                 let mut p = pending_out
                     .lock()
@@ -5856,6 +5860,7 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = if has_choices && !is_payload_usage {
+                    prompt_logprobs = p.prompt_logprobs.take();
                     p.nvext.take()
                 } else {
                     None
@@ -5866,6 +5871,7 @@ impl OpenAIPreprocessor {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext,
+                    prompt_logprobs,
                     llm_metrics,
                 }),
                 id: a.id,
@@ -5954,6 +5960,7 @@ impl OpenAIPreprocessor {
                     p.metrics_template = None;
                     p.chunk_tokens = 0;
                     p.nvext = None;
+                    p.prompt_logprobs = None;
                     p.response_template = None;
                 }
                 yield error;
@@ -5971,13 +5978,15 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = p.nvext.take();
-                if llm_metrics.is_none() && nvext.is_none() {
+                let prompt_logprobs = p.prompt_logprobs.take();
+                if llm_metrics.is_none() && nvext.is_none() && prompt_logprobs.is_none() {
                     None
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
                             inner,
                             nvext,
+                            prompt_logprobs,
                             llm_metrics,
                         }),
                         id: None,
@@ -7828,6 +7837,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         })
     }
@@ -8013,6 +8023,37 @@ mod tests {
         assert_eq!(
             roles,
             vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_jail_preserves_prompt_logprobs_metadata() {
+        let expected: crate::protocols::common::llm_backend::PromptLogprobs =
+            serde_json::from_value(serde_json::json!([
+                null,
+                {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+            ]))
+            .expect("valid prompt logprobs");
+        let mut chunk = terminal_chat_stream_chunk();
+        chunk.data.as_mut().unwrap().prompt_logprobs = Some(expected.clone());
+
+        let output = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            None,
+            None,
+            false,
+            false,
+            stream::iter(vec![chunk]),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .find_map(|data| data.prompt_logprobs.as_ref()),
+            Some(&expected)
         );
     }
 

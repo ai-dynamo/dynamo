@@ -204,6 +204,7 @@ fn empty_fallback_response() -> NvCreateChatCompletionResponse {
             choices: vec![],
             service_tier: None,
         },
+        prompt_logprobs: None,
         nvext: None,
     }
 }
@@ -317,6 +318,7 @@ pub fn final_response_to_one_chunk_stream(
             usage: resp.inner.usage.clone(),
         },
         nvext: resp.nvext.clone(),
+        prompt_logprobs: resp.prompt_logprobs,
         llm_metrics: None,
     };
 
@@ -372,6 +374,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -413,6 +416,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -456,6 +460,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -499,6 +504,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -643,6 +649,10 @@ mod tests {
             "object": "chat.completion",
             "created": 1234567890,
             "model": "test-model",
+            "prompt_logprobs": [
+                null,
+                {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+            ],
             "choices": [{
                 "index": 0,
                 "message": {
@@ -681,6 +691,17 @@ mod tests {
         let function = tool_call.function.as_ref().expect("function preserved");
         assert_eq!(function.name.as_deref(), Some("get_weather"));
         assert_eq!(function.arguments.as_deref(), Some("{\"city\":\"Tokyo\"}"));
+        assert_eq!(
+            chunks[0]
+                .data
+                .as_ref()
+                .expect("response data")
+                .prompt_logprobs
+                .as_ref()
+                .expect("prompt logprobs")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -760,6 +781,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("correlation-123".to_string()),
