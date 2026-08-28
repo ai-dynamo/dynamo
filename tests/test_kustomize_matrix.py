@@ -826,3 +826,51 @@ def test_help():
 
     assert result.returncode == 0
     assert "{unfold,render,check,compose}" in result.stdout
+
+
+def test_sort_options_default_and_opt_in():
+    """A matrix without `sortOptions` keeps fifo; only an opt-in matrix differs."""
+    module = load_matrix_module()
+
+    # Omitted -> byte-identical to the repository-wide default, so existing
+    # matrices regenerate unchanged.
+    assert module.parse_sort_options(None) == "sortOptions:\n  order: fifo"
+
+    # Opt-in renders a legacy block with explicit kind ordering. Kustomize applies
+    # sortOptions from the kustomization being built, so this only works when the
+    # generated overlay carries it -- a base cannot set it.
+    rendered = module.parse_sort_options(
+        {
+            "order": "legacy",
+            "legacySortOptions": {
+                "orderFirst": ["ResourceClaimTemplate", "ComputeDomain"],
+                "orderLast": [],
+            },
+        }
+    )
+    assert rendered == (
+        "sortOptions:\n"
+        "  order: legacy\n"
+        "  legacySortOptions:\n"
+        '    orderFirst: ["ResourceClaimTemplate", "ComputeDomain"]\n'
+        "    orderLast: []"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, message",
+    [
+        ({}, "non-empty mapping"),
+        ({"order": "alphabetical"}, "must be fifo or legacy"),
+        ({"order": "fifo", "legacySortOptions": {}}, "requires order: legacy"),
+        ({"order": "legacy", "nope": 1}, "unsupported sortOptions key"),
+        (
+            {"order": "legacy", "legacySortOptions": {"orderFirst": "Secret"}},
+            "must be a list of kinds",
+        ),
+    ],
+)
+def test_sort_options_rejects_invalid_input(raw, message):
+    module = load_matrix_module()
+    with pytest.raises(ValueError, match=message):
+        module.parse_sort_options(raw)

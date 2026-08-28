@@ -86,12 +86,20 @@ class MatrixVariant:
     values: dict[str, Any]
 
 
+DEFAULT_SORT_OPTIONS = "sortOptions:\n  order: fifo"
+
+
 @dataclass(frozen=True)
 class MatrixConfig:
     path: Path
     source: Path
     name_template: str
     dimensions: tuple[tuple[str, tuple[MatrixValue, ...]], ...]
+    # Rendered `sortOptions:` block for this matrix's generated overlays. Kustomize
+    # applies sortOptions from the kustomization being built, so a base cannot set
+    # them -- only the generated overlay can. Defaults to the repository-wide
+    # `order: fifo`; a matrix opts out only by declaring its own `sortOptions`.
+    sort_options: str = DEFAULT_SORT_OPTIONS
 
     @property
     def recipe_root(self) -> Path:
@@ -239,7 +247,7 @@ def load_matrix(path: str) -> MatrixConfig:
         raise ValueError(f"matrix file does not exist: {path}")
 
     data = load_yaml_mapping(matrix_path)
-    unknown_keys = set(data) - {"source", "nameTemplate", "matrix"}
+    unknown_keys = set(data) - {"source", "nameTemplate", "matrix", "sortOptions"}
     if unknown_keys:
         raise ValueError(
             f"unsupported matrix key in {display_path(matrix_path)}: {min(unknown_keys)}"
@@ -327,6 +335,7 @@ def load_matrix(path: str) -> MatrixConfig:
         source=source,
         name_template=name_template,
         dimensions=tuple(dimensions),
+        sort_options=parse_sort_options(data.get("sortOptions")),
     )
 
 
@@ -735,6 +744,48 @@ def generated_template_content(
     )
 
 
+def parse_sort_options(raw: Any) -> str:
+    """Render an optional matrix `sortOptions` mapping into a kustomization block.
+
+    Omitted (the normal case) keeps the repository-wide `order: fifo`, so matrices
+    that do not declare it render byte-identically.
+    """
+    if raw is None:
+        return DEFAULT_SORT_OPTIONS
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("sortOptions must be a non-empty mapping")
+    unknown = set(raw) - {"order", "legacySortOptions"}
+    if unknown:
+        raise ValueError(f"unsupported sortOptions key: {min(unknown)}")
+    order = require_string(raw.get("order"), "sortOptions.order")
+    if order not in {"fifo", "legacy"}:
+        raise ValueError(f"sortOptions.order must be fifo or legacy, got {order!r}")
+
+    lines = ["sortOptions:", f"  order: {order}"]
+    legacy = raw.get("legacySortOptions")
+    if legacy is not None:
+        if order != "legacy":
+            raise ValueError("sortOptions.legacySortOptions requires order: legacy")
+        if not isinstance(legacy, dict):
+            raise ValueError("sortOptions.legacySortOptions must be a mapping")
+        unknown_legacy = set(legacy) - {"orderFirst", "orderLast"}
+        if unknown_legacy:
+            raise ValueError(
+                f"unsupported legacySortOptions key: {min(unknown_legacy)}"
+            )
+        lines.append("  legacySortOptions:")
+        for key in ("orderFirst", "orderLast"):
+            kinds = legacy.get(key)
+            if kinds is None:
+                continue
+            if not isinstance(kinds, list) or not all(
+                isinstance(kind, str) for kind in kinds
+            ):
+                raise ValueError(f"legacySortOptions.{key} must be a list of kinds")
+            lines.append(f"    {key}: {json.dumps(kinds)}")
+    return "\n".join(lines)
+
+
 def unfolded_kustomization(
     config: MatrixConfig, variant: MatrixVariant, template_components: tuple[Path, ...]
 ) -> str:
@@ -748,8 +799,7 @@ def unfolded_kustomization(
         "",
         "apiVersion: kustomize.config.k8s.io/v1beta1",
         "kind: Kustomization",
-        "sortOptions:",
-        "  order: fifo",
+        *config.sort_options.split("\n"),
         "resources:",
         f"  - {json.dumps(relative_path(config.source, overlay_dir))}",
     ]

@@ -143,6 +143,21 @@ matrix:
         EFAS_PER_GPU: 4
 ```
 
+A matrix may also set `sortOptions`, which is forwarded to every overlay it
+generates. Kustomize applies sort options from the kustomization being built, so
+a base cannot set them — only the generated overlay can. Omit the key and the
+overlay keeps the default `order: fifo`, so a matrix that does not declare it
+regenerates byte-identically. Use it when apply order matters, for example to
+emit a `ResourceClaimTemplate` ahead of the resource that references it:
+
+```yaml
+sortOptions:
+  order: legacy
+  legacySortOptions:
+    orderFirst: [ResourceClaimTemplate, ComputeDomain]
+    orderLast: []
+```
+
 A template selection names a source directory relative to the matrix and an
 output `path` relative to the generated overlay. The output path must be under
 `components/`; `path: components/efa` produces a normal local Component at
