@@ -10,6 +10,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 import asyncio
 import importlib.util
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -252,6 +253,7 @@ class TestDynamoJsonToolCallFallback:
 
         assert result.guided_decoding is None
         assert result.uses_dynamo_json_tool_call_fallback is True
+
     def test_multiple_fallback_tool_calls_respect_parallel_setting(self, tokenizer):
         post = self._post_processor(
             tokenizer,
@@ -3525,3 +3527,172 @@ class TestReasoningTokenAccounting:
         usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
         annotated = self._annotator(post).annotate(usage)
         assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+
+class _ReproKimiTokenizer:
+    """Kimi-K3-style: XTML control tokens are genuine special tokens."""
+
+    all_special_tokens = ["<|open|>", "<|sep|>", "<|close|>"]
+
+    def decode(self, token_id):
+        return f"tok-{token_id}"
+
+
+class _ReproReasoningParser:
+    engine_based_streaming = False
+    _close = "</think>"
+
+    def __init__(self, *args, **kwargs):
+        self._ended = False
+
+    def is_reasoning_end(self, prompt_token_ids):
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        pass
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        if self._close not in current_text:
+            return prepost_module.DeltaMessage(reasoning=current_text)
+        reasoning, content = current_text.split(self._close, 1)
+        self._ended = True
+        return prepost_module.DeltaMessage(
+            reasoning=reasoning or None, content=content or None
+        )
+
+    def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+        return self._ended
+
+
+class _ReproWrappedResponseToolParser:
+    engine_based_streaming = False
+    tool_call_start_token = "<|open|>tools<|sep|>"
+    _response_open = "<|open|>response<|sep|>"
+    _message_close = "<|close|>message<|sep|>"
+    _response_open_re = re.compile(r"<\|open\|>\s*response\s*<\|sep\|>")
+    _response_close_re = re.compile(r"<\|close\|>\s*response\s*<\|sep\|>")
+
+    def __init__(self):
+        self._sent = 0
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+    ):
+        match = self._response_open_re.search(current_text)
+        if match is None:
+            if any(
+                current_text.endswith(self._response_open[:length])
+                for length in range(1, len(self._response_open))
+            ):
+                return None
+            body = current_text
+        else:
+            body = current_text[match.end() :]
+        body = self._response_close_re.sub("", body)
+        if len(body) <= self._sent:
+            return None
+        content = body[self._sent :]
+        self._sent = len(body)
+        return prepost_module.DeltaMessage(content=content)
+
+
+class _ReproWrappedResponseReasoningParser(_ReproReasoningParser):
+    """Kimi-style: the reasoning parser declares its channel wrapper markers."""
+
+    _response_open = "<|open|>response<|sep|>"
+    _message_close = "<|close|>message<|sep|>"
+
+
+def _repro_postprocessor(with_tool_parser: bool) -> StreamingPostProcessor:
+    return StreamingPostProcessor(
+        tokenizer=_ReproKimiTokenizer(),
+        request_for_sampling=SimpleNamespace(
+            include_reasoning=True,
+            tool_choice="auto",
+            tools=None,
+            top_logprobs=None,
+        ),
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=_ReproWrappedResponseToolParser() if with_tool_parser else None,
+        reasoning_parser_class=(
+            _ReproReasoningParser
+            if with_tool_parser
+            else _ReproWrappedResponseReasoningParser
+        ),
+        chat_template_kwargs={},
+        stream_response=True,
+    )
+
+
+def _repro_chunk(text: str, finish_reason: str | None = None):
+    return SimpleNamespace(
+        index=0,
+        text=text,
+        token_ids=[],
+        finish_reason=finish_reason,
+        logprobs=None,
+    )
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_response_wrapper_same_chunk_as_reasoning_end_does_not_leak(
+    with_tool_parser,
+):
+    post = _repro_postprocessor(with_tool_parser)
+    choice = post.process_output(
+        _repro_chunk("analysis</think><|open|>response<|sep|>Hello", "stop")
+    )
+    delta = choice["delta"]
+    assert delta.get("content") == "Hello", delta
+    assert delta.get("reasoning_content") == "analysis"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_response_wrapper_split_across_transition_does_not_leak(with_tool_parser):
+    post = _repro_postprocessor(with_tool_parser)
+    first = post.process_output(_repro_chunk("analysis</think><|open|>"))
+    second = post.process_output(_repro_chunk(" response <|sep|>Hello", "stop"))
+    for choice in (first, second):
+        content = choice["delta"].get("content") or ""
+        assert "<|open|>" not in content
+        assert "<|sep|>" not in content
+        assert "response" not in content
+    assert second["delta"].get("content") == "Hello"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_stop_trimmed_marker_suffix_does_not_leak(with_tool_parser):
+    """A stop trimmed <|close|> must not leak the orphan `message<|sep|>`."""
+    post = _repro_postprocessor(with_tool_parser)
+    post.process_output(_repro_chunk("analysis</think><|open|>response<|sep|>Hello"))
+    final = post.process_output(_repro_chunk("message<|sep|>", "stop"))
+    content = final["delta"].get("content") or ""
+    assert "message" not in content
+    assert "<|sep|>" not in content
+    assert final["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_terminal_bare_control_token_stripped(with_tool_parser):
+    post = _repro_postprocessor(with_tool_parser)
+    choice = post.process_output(
+        _repro_chunk("analysis</think><|open|>response<|sep|>Hello<|sep|>", "stop")
+    )
+    assert "<|sep|>" not in (choice["delta"].get("content") or "")
+    assert choice["finish_reason"] == "stop"

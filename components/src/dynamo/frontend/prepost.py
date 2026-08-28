@@ -826,6 +826,78 @@ def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | 
     return re.compile("|".join(re.escape(m) for m in ordered))
 
 
+# Parser attributes that carry complete control markers. Only string values are
+# honoured; the attribute names are a convention followed by wrapped-channel
+# parsers such as Kimi K3's, and absent attributes simply contribute nothing.
+_PARSER_MARKER_ATTRIBUTES = (
+    "response_open",
+    "response_close",
+    "tools_open",
+    "tools_close",
+    "_response_open",
+    "_response_close",
+    "_message_close",
+    "_think_open",
+    "_think_close",
+)
+
+
+def _parser_control_markers(
+    tool_parser: ToolParser | None,
+    reasoning_parser: Any,
+) -> tuple[str, ...]:
+    """Composite control markers declared by the active parsers.
+
+    `_marker_strip_re` only knows tokenizer-level special tokens, which strips
+    complete markers like `<|open|>` but cannot remove the channel words that
+    live *between* a parser's control tokens (Kimi K3's
+    `<|open|>response<|sep|>` sheds its tokens but leaks `response`), nor the
+    stop-trimmed derivative the engine can emit when its stop consumes only
+    the leading control token (`<|close|>message<|sep|>` -> `message<|sep|>`).
+    Return the parsers' complete markers plus such orphaned variants.
+    """
+    markers: list[str] = []
+    for parser in (tool_parser, reasoning_parser):
+        if parser is None:
+            continue
+        for attribute in _PARSER_MARKER_ATTRIBUTES:
+            marker = getattr(parser, attribute, None)
+            if isinstance(marker, str) and marker and marker not in markers:
+                markers.append(marker)
+    for marker in list(markers):
+        # Engines may trim only the marker's leading control token at a stop
+        # boundary, leaving the rest behind.  The remainder is considered an
+        # orphan only when it still ends in a registered control token, so
+        # ordinary channel words alone (`message`) never match this pattern.
+        leading_control = re.match(r"<\|[^>]+\|>", marker)
+        if leading_control is not None:
+            orphaned = marker[leading_control.end() :]
+            if re.search(r"<\|[^>]+\|>", orphaned) and orphaned not in markers:
+                markers.append(orphaned)
+    return tuple(markers)
+
+
+def _whitespace_tolerant_marker_pattern(marker: str) -> str:
+    pieces = re.split(r"(<\|[^>]+\|>)", marker)
+    inner = r"\s*".join(re.escape(piece) for piece in pieces if piece)
+    # A wrapper can be stream-split after its leading control token, so the
+    # remainder may arrive with formatting whitespace in front of the channel
+    # word (` response <|sep|>Hello`).
+    return r"\s*" + inner
+
+
+def _compile_parser_marker_re(markers: tuple[str, ...]) -> "re.Pattern[str] | None":
+    if not markers:
+        return None
+    # Longest-first so a complete marker wins over its orphaned variant.
+    patterns = sorted(
+        (_whitespace_tolerant_marker_pattern(m) for m in markers),
+        key=len,
+        reverse=True,
+    )
+    return re.compile("|".join(patterns))
+
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -929,6 +1001,9 @@ class StreamingPostProcessor:
             self._marker_strip_re = _compile_marker_strip_re(
                 tuple(m for m in self._control_markers if m not in owned)
             )
+        self._parser_marker_re = _compile_parser_marker_re(
+            _parser_control_markers(self.tool_parser, self.reasoning_parser)
+        )
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -1155,6 +1230,18 @@ class StreamingPostProcessor:
             return text
         return self._marker_strip_re.sub("", text)
 
+    def _strip_parser_control_markers(self, text: str | None) -> str | None:
+        """Strip parser-declared composite markers and stop-trimmed suffixes.
+
+        Complements `_strip_control_markers`, which only sees whole special
+        tokens: this one sees the parser's own multi-token markers
+        (`<|open|>response<|sep|>`) and their orphaned remainders
+        (`message<|sep|>`), whitespace-tolerantly.
+        """
+        if not text or self._parser_marker_re is None:
+            return text
+        return self._parser_marker_re.sub("", text)
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -1290,7 +1377,11 @@ class StreamingPostProcessor:
         # enforced once at the funnel rather than at each producer -- stripping at
         # the producers as well only re-scans text that is about to be scanned.
         if isinstance(delta.get("content"), str):
-            stripped = self._strip_control_markers(delta["content"])
+            # Composite markers must go first: they match across control-token
+            # boundaries, which `_strip_control_markers` would erase.
+            stripped = self._strip_control_markers(
+                self._strip_parser_control_markers(delta["content"])
+            )
             if stripped:
                 delta["content"] = stripped
             else:
