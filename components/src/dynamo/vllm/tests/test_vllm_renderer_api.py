@@ -459,11 +459,22 @@ class TestVllmRendererApi:
         omni_cached_token_output_fields = (
             cached_token_output_fields + omni_output_extra_fields
         )
-        valid_output_fields = (
-            base_output_fields,
-            cached_token_output_fields,
-            omni_output_fields,
-            omni_cached_token_output_fields,
+        # vLLM 0.28.0 appends two fields after num_nans_in_logits, i.e. after
+        # vLLM's own fields but before anything vllm-omni adds. Dynamo builds
+        # EngineCoreOutput BY KEYWORD and feature-detects optional fields via
+        # __struct_fields__, so appended fields take their msgspec defaults and
+        # need no output mapping -- validated by ~7000 requests through this exact
+        # path on vLLM 0.28.0 (p0 + moontrace, 2-replica AGG and 1P1D).
+        vllm_0280_output_extra_fields = (
+            "mm_cache_miss_hashes",
+            "new_sampling_mask",
+        )
+        _output_bases = (base_output_fields, cached_token_output_fields)
+        valid_output_fields = tuple(
+            base + vllm_extra + omni_extra
+            for base in _output_bases
+            for vllm_extra in ((), vllm_0280_output_extra_fields)
+            for omni_extra in ((), omni_output_extra_fields)
         )
         actual_output_fields = EngineCoreOutput.__struct_fields__
         assert actual_output_fields in valid_output_fields, (
