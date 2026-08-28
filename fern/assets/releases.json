@@ -1086,7 +1086,8 @@
     {
       "name": "LoRA",
       "sglang": {
-        "status": "no"
+        "status": "wip",
+        "note": "Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated"
       },
       "trtllm": {
         "status": "no"
