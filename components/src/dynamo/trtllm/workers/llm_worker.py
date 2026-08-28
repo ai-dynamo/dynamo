@@ -357,9 +357,10 @@ async def init_llm_worker(
         # collector: growing `step_metrics` / `ctx_chunk_metrics` lists that get
         # attached to the final response, then pickled for the rank gather and again
         # for worker->proxy IPC under attention DP. Nothing in Dynamo reads
-        # `time_breakdown_metrics`, so keep this off unconditionally. An explicit
-        # `return_perf_metrics: true` in extra/override engine args still wins --
-        # those are merged into `arg_map` after this dict is built.
+        # `time_breakdown_metrics`, so default it off rather than tying it to
+        # publishing. This is a default, not a hard disable: `--extra-engine-args`
+        # and `--override-engine-args` are merged over `arg_map` below and can set
+        # it back to true for custom instrumentation.
         "return_perf_metrics": False,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
@@ -521,8 +522,8 @@ async def init_llm_worker(
 
     # Request-level perf metrics are a *separate* switch that merely shares the
     # engine flag's name. Tie it to KV-event publishing, not to the engine flag
-    # (now always False above): its one consumer is the KV-transfer histogram in
-    # HandlerBase, whose AdditionalMetricsCollector is built only under
+    # (which now defaults to False above): its one consumer is the KV-transfer
+    # histogram in HandlerBase, whose AdditionalMetricsCollector is built only under
     # `if config.publish_events_and_metrics`. So with publishing off nothing reads
     # `request_perf_metrics` and filling it is pure waste. `cached_tokens` is
     # unaffected either way -- it comes from `res.cached_tokens`, not from
