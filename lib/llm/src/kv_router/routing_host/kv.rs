@@ -522,7 +522,7 @@ where
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_routable(selected_target)
+                    && !self.affinity_target_is_valid(selected_target)
                     && let Some(operation) = operation.take()
                 {
                     operation.invalidate();

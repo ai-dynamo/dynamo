@@ -5,7 +5,7 @@ use std::sync::Weak;
 
 use anyhow::{Context, Result};
 use dynamo_runtime::{
-    component::Client,
+    component::{Client, Instance},
     discovery::EventTransportKind,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{
@@ -65,22 +65,23 @@ impl ReplicaUpdateSender {
 #[derive(Clone)]
 struct ReplicaUpdateApplier {
     publisher_id: u64,
-    local_worker_ids: watch::Receiver<Vec<u64>>,
+    local_instances: watch::Receiver<Vec<Instance>>,
     coordinator: Weak<AffinityCoordinatorInner>,
 }
 
 impl ReplicaUpdateApplier {
     fn apply(&self, source_publisher_id: u64, update: SessionAffinityUpdate) -> bool {
-        let worker_ids = self.local_worker_ids.borrow();
+        let instances = self.local_instances.borrow();
         if !should_apply_update(
             self.publisher_id,
             source_publisher_id,
-            worker_ids.as_slice(),
-            &update,
+            instances
+                .iter()
+                .any(|instance| instance.id() == update.worker_id),
         ) {
             return true;
         }
-        drop(worker_ids);
+        drop(instances);
 
         let Some(coordinator) = self.coordinator.upgrade() else {
             return false;
@@ -138,7 +139,7 @@ impl ReplicaSyncRuntime {
         }
         let applier = ReplicaUpdateApplier {
             publisher_id,
-            local_worker_ids: client.instance_avail_watcher(),
+            local_instances: client.instance_source.as_ref().clone(),
             coordinator,
         };
 
@@ -291,11 +292,9 @@ impl Drop for ReplicaSyncRuntime {
 fn should_apply_update(
     local_publisher_id: u64,
     source_publisher_id: u64,
-    local_worker_ids: &[u64],
-    update: &SessionAffinityUpdate,
+    target_is_discovered: bool,
 ) -> bool {
-    source_publisher_id != local_publisher_id
-        && local_worker_ids.binary_search(&update.worker_id).is_ok()
+    source_publisher_id != local_publisher_id && target_is_discovered
 }
 
 fn should_use_direct_sync(transport_kind: EventTransportKind, direct_zmq_topology: bool) -> bool {
@@ -313,21 +312,11 @@ mod tests {
     };
     use std::time::Duration;
 
-    fn update(router_id: u64, worker_id: u64) -> SessionAffinityUpdate {
-        SessionAffinityUpdate {
-            session_id: "session".to_string(),
-            worker_id,
-            dp_rank: Some(0),
-            sequence: 1,
-            router_id,
-        }
-    }
-
     #[test]
     fn replica_update_filter_rejects_self_and_unknown_workers() {
-        assert!(!should_apply_update(7, 7, &[10, 11], &update(8, 10)));
-        assert!(!should_apply_update(7, 8, &[10, 11], &update(8, 12)));
-        assert!(should_apply_update(7, 8, &[10, 11], &update(7, 10)));
+        assert!(!should_apply_update(7, 7, true));
+        assert!(!should_apply_update(7, 8, false));
+        assert!(should_apply_update(7, 8, true));
     }
 
     #[test]

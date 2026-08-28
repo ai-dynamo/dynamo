@@ -275,7 +275,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 
 #[tokio::test]
 #[serial_test::serial]
-async fn builtin_direct_dispatch_ignores_local_inhibition() {
+async fn builtin_hard_affinity_ignores_local_inhibition() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -298,23 +298,41 @@ async fn builtin_direct_dispatch_ignores_local_inhibition() {
     )
     .await
     .unwrap();
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
     let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
         inner,
         load_context,
-        None,
+        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
+
+    let session_id = SessionAffinityId::new("local-inhibition");
+    let AffinityAcquire::Initialize(initializer) =
+        affinity.acquire(&session_id, None).await.unwrap()
+    else {
+        panic!("new affinity session must initialize");
+    };
+    drop(
+        initializer
+            .commit(AffinityTarget::worker(worker_id))
+            .unwrap(),
+    );
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
     assert!(!client.instance_ids_avail().contains(&worker_id));
 
-    let mut direct_request = request();
-    direct_request.routing_mut().backend_instance_id = Some(worker_id);
-    let mut stream = host.generate(Context::new(direct_request)).await.unwrap();
+    let mut stream = host
+        .generate(affinity_request("local-inhibition", None))
+        .await
+        .unwrap();
     while stream.next().await.is_some() {}
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(AffinityTarget::worker(worker_id))
+    );
 
     drop(host);
     runtime.shutdown();
@@ -582,10 +600,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[real_worker]
     );
-    assert_eq!(
-        affinity.query_target(&session_id, None).unwrap(),
-        Some(AffinityTarget::worker(stale_worker))
-    );
+    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
     drop(host);
     runtime.shutdown();
@@ -1304,7 +1319,7 @@ async fn stale_affinity_rank_rebinds_once() {
 }
 
 #[tokio::test]
-async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_pins() {
+async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escaping_pins() {
     let mut constrained_worker = ModelRuntimeConfig::default();
     constrained_worker.taints.insert("retry-pool".to_string());
     let workers = HashMap::from([
@@ -1348,7 +1363,7 @@ async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_
             ),
         );
     let mut retry_request = Context::new(retry_input);
-    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
     assert!(
         router
@@ -1356,13 +1371,21 @@ async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_
             .await
             .is_err()
     );
-    let (selection, operation) = router
-        .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
-        .await
-        .unwrap();
-    assert_eq!(selection.worker.worker_id, 8);
-    router.kv_router().free(retry_request.id()).await.unwrap();
-    drop(operation);
+    assert!(
+        router
+            .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .query_target(&session_id, None)
+            .unwrap(),
+        Some(original_target)
+    );
 
     let mut exhausted_input = request();
     exhausted_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 10]));

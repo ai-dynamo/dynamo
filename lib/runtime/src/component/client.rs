@@ -338,6 +338,10 @@ impl RoutingInstancesState {
         self.snapshot().routable_ids().to_vec()
     }
 
+    fn discovered_ids(&self) -> Vec<u64> {
+        self.snapshot().discovered_ids().to_vec()
+    }
+
     fn available_ids(&self) -> Option<Arc<HashSet<u64>>> {
         self.snapshot().available_ids()
     }
@@ -516,6 +520,11 @@ impl Client {
 
     pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
+    }
+
+    /// Instance IDs in the latest discovery snapshot, including locally inhibited workers.
+    pub fn instance_ids_discovered(&self) -> Vec<u64> {
+        self.routing_instances.discovered_ids()
     }
 
     pub fn instance_ids_avail(&self) -> Vec<u64> {

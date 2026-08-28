@@ -39,7 +39,7 @@ use crate::{
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target, invalid_argument,
+        explicit_target_for_routing, invalid_argument,
     },
 };
 
@@ -494,26 +494,11 @@ where
         }
     }
 
-    fn affinity_target_requires_rebind(
-        &self,
-        request: &PreprocessedRequest,
-        target: AffinityTarget,
-    ) -> bool {
-        if request
-            .migration_state
-            .as_ref()
-            .is_some_and(|state| state.excluded_worker_ids().contains(&target.worker_id))
-        {
-            return true;
-        }
-        !self.affinity_target_is_routable(target)
-    }
-
-    fn affinity_target_is_routable(&self, target: AffinityTarget) -> bool {
+    fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
         if self
             .inner
             .client
-            .instance_ids_avail()
+            .instance_ids_discovered()
             .binary_search(&target.worker_id)
             .is_err()
         {
@@ -524,7 +509,7 @@ where
         };
         let workers = kv_router.workers_with_configs.borrow();
         let Some(config) = workers.get(&target.worker_id) else {
-            return false;
+            return true;
         };
         let Some(dp_rank) = target.dp_rank else {
             return true;
@@ -551,7 +536,7 @@ where
         let Some(session_id) = affinity_id(request)? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request, phase)?;
+        let explicit = explicit_target_for_routing(request, phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));
@@ -568,9 +553,7 @@ where
             Err(error)
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && explicit.is_none()
-                    && target.is_some_and(|target| {
-                        self.affinity_target_requires_rebind(request.content(), target)
-                    }) =>
+                    && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
                 Err(error)
@@ -722,7 +705,7 @@ where
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_routable(selected_target)
+                    && !self.affinity_target_is_valid(selected_target)
                     && let Some(operation) = operation.take()
                 {
                     operation.invalidate();

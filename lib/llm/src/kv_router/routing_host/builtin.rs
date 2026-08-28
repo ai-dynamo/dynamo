@@ -285,14 +285,14 @@ where
     {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let explicit = explicit_target(&request, phase)?;
+        let explicit = explicit_target_for_routing(&request, phase)?;
+        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
-        if is_direct && explicit.is_none() {
+        if is_direct && explicit.is_none() && !has_affinity_session {
             return Err(invalid_argument(format!(
                 "worker ID required for {phase} request in Direct routing mode"
             )));
         }
-        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (lora_target, lora_fallback, lora_load) =
             match self.select_lora_target(request.content())? {
@@ -448,7 +448,7 @@ where
             Ok(result) => result,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_routable(expected_target)
+                    && !self.affinity_target_is_valid(expected_target)
                     && let Some(operation) = operation.take()
                 {
                     operation.invalidate();
