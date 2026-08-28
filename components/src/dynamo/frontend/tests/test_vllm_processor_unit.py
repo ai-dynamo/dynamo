@@ -2726,3 +2726,16 @@ class TestReasoningTokenAccounting:
         usage = {"completion_tokens_details": {"reasoning_tokens": 0}}
         annotated = self._annotator(post).annotate(usage)
         assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+    @pytest.mark.parametrize("backend", [-1, -100, None, "7"])
+    def test_annotate_replaces_a_non_positive_backend_value(self, tokenizer, backend):
+        """Only a POSITIVE backend count is authoritative.
+
+        -1 is truthy, so a plain falsiness check preserved it and reported a
+        negative reasoning_tokens to the client.
+        """
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
