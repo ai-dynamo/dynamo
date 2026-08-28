@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use llm_multimodal::vision::{PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry};
 use llm_multimodal::{ModelMetadata, ModelRegistry};
 use llm_tokenizer::traits::Tokenizer;
@@ -74,9 +74,306 @@ static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::ne
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
-    processor: &'static dyn VisionPreProcessor,
+    processor: ImageTokenCounter,
     config: PreProcessorConfig,
     model_id: String,
+}
+
+enum ImageTokenCounter {
+    Registry(&'static dyn VisionPreProcessor),
+    NemotronNanoOmni(NemotronNanoOmniCounter),
+}
+
+/// Routing-only token counter matching vLLM's Nano Nemotron VL processor.
+/// Image decoding and tensor preprocessing remain entirely backend-owned.
+struct NemotronNanoOmniCounter {
+    image_size: usize,
+    patch_size: usize,
+    downsample_ratio: f64,
+    use_thumbnail: bool,
+    max_num_tiles: usize,
+    dynamic_resolution: Option<NemotronDynamicResolution>,
+}
+
+struct NemotronDynamicResolution {
+    min_num_patches: usize,
+    max_num_patches: usize,
+}
+
+impl NemotronNanoOmniCounter {
+    fn try_from_configs(
+        processor_config: &PreProcessorConfig,
+        model_config: &serde_json::Value,
+    ) -> Result<Self> {
+        let image_size = processor_config
+            .get_extra::<usize>("image_size")
+            .or_else(|| json_usize(model_config, &["force_image_size"]))
+            .ok_or_else(|| anyhow!("Nemotron Nano Omni image_size is missing"))?;
+        let patch_size = processor_config.get_patch_size(0);
+        let downsample_ratio = processor_config
+            .get_extra::<f64>("downsample_ratio")
+            .or_else(|| {
+                model_config
+                    .get("downsample_ratio")
+                    .and_then(serde_json::Value::as_f64)
+            })
+            .ok_or_else(|| anyhow!("Nemotron Nano Omni downsample_ratio is missing"))?;
+        let max_num_tiles = processor_config
+            .get_extra::<usize>("max_num_tiles")
+            .unwrap_or(12);
+        let use_thumbnail = processor_config
+            .get_extra::<bool>("use_thumbnail")
+            .or_else(|| {
+                model_config
+                    .get("use_thumbnail")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(true);
+
+        if image_size == 0
+            || patch_size == 0
+            || image_size % patch_size != 0
+            || !(0.0..=1.0).contains(&downsample_ratio)
+            || downsample_ratio == 0.0
+            || max_num_tiles == 0
+        {
+            bail!(
+                "invalid Nemotron Nano Omni image config: image_size={image_size}, \
+                 patch_size={patch_size}, downsample_ratio={downsample_ratio}, \
+                 max_num_tiles={max_num_tiles}"
+            );
+        }
+
+        let min_num_patches =
+            json_usize(model_config, &["vision_config", "args", "min_num_patches"]);
+        let max_num_patches =
+            json_usize(model_config, &["vision_config", "args", "max_num_patches"]);
+        let dynamic_resolution = match (min_num_patches, max_num_patches) {
+            (Some(min_num_patches), Some(max_num_patches))
+                if min_num_patches > 0 && max_num_patches >= min_num_patches =>
+            {
+                Some(NemotronDynamicResolution {
+                    min_num_patches,
+                    max_num_patches,
+                })
+            }
+            (None, None) => None,
+            _ => bail!("invalid Nemotron Nano Omni dynamic-resolution patch limits"),
+        };
+
+        Ok(Self {
+            image_size,
+            patch_size,
+            downsample_ratio,
+            use_thumbnail,
+            max_num_tiles,
+            dynamic_resolution,
+        })
+    }
+
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        if let Some(dynamic) = &self.dynamic_resolution {
+            return dynamic.count_tokens_unconstrained(width, height, self.patch_size);
+        }
+        self.count_static_tokens(width, height)
+    }
+
+    fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+    ) -> Option<Vec<usize>> {
+        match &self.dynamic_resolution {
+            Some(dynamic) => dynamic.count_tokens_for_images(
+                dimensions,
+                max_model_len,
+                text_prompt_len,
+                self.patch_size,
+            ),
+            None => Some(
+                dimensions
+                    .iter()
+                    .map(|&(width, height)| self.count_static_tokens(width, height))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn count_static_tokens(&self, width: u32, height: u32) -> usize {
+        if width == 0 || height == 0 {
+            return 0;
+        }
+
+        let mut target_ratios: Vec<(usize, usize)> = (1..=self.max_num_tiles)
+            .flat_map(|tiles_w| {
+                (1..=self.max_num_tiles)
+                    .filter(move |tiles_h| tiles_w * tiles_h <= self.max_num_tiles)
+                    .map(move |tiles_h| (tiles_w, tiles_h))
+            })
+            .collect();
+        target_ratios.sort_by_key(|(tiles_w, tiles_h)| tiles_w * tiles_h);
+
+        let aspect_ratio = f64::from(width) / f64::from(height);
+        let area = f64::from(width) * f64::from(height);
+        let mut best_ratio = (1usize, 1usize);
+        let mut best_diff = f64::INFINITY;
+        for ratio in target_ratios {
+            let target_aspect_ratio = ratio.0 as f64 / ratio.1 as f64;
+            let ratio_diff = (aspect_ratio - target_aspect_ratio).abs();
+            if ratio_diff < best_diff {
+                best_diff = ratio_diff;
+                best_ratio = ratio;
+            } else if ratio_diff == best_diff
+                && area > 0.5 * (self.image_size * self.image_size * ratio.0 * ratio.1) as f64
+            {
+                best_ratio = ratio;
+            }
+        }
+
+        let mut num_tiles = best_ratio.0 * best_ratio.1;
+        if self.use_thumbnail && num_tiles > 1 {
+            num_tiles += 1;
+        }
+        let patches_per_side = self.image_size / self.patch_size;
+        let tokens_per_tile =
+            ((patches_per_side * patches_per_side) as f64 * self.downsample_ratio.powi(2)) as usize;
+        num_tiles * tokens_per_tile
+    }
+}
+
+impl NemotronDynamicResolution {
+    fn count_tokens_unconstrained(&self, width: u32, height: u32, patch_size: usize) -> usize {
+        self.process_image(width, height, self.max_num_patches, patch_size)
+            .map(|(_, embeddings)| embeddings)
+            .unwrap_or(0)
+    }
+
+    /// Mirror vLLM's `DynamicResolutionImageTiler.compute_params`. The
+    /// backend budgets in pre-pixel-shuffle patches, hence the factor of four.
+    fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+        patch_size: usize,
+    ) -> Option<Vec<usize>> {
+        if dimensions.is_empty() {
+            return Some(Vec::new());
+        }
+        let post_shuffle_budget = max_model_len.checked_sub(text_prompt_len)?.checked_sub(4)?;
+        let mut total_patch_budget = post_shuffle_budget.checked_mul(4)?;
+        total_patch_budget = total_patch_budget.max(self.min_num_patches * dimensions.len());
+        let initial_budget = total_patch_budget.clamp(self.min_num_patches, self.max_num_patches);
+        let mut per_image_budgets = vec![initial_budget; dimensions.len()];
+
+        for _ in 0..10 {
+            let processed: Option<Vec<(usize, usize)>> = dimensions
+                .iter()
+                .zip(&per_image_budgets)
+                .map(|(&(width, height), &budget)| {
+                    self.process_image(width, height, budget, patch_size)
+                })
+                .collect();
+            let processed = processed?;
+            let total_patches = processed
+                .iter()
+                .try_fold(0usize, |sum, (patches, _)| sum.checked_add(*patches))?;
+            if total_patches <= total_patch_budget {
+                return Some(
+                    processed
+                        .into_iter()
+                        .map(|(_, embeddings)| embeddings)
+                        .collect(),
+                );
+            }
+
+            let scale = total_patch_budget as f64 / total_patches as f64;
+            let scaled: Vec<usize> = processed
+                .iter()
+                .map(|(patches, _)| self.min_num_patches.max((*patches as f64 * scale) as usize))
+                .collect();
+            let scaled_down = scaled
+                .iter()
+                .zip(&per_image_budgets)
+                .any(|(scaled, previous)| scaled < previous);
+            per_image_budgets = if scaled_down {
+                scaled
+            } else {
+                vec![self.min_num_patches; dimensions.len()]
+            };
+        }
+        None
+    }
+
+    /// Return `(pre-shuffle patches, post-shuffle image tokens)`.
+    fn process_image(
+        &self,
+        width: u32,
+        height: u32,
+        patch_budget: usize,
+        patch_size: usize,
+    ) -> Option<(usize, usize)> {
+        if width == 0 || height == 0 || patch_size == 0 || patch_budget == 0 {
+            return None;
+        }
+        // Python's round() is ties-to-even; vLLM deliberately adds 0.5 first.
+        let closest_patch_height =
+            (f64::from(height) / patch_size as f64 + 0.5).round_ties_even() as usize;
+        let closest_patch_width =
+            (f64::from(width) / patch_size as f64 + 0.5).round_ties_even() as usize;
+        let closest_patch_height = closest_patch_height.max(1);
+        let closest_patch_width = closest_patch_width.max(1);
+        let patches = closest_patch_height.checked_mul(closest_patch_width)?;
+        let factor = (patch_budget as f64 / patches as f64).sqrt().min(1.0);
+        let mut target_height = (factor * closest_patch_height as f64).floor() as usize;
+        let mut target_width = (factor * closest_patch_width as f64).floor() as usize;
+        target_height = target_height.max(1);
+        target_width = target_width.max(1);
+
+        let target_patches = target_height.checked_mul(target_width)?;
+        if patch_budget > self.min_num_patches && target_patches < self.min_num_patches {
+            let up_factor = (self.min_num_patches as f64 / target_patches as f64).sqrt();
+            target_height = (up_factor * target_height as f64).ceil() as usize;
+            target_width = (up_factor * target_width as f64).ceil() as usize;
+        }
+
+        // Nano Nemotron uses one 2x pixel-shuffle reduction.
+        round_patch_dimension(&mut target_height, target_width, patch_budget, 2);
+        round_patch_dimension(&mut target_width, target_height, patch_budget, 2);
+
+        let raw_patches = target_height.checked_mul(target_width)?;
+        Some((raw_patches, raw_patches / 4))
+    }
+}
+
+fn round_patch_dimension(
+    dimension: &mut usize,
+    other_dimension: usize,
+    patch_budget: usize,
+    divisor: usize,
+) {
+    let remainder = *dimension % divisor;
+    if remainder == 0 {
+        return;
+    }
+    let increase = divisor - remainder;
+    if dimension
+        .checked_add(increase)
+        .and_then(|value| value.checked_mul(other_dimension))
+        .is_some_and(|patches| patches <= patch_budget)
+    {
+        *dimension += increase;
+    } else {
+        *dimension = divisor.max(*dimension - remainder);
+    }
+}
+
+fn json_usize(config: &serde_json::Value, path: &[&str]) -> Option<usize> {
+    path.iter()
+        .try_fold(config, |value, key| value.get(*key))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 impl LightseekMmCounter {
@@ -106,13 +403,26 @@ impl LightseekMmCounter {
             )
         })?;
 
-        let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
-            anyhow!(
-                "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
-                model_id,
-                model_type
-            )
-        })?;
+        let processor = if is_nemotron_nano_omni(model_id, model_type) {
+            let model_config = read_json(model_dir, "config.json").ok_or_else(|| {
+                anyhow!(
+                    "mm-routing: failed to read Nemotron Nano Omni config.json at {}",
+                    model_dir.display()
+                )
+            })?;
+            ImageTokenCounter::NemotronNanoOmni(NemotronNanoOmniCounter::try_from_configs(
+                &config,
+                &model_config,
+            )?)
+        } else {
+            ImageTokenCounter::Registry(REGISTRY.find(model_id, model_type).ok_or_else(|| {
+                anyhow!(
+                    "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
+                    model_id,
+                    model_type
+                )
+            })?)
+        };
 
         Ok(Self {
             processor,
@@ -122,8 +432,36 @@ impl LightseekMmCounter {
     }
 
     pub fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+        match &self.processor {
+            ImageTokenCounter::Registry(processor) => {
+                processor.calculate_num_tokens(width, height, &self.config)
+            }
+            ImageTokenCounter::NemotronNanoOmni(counter) => counter.count_tokens(width, height),
+        }
+    }
+
+    /// Return backend-exact counts for an entire image batch. Nemotron's
+    /// dynamic tiler shares the remaining context budget across images, so
+    /// counting each image independently would diverge for larger batches.
+    pub fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+    ) -> Option<Vec<usize>> {
+        match &self.processor {
+            ImageTokenCounter::Registry(processor) => Some(
+                dimensions
+                    .iter()
+                    .map(|&(width, height)| {
+                        processor.calculate_num_tokens(width, height, &self.config)
+                    })
+                    .collect(),
+            ),
+            ImageTokenCounter::NemotronNanoOmni(counter) => {
+                counter.count_tokens_for_images(dimensions, max_model_len, text_prompt_len)
+            }
+        }
     }
 
     pub fn model_id(&self) -> &str {
@@ -131,13 +469,18 @@ impl LightseekMmCounter {
     }
 }
 
-/// Resolve the image-placeholder token id by delegating to a per-model
-/// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-Omni,
-/// Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
-/// Kimi-K2.5, Kimi-K3, Inkling) reads the right field of `config.json`
-/// (`image_token_id`, `image_token_index`, `media_placeholder_token_id`) and
-/// falls back to the tokenizer's vocab when only the placeholder string is
-/// known.
+fn is_nemotron_nano_omni(model_id: &str, model_type: Option<&str>) -> bool {
+    const ARCH: &str = "NemotronH_Nano_Omni_Reasoning_V3";
+    model_type.is_some_and(|model_type| model_type.eq_ignore_ascii_case(ARCH))
+        || model_id
+            .to_ascii_lowercase()
+            .contains("nemotron-3-nano-omni")
+}
+
+/// Resolve the image-placeholder token id from model config or by delegating
+/// to a per-model `ModelProcessorSpec`. Nemotron Nano Omni publishes
+/// `img_context_token_id`; registry-backed families read their corresponding
+/// `image_token_id`, `image_token_index`, or `media_placeholder_token_id`.
 ///
 /// `model_id` is the HF id or local path; `model_dir` is the directory
 /// containing `tokenizer.json` and `config.json`.
@@ -163,6 +506,9 @@ pub enum ImagePromptKind {
     /// Kimi-K3's renderer emits one structural `<|media_pad|>` per image, but
     /// the backend replaces it with a dimension-bearing media block.
     KimiK3,
+    /// The backend wraps each repeated image-pad run in model-configured
+    /// single-token delimiters. Nemotron Nano Omni uses `<img>` and `</img>`.
+    WrappedRepeatedPad,
 }
 
 impl LightseekMmCounter {
@@ -173,11 +519,16 @@ impl LightseekMmCounter {
     /// repeating its model-id / model-type aliases. New processor families
     /// fail closed until their worker prompt shape has been verified here.
     pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
-        match self.processor.model_name() {
-            "kimi-k3" => Some(ImagePromptKind::KimiK3),
-            "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision"
-            | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
-            _ => None,
+        match &self.processor {
+            ImageTokenCounter::NemotronNanoOmni(_) => Some(ImagePromptKind::WrappedRepeatedPad),
+            ImageTokenCounter::Registry(processor) => match processor.model_name() {
+                "kimi-k3" => Some(ImagePromptKind::KimiK3),
+                "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next"
+                | "phi3-vision" | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => {
+                    Some(ImagePromptKind::RepeatedPad)
+                }
+                _ => None,
+            },
         }
     }
 }
@@ -191,6 +542,16 @@ fn resolve_model_token_with_config(
     model_dir: &Path,
     config: &serde_json::Value,
 ) -> Option<ResolvedModelToken> {
+    if let Some(token_id) = extract_nemotron_omni_image_token_id(config) {
+        tracing::debug!(
+            target: "mm_routing",
+            model_id = %model_id,
+            image_token_id = token_id,
+            "resolved Nemotron Nano Omni image-placeholder token id"
+        );
+        return Some(ResolvedModelToken { token_id });
+    }
+
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -249,6 +610,35 @@ fn resolve_model_token_with_config(
     })
 }
 
+/// vLLM expands every Nemotron image placeholder into `<img>`, a run of
+/// `<image>` context tokens, and `</img>`. KV events therefore contain the
+/// configured context-token id rather than a generic `image_token_id`.
+fn extract_nemotron_omni_image_token_id(config: &serde_json::Value) -> Option<TokenIdType> {
+    is_nemotron_nano_omni_config(config)
+        .then(|| config.get("img_context_token_id"))
+        .flatten()
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|id| u32::try_from(id).ok())
+}
+
+fn is_nemotron_nano_omni_config(config: &serde_json::Value) -> bool {
+    const ARCH: &str = "NemotronH_Nano_Omni_Reasoning_V3";
+    config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|model_type| model_type.eq_ignore_ascii_case(ARCH))
+        || config
+            .get("architectures")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|architectures| {
+                architectures.iter().any(|architecture| {
+                    architecture
+                        .as_str()
+                        .is_some_and(|architecture| architecture.eq_ignore_ascii_case(ARCH))
+                })
+            })
+}
+
 /// Bundle of routing-side token info resolved from a model's HF JSON
 /// configs. All fields default to `None` when the corresponding lookup
 /// fails — callers disable the respective routing path without erroring.
@@ -272,6 +662,10 @@ pub struct RoutingTokens {
     /// produce the routing-side prepend id. `None` for models that don't
     /// prepend BOS.
     pub bos_token_string: Option<String>,
+    /// Model-configured wrapper strings for
+    /// [`ImagePromptKind::WrappedRepeatedPad`]. Both must encode atomically or
+    /// exact routing fails closed.
+    pub image_wrapper_strings: Option<(String, String)>,
 }
 
 impl RoutingTokens {
@@ -320,12 +714,22 @@ pub fn resolve_routing_tokens(
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
+    let image_wrapper_strings = config
+        .as_ref()
+        .filter(|config| is_nemotron_nano_omni_config(config))
+        .and_then(|config| {
+            Some((
+                config.get("img_start_token")?.as_str()?.to_owned(),
+                config.get("img_end_token")?.as_str()?.to_owned(),
+            ))
+        });
 
     RoutingTokens {
         image_token_id,
         chat_placeholder_token_id,
         image_prompt_kind,
         bos_token_string,
+        image_wrapper_strings,
     }
 }
 
@@ -463,6 +867,105 @@ mod tests {
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
         assert_eq!(counter.count_tokens(640, 480), 300);
+    }
+
+    fn write_nemotron_omni_configs(model_dir: &Path) {
+        std::fs::write(
+            model_dir.join("config.json"),
+            serde_json::json!({
+                "architectures": ["NemotronH_Nano_Omni_Reasoning_V3"],
+                "model_type": "NemotronH_Nano_Omni_Reasoning_V3",
+                "force_image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5,
+                "use_thumbnail": true,
+                "img_context_token": "<image>",
+                "img_context_token_id": 18,
+                "img_start_token": "<img>",
+                "img_end_token": "</img>",
+                "vision_config": {
+                    "args": {
+                        "min_num_patches": 1024,
+                        "max_num_patches": 13312
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.join("preprocessor_config.json"),
+            serde_json::json!({
+                "image_processor_type": "NemotronH_Nano_Omni_Reasoning_V3ImageProcessor",
+                "image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5,
+                "max_num_tiles": 12,
+                "use_thumbnail": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn routing_tokens_resolve_nemotron_nano_omni_prompt_shape() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_nemotron_omni_configs(model_dir.path());
+        let model_id = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8";
+        let counter = LightseekMmCounter::try_new(
+            model_id,
+            Some("NemotronH_Nano_Omni_Reasoning_V3"),
+            model_dir.path(),
+        )
+        .unwrap();
+        let resolved = resolve_routing_tokens(model_id, model_dir.path(), Some(&counter));
+
+        assert_eq!(resolved.image_token_id, Some(18));
+        assert_eq!(resolved.chat_placeholder_token_id, Some(18));
+        assert_eq!(
+            resolved.image_prompt_kind,
+            Some(ImagePromptKind::WrappedRepeatedPad)
+        );
+        assert_eq!(
+            resolved.image_wrapper_strings,
+            Some(("<img>".to_string(), "</img>".to_string()))
+        );
+        assert_eq!(
+            resolve_exact_routing_image_token_id(model_id, model_dir.path()),
+            Some(18)
+        );
+    }
+
+    #[test]
+    fn counter_matches_vllm_nemotron_dynamic_resolution() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_nemotron_omni_configs(model_dir.path());
+        let counter = LightseekMmCounter::try_new(
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            Some("NemotronH_Nano_Omni_Reasoning_V3"),
+            model_dir.path(),
+        )
+        .unwrap();
+
+        // Golden values from vLLM 0.27.1's DynamicResolutionImageTiler.
+        for (dimensions, expected) in [
+            ((224, 224), 256),
+            ((64, 32), 276),
+            ((512, 512), 256),
+            ((1000, 500), 512),
+            ((500, 1000), 512),
+            ((1024, 1024), 1024),
+            ((1920, 1080), 2040),
+        ] {
+            assert_eq!(counter.count_tokens(dimensions.0, dimensions.1), expected);
+        }
+
+        let dimensions = vec![(1920, 1080); 3];
+        assert_eq!(
+            counter.count_tokens_for_images(&dimensions, 4096, 10),
+            Some(vec![1344, 1344, 1344])
+        );
     }
 
     fn write_model_config(model_dir: &Path, model_type: &str) {

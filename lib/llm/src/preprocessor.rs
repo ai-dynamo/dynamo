@@ -748,6 +748,10 @@ pub struct MmImageEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoutingImagePromptLayout {
     RepeatedPad,
+    WrappedRepeatedPad {
+        image_start: TokenIdType,
+        image_end: TokenIdType,
+    },
     KimiK3 {
         media_begin: TokenIdType,
         media_content: TokenIdType,
@@ -799,26 +803,51 @@ fn encode_routing_segment(
 fn resolve_routing_image_prompt_layout(
     tokenizer: &dyn Tokenizer,
     kind: lightseek_mm::ImagePromptKind,
+    image_wrapper_strings: Option<&(String, String)>,
 ) -> Result<RoutingImagePromptLayout> {
     if kind == lightseek_mm::ImagePromptKind::RepeatedPad {
         return Ok(RoutingImagePromptLayout::RepeatedPad);
     }
 
-    let resolve_control = |token: &str| -> Result<TokenIdType> {
+    let resolve_control = |label: &str, token: &str| -> Result<TokenIdType> {
         let ids = encode_routing_segment(tokenizer, token, true)?;
         if ids.len() != 1 {
             bail!(
-                "Kimi-K3 routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
+                "{label} routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
                 ids.len()
             );
         }
         Ok(ids[0])
     };
 
+    if kind == lightseek_mm::ImagePromptKind::WrappedRepeatedPad {
+        let (start, end) = image_wrapper_strings.ok_or_else(|| {
+            anyhow::anyhow!("wrapped image prompt is missing start/end token strings")
+        })?;
+        // The default HuggingFace backend registers model special tokens and
+        // encodes them atomically through `encode`, but not every tokenizer
+        // backend implements segmented encoding. Wrapper resolution does not
+        // inject plain text, so the normal encode path is sufficient here.
+        let resolve_wrapper = |label: &str, token: &str| -> Result<TokenIdType> {
+            let ids = tokenizer.encode(token)?.token_ids().to_vec();
+            if ids.len() != 1 {
+                bail!(
+                    "{label} routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
+                    ids.len()
+                );
+            }
+            Ok(ids[0])
+        };
+        return Ok(RoutingImagePromptLayout::WrappedRepeatedPad {
+            image_start: resolve_wrapper("image-start", start)?,
+            image_end: resolve_wrapper("image-end", end)?,
+        });
+    }
+
     Ok(RoutingImagePromptLayout::KimiK3 {
-        media_begin: resolve_control("<|media_begin|>")?,
-        media_content: resolve_control("<|media_content|>")?,
-        media_end: resolve_control("<|media_end|>")?,
+        media_begin: resolve_control("Kimi-K3 media-begin", "<|media_begin|>")?,
+        media_content: resolve_control("Kimi-K3 media-content", "<|media_content|>")?,
+        media_end: resolve_control("Kimi-K3 media-end", "<|media_end|>")?,
     })
 }
 
@@ -835,6 +864,14 @@ fn append_mm_routing_replacement(
     match layout {
         RoutingImagePromptLayout::RepeatedPad => {
             expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+        }
+        RoutingImagePromptLayout::WrappedRepeatedPad {
+            image_start,
+            image_end,
+        } => {
+            expanded.push(image_start);
+            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.push(image_end);
         }
         RoutingImagePromptLayout::KimiK3 {
             media_begin,
@@ -2100,7 +2137,11 @@ impl OpenAIPreprocessor {
                     );
                     let prompt_layout =
                             routing_tokens.image_prompt_kind.and_then(|kind| {
-                                match resolve_routing_image_prompt_layout(tokenizer.as_ref(), kind) {
+                                match resolve_routing_image_prompt_layout(
+                                    tokenizer.as_ref(),
+                                    kind,
+                                    routing_tokens.image_wrapper_strings.as_ref(),
+                                ) {
                                     Ok(layout) => Some(layout),
                                     Err(e) => {
                                         tracing::warn!(
@@ -3272,10 +3313,15 @@ impl OpenAIPreprocessor {
         let normalized_token_ids = token_ids;
 
         // Compute per-image N via the registry + run the expansion.
-        let n_tokens: Vec<usize> = mm_image_entries
+        let dimensions: Vec<(u32, u32)> = mm_image_entries
             .iter()
-            .map(|e| counter.count_tokens(e.width, e.height))
+            .map(|entry| (entry.width, entry.height))
             .collect();
+        let n_tokens = counter.count_tokens_for_images(
+            &dimensions,
+            self.context_length as usize,
+            token_ids.len(),
+        )?;
         // Canonical pad_value fill at image positions for ALL backends. sglang
         // consumes pad_value natively; vLLM events are normalized to pad_value
         // in the kv-router (see `create_stored_blocks`), so the frontend stays
@@ -7320,6 +7366,13 @@ mod tests {
     #[cfg(feature = "mm-routing")]
     impl crate::tokenizers::traits::Encoder for RoutingTestTokenizer {
         fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            if self.atomic_controls {
+                match input {
+                    "<img>" => return Ok(Encoding::Sp(vec![19])),
+                    "</img>" => return Ok(Encoding::Sp(vec![20])),
+                    _ => {}
+                }
+            }
             Ok(Encoding::Sp(
                 input.bytes().map(|byte| 1000 + u32::from(byte)).collect(),
             ))
@@ -7344,6 +7397,8 @@ mod tests {
                         "<|media_begin|>" => 163602,
                         "<|media_content|>" => 163603,
                         "<|media_end|>" => 163604,
+                        "<img>" => 19,
+                        "</img>" => 20,
                         other => anyhow::bail!("unexpected control segment {other:?}"),
                     });
                 } else {
@@ -7445,9 +7500,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -7499,15 +7557,45 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
+    fn wrapped_routing_replacement_preserves_nemotron_delimiters() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+            fail_plain_text: false,
+        };
+        let wrappers = ("<img>".to_string(), "</img>".to_string());
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::WrappedRepeatedPad,
+            Some(&wrappers),
+        )
+        .unwrap();
+        let image = MmImageEntry {
+            mm_hash: 0x1234,
+            width: 224,
+            height: 224,
+        };
+        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let mut expanded = vec![7];
+
+        append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
+
+        assert_eq!(expanded, vec![7, 19, fill, fill, fill, 20]);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
     fn kimi_k3_layout_resolution_rejects_non_atomic_control_tokens() {
         let tokenizer = RoutingTestTokenizer {
             atomic_controls: false,
             fail_plain_text: false,
         };
 
-        let error =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap_err();
+        let error = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("expected exactly one"));
     }
@@ -7519,9 +7607,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -7580,9 +7671,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image_entry = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -7611,9 +7705,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: true,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            lightseek_mm::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
