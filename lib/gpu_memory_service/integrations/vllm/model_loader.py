@@ -23,6 +23,7 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.client.torch.module import (
     _resolve_module_attr,
     copy_unmapped_tensors_into_gms,
+    repoint_non_module_tensor_caches,
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
@@ -328,6 +329,12 @@ def _load_read_mode(
         _clone_triton_incompatible_params_off_gms(model)
         torch.cuda.synchronize()
         logger.info("[GMS] Read mode: cuda sync ok after triton-param clone")
+
+        # Last, after every pass that rebinds module tensors by name. The
+        # FusedMoE rebuild and the Triton clone both replace tensors --
+        # `expert_map` among them -- which re-breaks the aliases plain
+        # holder objects keep. Repairing any earlier would be undone here.
+        repoint_non_module_tensor_caches(model)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)

@@ -116,6 +116,71 @@ blake2b hash of a strided byte sample) dumped from both arms and diffed.
 That last row is what identified defect 3: it showed which tensors
 `init_fp8_kv_scales` repaired, and by elimination which ones it did not.
 
+## Defect 4: shared top-k channel severed on the read-only replica
+
+The read-only replica served correct, full-speed results below 2,048 tokens and
+garbage at a third of the throughput above it. 2,048 is `index_topk`, and the
+boundary is a route switch, not a quality knob:
+
+```
+sparse_mla_attention.py:252   use_dense_mha = prefill_max_seq_len <= self.topk_tokens
+```
+
+Below it vLLM runs dense MHA and never reads `topk_indices_buffer` at all, so
+any corruption there is perfectly invisible. Above it every layer reads the
+buffer.
+
+`deepseek_v2.py:1382` builds that buffer as a **local variable** and threads it
+into each layer by constructor argument; nothing stores it on the model. In
+GLM-5.2 only 21 of 78 MLA layers own an indexer. The other 57 are `skip_topk`
+backbone layers that reuse the buffer an earlier layer wrote, and vLLM says so:
+
+```
+sparse_mla_attention.py:484   # the explicitly-passed buffer covers backbone
+                              # skip layers, whose indexer is not constructed
+```
+
+Name-keyed materialization rebinds only what module traversal reaches, so it
+repaired the 21 producers and left all 57 consumers pointing at whatever the
+meta constructor allocated. That allocation is not benign: the model passes
+`device=self.device` explicitly, so even under meta construction it is real,
+uninitialised CUDA memory that nothing ever writes. 57 of 78 layers attended to
+arbitrary KV slots.
+
+**Fix.** Resolve `_SHARED_CHANNEL_LEAVES` once per model rather than per module.
+There is exactly one such buffer for the whole network, so any module holding it
+after materialization is the canonical copy.
+
+Repair count moves from 96 (21 producers + 75 expert maps) to 153
+(21 + 57 + 75) -- the 57 is the bug, and the arithmetic is the proof.
+
+### Read-only replica, before and after
+
+| ~tokens | before | after | publisher | after / publisher |
+|--------:|-------:|------:|----------:|------------------:|
+| 1,215 | 0.110 s | 0.107 s | 0.118 s | 0.91x |
+| 4,050 | 0.723 s | 0.195 s | 0.200 s | 0.97x |
+| 8,100 | 1.440 s | 0.403 s | 0.441 s | 0.91x |
+| 16,200 | 2.800 s | 0.798 s | 0.799 s | 1.00x |
+| 32,400 | 12.357 s | 1.642 s | 1.651 s | 0.99x |
+
+Prefill at 32,400 tokens: 2,622 -> 19,732 tok/s, a 7.5x gain. Greedy output is
+again byte-identical to the publisher.
+
+For the failover workload this is the difference between diverging and holding:
+0.7 rps at 32k ISL needs 22,400 prompt tok/s to break even. The promoted replica
+was serving 3,200-6,400 tok/s (0.14-0.29x break-even), so its wait queue grew
+without bound regardless of shadow replenishment. Contention was never the
+story; capacity was.
+
+### Why this hid from the tensor fingerprint
+
+The fingerprint that exonerated the weights walks `module._modules` and yields
+only CUDA tensors. It therefore could not see the one tensor that mattered,
+because the failure was not a wrong *value* but a wrong *referent* on a
+non-Module holder. Byte-identical model state and broken serving are compatible
+whenever the defect is in the object graph rather than in the bytes.
+
 ## Ruled out by measurement
 
 Recorded so these are not re-litigated:
@@ -133,7 +198,5 @@ Recorded so these are not re-litigated:
 
 ## Status
 
-Publishing engine: at parity, verified above.
-Read-only failover engine: defects 1-3 fixed and verified byte-identical to the
-publisher after wake, but its output still degrades; the remaining cause is not
-in tensor state and is tracked separately.
+Publishing engine: at parity with GMS V1, verified above.
+Read-only failover replica: at parity with the publisher, verified above.

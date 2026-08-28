@@ -99,7 +99,7 @@ _SHARED_CHANNEL_LEAVES = frozenset({"topk_indices_buffer"})
 
 # Tensors vLLM caches on plain (non-``nn.Module``) helper objects as aliases
 # of the owning module's tensor. Name-keyed materialization cannot reach
-# them, so ``_repoint_non_module_tensor_caches`` re-establishes the alias --
+# them, so ``repoint_non_module_tensor_caches`` re-establishes the alias --
 # but only for these, since a same-name match is not by itself evidence of
 # an intended alias.
 _REPOINTED_CACHE_LEAVES = frozenset(
@@ -240,7 +240,7 @@ def register_module_tensors(
     return referenced_allocation_ids
 
 
-def _repoint_non_module_tensor_caches(model: torch.nn.Module) -> None:
+def repoint_non_module_tensor_caches(model: torch.nn.Module) -> None:
     """Repoint tensors cached on plain objects hanging off the model.
 
     Materialization binds tensors by qualified name, which only reaches
@@ -259,12 +259,42 @@ def _repoint_non_module_tensor_caches(model: torch.nn.Module) -> None:
     correctness bug. Add a leaf here only with evidence that vLLM
     constructs it as an alias of the module's tensor.
 
+    Sources are tried in the order vLLM itself binds them
+    (``sparse_mla_attention.py``: ``indexer.topk_indices_buffer if indexer
+    is not None else topk_indices_buffer``). For the leaves in
+    ``_SHARED_CHANNEL_LEAVES`` the model holds exactly one buffer for the
+    whole network, so it is resolved globally rather than per module. That
+    is load-bearing, not defensive: in GLM-5.2 only 21 of 78 MLA layers
+    own an indexer. The other 57 are ``skip_topk`` backbone layers that
+    reuse the buffer an earlier layer wrote, and they receive it as a
+    constructor argument (``deepseek_v2.py`` builds it as a *local* and
+    passes it down, never storing it on the model). Nothing reachable by
+    name holds it for those layers, so a per-module lookup repairs the 21
+    producers and leaves all 57 consumers pointed at the buffer meta
+    construction allocated -- which, because the model asks for
+    ``device="cuda"`` explicitly, is real but uninitialised memory that no
+    one ever writes. Below ``index_topk`` every token is selected and the
+    garbage is invisible; above it, 57 of 78 layers attend to arbitrary KV
+    slots.
+
     The writer avoids needing this by swapping storage under the existing
     TensorImpl (see ``rebind_nonparameter_tensors``). The reader cannot:
     it starts from a meta model, and PyTorch rejects both ``set_`` and
     ``.data =`` when they would move a tensor off the meta device, so
     materialization has to bind new objects and then repair the holders.
     """
+    # The one buffer per model that the shared channels use. Materialization
+    # rebound it on every module that holds it by name, so any of those is
+    # the canonical post-materialize copy.
+    shared: dict[str, torch.Tensor] = {}
+    for _n, module in model.named_modules():
+        for leaf in _SHARED_CHANNEL_LEAVES:
+            if leaf in shared:
+                continue
+            cand = getattr(module, leaf, None)
+            if torch.is_tensor(cand) and not cand.is_meta:
+                shared[leaf] = cand
+
     repointed: list[str] = []
     for mod_name, module in model.named_modules():
         for holder_attr, holder in list(vars(module).items()):
@@ -277,17 +307,15 @@ def _repoint_non_module_tensor_caches(model: torch.nn.Module) -> None:
                 current = holder_vars[attr]
                 if not torch.is_tensor(current):
                     continue
-                # Prefer the layer's own indexer: vLLM sources the sparse
-                # buffers from there (sparse_mla_attention.py binds
-                # `indexer.topk_indices_buffer`), else the module itself.
-                replacement = None
-                for source in (getattr(module, "indexer", None), module):
-                    if source is None or source is holder:
-                        continue
-                    cand = getattr(source, attr, None)
-                    if torch.is_tensor(cand):
-                        replacement = cand
-                        break
+                replacement = shared.get(attr)
+                if replacement is None:
+                    for source in (getattr(module, "indexer", None), module):
+                        if source is None or source is holder:
+                            continue
+                        cand = getattr(source, attr, None)
+                        if torch.is_tensor(cand):
+                            replacement = cand
+                            break
                 if replacement is None or replacement is current:
                     continue
                 if (
@@ -479,8 +507,6 @@ def materialize_module_from_gms(
 
         # Fallback: set as attribute
         setattr(mod, attr, tensor)
-
-    _repoint_non_module_tensor_caches(model)
 
     # Leftover meta params/buffers were never in the writer's GMS layout: the
     # writer registers the MLA scales under their `_`-prefixed buffer names,
