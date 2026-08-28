@@ -812,6 +812,7 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            enable_frontend_decoding=config.frontend_decoding,
         )
         await handler.async_init(runtime)
 
