@@ -282,14 +282,27 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
+        # Keep one capacity view for both sticky-pin validation and admission.
+        # A live worker can change its advertised DP range without changing
+        # its instance ID; an empty or worker-missing snapshot still means
+        # the MDC view is temporarily incomplete, so preserve the existing pin.
+        capacities = self._normalize_capacities(self._capacity.snapshot())
         needs_assignment = not self._has_replica_assignment(program)
         stale_replacement = False
         live_worker_ids: set[int] = set()
         if program.assigned_worker_id is not None:
             live_worker_ids = self._capacity.live_worker_ids()
+            assigned_replica = self._program_replica(program)
+            worker_has_advertised_replica = any(
+                replica[0] == program.assigned_worker_id for replica in capacities
+            )
             if (
-                not live_worker_ids or program.assigned_worker_id in live_worker_ids
-            ) and self._has_replica_assignment(program):
+                (not live_worker_ids or program.assigned_worker_id in live_worker_ids)
+                and assigned_replica is not None
+                and (
+                    not worker_has_advertised_replica or assigned_replica in capacities
+                )
+            ):
                 return None, False
             stale_worker_id = program.assigned_worker_id
             program.assigned_worker_id = None
@@ -309,7 +322,6 @@ class ThunderAgentScheduler:
         if not needs_assignment:
             return None, False
 
-        capacities = self._normalize_capacities(self._capacity.snapshot())
         if stale_replacement:
             capacities = {
                 replica: capacity

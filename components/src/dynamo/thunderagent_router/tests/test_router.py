@@ -241,6 +241,24 @@ async def test_stale_worker_assignment_moves_to_replacement():
 
 
 @pytest.mark.asyncio
+async def test_stale_data_parallel_rank_is_reassigned_when_worker_remains_live():
+    router, capacity = make_router(capacity_workers={(7, 0): 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_replica_hint == (7, 0)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=0)
+
+    # The worker process is still live, but its advertised DP range no longer
+    # contains the rank used by the previous turn.
+    capacity.workers = {(7, 1): 1000}
+    capacity.live_workers = {7}
+
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+
+    assert decision.assigned_replica_hint == (7, 1)
+    assert router._table.programs["p1"].assigned_dp_rank == 1
+
+
+@pytest.mark.asyncio
 async def test_stale_replacement_bypasses_new_program_fairness_gate():
     router, capacity = make_router(capacity_workers={1: 300})
     decision = await router.before_request("active", estimated_prompt_tokens=100)
