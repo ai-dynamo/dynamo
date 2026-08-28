@@ -853,6 +853,19 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
+        # Reasoning tokens attributed to THIS choice, accumulated where the
+        # reasoning parser CLASSIFIES output -- deliberately not where the
+        # response is projected. Two projections would otherwise lose the count
+        # entirely (NVBug 6678449b):
+        #   * `_suppress_reasoning_output` (include_reasoning=false) drops the
+        #     parsed reasoning from the emitted delta, so a response with hidden
+        #     reasoning would report zero;
+        #   * the non-streaming tool path buffers every generated chunk and
+        #     emits once on the terminal delta, so per-chunk observation sees
+        #     only a zero-token terminal frame.
+        # Counting at classification is invariant to both.
+        self.reasoning_token_total = 0
+
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
@@ -1265,6 +1278,15 @@ class StreamingPostProcessor:
                 current_text,
                 request=self.request_for_sampling,
             )
+            # This path buffers every generated chunk and parses once here, so
+            # there is no per-chunk classification to count. The reasoning text
+            # IS known now, so count it exactly -- and do it before the
+            # include_reasoning projection on the next line, which would
+            # otherwise hide it.
+            if saved_reasoning:
+                self.reasoning_token_total += len(
+                    self.tokenizer.encode(saved_reasoning, add_special_tokens=False)
+                )
             if not self.request_for_sampling.include_reasoning:
                 saved_reasoning = None
 
@@ -1456,6 +1478,14 @@ class StreamingPostProcessor:
                     self._finish_engine_parser(self.tool_parser),
                 )
                 self._tool_parser_streaming_started = False
+
+        # Account BEFORE the projection below. `delta_message` is the parser's
+        # classification; `reasoning` is what survives include_reasoning. Reading
+        # the latter is what reported zero for hidden reasoning.
+        # Chunk-granular, matching the Rust estimator: a chunk carrying both
+        # reasoning and visible content counts entirely as reasoning.
+        if delta_message is not None and delta_message.reasoning:
+            self.reasoning_token_total += len(delta_token_ids)
 
         choice = None
         if delta_message is None:
