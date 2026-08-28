@@ -455,10 +455,6 @@ class TestVllmRendererApi:
             "is_segment_finished",
             "new_prompt_len_snapshot",
         )
-        omni_output_fields = base_output_fields + omni_output_extra_fields
-        omni_cached_token_output_fields = (
-            cached_token_output_fields + omni_output_extra_fields
-        )
         # vLLM 0.28.0 appends two fields after num_nans_in_logits, i.e. after
         # vLLM's own fields but before anything vllm-omni adds. Dynamo builds
         # EngineCoreOutput BY KEYWORD and feature-detects optional fields via
