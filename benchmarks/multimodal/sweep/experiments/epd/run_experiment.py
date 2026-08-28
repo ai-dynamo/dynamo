@@ -169,7 +169,6 @@ def build_payload(
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ],
-        "min_tokens": osl,
         "max_tokens": osl,
         "ignore_eos": True,
         "temperature": 0,
