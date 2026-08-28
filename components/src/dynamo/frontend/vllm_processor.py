@@ -95,15 +95,18 @@ class _ReasoningUsageAnnotator:
     @property
     def total(self) -> int:
         return sum(
-            getattr(post, "reasoning_token_total", 0)
-            for post in self._post_processors.values()
+            post.reasoning_token_total for post in self._post_processors.values()
         )
 
     def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
         """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
         annotated = dict(usage)
         details = dict(annotated.get("completion_tokens_details") or {})
-        if not details.get("reasoning_tokens"):
+        # Only a POSITIVE backend count is authoritative. Missing, zero and
+        # negative all fall back to our own tally -- a negative would otherwise
+        # survive, since -1 is truthy.
+        backend = details.get("reasoning_tokens")
+        if not isinstance(backend, int) or backend <= 0:
             details["reasoning_tokens"] = self.total
         annotated["completion_tokens_details"] = details
         return annotated
