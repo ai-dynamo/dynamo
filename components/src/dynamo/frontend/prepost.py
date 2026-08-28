@@ -1487,10 +1487,13 @@ class StreamingPostProcessor:
                 if len(delta) > 1:
                     choice = self._build_choice(output, delta)
             elif delta_message.tool_calls:
-                if output.finish_reason and self.in_progress_tool_calls:
-                    # Tool calls and finish_reason arrived in the same chunk.
-                    # Emit now — there will be no subsequent process_output call
-                    # to drain the buffer.
+                if self.in_progress_tool_calls:
+                    # Emit every parser delta immediately, the same way plain
+                    # content streams. Inside a long string argument the parser
+                    # produces a delta for nearly every token and never falls
+                    # silent, so gating this on a quiet chunk or on
+                    # finish_reason withholds the whole argument until the turn
+                    # ends. See https://github.com/ai-dynamo/dynamo/issues/13821
                     choice = self._emit_tool_calls_choice(output)
             elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)

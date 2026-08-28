@@ -2079,6 +2079,150 @@ def test_streaming_parallel_tool_calls_no_think(
 
 
 # ---------------------------------------------------------------------------
+# Cadence of tool-call argument deltas.
+# See https://github.com/ai-dynamo/dynamo/issues/13821
+#
+# The vLLM streaming tool parser produces an argument delta for nearly every
+# token, so the chunks inside a long string value are *consecutive*
+# tool-call-only deltas with no quiet chunk between them. That is the shape
+# that starved the old flush condition, which published the accumulator only
+# when the parser fell silent or at finish_reason.
+#
+# Token IDs are arbitrary non-special ints — the hermes parser operates on the
+# text attribute, not decoded tokens.
+# ---------------------------------------------------------------------------
+_LONG_ARGUMENT_FRAGMENTS = [
+    "James",
+    " Joyce",
+    " Dubliners",
+    " Ulysses",
+    " Finnegans",
+    " Wake",
+    " Portrait",
+    " of",
+    " the",
+    " Artist",
+]
+
+_LONG_ARGUMENT_CHUNK_TEXTS = [
+    '<tool_call>\n{"name": "search_gutenberg_books", '
+    '"arguments": {"search_terms": ["',
+    *_LONG_ARGUMENT_FRAGMENTS,
+    '"]}}\n</tool_call>',
+]
+
+OUTPUTS_LONG_STRING_ARGUMENT = [
+    CompletionOutput(
+        index=0,
+        text=text,
+        token_ids=list(range(1000 + i * 4, 1000 + i * 4 + 4)),
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason=("stop" if i == len(_LONG_ARGUMENT_CHUNK_TEXTS) - 1 else None),
+    )
+    for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
+]
+
+
+@pytest.mark.vllm
+def test_streaming_tool_call_arguments_are_not_withheld(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Every parser tool-call delta must reach the client as its own frame.
+
+    See https://github.com/ai-dynamo/dynamo/issues/13821
+
+    Pre-fix, ``StreamingPostProcessor`` published ``in_progress_tool_calls``
+    only on a chunk where the parser produced nothing, or at ``finish_reason``.
+    Inside a long string argument the parser never falls silent, so every chunk
+    below except the last returned ``None`` and the whole argument arrived in a
+    single terminal frame after an arbitrarily long silence.
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    outputs = OUTPUTS_LONG_STRING_ARGUMENT
+    results = [proc.process_output(output) for output in outputs]
+
+    def _tool_calls_of(result):
+        if result is None:
+            return None
+        return result.get("delta", {}).get("tool_calls")
+
+    # -- 1. no tool-call-only chunk is withheld -----------------------------
+    # These are the chunks the parser fed a delta for while finish_reason was
+    # still None; pre-fix every one of them returned None.
+    withheld = [
+        i
+        for i, (output, result) in enumerate(zip(outputs, results))
+        if output.finish_reason is None and not _tool_calls_of(result)
+    ]
+    assert not withheld, (
+        f"process_output withheld a tool_call delta on chunk(s) {withheld} of "
+        f"{len(outputs)}. The parser produced an argument delta for each, so "
+        "each must be published immediately rather than held until the parser "
+        "falls silent or finish_reason arrives."
+    )
+
+    # -- 2. cadence tracks the parser, it does not collapse to one frame ----
+    frames = [r for r in results if _tool_calls_of(r)]
+    assert len(frames) > 1, (
+        "The whole argument arrived in a single frame; argument deltas must "
+        "stream the way plain content does."
+    )
+    assert len(frames) == len(outputs), (
+        f"Expected one tool_call frame per parser delta ({len(outputs)}); got "
+        f"{len(frames)}."
+    )
+
+    # -- 3. cadence changed, content did not ---------------------------------
+    tool_calls = _collect_tool_calls([r for r in results if r is not None])
+    assert len(tool_calls) == 1
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {
+        "search_terms": ["".join(_LONG_ARGUMENT_FRAGMENTS)]
+    }
+
+    # -- 4. OpenAI delta semantics survive the extra frames ------------------
+    # id, type and function.name belong on the first frame only; every later
+    # frame carries index plus an arguments fragment.
+    id_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("id")
+    ]
+    type_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("type")
+    ]
+    name_frames = [
+        i
+        for i, r in enumerate(frames)
+        if r["delta"]["tool_calls"][0].get("function", {}).get("name")
+    ]
+    assert id_frames == [0], f"'id' must appear on exactly one frame; got {id_frames}"
+    assert type_frames == [
+        0
+    ], f"'type' must appear on exactly one frame; got {type_frames}"
+    assert name_frames == [
+        0
+    ], f"'function.name' must appear on exactly one frame; got {name_frames}"
+
+    # -- 5. finish_reason is still remapped exactly once ---------------------
+    # See https://github.com/ai-dynamo/dynamo/issues/8636
+    finish_reasons = [
+        r["finish_reason"] for r in results if r and r.get("finish_reason")
+    ]
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+# ---------------------------------------------------------------------------
 # Reasoning-parser adjust_request wiring
 # ---------------------------------------------------------------------------
 @pytest.fixture
