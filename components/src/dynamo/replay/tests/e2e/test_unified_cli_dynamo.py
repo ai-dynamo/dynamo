@@ -28,6 +28,7 @@ pytestmark = [
     # recommendation-to-prediction round trips in the shipped Planner image.
     pytest.mark.e2e,
     pytest.mark.pre_merge,
+    pytest.mark.parallel,
     pytest.mark.planner,
     pytest.mark.gpu_0,
     pytest.mark.timeout(240),
