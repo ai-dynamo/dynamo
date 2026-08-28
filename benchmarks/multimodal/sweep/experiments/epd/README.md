@@ -15,8 +15,8 @@ python download_dataset.py \
   --output-dir /to/your/path
 ```
 
-The downloader downloads 50 images by default. Pass `--count N` to download
-more.
+The downloader downloads 50 images by default. Pass `--count N`, where
+`1 <= N <= 50`, to download fewer.
 
 ## Run the benchmark
 
