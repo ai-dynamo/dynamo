@@ -65,6 +65,25 @@ func testSidecarDRAClaimComponent(objectName string, template bool) nvidiacomv1b
 	return component
 }
 
+func testNativeSidecarDRAClaimComponent(objectName string, template bool) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	component := testDRAClaimComponent(objectName, template)
+	claims := component.PodTemplate.Spec.Containers[0].Resources.Claims
+	component.PodTemplate.Spec.Containers[0].Resources.Claims = nil
+	component.PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name:          "native-sidecar",
+		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Resources:     corev1.ResourceRequirements{Claims: claims},
+	}}
+	return component
+}
+
+func TestDRAClaimDependenciesIncludeNativeSidecars(t *testing.T) {
+	component := testNativeSidecarDRAClaimComponent("gpu-template", true)
+
+	assert.True(t, componentReferencesDRAClaim(&component, "gpu-template", true))
+	assert.True(t, componentUsesDRAClaims(&component))
+}
+
 func TestMapResourceClaimToDCDRequests(t *testing.T) {
 	t.Log("Create matching multinode and single-node component deployments")
 	matching := &nvidiacomv1beta1.DynamoComponentDeployment{

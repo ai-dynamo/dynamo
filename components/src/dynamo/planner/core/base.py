@@ -44,7 +44,7 @@ from dynamo.planner.core.types import (
 )
 from dynamo.planner.environment.interface import PlannerEnvironment
 from dynamo.planner.environment.state import DeploymentState
-from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
@@ -57,6 +57,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+_GPU_SHAPE_RETRY_MIN_SECONDS = 0.1
+_GPU_SHAPE_RETRY_MAX_SECONDS = 5.0
 
 
 def _engine_caps(
@@ -857,6 +859,10 @@ class NativePlannerBase:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval_seconds / 10
+        gpu_shape_retry_interval = min(
+            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+            _GPU_SHAPE_RETRY_MAX_SECONDS,
+        )
 
         try:
             while True:
@@ -865,6 +871,14 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
-                next_tick = await self._run_one_tick(engine, next_tick)
+                try:
+                    next_tick = await self._run_one_tick(engine, next_tick)
+                except GPUShapeUnavailableError as exc:
+                    logger.warning(
+                        "Skipping planner tick until the operator publishes a current GPU shape: %s; retrying in %.1fs",
+                        exc,
+                        gpu_shape_retry_interval,
+                    )
+                    await asyncio.sleep(gpu_shape_retry_interval)
         finally:
             await self._shutdown_runtime()

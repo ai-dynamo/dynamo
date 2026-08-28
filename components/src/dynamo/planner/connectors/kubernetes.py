@@ -424,6 +424,10 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.PREFILL,
                 )
                 prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
+                if prefill_gpu_shape.gpus_per_replica == 0:
+                    raise ValueError(
+                        f"Component '{prefill_service.name}' has an observed zero-GPU shape."
+                    )
             except GPUShapeUnavailableError:
                 raise
             except (PlannerError, ValueError) as e:
@@ -436,6 +440,10 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.DECODE,
                 )
                 decode_gpu_shape = decode_service.get_gpu_shape(deployment)
+                if decode_gpu_shape.gpus_per_replica == 0:
+                    raise ValueError(
+                        f"Component '{decode_service.name}' has an observed zero-GPU shape."
+                    )
             except GPUShapeUnavailableError:
                 raise
             except (PlannerError, ValueError) as e:

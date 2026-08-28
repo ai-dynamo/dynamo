@@ -258,6 +258,13 @@ class KubernetesCapacityManager(CapacityManager):
                         # An untyped non-worker component is not a pool.
                         continue
                     raise
+                if gpu_per_replica == 0:
+                    if component_type == "":
+                        # Explicit zero marks an observed non-GPU component.
+                        continue
+                    raise ValueError(
+                        f"Planner pool component {component_name!r} has an observed zero-GPU shape"
+                    )
                 pool_key = component_name
             if not pool_key:
                 continue
@@ -267,15 +274,17 @@ class KubernetesCapacityManager(CapacityManager):
                 component_name,
                 connector.parent_dgd_name,
             )
+            if gpu_per_replica is None:
+                gpu_per_replica = self._gpu_per_replica(deployment, service)
+            if gpu_per_replica == 0:
+                raise ValueError(
+                    f"Planner pool component {component_name!r} has an observed zero-GPU shape"
+                )
             pools[pool_key] = PoolSpec(
                 sub_type=pool_key,
                 component_name=component_name,
                 current_replicas=service.number_replicas(),
-                gpu_per_replica=(
-                    gpu_per_replica
-                    if gpu_per_replica is not None
-                    else self._gpu_per_replica(deployment, service)
-                ),
+                gpu_per_replica=gpu_per_replica,
             )
         return pools
 

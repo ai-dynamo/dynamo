@@ -58,7 +58,8 @@ func clearComponentGPUShapes(statuses map[string]nvidiacomv1beta1.ComponentRepli
 }
 
 // applyComponentGPUShapes projects provider-resolved shapes onto observed
-// component statuses. A zero replica cost omits both fields.
+// component statuses. Explicit zero distinguishes a successful non-GPU
+// observation from a missing or cleared shape.
 func applyComponentGPUShapes(
 	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
 	shapes map[string]dynamo.GPUShape,
@@ -66,9 +67,6 @@ func applyComponentGPUShapes(
 	for componentName, shape := range shapes {
 		status, ok := statuses[componentName]
 		if !ok {
-			continue
-		}
-		if shape.GPUsPerReplica <= 0 {
 			continue
 		}
 		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)

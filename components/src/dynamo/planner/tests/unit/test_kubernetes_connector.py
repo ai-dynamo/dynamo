@@ -1252,6 +1252,48 @@ def test_missing_shape_for_pure_dra_worker_fails_closed(
         kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
+@pytest.mark.parametrize("sidecar_gpu", [0, 1])
+def test_missing_shape_falls_back_only_for_zero_gpu_native_sidecar(
+    kubernetes_connector, mock_kube_api, sidecar_gpu
+):
+    component = _component("decode-worker", "decode", replicas=1, gpu=4)
+    component["podTemplate"]["spec"]["initContainers"] = [
+        {
+            "name": "native-sidecar",
+            "restartPolicy": "Always",
+            "resources": {"limits": {"nvidia.com/gpu": str(sidecar_gpu)}},
+        }
+    ]
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    if sidecar_gpu == 0:
+        assert kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True
+        ) == (0, 4)
+    else:
+        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
+            kubernetes_connector.get_gpu_shapes(
+                require_prefill=False, require_decode=True
+            )
+
+
+def test_typed_worker_with_explicit_zero_shape_is_rejected(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    deployment["metadata"]["generation"] = 2
+    deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    with pytest.raises(DeploymentValidationError, match="observed zero-GPU shape"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
+
+
 @pytest.mark.parametrize("observed_generation", [1, 3])
 def test_get_gpu_counts_rejects_noncurrent_dra_status(
     kubernetes_connector, mock_kube_api, observed_generation

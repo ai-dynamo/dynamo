@@ -536,6 +536,64 @@ func TestResolvePodGPUCountSidecarCost(t *testing.T) {
 	}
 }
 
+func TestResolvePodGPUCountNativeSidecarCost(t *testing.T) {
+	nativeSidecarRestart := corev1.ContainerRestartPolicyAlways
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "main",
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+			}},
+		}},
+		InitContainers: []corev1.Container{
+			{
+				Name:          "native-sidecar",
+				RestartPolicy: &nativeSidecarRestart,
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+				}},
+			},
+			{
+				Name: "one-shot-init",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("8"),
+				}},
+			},
+		},
+	}
+
+	got, err := ResolvePodGPUCount(t.Context(), nil, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 5, got)
+}
+
+func TestResolvePodGPUCountNativeSidecarDRAClaim(t *testing.T) {
+	nativeSidecarRestart := corev1.ContainerRestartPolicyAlways
+	podSpec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "sidecar-gpu",
+			ResourceClaimTemplateName: ptr.To("gpu-template"),
+		}},
+		Containers: []corev1.Container{{Name: "main"}},
+		InitContainers: []corev1.Container{{
+			Name:          "native-sidecar",
+			RestartPolicy: &nativeSidecarRestart,
+			Resources: corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: "sidecar-gpu"}},
+			},
+		}},
+	}
+
+	got, err := ResolvePodGPUCount(
+		t.Context(),
+		testGPUClaimReader(t, testGPUClaimTemplate("gpu-template", 2)),
+		"default",
+		podSpec,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+}
+
 func TestResolvePodGPUCountDeduplicatesSharedDRAClaim(t *testing.T) {
 	t.Log("Build two containers that share one two-GPU DRA claim")
 	podSpec := &corev1.PodSpec{

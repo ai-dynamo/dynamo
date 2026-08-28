@@ -76,9 +76,7 @@ func ResolveGroveGPUShapes(
 		if component.IsInterPodGMSEnabled() {
 			shape.GPUsPerReplica += shape.GPUsPerEngine
 		}
-		if shape.GPUsPerReplica > 0 {
-			shapes[component.ComponentName] = shape
-		}
+		shapes[component.ComponentName] = shape
 	}
 	return shapes, nil
 }
@@ -101,6 +99,7 @@ func ResolveGPUShape(
 	if component.PodTemplate != nil {
 		enginePodSpec = component.PodTemplate.Spec.DeepCopy()
 		enginePodSpec.Containers = nil
+		enginePodSpec.InitContainers = nil
 		if main := GetMainContainer(component); main != nil {
 			enginePodSpec.Containers = []corev1.Container{*main.DeepCopy()}
 		}

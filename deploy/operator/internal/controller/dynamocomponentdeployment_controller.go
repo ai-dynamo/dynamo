@@ -333,10 +333,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("resolve Deployment GPU shape: %w", err)
 	}
-	var gpuShapeStatus *dynamo.GPUShape
-	if gpuShape.GPUsPerReplica > 0 {
-		gpuShapeStatus = &gpuShape
-	}
+	gpuShapeStatus := &gpuShape
 
 	if IsDeploymentReady(deployment) {
 		return ComponentReconcileResult{
@@ -449,10 +446,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("resolve LeaderWorkerSet GPU shape: %w", err)
 	}
-	var gpuShapeStatus *dynamo.GPUShape
-	if gpuShape.GPUsPerReplica > 0 {
-		gpuShapeStatus = &gpuShape
-	}
+	gpuShapeStatus := &gpuShape
 	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
@@ -478,7 +472,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	if componentReconcileResult.serviceReplicaStatus != nil {
 		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil
 		componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = nil
-		if componentReconcileResult.gpuShape != nil && componentReconcileResult.gpuShape.GPUsPerReplica > 0 {
+		if componentReconcileResult.gpuShape != nil {
 			componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = ptr.To(componentReconcileResult.gpuShape.GPUsPerEngine)
 			componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = ptr.To(componentReconcileResult.gpuShape.GPUsPerReplica)
 		}

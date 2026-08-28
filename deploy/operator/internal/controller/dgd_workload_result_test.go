@@ -18,15 +18,21 @@ import (
 func TestApplyAndClearComponentGPUShapes(t *testing.T) {
 	t.Log("Apply provider-resolved shapes to observed component statuses")
 	statuses := map[string]nvidiacomv1beta1.ComponentReplicaStatus{
-		"worker": {},
+		"worker":   {},
+		"frontend": {},
 	}
 	applyComponentGPUShapes(statuses, map[string]dynamo.GPUShape{
-		"worker": {GPUsPerEngine: 4, GPUsPerReplica: 5},
+		"worker":   {GPUsPerEngine: 4, GPUsPerReplica: 5},
+		"frontend": {},
 	})
 	require.NotNil(t, statuses["worker"].GPUsPerEngine)
 	require.NotNil(t, statuses["worker"].GPUsPerReplica)
 	assert.Equal(t, int64(4), *statuses["worker"].GPUsPerEngine)
 	assert.Equal(t, int64(5), *statuses["worker"].GPUsPerReplica)
+	require.NotNil(t, statuses["frontend"].GPUsPerEngine)
+	require.NotNil(t, statuses["frontend"].GPUsPerReplica)
+	assert.Equal(t, int64(0), *statuses["frontend"].GPUsPerEngine)
+	assert.Equal(t, int64(0), *statuses["frontend"].GPUsPerReplica)
 
 	t.Log("Clear both fields before a later provider render can fail")
 	statuses["unobserved"] = nvidiacomv1beta1.ComponentReplicaStatus{
@@ -36,6 +42,8 @@ func TestApplyAndClearComponentGPUShapes(t *testing.T) {
 	clearComponentGPUShapes(statuses)
 	assert.Nil(t, statuses["worker"].GPUsPerEngine)
 	assert.Nil(t, statuses["worker"].GPUsPerReplica)
+	assert.Nil(t, statuses["frontend"].GPUsPerEngine)
+	assert.Nil(t, statuses["frontend"].GPUsPerReplica)
 	assert.Nil(t, statuses["unobserved"].GPUsPerEngine)
 	assert.Nil(t, statuses["unobserved"].GPUsPerReplica)
 }

@@ -2176,13 +2176,13 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">
-GPUsPerEngine is the number of GPUs assigned to one inference engine in a service replica, across all of its nodes. Independent auxiliary GPU allocations are excluded.
+GPUsPerEngine is the number of GPUs assigned to one inference engine in a service replica, across all of its nodes. Independent auxiliary GPU allocations are excluded. A present zero means the engine itself has no GPUs; consult GPUsPerReplica for auxiliary allocations.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="gpusPerReplica" type="integer">
-GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once.
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -2540,13 +2540,13 @@ runtimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">
-gpusPerEngine is the number of GPUs assigned to one inference engine in a component replica, across all of its nodes. Independent auxiliary GPU allocations are excluded.
+gpusPerEngine is the number of GPUs assigned to one inference engine in a component replica, across all of its nodes. Independent auxiliary GPU allocations are excluded. A present zero means the engine itself has no GPUs; consult gpusPerReplica for auxiliary allocations.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="gpusPerReplica" type="integer">
-gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once.
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">

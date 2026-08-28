@@ -256,7 +256,7 @@ class Service(BaseModel):
                     f"Invalid GPU shape for component '{self.name}': "
                     f"gpusPerEngine={engine_raw!r}, gpusPerReplica={replica_raw!r}.",
                 ) from err
-            if engine < 0 or replica <= 0:
+            if engine < 0 or replica < 0 or (replica == 0 and engine != 0):
                 raise GPUShapeUnavailableError(
                     self.name,
                     f"Invalid GPU shape for component '{self.name}': "
@@ -279,8 +279,12 @@ class Service(BaseModel):
     def requires_authoritative_gpu_shape(self) -> bool:
         """Whether spec-only fallback could miss a distinct GPU allocation."""
 
-        containers = (
-            self.service.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        pod_spec = self.service.get("podTemplate", {}).get("spec", {})
+        containers = list(pod_spec.get("containers", []))
+        containers.extend(
+            container
+            for container in pod_spec.get("initContainers", [])
+            if container.get("restartPolicy") == "Always"
         )
         for container in containers:
             resources = container.get("resources", {})

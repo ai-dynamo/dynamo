@@ -171,6 +171,25 @@ type PodSpecMultiplicity struct {
 	Count   int32
 }
 
+// RuntimeContainers returns regular containers plus restartable init
+// containers, which Kubernetes runs as native sidecars for the Pod lifetime.
+func RuntimeContainers(podSpec *corev1.PodSpec) []*corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	containers := make([]*corev1.Container, 0, len(podSpec.Containers)+len(podSpec.InitContainers))
+	for i := range podSpec.Containers {
+		containers = append(containers, &podSpec.Containers[i])
+	}
+	for i := range podSpec.InitContainers {
+		container := &podSpec.InitContainers[i]
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			containers = append(containers, container)
+		}
+	}
+	return containers
+}
+
 type claimSelection struct {
 	claims     []corev1.ResourceClaim
 	requests   map[string]struct{}
@@ -238,8 +257,7 @@ func ResolvePodSetGPUCount(
 		}
 		claimOrder := make([]string, 0)
 		claimSelections := make(map[string]*claimSelection)
-		for i := range pod.PodSpec.Containers {
-			container := &pod.PodSpec.Containers[i]
+		for _, container := range RuntimeContainers(pod.PodSpec) {
 			scalarCount, err := ExtractGPUCountFromResourceRequirements(container.Resources)
 			if err != nil {
 				return 0, fmt.Errorf("container %q: %w", container.Name, err)

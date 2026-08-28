@@ -3022,6 +3022,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 
 			// Assert the ComponentReconcileResult
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{}
 
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -3118,6 +3119,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 			ReadyReplicas:     ptr.To(int32(0)),
 			AvailableReplicas: ptr.To(int32(0)),
 		},
+		gpuShape: &dynamo.GPUShape{},
 	}))
 
 }
@@ -3393,6 +3395,15 @@ func TestSetStatusConditionAndServiceReplicaStatusPublishesGPUShape(t *testing.T
 	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
 	assert.Equal(t, int64(2), *updated.Status.Component.GPUsPerEngine)
 	assert.Equal(t, int64(3), *updated.Status.Component.GPUsPerReplica)
+
+	t.Log("Publish an explicit zero after a successful non-GPU observation")
+	reconcileResult.gpuShape = &dynamo.GPUShape{}
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUsPerEngine)
+	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerEngine)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerReplica)
 
 	t.Log("Clear both fields before reporting a later provider failure")
 	require.NoError(t, reconciler.clearDCDGPUShape(t.Context(), ctrl.Request{

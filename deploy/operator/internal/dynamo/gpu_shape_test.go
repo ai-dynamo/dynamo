@@ -90,6 +90,37 @@ func TestResolveGPUShapeSeparatesEngineWidthFromReplicaCost(t *testing.T) {
 	}
 }
 
+func TestResolveGPUShapeCountsNativeSidecarOnlyInReplicaCost(t *testing.T) {
+	restartAlways := corev1.ContainerRestartPolicyAlways
+	main := gpuContainer(commonconsts.MainContainerName, "4")
+	nativeSidecar := gpuContainer("native-sidecar", "1")
+	nativeSidecar.RestartPolicy = &restartAlways
+	oneShotInit := gpuContainer("one-shot-init", "8")
+	podSpec := corev1.PodSpec{
+		Containers:     []corev1.Container{main},
+		InitContainers: []corev1.Container{nativeSidecar, oneShotInit},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeDecode,
+		Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+		PodTemplate:   &corev1.PodTemplateSpec{Spec: podSpec},
+	}
+
+	shape, err := ResolveGPUShape(
+		t.Context(),
+		nil,
+		"default",
+		component,
+		[]PodSpecMultiplicity{
+			{PodSpec: podSpec.DeepCopy(), Count: 1},
+			{PodSpec: podSpec.DeepCopy(), Count: 1},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: 10}, shape)
+}
+
 func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T) {
 	for _, sidecarGPU := range []string{"0", "1"} {
 		t.Run("sidecar GPU "+sidecarGPU, func(t *testing.T) {
@@ -133,6 +164,63 @@ func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T
 			assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: wantReplica}, shapes["decode"])
 		})
 	}
+}
+
+func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
+	podSpec := corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "rdma",
+			ResourceClaimTemplateName: ptr.To("frontend-rdma"),
+		}},
+		Containers: []corev1.Container{{
+			Name: commonconsts.MainContainerName,
+			Resources: corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: "rdma"}},
+			},
+		}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+			ComponentName: "frontend",
+			PodTemplate:   &corev1.PodTemplateSpec{Spec: podSpec},
+		}}},
+	}
+	pcs := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
+		Template: grovev1alpha1.PodCliqueSetTemplateSpec{Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+			{
+				Name:   "frontend",
+				Labels: map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+				Spec:   grovev1alpha1.PodCliqueSpec{PodSpec: podSpec},
+			},
+		}},
+	}}
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend-rdma", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "nic",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "rdma-nic.example.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           1,
+				},
+			}}},
+		}},
+	}
+	deviceClass := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "rdma-nic.example.com"},
+		Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+			CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.net.example.com"`},
+		}}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, deviceClass).Build()
+
+	shapes, err := ResolveGroveGPUShapes(t.Context(), reader, dgd, pcs)
+	require.NoError(t, err)
+	assert.Equal(t, GPUShape{}, shapes["frontend"])
 }
 
 func TestResolveGPUShapeDeduplicatesConcreteClaimAcrossNodes(t *testing.T) {

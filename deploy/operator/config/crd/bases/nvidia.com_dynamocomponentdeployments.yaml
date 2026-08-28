@@ -11657,7 +11657,8 @@ spec:
                       description: |-
                         GPUsPerEngine is the number of GPUs assigned to one inference engine in a
                         service replica, across all of its nodes. Independent auxiliary GPU
-                        allocations are excluded.
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult GPUsPerReplica for auxiliary allocations.
                       format: int64
                       minimum: 0
                       type: integer
@@ -11665,9 +11666,10 @@ spec:
                       description: |-
                         GPUsPerReplica is the unique GPU allocation added when this service scales
                         by one replica, across all nodes, runtime containers, and provider-owned Pods.
-                        Shared DRA claims are counted once.
+                        Shared DRA claims are counted once. A present zero records a successful
+                        non-GPU resolution; omission means no current shape is available.
                       format: int64
-                      minimum: 1
+                      minimum: 0
                       type: integer
                     readyReplicas:
                       description: |-
@@ -20554,7 +20556,8 @@ spec:
                       description: |-
                         gpusPerEngine is the number of GPUs assigned to one inference engine in a
                         component replica, across all of its nodes. Independent auxiliary GPU
-                        allocations are excluded.
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult gpusPerReplica for auxiliary allocations.
                       format: int64
                       minimum: 0
                       type: integer
@@ -20562,9 +20565,11 @@ spec:
                       description: |-
                         gpusPerReplica is the unique GPU allocation added when this component
                         scales by one replica, across all nodes, runtime containers, and
-                        provider-owned Pods. Shared DRA claims are counted once.
+                        provider-owned Pods. Shared DRA claims are counted once. A present zero
+                        records a successful non-GPU resolution; omission means no current shape
+                        is available.
                       format: int64
-                      minimum: 1
+                      minimum: 0
                       type: integer
                     readyReplicas:
                       description: |-

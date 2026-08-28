@@ -11,6 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,7 +35,7 @@ func deploymentEventFilter(
 	})
 }
 
-// componentReferencesDRAClaim reports whether any regular container in the
+// componentReferencesDRAClaim reports whether any runtime container in the
 // non-nil component references the named claim or claim template.
 func componentReferencesDRAClaim(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -45,8 +46,8 @@ func componentReferencesDRAClaim(
 		return false
 	}
 	containerClaimNames := make(map[string]struct{})
-	for i := range component.PodTemplate.Spec.Containers {
-		for _, claim := range component.PodTemplate.Spec.Containers[i].Resources.Claims {
+	for _, container := range dra.RuntimeContainers(&component.PodTemplate.Spec) {
+		for _, claim := range container.Resources.Claims {
 			containerClaimNames[claim.Name] = struct{}{}
 		}
 	}
@@ -68,14 +69,14 @@ func componentReferencesDRAClaim(
 	return false
 }
 
-// componentUsesDRAClaims reports whether any regular container in the non-nil
+// componentUsesDRAClaims reports whether any runtime container in the non-nil
 // component references DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if component.PodTemplate == nil {
 		return false
 	}
-	for i := range component.PodTemplate.Spec.Containers {
-		if len(component.PodTemplate.Spec.Containers[i].Resources.Claims) > 0 {
+	for _, container := range dra.RuntimeContainers(&component.PodTemplate.Spec) {
+		if len(container.Resources.Claims) > 0 {
 			return true
 		}
 	}

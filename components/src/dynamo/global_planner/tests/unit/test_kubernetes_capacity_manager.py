@@ -13,6 +13,7 @@ import pytest
 from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.errors import GPUShapeUnavailableError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -302,6 +303,47 @@ def test_observe_untyped_worker_with_gpu_counts_toward_budget():
     _install_connector(cm, "default/w", _worker_dgd_spec(replicas=2, gpu=2, ctype=None))
     pools = cm.observe()["default/w"]
     assert pools["worker-svc"].gpu_per_replica == 2
+
+
+def test_observe_skips_explicit_zero_gpu_dra_component():
+    cm = KubernetesCapacityManager("default")
+    component = _component("frontend", replicas=1, gpu=None, ctype=None)
+    component["podTemplate"]["spec"] = {
+        "resourceClaims": [
+            {"name": "rdma", "resourceClaimTemplateName": "frontend-rdma"}
+        ],
+        "containers": [{"name": "main", "resources": {"claims": [{"name": "rdma"}]}}],
+    }
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {"components": [component]},
+        "status": {
+            "observedGeneration": 2,
+            "components": {"frontend": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+        },
+    }
+    _install_connector(cm, "default/frontend", deployment)
+
+    assert cm.observe(require_complete=True)["default/frontend"] == {}
+
+
+def test_observe_untyped_dra_worker_missing_shape_fails_closed():
+    cm = KubernetesCapacityManager("default")
+    component = _component("worker", replicas=1, gpu=None, ctype=None)
+    component["podTemplate"]["spec"] = {
+        "resourceClaims": [{"name": "gpu", "resourceClaimTemplateName": "worker-gpu"}],
+        "containers": [{"name": "main", "resources": {"claims": [{"name": "gpu"}]}}],
+    }
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {"components": [component]},
+        "status": {"observedGeneration": 2, "components": {"worker": {}}},
+    }
+    _install_connector(cm, "default/worker", deployment)
+
+    with pytest.raises(RuntimeError, match="GPU shape") as exc_info:
+        cm.observe(require_complete=True)
+    assert isinstance(exc_info.value.__cause__, GPUShapeUnavailableError)
 
 
 def test_observe_tolerates_read_failure():
