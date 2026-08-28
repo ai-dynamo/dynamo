@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: axk2-aiperf-runner
+  labels:
+    app.kubernetes.io/part-of: ax-k2-nvfp4
+data:
+  warmup.yaml: |
+    schemaVersion: "2.0"
+    randomSeed: 42
+    benchmark:
+      model: skt/A.X-K2-NVFP4
+      tokenizer:
+        name: /tmp/axk2-tokenizer
+        trustRemoteCode: false
+      endpoint:
+        url: http://${ENDPOINT}/v1/chat/completions
+        type: chat
+        streaming: true
+        useServerTokenCount: true
+        extra:
+          ignore_eos: true
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+        entries: 32
+        synthesis:
+          max_isl: 256000
+      phases:
+        type: concurrency
+        concurrency: 32
+        requests: 32
+      artifacts:
+        dir: ${RESULT_DIR}/warmup
+        prefix: report
+        autoPlot: false
+      runtime:
+        ui: none
+        workers: 32
+  profile.yaml: |
+    schemaVersion: "2.0"
+    randomSeed: 42
+    benchmark:
+      model: skt/A.X-K2-NVFP4
+      tokenizer:
+        name: /tmp/axk2-tokenizer
+        trustRemoteCode: false
+      endpoint:
+        url: http://${ENDPOINT}/v1/chat/completions
+        type: chat
+        streaming: true
+        useServerTokenCount: true
+        extra:
+          ignore_eos: true
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+        synthesis:
+          max_isl: 256000
+      phases:
+        type: concurrency
+        concurrency: 32
+        requests: 11845
+      artifacts:
+        dir: ${RESULT_DIR}/main
+        prefix: report
+        autoPlot: false
+      runtime:
+        ui: none
+        workers: 32
+  run.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+
+    : "${ENDPOINT:?ENDPOINT is required}"
+    : "${ROOT_ARTIFACT_DIR:?ROOT_ARTIFACT_DIR is required}"
+    : "${ROUTING_MODE:?ROUTING_MODE is required}"
+
+    MODEL="skt/A.X-K2-NVFP4"
+    MODEL_REVISION="9e2e804e80f8d1b3afba5d7938173cec1ed46b49"
+    TRACE_URL="https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl"
+    TRACE_SHA256="5f369eb75ce639ad8b05cc209bb534bfedd627e9f7b923de32888155b4c9085a"
+    TRACE_FILE="/tmp/axk2-8k-1k-70kv-noschedule.jsonl"
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+    RESULT_DIR="${ROOT_ARTIFACT_DIR}/${ROUTING_MODE}/${RUN_ID}"
+    export ENDPOINT MODEL MODEL_REVISION TRACE_FILE TRACE_SHA256 RESULT_DIR RUN_ID
+
+    mkdir -p "${RESULT_DIR}"
+    ulimit -n 600000 || true
+
+    python3 - <<'PY'
+    import hashlib
+    import json
+    import os
+    import urllib.request
+    from pathlib import Path
+
+    trace_path = Path(os.environ["TRACE_FILE"])
+    urllib.request.urlretrieve(
+        "https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl",
+        trace_path,
+    )
+    actual = hashlib.file_digest(trace_path.open("rb"), "sha256").hexdigest()
+    if actual != os.environ["TRACE_SHA256"]:
+        raise SystemExit(
+            f"TRACE_SHA_MISMATCH expected={os.environ['TRACE_SHA256']} actual={actual}"
+        )
+
+    total = 0
+    eligible = 0
+    timestamped = 0
+    with trace_path.open() as handle:
+        for line in handle:
+            total += 1
+            record = json.loads(line)
+            eligible += record["input_length"] <= 256000
+            timestamped += "timestamp" in record
+    if (total, eligible, timestamped) != (12031, 11845, 0):
+        raise SystemExit(
+            "TRACE_INVARIANT_MISMATCH "
+            f"total={total} eligible={eligible} timestamped={timestamped}"
+        )
+    print(
+        f"TRACE_OK sha256={actual} total={total} eligible={eligible} "
+        f"timestamped={timestamped}"
+    )
+    PY
+
+    python3 - <<'PY'
+    import os
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=os.environ["MODEL"],
+        revision=os.environ["MODEL_REVISION"],
+        local_dir="/tmp/axk2-tokenizer",
+        allow_patterns=[
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "chat_template.jinja",
+        ],
+    )
+    PY
+
+    python3 - <<'PY'
+    from aiperf.common.tokenizer import Tokenizer
+
+    tokenizer = Tokenizer.from_pretrained(
+        "/tmp/axk2-tokenizer",
+        trust_remote_code=False,
+        revision="main",
+        resolve_alias=False,
+    )
+    if tokenizer._tokenizer.vocab_size != 163840:
+        raise SystemExit(
+            f"TOKENIZER_VOCAB_MISMATCH actual={tokenizer._tokenizer.vocab_size}"
+        )
+    print("TOKENIZER_OK path=/tmp/axk2-tokenizer vocab_size=163840")
+    PY
+
+    AIPERF_VERSION="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("aiperf"))')"
+    if [[ "${AIPERF_VERSION}" != "0.12.0" ]]; then
+      echo "AIPERF_VERSION_MISMATCH expected=0.12.0 actual=${AIPERF_VERSION}" >&2
+      exit 40
+    fi
+    export AIPERF_VERSION
+
+    python3 - <<'PY'
+    import json
+    import os
+    import time
+    import urllib.request
+
+    endpoint = os.environ["ENDPOINT"]
+    model = os.environ["MODEL"]
+    for attempt in range(1, 721):
+        try:
+            with urllib.request.urlopen(
+                f"http://{endpoint}/v1/models", timeout=10
+            ) as response:
+                payload = json.load(response)
+            if any(item.get("id") == model for item in payload.get("data", [])):
+                body = json.dumps({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                    "max_tokens": 1,
+                }).encode()
+                request = urllib.request.Request(
+                    f"http://{endpoint}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    completion = json.load(response)
+                if completion.get("choices"):
+                    print(f"MODEL_READY endpoint={endpoint} attempt={attempt}")
+                    break
+        except Exception as error:
+            if attempt % 12 == 0:
+                print(f"MODEL_WAIT endpoint={endpoint} attempt={attempt} error={error}")
+        time.sleep(5)
+    else:
+        raise SystemExit(f"MODEL_READY_TIMEOUT endpoint={endpoint}")
+    PY
+
+    python3 - <<'PY'
+    import json
+    import os
+    import urllib.request
+    from pathlib import Path
+
+    result_dir = Path(os.environ["RESULT_DIR"])
+    manifest = {
+        "aiperf_version": os.environ["AIPERF_VERSION"],
+        "concurrency": 32,
+        "eligible_requests": 11845,
+        "endpoint": os.environ["ENDPOINT"],
+        "max_isl": 256000,
+        "model": os.environ["MODEL"],
+        "model_revision": os.environ["MODEL_REVISION"],
+        "routing_mode": os.environ["ROUTING_MODE"],
+        "timing_mode": "concurrency (trace has no timestamps)",
+        "trace_sha256": os.environ["TRACE_SHA256"],
+        "warmup_requests": 32,
+    }
+    (result_dir / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    try:
+        with urllib.request.urlopen(
+            f"http://{os.environ['ENDPOINT']}/metrics", timeout=30
+        ) as response:
+            (result_dir / "frontend-metrics-before.prom").write_bytes(response.read())
+    except Exception as error:
+        (result_dir / "frontend-metrics-before.error.txt").write_text(str(error) + "\n")
+    PY
+
+    aiperf config validate /runner/warmup.yaml | tee "${RESULT_DIR}/warmup.validate.log"
+    aiperf config expand /runner/warmup.yaml --full > "${RESULT_DIR}/warmup.expanded.yaml"
+    aiperf profile --config /runner/warmup.yaml
+
+    aiperf config validate /runner/profile.yaml | tee "${RESULT_DIR}/profile.validate.log"
+    aiperf config expand /runner/profile.yaml --full > "${RESULT_DIR}/profile.expanded.yaml"
+    aiperf profile --config /runner/profile.yaml
+
+    python3 - <<'PY'
+    import os
+    import urllib.request
+    from pathlib import Path
+
+    result_dir = Path(os.environ["RESULT_DIR"])
+    try:
+        with urllib.request.urlopen(
+            f"http://{os.environ['ENDPOINT']}/metrics", timeout=30
+        ) as response:
+            (result_dir / "frontend-metrics-after.prom").write_bytes(response.read())
+    except Exception as error:
+        (result_dir / "frontend-metrics-after.error.txt").write_text(str(error) + "\n")
+    PY
+
+    echo "RESULT_DIR=${RESULT_DIR}"

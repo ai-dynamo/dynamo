@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: axk2-agg-b200-chat
+  labels:
+    app.kubernetes.io/name: axk2-agg-b200-chat
+    app.kubernetes.io/part-of: ax-k2-nvfp4
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      runtimeVersionOverride: 1.4.1
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            axk2.nvidia.com/role: frontend
+            axk2.nvidia.com/routing: kv-aware
+        spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-fp8-ds-mla@sha256:627a6f52b4280acbdd5807997b33bae61827f97ce8944a9204696e1945044118
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  exec python3 -m dynamo.frontend \
+                    --router-mode kv \
+                    --router-kv-events \
+                    --kv-cache-block-size 64 \
+                    --router-track-prefill-tokens \
+                    --router-kv-overlap-score-credit-decay 0.1 \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+              ports:
+                - name: http
+                  containerPort: 8000
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 6
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                limits:
+                  cpu: "16"
+                  memory: 32Gi
+
+    - name: agg
+      type: worker
+      runtimeVersionOverride: 1.4.1
+      replicas: 2
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          labels:
+            axk2.nvidia.com/role: aggregate-worker
+            axk2.nvidia.com/routing: kv-aware
+        spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-fp8-ds-mla@sha256:627a6f52b4280acbdd5807997b33bae61827f97ce8944a9204696e1945044118
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  ulimit -l unlimited
+                  exec python3 -m dynamo.vllm \
+                    --model skt/A.X-K2-NVFP4 \
+                    --revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --tokenizer-revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --served-model-name skt/A.X-K2-NVFP4 \
+                    --tensor-parallel-size 4 \
+                    --data-parallel-size 1 \
+                    --enable-expert-parallel \
+                    --attention-backend FLASHINFER_MLA_SPARSE \
+                    --kv-cache-dtype auto \
+                    --max-model-len 262144 \
+                    --max-num-seqs 32 \
+                    --max-num-batched-tokens 16384 \
+                    --gpu-memory-utilization 0.92 \
+                    --block-size 64 \
+                    --enable-prefix-caching \
+                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+                    --async-scheduling \
+                    --dyn-tool-call-parser hermes \
+                    --dyn-reasoning-parser deepseek_v3 \
+                    --reasoning-parser deepseek_v3
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_XET_HIGH_PERFORMANCE
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf-modules
+                - name: PYTHONHASHSEED
+                  value: "42"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: 750Gi
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: runtime-tmp
+              emptyDir: {}
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule

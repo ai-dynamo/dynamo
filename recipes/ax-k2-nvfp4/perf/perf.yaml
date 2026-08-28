@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: axk2-kv-bench
+  labels:
+    app.kubernetes.io/name: axk2-kv-bench
+    app.kubernetes.io/part-of: ax-k2-nvfp4
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: axk2-kv-bench
+        app.kubernetes.io/part-of: ax-k2-nvfp4
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: nvcr-imagepullsecret
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                      - frontend
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - axk2-agg-b200-chat
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: perf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - /runner/run.sh
+          env:
+            - name: ENDPOINT
+              value: axk2-agg-b200-chat-frontend:8000
+            - name: ROUTING_MODE
+              value: kv
+            - name: ROOT_ARTIFACT_DIR
+              value: /model-cache/perf/ax-k2-nvfp4
+            - name: AIPERF_HTTP_CONNECTION_LIMIT
+              value: "200"
+            - name: AIPERF_HTTP_SO_RCVTIMEO
+              value: "120"
+            - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+              value: "3600"
+            - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+              value: "3600"
+            - name: HF_HOME
+              value: /model-cache
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "16"
+              memory: 32Gi
+          volumeMounts:
+            - name: runner
+              mountPath: /runner
+              readOnly: true
+            - name: model-cache
+              mountPath: /model-cache
+      volumes:
+        - name: runner
+          configMap:
+            name: axk2-aiperf-runner
+            defaultMode: 365
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
