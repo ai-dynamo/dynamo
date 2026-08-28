@@ -18,7 +18,10 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
-from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.engine_response import (
+    normalize_finish_reason,
+    trailing_stop_prefix_len,
+)
 from dynamo.llm import HttpError
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
@@ -159,6 +162,77 @@ def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
         for token_id in (request.get("stop_token_ids") or [])
         if isinstance(token_id, int) and not isinstance(token_id, bool)
     }
+
+
+def _suppressed_stop_token_ids(request: Dict[str, Any]) -> set[int]:
+    stop_conditions = request.get("stop_conditions") or {}
+    if not isinstance(stop_conditions, dict):
+        return set()
+
+    values = [
+        *(stop_conditions.get("stop_token_ids") or []),
+        *(stop_conditions.get("stop_token_ids_hidden") or []),
+    ]
+    return {
+        token_id
+        for token_id in values
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    }
+
+
+def _stop_strings(request: Dict[str, Any]) -> set[str]:
+    stop_conditions = request.get("stop_conditions")
+    stop = (
+        stop_conditions.get("stop")
+        if isinstance(stop_conditions, dict)
+        else request.get("stop")
+    )
+    if isinstance(stop, str):
+        return {stop}
+    if isinstance(stop, list):
+        return {item for item in stop if isinstance(item, str)}
+    return set()
+
+
+def _remove_suppressed_stop_tokens(
+    output_ids: list[int],
+    matched: Any,
+    suppressed_stop_token_ids: set[int] | None,
+) -> tuple[list[int], int]:
+    if not output_ids or not suppressed_stop_token_ids:
+        return output_ids, 0
+
+    if isinstance(matched, int) and not isinstance(matched, bool):
+        matched_ids = [matched]
+    elif isinstance(matched, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in matched
+    ):
+        matched_ids = matched
+    else:
+        return output_ids, 0
+
+    if (
+        matched_ids
+        and all(token_id in suppressed_stop_token_ids for token_id in matched_ids)
+        and len(output_ids) >= len(matched_ids)
+        and output_ids[-len(matched_ids) :] == matched_ids
+    ):
+        return output_ids[: -len(matched_ids)], len(matched_ids)
+
+    return output_ids, 0
+
+
+def _split_trailing_suppressed_stop_tokens(
+    output_ids: list[int],
+    suppressed_stop_token_ids: set[int] | None,
+) -> tuple[list[int], list[int]]:
+    if not output_ids or not suppressed_stop_token_ids:
+        return output_ids, []
+
+    split_at = len(output_ids)
+    while split_at > 0 and output_ids[split_at - 1] in suppressed_stop_token_ids:
+        split_at -= 1
+    return output_ids[:split_at], output_ids[split_at:]
 
 
 def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -359,7 +433,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _plain = stop_conditions.get("stop_token_ids") or []
             _merged = list(set(_hidden).union(_plain))
             stop_token_ids = _merged if _merged else None
-
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
@@ -493,6 +566,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             output_options.get("return_tokens_as_token_ids")
         )
         user_stop_token_ids = _user_stop_token_ids(request)
+        suppressed_stop_token_ids = _suppressed_stop_token_ids(request)
 
         lora_path = self._resolve_lora(request)
         if lora_path:
@@ -549,6 +623,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    suppressed_stop_token_ids=suppressed_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                 ):
                     yield out
@@ -632,6 +707,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    suppressed_stop_token_ids=suppressed_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                 ):
                     yield out
@@ -675,6 +751,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         context: Context,
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
+        suppressed_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
@@ -692,6 +769,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
+        pending_stop_tokens_per_choice: dict[int, list[int]] = {}
+        pending_log_probs_per_choice: dict[int, list[Any]] = {}
+        pending_top_logprobs_per_choice: dict[int, list[Any]] = {}
+        completion_tokens_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -723,7 +804,60 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         out["stop_reason"] = stop_reason
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
-                output_ids = res.get("output_ids", [])
+                raw_output_ids = list(res.get("output_ids", []))
+                if raw_output_ids and not first_output_seen:
+                    first_output_seen = True
+                    context.notify_first_token()
+                log_probs = None
+                top_logprobs = None
+                if metadata_uploader is None:
+                    # Extract logprobs for new tokens if available.
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        meta_info,
+                        num_output_tokens_in_chunk=len(raw_output_ids),
+                        return_tokens_as_token_ids=return_tokens_as_token_ids,
+                    )
+
+                output_ids = pending_stop_tokens_per_choice.pop(output_idx, [])
+                output_ids.extend(raw_output_ids)
+                if log_probs is not None:
+                    log_probs = pending_log_probs_per_choice.pop(output_idx, []) + list(
+                        log_probs
+                    )
+                if top_logprobs is not None:
+                    top_logprobs = pending_top_logprobs_per_choice.pop(
+                        output_idx, []
+                    ) + list(top_logprobs)
+
+                matched = finish_reason.get("matched") if finish_reason else None
+                output_ids, removed_count = _remove_suppressed_stop_tokens(
+                    output_ids, matched, suppressed_stop_token_ids
+                )
+                if removed_count:
+                    if log_probs is not None:
+                        log_probs = log_probs[:-removed_count]
+                    if top_logprobs is not None:
+                        top_logprobs = top_logprobs[:-removed_count]
+                elif not finish_reason:
+                    (
+                        output_ids,
+                        pending_stop_tokens,
+                    ) = _split_trailing_suppressed_stop_tokens(
+                        output_ids, suppressed_stop_token_ids
+                    )
+                    if pending_stop_tokens:
+                        pending_stop_tokens_per_choice[output_idx] = pending_stop_tokens
+                        if log_probs is not None:
+                            pending_log_probs_per_choice[output_idx] = log_probs[
+                                -len(pending_stop_tokens) :
+                            ]
+                            log_probs = log_probs[: -len(pending_stop_tokens)]
+                        if top_logprobs is not None:
+                            pending_top_logprobs_per_choice[output_idx] = top_logprobs[
+                                -len(pending_stop_tokens) :
+                            ]
+                            top_logprobs = top_logprobs[: -len(pending_stop_tokens)]
+
                 # Empty, non-final chunks can happen during scheduler idle ticks.
                 # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
@@ -731,23 +865,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         break
                     continue
 
-                if output_ids and not first_output_seen:
-                    first_output_seen = True
-                    context.notify_first_token()
-
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
-                if metadata_uploader is None:
-                    # Extract logprobs for new tokens if available
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        meta_info,
-                        num_output_tokens_in_chunk=len(output_ids),
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
-                    )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
 
                 engine_data: dict[str, Any] = dict(res.get("engine_data") or {})
                 routed_experts = meta_info.get("routed_experts")
@@ -771,10 +895,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
                     if input_tokens is not None and completion_tokens is not None:
+                        completion_tokens_per_choice[output_idx] = completion_tokens
+                        request_completion_tokens = sum(
+                            completion_tokens_per_choice.values()
+                        )
                         completion_usage = {
                             "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
+                            "completion_tokens": request_completion_tokens,
+                            "total_tokens": input_tokens + request_completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
                             completion_usage[
@@ -811,6 +939,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             OpenAI-formatted chat completion chunk dicts.
         """
         request = request or {}
+        stop_strings = _stop_strings(request)
         # SGLang text chunks are cumulative per choice. Keep independent text
         # offsets so interleaved n>1 choices do not compute deltas from each
         # other's previous text.
@@ -847,7 +976,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
                 next_count = len(text)
                 count = text_counts_per_choice.get(index, 0)
-                delta = text[count:]
+                visible_text_len = next_count
+                matched = finish_reason.get("matched") if finish_reason else None
+                if (
+                    isinstance(matched, str)
+                    and matched in stop_strings
+                    and text.endswith(matched)
+                ):
+                    visible_text_len = len(text) - len(matched)
+                elif not finish_reason:
+                    visible_text_len -= trailing_stop_prefix_len(text, stop_strings)
+
+                delta = text[count:visible_text_len] if visible_text_len > count else ""
                 if res.get("output_ids") and not first_output_seen:
                     first_output_seen = True
                     context.notify_first_token()
@@ -888,4 +1028,4 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
-                text_counts_per_choice[index] = next_count
+                text_counts_per_choice[index] = visible_text_len

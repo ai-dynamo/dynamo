@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # vLLM sidecar
 
 > [!WARNING]
-> **Experimental.** This sidecar and its deployment examples are experimental
-> and not yet packaged for distribution. The manifests, flags, and behavior may
-> change without notice.
+> **Experimental.** This sidecar and its deployment examples are experimental.
+> The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel
+> pair, but the container image is not yet packaged for distribution. The
+> manifests, flags, and behavior may change without notice.
 
 `dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC services:
 
@@ -16,7 +17,8 @@ SPDX-License-Identifier: Apache-2.0
 - `vllm.Control` for model and server discovery
 - Standard gRPC health for startup readiness
 
-It is a standalone Rust executable.
+It is a standalone Rust executable and is also compiled into
+`ai-dynamo-runtime` for the importable `dynamo.vllm.sidecar` launcher.
 
 ## Supported
 
@@ -55,6 +57,13 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051
+```
+
+After installing `ai-dynamo`, the Python module runs the same native worker:
+
+```bash
+python -m dynamo.vllm.sidecar \
   --grpc-endpoint 127.0.0.1:50051
 ```
 
