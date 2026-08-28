@@ -1318,9 +1318,11 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1594,9 +1596,11 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
