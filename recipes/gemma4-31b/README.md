@@ -114,7 +114,7 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 
 | Workload             | Recipe                     | SKU   | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
 | -------------------- | -------------------------- | ----- | ----------- | ----------------------- | ----------------------- | ------------- |
-| Agentic (15% subset) | Aggregated (8 workers)     | B200  | 192         | 1,109.489               | 60.10                   | 3,431.78      |
+| Agentic (15% subset) | Aggregated (8 workers)     | B200  | 192         | 1,096.75                | 57.22                   | 3,052.24      |
 | Agentic (15% subset) | Aggregated (8 workers)     | GB200 | 192         | 1,085.038               | 48.67                   | 378.79        |
 | Agentic (15% subset) | Aggregated (2 TP4 workers) | H200  | 32          | 153.020                 | 63.02                   | 979.09        |
 
@@ -141,3 +141,4 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
   sampling parameters: `min_p` and `min_tokens` are not supported, and `frequency_penalty`,
   `presence_penalty` and `repetition_penalty` are rejected. `n > 1` and `best_of > 1` are also
   rejected under greedy decoding (`temperature=0`).
+- Only chat-type endpoints (`v1/chat/completions`, `v1/responses`) are supported for this recipe.
