@@ -651,6 +651,7 @@ func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *S
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
+	dst.CurrentWorkerHash = src.CurrentWorkerHash
 	dst.State = v1beta1.DGDState(src.State)
 	if src.Placement != nil {
 		dst.Placement = &v1beta1.PlacementStatus{
@@ -698,6 +699,7 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 // v1alpha1.
 func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
+	dst.CurrentWorkerHash = src.CurrentWorkerHash
 	dst.State = DGDState(src.State)
 	if src.Placement != nil {
 		dst.Placement = &PlacementStatus{

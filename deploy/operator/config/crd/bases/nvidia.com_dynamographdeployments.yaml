@@ -12094,6 +12094,13 @@ spec:
                       - type
                     type: object
                   type: array
+                currentWorkerHash:
+                  description: |-
+                    CurrentWorkerHash is the v2 hash of the completed worker generation.
+                    The controller uses it as the authoritative baseline for worker rollout
+                    change detection. The v2 annotation is retained as a compatibility mirror
+                    for older controller versions.
+                  type: string
                 observedGeneration:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
@@ -21693,6 +21700,13 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                currentWorkerHash:
+                  description: |-
+                    currentWorkerHash is the v2 hash of the completed worker generation.
+                    The controller uses it as the authoritative baseline for worker rollout
+                    change detection. The v2 annotation is retained as a compatibility mirror
+                    for older controller versions.
+                  type: string
                 observedGeneration:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64

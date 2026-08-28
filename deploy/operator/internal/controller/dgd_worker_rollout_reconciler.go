@@ -145,6 +145,7 @@ func (r *dgdWorkerRolloutReconciler) commitUnsupportedWorkerHashTransition(
 	if err := r.Update(ctx, dgd); err != nil {
 		return err
 	}
+	r.setCurrentWorkerHashStatus(dgd, transition.next.v2)
 	if !transition.workerGenerationChanged {
 		return nil
 	}
@@ -264,9 +265,9 @@ func (r *dgdWorkerRolloutReconciler) workerHashesForUnsupportedPathway(
 // generation recorded on the DGD.
 //
 // During v1/v2 compatibility a worker DCD is current if its worker-hash label
-// matches either current-worker-hash (v1) or current-worker-hash-v2. This keeps
-// the existing annotation/label meaning downgrade-safe while allowing the
-// controller to record the v2 hash that will become primary later.
+// matches the v1 current-worker-hash annotation or the v2 hash in status. The
+// current-worker-hash-v2 annotation mirrors status for older controller
+// versions during the compatibility period.
 func (r *dgdWorkerRolloutReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
@@ -342,6 +343,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to initialize worker hash: %w", err)
 	}
+	r.setCurrentWorkerHashStatus(dgd, hashes.v2)
 
 	logger.Info("Initialized current worker hashes", "v1Hash", hashes.v1, "v2Hash", hashes.v2)
 
@@ -356,7 +358,38 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 ) error {
 	logger := log.FromContext(ctx)
 
+	annotationV2 := currentWorkerHashV2Annotation(dgd)
+	if dgd.Status.CurrentWorkerHash == "" && annotationV2 != "" {
+		r.setCurrentWorkerHashStatus(dgd, annotationV2)
+		logger.Info("Backfilled current worker hash status from v2 annotation", "v2Hash", annotationV2)
+	}
+
 	current := r.currentWorkerHashes(dgd)
+	metadataChanged := false
+	needsCompatibilityMirror := current.v2 != "" && annotationV2 != current.v2 &&
+		!isRollingUpdateInProgress(&dgd.Status)
+	if needsCompatibilityMirror {
+		if dgd.Annotations == nil {
+			dgd.Annotations = make(map[string]string)
+		}
+		dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = current.v2
+		metadataChanged = true
+	}
+	if current.v1 == "" && needsCompatibilityMirror {
+		restored, err := r.restoreLegacyWorkerHashIfNeeded(ctx, dgd, current.v2)
+		if err != nil {
+			return err
+		}
+		metadataChanged = metadataChanged || restored
+	}
+	if metadataChanged {
+		if err := r.Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to restore worker hash annotations: %w", err)
+		}
+		if dgd.Status.CurrentWorkerHash == "" {
+			r.setCurrentWorkerHashStatus(dgd, current.v2)
+		}
+	}
 	if !current.v1Only() || current.v1 == consts.LegacyWorkerHash {
 		return nil
 	}
@@ -377,6 +410,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to migrate worker hash annotations: %w", err)
 	}
+	r.setCurrentWorkerHashStatus(dgd, next.v2)
 	logger.Info("Migrated worker hash annotations",
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
@@ -463,6 +497,51 @@ func (r *dgdWorkerRolloutReconciler) findLegacyWorkerDCDs(
 	return legacyDCDs, nil
 }
 
+// restoreLegacyWorkerHashIfNeeded restores the v1 suffix only when every
+// existing labeled worker DCD agrees on one non-v2 generation. This prevents a
+// replacement that omitted controller annotations from rendering a duplicate
+// v2 DCD for a completed legacy generation.
+func (r *dgdWorkerRolloutReconciler) restoreLegacyWorkerHashIfNeeded(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	currentV2 string,
+) (bool, error) {
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.List(ctx, dcdList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
+	); err != nil {
+		return false, fmt.Errorf("list worker DCDs for legacy suffix recovery: %w", err)
+	}
+
+	legacyHashes := make(map[string]struct{})
+	for i := range dcdList.Items {
+		dcd := &dcdList.Items[i]
+		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+			continue
+		}
+		hash := dcd.Labels[consts.KubeLabelDynamoWorkerHash]
+		if hash == currentV2 {
+			return false, nil
+		}
+		if hash != "" {
+			legacyHashes[hash] = struct{}{}
+		}
+	}
+	if len(legacyHashes) != 1 {
+		return false, nil
+	}
+
+	for hash := range legacyHashes {
+		if dgd.Annotations == nil {
+			dgd.Annotations = make(map[string]string)
+		}
+		dgd.Annotations[consts.AnnotationCurrentWorkerHash] = hash
+		return true, nil
+	}
+	return false, nil
+}
+
 // getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
 // It is empty after the DGD has converged to a v2-only generation.
 func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHash(
@@ -485,10 +564,27 @@ func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHashV2(
 }
 
 func currentWorkerHashV2(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
+	if dgd.Status.CurrentWorkerHash != "" {
+		return dgd.Status.CurrentWorkerHash
+	}
+	return currentWorkerHashV2Annotation(dgd)
+}
+
+func currentWorkerHashV2Annotation(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	if dgd.Annotations == nil {
 		return ""
 	}
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
+}
+
+func (r *dgdWorkerRolloutReconciler) setCurrentWorkerHashStatus(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	hash string,
+) {
+	if dgd.Status.CurrentWorkerHash == hash {
+		return
+	}
+	dgd.Status.CurrentWorkerHash = hash
 }
 
 // setCurrentWorkerHashes stores the active worker hashes for one generation.
@@ -792,7 +888,8 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
-	r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
+	completed := workerHashesForCompletedGeneration(newWorkerHash, desired)
+	r.setCurrentWorkerHashes(dgd, completed)
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update current worker hash: %w", err)
 	}
@@ -814,6 +911,8 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	sort.Strings(allWorkerComponents)
 	rollingUpdateStatus.UpdatedComponents = allWorkerComponents
 
+	status.CurrentWorkerHash = completed.v2
+	dgd.Status = *status
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
 	return nil

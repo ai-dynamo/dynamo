@@ -183,6 +183,12 @@ type DynamoGraphDeploymentStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// CurrentWorkerHash is the v2 hash of the completed worker generation.
+	// The controller uses it as the authoritative baseline for worker rollout
+	// change detection. The v2 annotation is retained as a compatibility mirror
+	// for older controller versions.
+	// +optional
+	CurrentWorkerHash string `json:"currentWorkerHash,omitempty"`
 	// State is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
 	State DGDState `json:"state"`
