@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -35,6 +35,9 @@ from vllm.utils.async_utils import make_async
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 
 class _Renderer(Protocol):
@@ -416,16 +419,41 @@ def _validate_chat_completion_request(
     return validated_request
 
 
+def _reasoning_parser_enabled(
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+) -> TypeGuard[type[ReasoningParser]]:
+    """Whether a reasoning parser runs for this request.
+
+    Single-sourced because three call sites must agree: _prepare_request (which
+    lets the parser adjust the sampling request), preprocess_chat_request (which
+    must know whether that parser could have rewritten the request's guidance),
+    and StreamingPostProcessor (which builds the parser that consumes the result).
+    If they drift, the sampling params get adjusted for a parser that then does not
+    exist and the model's control markers reach the client as visible text.
+
+    See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
+    half: when the chat template runs with enable_thinking=False the reasoning
+    tags live in the prompt and the generated output carries none.
+    """
+    return reasoning_parser_class is not None and (
+        chat_template_kwargs.get("enable_thinking") is not False
+    )
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
+    model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
+    guidance_snapshots: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -497,6 +525,50 @@ def _prepare_request(
         ),
     )
 
+    # Let the reasoning parser adjust the sampling request, mirroring the tool-parser
+    # path above. Parsers that split thinking from the answer on text markers need
+    # `skip_special_tokens=False` so those markers survive detokenisation, and they
+    # declare that through adjust_request(). Without this call the reasoning channel
+    # only works when the *client* happens to send skip_special_tokens=false.
+    #
+    # Gated identically to StreamingPostProcessor's own parser construction below: if
+    # the sampling params were adjusted for a parser that then does not exist, the
+    # markers reach the client as visible text.
+    #
+    # ReasoningParser.adjust_request is `return request` by default, so this is a no-op
+    # for parsers that do not need it.
+    if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
+        # Both parsers rewrite the same request, tool first and reasoning here, so a
+        # single before/after diff cannot say which one moved the guidance. Splitting
+        # it here is the only reason the caller can apply one precedence rule to a
+        # reasoning rewrite and a different one to a tool rewrite.
+        #
+        # Taken inside this gate, not above it: it is read only behind the same
+        # _reasoning_parser_enabled() test in the caller, so on the tool-only and
+        # no-parser paths it was pure cost. No copy either -- adjust_request()
+        # REPLACES request.structured_outputs with a fresh object rather than
+        # mutating the one this names, so the plain reference still denotes the
+        # pre-adjustment value afterwards. That also makes the caller's `!=` O(1)
+        # by identity in the common unchanged case instead of a deep structural walk.
+        if guidance_snapshots is not None:
+            # Same accessor as adjusted_structured_guidance in the caller,
+            # deliberately: this value is only ever compared against that one, and
+            # extract_structured_outputs() is a different view.
+            guidance_snapshots[
+                "after_tool_parser"
+            ] = _guided_decoding_from_structured_outputs(
+                request_for_sampling.structured_outputs
+            )
+        # model_config is required, not decorative: the Cohere parsers gate their
+        # response_format -> structural_tag rewrite on _model_config.architecture and
+        # return the request untouched without it, which made this whole call a no-op
+        # for the only shipped parser that overrides adjust_request.
+        request_for_sampling = reasoning_parser_class(
+            tokenizer,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=model_config,
+        ).adjust_request(request_for_sampling)
+
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
         tokenizer.__class__.__name__ == "MistralTokenizer"
@@ -538,6 +610,8 @@ async def preprocess_chat_request(
     tokenizer: TokenizerLike,
     renderer: _Renderer,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
+    model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -559,6 +633,7 @@ async def preprocess_chat_request(
     # structured_outputs itself. Reading it afterwards would treat a
     # parser-generated constraint as one the caller sent and reject the request.
     has_explicit_output_constraint = _has_explicit_output_constraint(validated_request)
+    guidance_snapshots: dict[str, Any] = {}
     (
         request_for_sampling,
         tool_parser,
@@ -569,19 +644,31 @@ async def preprocess_chat_request(
         request,
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
+        reasoning_parser_class=reasoning_parser_class,
+        model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
+        guidance_snapshots=guidance_snapshots,
     )
 
     adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
         request_for_sampling.structured_outputs
     )
+    # Either parser's adjust_request() may rewrite the caller's constraint into the
+    # form the model actually speaks -- a reasoning parser converting
+    # response_format into a structural tag, say. Gating this recompute on
+    # tool_parser alone dropped a reasoning parser's rewrite on the floor: the
+    # request carried the adjusted constraint but the pre-adjustment copy was
+    # forwarded to the engine.
     parser_guided_decoding = (
         adjusted_structured_guidance
-        if tool_parser is not None
+        if (
+            tool_parser is not None
+            or _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        )
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
@@ -610,11 +697,45 @@ async def preprocess_chat_request(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* or structured_outputs constraint."
         )
-    guided_decoding = (
-        assistant_guided_decoding
-        if assistant_guided_decoding is not None and not is_forced_tool_choice
-        else tool_guided_decoding
+    # Which parser moved the guidance, measured rather than inferred. Both run
+    # inside _prepare_request against the same request -- tool first, reasoning
+    # second -- so the snapshot taken between them turns one ambiguous diff into
+    # two attributable ones:
+    #
+    #     client -> after_tool_parser   changed by the tool parser
+    #     after_tool_parser -> final    changed by the reasoning parser
+    #
+    # This matters because the two rewrites carry different precedence. A tool
+    # parser's rewrite loses to the caller's explicit constraint -- deliberate,
+    # pinned by test_assistant_guidance_takes_precedence_over_auto_tool_guidance
+    # and the response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES. A
+    # reasoning parser's rewrite has to win, or the request carries the parser's
+    # structural tag while the engine is handed the pre-adjustment copy, which is
+    # the bug this change exists to fix.
+    #
+    # When both rewrote it there is nothing to arbitrate: the reasoning parser ran
+    # last, on the already-tool-adjusted request, so the final value IS the
+    # composition. Forwarding it is just forwarding what the request holds.
+    # Absent only when no tool parser ran, in which case nothing has touched the
+    # request yet and the caller's own constraint is the correct baseline.
+    # Absent whenever no reasoning parser ran, because _prepare_request only takes
+    # the snapshot when it is about to run one. The default is then a don't-care:
+    # the comparison below sits behind the same _reasoning_parser_enabled() test and
+    # short-circuits before reading it.
+    guidance_after_tool_parser = guidance_snapshots.get(
+        "after_tool_parser", client_structured_guidance
     )
+    reasoning_rewrote_guidance = (
+        _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        and adjusted_structured_guidance != guidance_after_tool_parser
+    )
+    guided_decoding: dict[str, Any] | None
+    if reasoning_rewrote_guidance and not is_forced_tool_choice:
+        guided_decoding = adjusted_structured_guidance
+    elif assistant_guided_decoding is not None and not is_forced_tool_choice:
+        guided_decoding = assistant_guided_decoding
+    else:
+        guided_decoding = tool_guided_decoding
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
     # when a forced tool choice has no parser-provided grammar.  That can happen
     # both without a parser and with parsers (for example Hermes) whose
@@ -679,6 +800,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        model_config: ModelConfig | None = None,
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
@@ -699,14 +821,13 @@ class StreamingPostProcessor:
         # `enable_thinking` is the convention adopted across the modern
         # reasoning-capable model families that vLLM supports; templates
         # that don't honor it simply leave it unset (no effect here).
-        thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
             )
-            if reasoning_parser_class
-            and not thinking_disabled
+            if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
             and response_reasoning_ended is not True
             else None
         )
