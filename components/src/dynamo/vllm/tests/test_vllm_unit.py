@@ -1189,7 +1189,7 @@ def test_build_sampling_params_attaches_kv_hint_message():
         "actions": [
             {
                 "action_id": "a1",
-                "action_type": "kv.source_locations",
+                "action_type": "kv.fetch",
                 "action_version": "1.0",
                 "payload": source_locations_payload,
             },

@@ -1090,7 +1090,7 @@ where
         )?;
         Some(KvHint::new(
             message_id.unwrap_or_default(),
-            vec![KvHintAction::source_locations("a1", payload)],
+            vec![KvHintAction::fetch("a1", payload)],
         ))
     }
 
@@ -2667,7 +2667,7 @@ mod tests {
             hint,
             Some(KvHint::new(
                 "msg-123",
-                vec![KvHintAction::source_locations(
+                vec![KvHintAction::fetch(
                     "a1",
                     KvSourceLocationsPayload {
                         source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),

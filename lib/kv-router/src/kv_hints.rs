@@ -21,10 +21,10 @@ pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
-const KV_SOURCE_LOCATIONS_ACTION_TYPE: &str = "kv.source_locations";
-const KV_SOURCE_LOCATIONS_ACTION_VERSION: &str = "1.0";
+const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
+const KV_FETCH_ACTION_VERSION: &str = "1.0";
 
-/// Typed payload for the `kv.source_locations@1.0` point-to-point action.
+/// Typed payload for the `kv.fetch@1.0` point-to-point action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSourceLocationsPayload {
     pub source_control_endpoint: String,
@@ -57,18 +57,15 @@ impl KvHintAction {
         }
     }
 
-    pub fn source_locations(
-        action_id: impl Into<String>,
-        payload: KvSourceLocationsPayload,
-    ) -> Self {
+    pub fn fetch(action_id: impl Into<String>, payload: KvSourceLocationsPayload) -> Self {
         let KvSourceLocationsPayload {
             source_control_endpoint,
             block_hashes,
         } = payload;
         Self::new(
             action_id,
-            KV_SOURCE_LOCATIONS_ACTION_TYPE,
-            KV_SOURCE_LOCATIONS_ACTION_VERSION,
+            KV_FETCH_ACTION_TYPE,
+            KV_FETCH_ACTION_VERSION,
             BTreeMap::from([
                 (
                     "source_control_endpoint".to_string(),
@@ -148,10 +145,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serializes_versioned_source_locations_action() {
+    fn serializes_versioned_fetch_action() {
         let hint = KvHint::new(
             "msg-123",
-            vec![KvHintAction::source_locations(
+            vec![KvHintAction::fetch(
                 "a1",
                 KvSourceLocationsPayload {
                     source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
@@ -170,7 +167,7 @@ mod tests {
                 "message_id": "msg-123",
                 "actions": [{
                     "action_id": "a1",
-                    "action_type": "kv.source_locations",
+                    "action_type": "kv.fetch",
                     "action_version": "1.0",
                     "payload": {
                         "source_control_endpoint": "tcp://127.0.0.1:23280",

@@ -154,7 +154,7 @@ def resolve_kv_transfer_hint_sources(
     transfer_hint_tiers = _transfer_hint_tiers(engine_args)
     if not transfer_hint_tiers:
         return None
-    # kv.source_locations@1.0 describes one P2P source and cannot disambiguate tiers.
+    # kv.fetch@1.0 describes one P2P source and cannot disambiguate tiers.
     if len(transfer_hint_tiers) > 1:
         raise ValueError(
             "P2P KV transfer hint support requires exactly one capable "
