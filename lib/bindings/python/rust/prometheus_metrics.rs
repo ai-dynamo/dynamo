@@ -33,6 +33,56 @@ fn wrap_py_expfmt_callback(
     })
 }
 
+/// What a typed callback returns: `[(name, help, type, [(sample, [(k, v)], value)])]`.
+///
+/// Extracted natively by pyo3 -- deliberately not JSON or any other string, so
+/// the structure never round-trips through text on either side of the boundary.
+type PyTypedFamilies = Vec<(
+    String,
+    String,
+    String,
+    Vec<(String, Vec<(String, String)>, f64)>,
+)>;
+
+/// Wrap a Python callable returning typed families into the Rust callback shape.
+fn wrap_py_typed_callback(
+    callback: PyObject,
+    source: &'static str,
+) -> crate::rs::metrics::PrometheusTypedCallback {
+    Arc::new(move || {
+        Python::with_gil(|py| {
+            let result = callback
+                .call0(py)
+                .map_err(|e| anyhow::anyhow!("{source} typed callback raised: {e}"))?;
+            let typed: PyTypedFamilies = result.extract(py).map_err(|e| {
+                anyhow::anyhow!("{source} typed callback returned an unexpected shape: {e}")
+            })?;
+            Ok(crate::rs::metrics::prom_typed::build_families(
+                typed
+                    .into_iter()
+                    .map(|(name, help, kind, samples)| {
+                        crate::rs::metrics::prom_typed::TypedFamily {
+                            name,
+                            help,
+                            kind,
+                            samples: samples
+                                .into_iter()
+                                .map(|(name, labels, value)| {
+                                    crate::rs::metrics::prom_typed::TypedSample {
+                                        name,
+                                        labels: labels.into_iter().collect(),
+                                        value,
+                                    }
+                                })
+                                .collect(),
+                        }
+                    })
+                    .collect(),
+            ))
+        })
+    })
+}
+
 /// Callback-registration handle exposed as `endpoint.metrics` in Python.
 #[pyclass]
 #[derive(Clone)]
@@ -59,6 +109,17 @@ impl RuntimeMetrics {
         self.hierarchy
             .get_metrics_registry()
             .add_expfmt_callback(wrap_py_expfmt_callback(callback, "RuntimeMetrics"));
+        Ok(())
+    }
+
+    /// Register a callback returning typed metric families.
+    ///
+    /// Preferred over the exposition-text callback: it avoids rendering the
+    /// engine's already-typed metrics to text only to parse them back.
+    fn register_prometheus_typed_callback(&self, callback: PyObject) -> PyResult<()> {
+        self.hierarchy
+            .get_metrics_registry()
+            .add_typed_callback(wrap_py_typed_callback(callback, "RuntimeMetrics"));
         Ok(())
     }
 }
@@ -91,6 +152,14 @@ impl EngineMetrics {
         self.hierarchy
             .get_metrics_registry()
             .add_expfmt_callback(wrap_py_expfmt_callback(callback, "EngineMetrics"));
+        Ok(())
+    }
+
+    /// Mirrors `RuntimeMetrics.register_prometheus_typed_callback`.
+    fn register_prometheus_typed_callback(&self, callback: PyObject) -> PyResult<()> {
+        self.hierarchy
+            .get_metrics_registry()
+            .add_typed_callback(wrap_py_typed_callback(callback, "EngineMetrics"));
         Ok(())
     }
 
