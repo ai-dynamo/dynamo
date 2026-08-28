@@ -106,6 +106,11 @@ jobs:
           kubectl get nodes \
             -l nvidia.com/gpu.product=NVIDIA-GB300 \
             -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'
+          gb300_nodes_json="$(kubectl get nodes \
+            -l nvidia.com/gpu.product=NVIDIA-GB300 \
+            -o json)"
+          jq -e '.items | length > 0' <<< "${gb300_nodes_json}"
+          jq -e 'all(.items[]; ((.spec.taints // []) | length) == 0)' <<< "${gb300_nodes_json}"
 
       - name: Run GPU smoke Job
         shell: bash
@@ -192,12 +197,25 @@ jobs:
           pod_json="$(kubectl get pod "${pod_name}" --namespace "${KUBE_NAMESPACE}" -o json)"
           jq -e '.spec.nodeSelector["nvidia.com/gpu.product"] == "NVIDIA-GB300"' <<< "${pod_json}"
           jq -e '.spec.priorityClassName == "ci-nightly-high-priority"' <<< "${pod_json}"
+          # Kubernetes injects the GPU toleration for pods requesting the
+          # nvidia.com/gpu extended resource. Allow that and the two default
+          # NoExecute tolerations, but reject any configured runner toleration.
           jq -e '
             all(
               .spec.tolerations[]?;
-              .key != "dedicated" and
-              .key != "github-runners" and
-              .key != "nvidia.com/gpu"
+              (
+                .key == "node.kubernetes.io/not-ready" and
+                .operator == "Exists" and
+                .effect == "NoExecute"
+              ) or (
+                .key == "node.kubernetes.io/unreachable" and
+                .operator == "Exists" and
+                .effect == "NoExecute"
+              ) or (
+                .key == "nvidia.com/gpu" and
+                .operator == "Exists" and
+                .effect == "NoSchedule"
+              )
             )
           ' <<< "${pod_json}"
           jq -e --arg gpu_count "${GPU_COUNT}" '
