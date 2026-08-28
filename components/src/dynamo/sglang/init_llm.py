@@ -14,7 +14,6 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
-from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -67,15 +66,9 @@ async def init_decode(
         engine = snapshot_engine
         load_time = 0.0
         if getattr(server_args, "enable_forward_pass_metrics", False):
-            logging.warning(
-                "Forward pass metrics disabled in snapshot mode: the engine was "
-                "created before the endpoint existed, so its FPM publisher bound "
-                "a different IPC path than the relay would subscribe to."
-            )
-            override_server_args(
-                server_args,
-                "dynamo.snapshot",
-                enable_forward_pass_metrics=False,
+            raise RuntimeError(
+                "Snapshot ServerArgs must disable forward-pass metrics before "
+                "engine creation"
             )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
@@ -230,15 +223,9 @@ async def init_prefill(
         engine = snapshot_engine
         load_time = 0.0
         if getattr(server_args, "enable_forward_pass_metrics", False):
-            logging.warning(
-                "Forward pass metrics disabled in snapshot mode: the engine was "
-                "created before the endpoint existed, so its FPM publisher bound "
-                "a different IPC path than the relay would subscribe to."
-            )
-            override_server_args(
-                server_args,
-                "dynamo.snapshot",
-                enable_forward_pass_metrics=False,
+            raise RuntimeError(
+                "Snapshot ServerArgs must disable forward-pass metrics before "
+                "engine creation"
             )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
