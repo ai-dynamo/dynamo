@@ -28,7 +28,7 @@ Send rollout inference through the shared frontend. Send mutating operations onl
 | Cross-backend completions | `POST /v1/completions` | Accepts token arrays and supports selected NVIDIA request-extension fields. |
 | Cross-backend chat | `POST /v1/chat/completions` | Uses messages or bypasses frontend tokenization with `nvext.token_data`. |
 | RL worker discovery | `GET /v1/rl/workers` | Returns protocol version `1` and live worker descriptors. |
-| Direct worker operation | `POST <system_url>/engine/<route>` | Calls one selected worker with a backend-specific request body. |
+| Direct worker operation | `POST` to the advertised route under `system_url/engine/` | Calls one selected worker with a backend-specific request body. |
 
 Use the native SGLang route when the framework already speaks that schema. Use an OpenAI-compatible route when the adapter needs one request envelope across backends or named `nvext` response fields.
 
@@ -61,6 +61,18 @@ Before admitting a sample to training, verify:
 
 `POST /v1/responses/input_tokens` estimates input size for preflight decisions. It does not return authoritative token IDs, verify the model or tokenizer, or prove that a worker is ready.
 
+## Know What Returns to the Trainer
+
+| Data | Dynamo surface | Contract boundary |
+|---|---|---|
+| Generated token IDs | Named `nvext.completion_token_ids`, or the native SGLang stream | Use the engine-returned sequence; exact placement depends on the selected interface. |
+| Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
+| Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |
+| Large SGLang `meta_info` | `nvext.metadata_upload.url` on the OpenAI-compatible path | Uploaded out of band by an RL-enabled SGLang worker; the destination is trusted control input. |
+| Masks, rewards, advantages, tool or environment state, and trajectory objects | Not a generic Dynamo response contract | The framework derives, stores, validates, and accepts these values. |
+
+See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` request and response shapes.
+
 ## Handle Streaming and Retries
 
 Treat a streaming request as a state machine: accepted, streaming, terminal success, canceled, or failed. Admit only a verified terminal result. Preserve attempt identity when retrying, because a timed-out request may have completed after the client stopped waiting and generation is not idempotent.
@@ -83,6 +95,34 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
 
 ```bash
 curl http://localhost:8001/v1/rl/workers
+```
+
+A protocol version `1` response has this shape. Optional fields such as `model`, `system_url`, `admin_base_url`, and `world_size` appear only when the worker provides them:
+
+```json
+{
+  "protocol_version": 1,
+  "namespace": "dynamo",
+  "workers": [
+    {
+      "namespace": "dynamo",
+      "component": "backend",
+      "endpoint": "rl",
+      "instance_id": 12345,
+      "transport": {"tcp": "10.0.0.12:1234/..."},
+      "request_plane_url": "dyn://dynamo.backend.rl",
+      "system_url": "http://10.0.0.12:8081",
+      "model": "Qwen/Qwen3-0.6B",
+      "routes": [
+        "get_weight_version",
+        "liveness_probe",
+        "pause_generation",
+        "resume_generation",
+        "update_weights_from_disk"
+      ]
+    }
+  ]
+}
 ```
 
 Check `protocol_version` before reading the worker list. In protocol version `1`:
@@ -111,6 +151,24 @@ The framework owns the fleet-level lifecycle:
 
 Per-worker success is not fleet-wide atomicity. Keep generation gated when membership changes, an update fails, cache reset fails, or post-update generation does not pass. See [Distribute and Update Rollout Weights](weight-updates.md) for the supported paths and recovery rules.
 
+## Compare vLLM and SGLang Administration
+
+The backends do not share one administration schema. Use the exact route returned by discovery or configured by the deployment, and validate request bodies against the installed backend version.
+
+| Operation | vLLM | SGLang |
+|---|---|---|
+| Generation | OpenAI-compatible frontend routes; a native unary path is also experimental | Native streaming `/generate` or OpenAI-compatible frontend routes |
+| Worker discovery | RL-enabled Python workers and the native sidecar register with `/v1/rl/workers` | Not currently registered; obtain trusted worker URLs from the framework or deployment |
+| Administration route family | Python workers advertise names such as `/engine/pause_generation`; the native sidecar advertises `/engine/control/*` and `/engine/update/*` | Built-in controls use `/engine/control/*` |
+| Stop and resume work | Python `pause_generation` / `resume_generation`; native-sidecar control routes reflect the installed vLLM RL API | `release_memory_occupation` unregisters and drains the worker; `resume_memory_occupation` restores it |
+| Clear KV state | Python `flush_cache`; native-sidecar behavior follows the advertised lifecycle route and vLLM configuration | `clear_kv_blocks` is a Dynamo worker request-plane endpoint, not a built-in `/engine/control/*` route, and rejects active requests |
+| Apply weights | Python disk or distributed update routes and group lifecycle; native sidecar init/start/update/finish routes when weight transfer is enabled | Built-in disk, tensor, distributed, or IPC update routes using the installed SGLang request schemas |
+| Weight version | Python `get_weight_version` reads caller-supplied update metadata; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
+| Custom controls | Python integrations can register and advertise trusted engine routes | Allowlist methods with `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` using `path[=method][:engine|tm]` |
+| Success body | Python RL routes commonly return a `status` field; native-sidecar routes follow vLLM's RL schemas | Built-in update routes commonly return `success` and `message`; check both HTTP status and body |
+
+Even two vLLM deployments can expose different route families because the Python worker and native sidecar adapt different backend control APIs. Never prepend, remove, or rename route segments returned in `routes`.
+
 ## Framework Compatibility
 
 | Framework | Status | Current Dynamo path | Key boundary |
@@ -121,7 +179,7 @@ Per-worker success is not fleet-wide atomicity. Keep generation gated when membe
 | [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Router available; full integration in progress | Prime-RL documents the Dynamo router as a drop-in option; a proposed Dynamo/vLLM sidecar adds worker discovery and external updates | Routing can be evaluated today, but the full adapter remains in upstream development and is not a released compatibility surface. |
 | [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/fleet-ai/miles-fleet), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
 
-The table was last reviewed on 2026-08-27. A status reflects the documented integration, not whether the framework can call a generic HTTP endpoint.
+A status reflects the documented integration, not whether the framework can call a generic HTTP endpoint.
 
 ## Backend Compatibility
 
@@ -148,8 +206,4 @@ Before publishing a runnable integration, verify:
 - [ ] One complete training iteration includes policy refresh and post-update generation.
 - [ ] Request, worker, and update failures have a tested recovery path.
 - [ ] Framework identity can be correlated with Dynamo telemetry without high-cardinality metric labels.
-- [ ] Versions, environment, topology, validation date, and maintenance owners are recorded.
-
-## Freshness
-
-Recheck framework status, backend versions, request and response fields, discovery fields, weight routes, and validated topology for each Dynamo minor release. Change a maturity label only after the corresponding runnable path and recovery behavior are reproduced.
+- [ ] The tested versions, environment, and topology are recorded with the integration.

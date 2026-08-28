@@ -7,22 +7,25 @@ subtitle: Move policy weights into the fleet, then coordinate refresh and recove
 
 A live policy refresh is more than tensor transfer. The RL framework must select the target workers, gate generation, apply one policy, clear stale cache state, verify readiness, and decide when new rollouts can begin. Dynamo exposes backend controls but does not provide a fleet-wide atomic update.
 
-## Use ModelExpress for Fleet Distribution
+## Choose a ModelExpress Source
 
-[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) accelerates worker startup, scale-out, and deployment updates by distributing model weights from storage or another compatible worker. Use it to get a model revision into the rollout fleet quickly.
+[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) can move a policy from a trainer, object storage, or another inference worker. Its RL refit client separates transfer from installation so an inference worker can stage a version, apply it at an orchestrator-selected safe point, and then publish that applied version as a compatible peer source.
 
-Live policy refresh is a separate step. The RL framework must still gate requests, apply the new policy through its framework- or backend-specific update path, clear stale cache state, and decide when generation can resume. ModelExpress is not the live-update mechanism used by the verl or NeMo RL integrations documented here.
+ModelExpress can stage a version from three sources:
 
-| Job | Trigger | Dynamo role |
-|---|---|---|
-| Initial model load | Worker startup or scale-up | Backend loading, model caching, ModelExpress, and readiness |
-| Deployment rollout | A new serving revision | Deployment-level rollout and rollback |
-| Live RL policy refresh | Trainer produces a new policy during a running job | Direct backend controls plus framework-owned orchestration |
+- **Trainer to inference:** trainer ranks publish the GPU shards they already own and each inference rank pulls the ranges required by its own layout over NIXL.
+- **Artifact to inference:** an inference worker prepares a canonical checkpoint from S3, including the current exact-base XOR delta format, before engine installation.
+- **Inference to inference:** after an inference worker applies a version, a rank-compatible worker can pull that version from it instead of returning to the trainer.
+
+All three refit paths are Experimental. The [ModelExpress RL refit package](https://github.com/ai-dynamo/modelexpress/tree/main/modelexpress_client/python/modelexpress_rl) contains the current source strategies. The [Dynamo vLLM refit example](https://github.com/ai-dynamo/modelexpress/tree/main/examples/rl/dynamo_vllm_refit) validates the full-weight trainer-to-inference path only; it does not qualify the S3 delta path or every backend and topology. ModelExpress startup loading remains a separate boot and scale-out workflow.
 
 ## Choose the Update Path
 
 | Path | Transfer and control | Current boundary |
 |---|---|---|
+| ModelExpress trainer source | Trainer publication plus receiver-driven NIXL staging and engine apply | Experimental. Prove source ownership, layout conversion, installation, and safe-point orchestration for the exact framework/backend pair. |
+| ModelExpress inference peer | An already-updated, rank-compatible inference worker republishes the version for P2P staging | Experimental. Source selection is a transfer optimization, not proof that the source or target may serve. |
+| ModelExpress S3 artifact | Canonical full checkpoint or exact-base XOR delta is prepared locally and applied by the engine adapter | Experimental and S3-specific. The required base and artifact identity must match. |
 | verl | Recipe-owned Ray/ZMQ control and colocated CUDA IPC | Follow the recipe's trainer/rollout rank mapping. |
 | NeMo RL | Framework-owned NCCL sender and fixed worker URLs | Managed Slurm/Ray vLLM path only. |
 | Dynamo vLLM from disk | `update_weights_from_disk` through each worker's `system_url` | Per-worker pause, apply, cache reset, and version; no fleet transaction. |
@@ -30,6 +33,17 @@ Live policy refresh is a separate step. The RL framework must still gate request
 | Dynamo SGLang | Fixed `/engine/control/update_weights_from_*` routes or allowlisted methods | The integration must obtain each SGLang system URL separately. |
 
 The transport name does not determine compatibility. Record checkpoint format, source and destination parallel layouts, rank mapping, dtype, group membership, resharding, network transport, and failure behavior.
+
+## Know the Current Contract Boundaries
+
+| Concern | Current contract |
+|---|---|
+| Fleet-wide atomic update | Dynamo and ModelExpress expose per-worker and per-version building blocks, not one cross-backend fleet transaction. The framework gates generation and decides the success set. |
+| Status and cancellation | ModelExpress weight versions have `STAGING`, `READY`, and `RELEASING` lifecycle state. Changing or deleting a version does not cancel an engine installation already in progress or prove fleet readiness. |
+| Delta reconstruction | The current ModelExpress generator path reconstructs its canonical XOR delta from an exact S3 base. Delta refit is not a generic Dynamo capability or an implicit property of NIXL and P2P transfer. |
+| Quantization and derived state | The inference adapter and engine own conversion, scales, fused parameters, compiled-graph storage, and post-load processing. Validate the exact model and engine path. |
+| Replacement-worker admission | ModelExpress can help a new worker obtain a version; the framework or deployment decides which version it must load and when it may join the rollout pool. |
+| Per-token policy identity | The current shared serving response does not attach a policy-version identity to every generated token. Preserve request, attempt, target-version, and worker evidence in the orchestrator. |
 
 ## Follow One Lifecycle
 

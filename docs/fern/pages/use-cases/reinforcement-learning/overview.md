@@ -37,6 +37,7 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 
 | Framework | Status | Start here |
 |---|---|---|
+| Custom or external trainer | Experimental contract | [External Trainer Integration](implementation-guide.md) for generation, discovery, administration, and policy updates. |
 | verl | Experimental | [verl Integration](verl.md) for the public colocated Dynamo/vLLM recipe. |
 | NeMo RL | Experimental | [NeMo RL Integration](nemo-rl.md) for the managed Slurm/Ray Dynamo backend. |
 | SLIME | Integration in progress | Review the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
@@ -54,12 +55,12 @@ Experimental guides have runnable upstream artifacts but do not make a general c
     Route repeated rollout prefixes to cache-rich workers while accounting for live load and queue pressure.
   </Card>
   <Card title="Distribute and Update Rollout Weights" icon="regular database" href="weight-updates.md">
-    Use ModelExpress for fleet distribution, then coordinate integration-specific live policy refresh and recovery.
+    Choose a trainer, artifact, or inference-peer source, then coordinate policy refresh and recovery.
   </Card>
   <Card title="Profile RL Rollouts" icon="regular chart-line" href="operations-and-simulation.md">
     Join framework records with Dynamo traces and metrics, inspect Perfetto timelines, and replay or simulate the serving workload.
   </Card>
-  <Card title="Build a Framework Integration" icon="regular terminal" href="integration-reference.md">
-    Preserve token, retry, discovery, and policy-update contracts when adding Dynamo to another RL framework.
+  <Card title="Connect an External Trainer" icon="regular terminal" href="implementation-guide.md">
+    Connect generation, worker administration, and policy updates while keeping RL semantics in your framework.
   </Card>
 </CardGroup>

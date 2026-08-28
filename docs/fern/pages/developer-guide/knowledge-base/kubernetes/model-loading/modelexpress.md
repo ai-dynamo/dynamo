@@ -5,7 +5,7 @@ title: ModelExpress
 subtitle: Speed up model weight distribution across Kubernetes workers
 ---
 
-ModelExpress is a model weight distribution service for faster worker startup in larger Dynamo clusters. Instead of every worker downloading the full model from storage, one worker can publish model weight availability and later workers can pull compatible tensors from that source over NIXL/RDMA. ModelExpress can also pair with ModelStreamer to stream safetensors directly from object storage into GPU memory.
+ModelExpress is a model weight distribution service for faster worker startup in larger Dynamo clusters. Instead of every worker downloading the full model from storage, one worker can publish model weight availability and later workers can pull compatible tensors from that source through peer-to-peer (P2P) NIXL/RDMA. ModelExpress can also pair with ModelStreamer to stream safetensors directly from object storage into GPU memory, and its experimental RL refit client can stage live policy updates from trainer ranks, object storage, or updated inference peers.
 
 Use ModelExpress when model rollout time, autoscale cold start, or fleet-wide model updates matter more than the simplicity of a shared PVC. For smaller clusters, start with [Model Caching](../../../../kubernetes/model-deployment/model-loading/model-caching.mdx).
 
@@ -23,7 +23,7 @@ Use ModelExpress when model rollout time, autoscale cold start, or fleet-wide mo
 ## How It Works
 
 1. A ModelExpress server runs in the cluster and stores metadata for available model sources.
-2. vLLM workers use the ModelExpress loader (`--load-format mx` on newer images, or `mx-source` / `mx-target` on older split-loader images).
+2. vLLM workers use the ModelExpress loader (`--load-format modelexpress` with vLLM 0.23 and later).
 3. If a compatible source worker is already serving the model, a new worker pulls model tensors from that source over NIXL/RDMA.
 4. If no source is available, the worker falls back to storage. With ModelStreamer, the first worker can stream safetensors from `s3://`, `gs://`, `az://`, or a local path.
 5. The Kubernetes operator can inject `MODEL_EXPRESS_URL` into all Dynamo pods from the platform `modelExpressURL` setting.
@@ -55,14 +55,14 @@ services:
           - --model
           - meta-llama/Llama-3.1-70B-Instruct
           - --load-format
-          - mx
+          - modelexpress
         env:
           - name: VLLM_PLUGINS
             value: modelexpress
 ```
 
 > [!NOTE]
-> Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some older Dynamo images expose `mx-source` and `mx-target` loader names instead.
+> Use `--load-format modelexpress` for the current vLLM integration. The ModelExpress package retains `mx` as a backward-compatible alias; older runtime images can have different plugin requirements.
 
 ## Stream Without Shared Storage
 
@@ -97,7 +97,7 @@ services:
           - --model
           - meta-llama/Llama-3.1-70B-Instruct
           - --load-format
-          - mx
+          - modelexpress
         env:
           - name: VLLM_PLUGINS
             value: modelexpress
@@ -116,8 +116,21 @@ services:
 
 Credentials are consumed by the storage SDKs in the worker pod. They do not flow through the ModelExpress server.
 
+## Use ModelExpress for RL Refit
+
+The experimental `modelexpress_rl` client supports three distinct live-update source paths:
+
+- Trainer ranks can publish their existing GPU shards for inference workers to pull and reshard over NIXL.
+- An inference worker that has applied a version can publish it so a rank-compatible inference worker can stage it over ModelExpress P2P.
+- An inference worker can prepare a canonical checkpoint from S3, including the current exact-base XOR delta format, before applying it through its engine adapter.
+
+These paths move and stage weights; they do not decide when a policy is ready for rollouts. The RL framework or orchestrator must gate generation, select the target version and worker set, apply at a safe point, handle cache state, verify readiness, and recover from partial failure. The current [Dynamo vLLM refit example](https://github.com/ai-dynamo/modelexpress/tree/main/examples/rl/dynamo_vllm_refit) validates the full-weight trainer-to-inference path only; it does not validate the S3 delta path or every backend and topology.
+
+See [Distribute and Update Rollout Weights](../../../../use-cases/reinforcement-learning/weight-updates.md) for the RL lifecycle and shared contract boundaries.
+
 ## See Also
 
 - [Model Caching](../../../../kubernetes/model-deployment/model-loading/model-caching.mdx) - simple PVC-based model caching and the longer ModelExpress background.
 - [ModelExpress deployment guide](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md) - server, P2P, and ModelStreamer configuration.
+- [ModelExpress RL refit package](https://github.com/ai-dynamo/modelexpress/tree/main/modelexpress_client/python/modelexpress_rl) - experimental trainer, inference-peer, and object-storage refit paths.
 - [Installation Guide](../../../../kubernetes/installation/install-dynamo.md) - Dynamo platform install options, including `modelExpressURL`.

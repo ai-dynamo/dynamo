@@ -720,6 +720,8 @@ navigation:
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: NeMo RL Integration
             path: pages/use-cases/reinforcement-learning/nemo-rl.md
+          - page: External Trainer Integration
+            path: pages/use-cases/reinforcement-learning/implementation-guide.md
           - page: RL Integration Reference
             path: pages/use-cases/reinforcement-learning/integration-reference.md
           - page: KV-Aware Load Balancing
@@ -728,9 +730,6 @@ navigation:
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
-          - page: RL Implementation Guide
-            path: pages/use-cases/reinforcement-learning/implementation-guide.md
-            hidden: true
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film
