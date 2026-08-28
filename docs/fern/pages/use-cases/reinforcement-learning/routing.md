@@ -82,6 +82,22 @@ Prefer ordinary KV-aware routing when cache state is enough. Affinity does not c
 
 Add router queueing only after measuring dispatch and engine queue pressure. Compare first-come, first-served (`fcfs`) for tail behavior with weighted shortest processing time (`wspt`) for mixed prompt lengths. Use bounded service classes; never encode rollout IDs, users, or policy versions as queue classes or Prometheus labels.
 
+## Handle Worker Loss and Overload
+
+Discovery and leases remove lost workers from the eligible set so new rollouts use healthy capacity. Requests already assigned to a failed worker fail unless request migration is enabled. Because a replacement worker does not inherit the failed worker's KV cache, migrated and newly routed requests can require a fresh prefill.
+
+Enable best-effort migration for supported in-flight requests by setting a positive limit on the frontend:
+
+```bash
+python -m dynamo.frontend \
+  --router-mode kv \
+  --migration-limit 3
+```
+
+Migration is off by default and has request-shape limitations. See [Request Migration](../../kubernetes/fault-tolerance/request-migration.md) before relying on it for rollout continuity.
+
+For bursty workloads, configure [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) so the frontend returns HTTP 529 when every eligible worker exceeds the selected load threshold. The framework can then retry under its own attempt and sample-acceptance policy instead of allowing queueing delay to grow without a bound. Rejection is also off by default.
+
 ## Measure Useful Work
 
 Keep model, hardware, prompts, arrival schedule, concurrency, output limits, worker count, parallelism, cache state, and update cadence fixed. Run at least three measured repetitions after warm-up.
@@ -106,6 +122,7 @@ The router does not filter workers by RL policy version. Gate synchronous update
 | One worker is cache-rich but overloaded | Overlap credit, active prefill/decode load, decay, and affinity |
 | Sibling requests scatter | Request burst timing versus KV-event publication; predicted-placement TTL |
 | Queue grows while workers appear idle | Eligible worker set, queue threshold, capacity input, and backend prefill limits |
+| Requests fail or stall after worker loss | Worker health and lease expiry, eligible worker set, migration settings, and the expected cache re-prefill |
 | Priority has no effect | Whether requests enter the router queue under controlled pressure |
 | Throughput rises but accepted sample rate falls | Framework update barrier, served policy identity, and acceptance logic |
 | Cache reuse drops after policy update | Required cache invalidation and the post-update warm-up window |

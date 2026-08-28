@@ -67,6 +67,16 @@ After the smoke passes, run at least one optimizer step with the same environmen
 
 ```bash
 export VERL_USE_EXTERNAL_MODULES=recipe.dynamo.register
+export VERL_DYNAMO_WORKER_METRICS_DIR=/tmp/verl-dynamo/workers
+mkdir -p "$VERL_DYNAMO_WORKER_METRICS_DIR"
+
+python3 recipe/dynamo/metrics_sidecar.py \
+  --endpoints-glob "$VERL_DYNAMO_WORKER_METRICS_DIR/*.endpoints" \
+  --output /tmp/verl-dynamo/kv-metrics.jsonl \
+  --label dynamo-kv \
+  --interval 30 &
+METRICS_SIDECAR_PID=$!
+trap 'kill "$METRICS_SIDECAR_PID" 2>/dev/null || true' EXIT
 
 python3 -m recipe.dynamo.main_dynamo \
   algorithm.adv_estimator=grpo \
@@ -77,6 +87,7 @@ python3 -m recipe.dynamo.main_dynamo \
   actor_rollout_ref.rollout.mode=async \
   actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode=kv \
   ++actor_rollout_ref.rollout.engine_kwargs.dynamo.thunderagent.enabled=false \
+  ++actor_rollout_ref.rollout.engine_kwargs.dynamo.enable_worker_system_metrics=true \
   trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
   trainer.total_training_steps=2
@@ -96,15 +107,7 @@ Set `request_completion_token_ids=true` when the framework must score the exact 
 
 ## Observe and Recover
 
-When `enable_worker_system_metrics=true`, the recipe writes worker endpoint files to `VERL_DYNAMO_WORKER_METRICS_DIR`. Run the provided metrics sidecar if you need per-worker JSONL:
-
-```bash
-python3 recipe/dynamo/metrics_sidecar.py \
-  --endpoints-glob "$VERL_DYNAMO_WORKER_METRICS_DIR/*.endpoints" \
-  --output /tmp/verl-dynamo/kv-metrics.jsonl \
-  --label dynamo-kv \
-  --interval 30
-```
+The training command above enables worker system metrics and starts the provided sidecar before workers come online. The sidecar rediscovers endpoint files throughout the run and writes per-worker snapshots to `/tmp/verl-dynamo/kv-metrics.jsonl`; starting it only after training leaves no live workers to scrape.
 
 | Symptom | Check first |
 |---|---|

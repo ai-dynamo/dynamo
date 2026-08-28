@@ -9,18 +9,11 @@ subtitle: Connect a trainer to Dynamo generation, worker control, and policy upd
 
 An external trainer does not need to be written in Python to call Dynamo's HTTP APIs. A framework-specific adapter may still need Python or backend libraries for checkpoint conversion, collective communication, ModelExpress, or colocated execution.
 
-## Connect the Three Planes
+## Connect to Dynamo
 
-| Plane | Connect to | Trainer responsibility |
-|---|---|---|
-| Request | Dynamo frontend, normally port `8000` | Submit generation, preserve request and attempt identity, and accept only complete samples. |
-| Discovery | RL listener, normally port `8001` | Read the current worker set and advertised capabilities. Discovery is read-only and currently covers RL-enabled vLLM workers. |
-| Administration | Each worker's returned `system_url`, or another trusted URL supplied by the deployment | Gate work, call backend-specific controls, verify every target worker, and decide when the fleet can serve again. |
+Start with the canonical [request, discovery, and administration contract](integration-reference.md#separate-the-three-planes). The trainer sends generation through the shared frontend, reads worker capabilities from the RL listener when the backend supports it, and sends mutating operations directly to trusted worker URLs.
 
-These planes do not form a fleet transaction. Dynamo routes requests and exposes worker controls; the trainer or rollout orchestrator owns barriers, retry policy, sample acceptance, policy freshness, and recovery from partial updates.
-
-> [!WARNING]
-> Keep discovery and worker administration on a trusted orchestrator network. Worker administration does not add an independent authentication layer.
+These surfaces do not form a fleet transaction. The trainer or rollout orchestrator owns barriers, retry policy, sample acceptance, policy freshness, and recovery from partial updates. The integration reference also defines the trusted-network boundary for discovery and administration.
 
 ## Generate Rollouts
 

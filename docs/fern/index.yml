@@ -633,27 +633,6 @@ navigation:
   - tab: use-cases
     layout:
       # ==================== Features ====================
-      - section: Agents
-        collapsed: true
-        icon: users
-        slug: agents
-        contents:
-          - page: Overview
-            path: pages/use-cases/agents/overview.md
-          - page: Session IDs
-            path: pages/use-cases/agents/session-ids.mdx
-          - page: Agent Hints
-            path: pages/use-cases/agents/agent-hints.md
-          - page: Priority Scheduling
-            path: pages/use-cases/agents/priority-scheduling.md
-          - page: Agent Harnesses
-            path: pages/use-cases/agents/agent-harnesses.mdx
-          - page: Agent Tracing
-            path: pages/use-cases/agents/agent-tracing.md
-          - page: Agent Simulation
-            path: pages/use-cases/agents/agent-simulation.mdx
-          - page: ThunderAgent Program Scheduler
-            path: pages/use-cases/agents/thunderagent-program-scheduler.md
       - section: Reinforcement Learning
         collapsed: true
         icon: brain
@@ -675,6 +654,27 @@ navigation:
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
+      - section: Agents
+        collapsed: true
+        icon: users
+        slug: agents
+        contents:
+          - page: Overview
+            path: pages/use-cases/agents/overview.md
+          - page: Session IDs
+            path: pages/use-cases/agents/session-ids.mdx
+          - page: Agent Hints
+            path: pages/use-cases/agents/agent-hints.md
+          - page: Priority Scheduling
+            path: pages/use-cases/agents/priority-scheduling.md
+          - page: Agent Harnesses
+            path: pages/use-cases/agents/agent-harnesses.mdx
+          - page: Agent Tracing
+            path: pages/use-cases/agents/agent-tracing.md
+          - page: Agent Simulation
+            path: pages/use-cases/agents/agent-simulation.mdx
+          - page: ThunderAgent Program Scheduler
+            path: pages/use-cases/agents/thunderagent-program-scheduler.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film

@@ -9,7 +9,7 @@ A live policy refresh is more than tensor transfer. The RL framework must select
 
 ## Choose a ModelExpress Source
 
-[ModelExpress](../../developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md) can move a policy from a trainer, object storage, or another inference worker. Its RL refit client separates transfer from installation so an inference worker can stage a version, apply it at an orchestrator-selected safe point, and then publish that applied version as a compatible peer source.
+[ModelExpress](https://github.com/ai-dynamo/modelexpress/tree/main/modelexpress_client/python/modelexpress_rl) can move a policy from a trainer, object storage, or another inference worker. Its RL refit client separates transfer from installation so an inference worker can stage a version, apply it at an orchestrator-selected safe point, and then publish that applied version as a compatible peer source.
 
 ModelExpress can stage a version from three sources:
 
@@ -18,6 +18,9 @@ ModelExpress can stage a version from three sources:
 - **Inference to inference:** after an inference worker applies a version, a rank-compatible worker can pull that version from it instead of returning to the trainer.
 
 All three refit paths are Experimental. The [ModelExpress RL refit package](https://github.com/ai-dynamo/modelexpress/tree/main/modelexpress_client/python/modelexpress_rl) contains the current source strategies. The [Dynamo vLLM refit example](https://github.com/ai-dynamo/modelexpress/tree/main/examples/rl/dynamo_vllm_refit) validates the full-weight trainer-to-inference path only; it does not qualify the S3 delta path or every backend and topology. ModelExpress startup loading remains a separate boot and scale-out workflow.
+
+> [!NOTE]
+> ModelExpress startup loading and live RL refit have different interfaces. vLLM 0.23 and later use the native `--load-format modelexpress`; `mx` remains a backward-compatible alias. Earlier plugin-based images generally use `mx`, while legacy split-loader images can expose `mx-source` and `mx-target`. Match the loader to the installed vLLM, ModelExpress package, and runtime image instead of inferring it from the refit API. See [Dynamo deprecations](../../reference/general/releases/deprecations.mdx) for the Dynamo-owned loader migration.
 
 ## Choose the Update Path
 
@@ -45,18 +48,9 @@ The transport name does not determine compatibility. Record checkpoint format, s
 | Replacement-worker admission | ModelExpress can help a new worker obtain a version; the framework or deployment decides which version it must load and when it may join the rollout pool. |
 | Per-token policy identity | The current shared serving response does not attach a policy-version identity to every generated token. Preserve request, attempt, target-version, and worker evidence in the orchestrator. |
 
-## Follow One Lifecycle
+## Use the Shared Refresh Lifecycle
 
-For every path:
-
-1. Gate new rollout requests for the target workers.
-2. Refresh membership and require the update capabilities.
-3. Pause or drain generation when the backend requires it.
-4. Transfer and apply one target policy.
-5. Clear old-policy KV state across every configured cache tier.
-6. Verify each worker, run post-update generation, and only then reopen the fleet.
-
-Persist the target policy identity and every worker result. Do not infer fleet success from one worker, one HTTP 200 response, or one trainer send.
+Follow the canonical [policy-refresh lifecycle](integration-reference.md#coordinate-policy-refresh) for every transfer path. Persist the target policy identity and every worker result; do not infer fleet success from one worker, one HTTP 200 response, or one trainer send. The sections below describe only the backend- and framework-specific differences.
 
 ## Update a vLLM Worker from Disk
 
@@ -92,6 +86,45 @@ curl --fail-with-body "$WORKER_URL/engine/resume_generation" \
 Repeat the operation under one framework-owned barrier for the complete target set. The version is caller-supplied metadata, not a tensor digest; pair it with update success, cache handling, and post-update generation.
 
 For distributed vLLM updates, use the advertised group lifecycle and distributed-update routes only with the exact request schema and rank mapping validated by the integration. Treat group-initialization timeout as worker failure because the backend process can remain blocked.
+
+## Update an SGLang Worker from Disk
+
+**Experimental.** SGLang workers do not currently register with `GET /v1/rl/workers`. Set `DYN_SYSTEM_PORT` on each worker and obtain its trusted system-server URL from the framework or deployment. Do not derive that URL from the shared frontend address.
+
+SGLang exposes fixed weight-update routes under `/engine/control/*`. Generation pause and continue methods must be explicitly allowlisted when the integration needs a framework-owned update barrier:
+
+```bash
+export DYN_SGLANG_ENGINE_ROUTES="pause_generation:tm continue_generation:tm"
+DYN_SYSTEM_PORT=8081 python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B
+```
+
+After the framework gates new rollout work, update one worker with the request schema supported by the installed SGLang version:
+
+```bash
+set -euo pipefail
+
+WORKER_URL=http://10.0.0.12:8081
+TARGET_VERSION=step-42
+TARGET_PATH=/models/checkpoint-42
+
+curl --fail-with-body "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq -e '.status == "ok"'
+
+curl --fail-with-body "$WORKER_URL/engine/control/update_weights_from_disk" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model_path\":\"$TARGET_PATH\",\"weight_version\":\"$TARGET_VERSION\",\"flush_cache\":true,\"keep_pause\":true}" \
+  | jq -e '.success == true'
+
+curl --fail-with-body "$WORKER_URL/engine/continue_generation" \
+  -H 'Content-Type: application/json' \
+  -d '{"torch_empty_cache":false}' | jq -e '.status == "ok"'
+```
+
+Repeat this sequence across the framework-selected worker set under one barrier. The fixed update response reports `success`, `message`, and paused-request count, but SGLang does not currently expose the vLLM discovery and `get_weight_version` contract. Keep the target version in the orchestrator, check every response body, and require post-update generation before admitting the worker.
+
+The built-in disk update can flush SGLang's local cache. Validate any additional host, disk, or shared cache tier separately. Distributed, tensor, and IPC update routes use the request schemas of the installed SGLang version; the [SGLang engine-route reference](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md#engine-routes) documents the fixed routes and explicit method allowlist.
 
 ## verl Colocated Update
 

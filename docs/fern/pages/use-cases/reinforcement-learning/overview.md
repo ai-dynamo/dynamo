@@ -13,7 +13,13 @@ Use Dynamo when rollout serving has become a distributed-systems problem: many w
 
 In production, [Cognition used Dynamo while training SWE-1.7](https://cognition.com/blog/swe-1-7) to manage inference-engine lifecycles and route inference across a multi-cluster RL system. When a replica failed, Dynamo rerouted inference to another worker and rescheduled the replica so the rollout pipeline could remain available while the latest policy state was restored.
 
-Dynamo also connects to a growing RL framework ecosystem. [NeMo RL](https://github.com/NVIDIA-NeMo/RL/tree/main/nemo_rl/models/generation/dynamo) includes a managed Dynamo generation backend, [verl](https://github.com/verl-project/verl-recipe/tree/main/dynamo) publishes a Dynamo rollout recipe, and [Prime-RL](https://www.primeintellect.ai/blog/rl-at-1t-scale) supports the Dynamo router as a drop-in routing option. Integration work with [SLIME](integration-reference.md#framework-compatibility) extends the same serving capabilities to SGLang-based rollout stacks. Together, these paths demonstrate that Dynamo can support different training frameworks and deployment models while leaving RL semantics with the trainer.
+Dynamo also connects to a growing RL framework ecosystem. [verl](https://github.com/verl-project/verl-recipe/tree/main/dynamo) publishes a Dynamo rollout recipe, [NeMo RL](https://github.com/NVIDIA-NeMo/RL/tree/main/nemo_rl/models/generation/dynamo) includes a managed Dynamo generation backend, and [Prime-RL](https://www.primeintellect.ai/blog/rl-at-1t-scale) supports the Dynamo router as a drop-in routing option. Integration work with [SLIME](integration-reference.md#framework-compatibility) extends the same serving capabilities to SGLang-based rollout stacks. Together, these paths demonstrate that Dynamo can support different training frameworks and deployment models while leaving RL semantics with the trainer.
+
+## Keep Rollouts Running Through Failures
+
+Dynamo detects worker loss and routes new work to healthy capacity. It can also migrate supported in-flight generations, reject new work explicitly when every eligible worker is overloaded, propagate client cancellation, and drain workers during planned shutdown. The RL framework still decides when to retry, discard, or accept a sample.
+
+These serving behaviors were central to Cognition's deployment above: failed replicas could be replaced without restarting the training system's serving plane. Request migration and overload rejection are optional frontend behaviors; cancellation is built into supported request paths, while graceful shutdown and engine failover depend on the deployment. See [Fault Tolerance](../../kubernetes/fault-tolerance/introduction.md) for the supported behaviors, defaults, and limitations.
 
 ## Decide Whether to Add Dynamo
 
@@ -26,9 +32,9 @@ Dynamo also connects to a growing RL framework ecosystem. [NeMo RL](https://gith
 
 Start with a specific bottleneck and a baseline metric. Measure cache reuse, worker imbalance, policy-refresh time, or time to diagnose a failure before adding Dynamo.
 
-## Who Owns What
+## Where Dynamo Fits
 
-![The RL framework owns training and policy decisions, Dynamo owns the rollout-serving plane, and the inference backend owns execution and backend-specific weight application.](./_assets/rl-serving-ownership.svg)
+![The reinforcement learning loop from prompts through rollout generation, rewards, and optimization. Dynamo owns rollout-serving orchestration, inference backends execute generation and apply weights, and the RL framework owns every training decision.](./_assets/rl-serving-ownership.svg)
 
 > [!IMPORTANT]
 > Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
@@ -59,6 +65,9 @@ Experimental guides have runnable upstream artifacts but do not make a general c
   </Card>
   <Card title="Profile RL Rollouts" icon="regular chart-line" href="operations-and-simulation.md">
     Join framework records with Dynamo traces and metrics, inspect Perfetto timelines, and replay or simulate the serving workload.
+  </Card>
+  <Card title="Protect Rollout Generation" icon="regular shield" href="../../kubernetes/fault-tolerance/introduction.md">
+    Recover supported in-flight requests, shed overload explicitly, propagate cancellation, and drain workers safely.
   </Card>
   <Card title="Connect an External Trainer" icon="regular terminal" href="implementation-guide.md">
     Connect generation, worker administration, and policy updates while keeping RL semantics in your framework.

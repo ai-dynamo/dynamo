@@ -13,7 +13,7 @@ Use this reference when implementing or reviewing a Dynamo rollout adapter. It d
 |---|---|---|
 | Request | Dynamo frontend, normally port `8000` | Generation, streaming, cancellation, and routing |
 | Discovery | RL listener, normally port `8001` | Read live worker identity, routes, and optional topology metadata |
-| Administration | Each worker's returned `system_url` | Pause, resume, weight operations, health checks, and backend-specific controls |
+| Administration | Returned `system_url` when present, or another trusted worker URL supplied by the deployment | Pause, resume, weight operations, health checks, and backend-specific controls |
 
 Send rollout inference through the shared frontend. Send mutating operations only to selected workers. The discovery endpoint is read-only and does not create a fleet-wide transaction.
 
@@ -164,7 +164,7 @@ The backends do not share one administration schema. Use the exact route returne
 | Clear KV state | Python `flush_cache`; native-sidecar behavior follows the advertised lifecycle route and vLLM configuration | `clear_kv_blocks` is a Dynamo worker request-plane endpoint, not a built-in `/engine/control/*` route, and rejects active requests |
 | Apply weights | Python disk or distributed update routes and group lifecycle; native sidecar init/start/update/finish routes when weight transfer is enabled | Built-in disk, tensor, distributed, or IPC update routes using the installed SGLang request schemas |
 | Weight version | Python `get_weight_version` reads caller-supplied update metadata; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
-| Custom controls | Python integrations can register and advertise trusted engine routes | Allowlist methods with `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` using `path[=method][:engine|tm]` |
+| Custom controls | Python integrations can register and advertise trusted engine routes | Allowlist methods with `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` using <code>path[=method][:engine&#124;tm]</code> |
 | Success body | Python RL routes commonly return a `status` field; native-sidecar routes follow vLLM's RL schemas | Built-in update routes commonly return `success` and `message`; check both HTTP status and body |
 
 Even two vLLM deployments can expose different route families because the Python worker and native sidecar adapt different backend control APIs. Never prepend, remove, or rename route segments returned in `routes`.
