@@ -21,10 +21,7 @@ pub(crate) enum ToolCallIdentityField {
 }
 
 impl ToolCallIdentityField {
-    // TODO: drop this `allow` once the streaming `tool_call_dispatch` assembly
-    // state machine lands and logs the conflicting field name; it is the only
-    // intended caller.
-    #[allow(dead_code)]
+    /// Field name for the streaming `tool_call_dispatch` fail-closed log line.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Id => "id",
