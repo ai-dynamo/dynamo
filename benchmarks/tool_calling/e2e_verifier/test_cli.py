@@ -126,6 +126,23 @@ def test_muse_uses_complete_profile_without_generic_thinking_controls() -> None:
     assert len(selection_hash) == 64
 
 
+def test_qwen36_27b_uses_complete_qwen_xml_profile() -> None:
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+
+    selection, selection_hash = _custom_selection(profile["custom"], "Qwen/Qwen3.6-27B")
+
+    assert selection["resolved_case_profile"] == "qwen3_coder_xml"
+    assert selection["case_groups"]["generic"] == []
+    assert selection["case_groups"]["model_specific"] == []
+    assert len(selection["case_groups"]["complete_profile"]) == 61
+    assert len(selection["case_ids"]) == 61
+    assert selection["complete_profile_case_count"] == 61
+    assert selection["complete_profile_record_count"] == 122
+    assert selection["record_count"] == 122
+    assert selection["temperature"] == 0.0
+    assert len(selection_hash) == 64
+
+
 def test_custom_selection_rejects_cross_group_overlap() -> None:
     profile, _ = _profile(DEFAULT_PROFILES, "qualification")
     config = {

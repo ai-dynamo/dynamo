@@ -44,7 +44,7 @@
             "customer_kimi_parallel_weather_final_answer"
           ]
         },
-        "complete_case_profiles": ["muse_glimmer"],
+        "complete_case_profiles": ["muse_glimmer", "qwen3_coder_xml"],
         "profile_temperatures": {"muse_glimmer": 1.0},
         "modes": ["nonstream", "stream"],
         "iterations": 1,

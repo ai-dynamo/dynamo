@@ -92,6 +92,13 @@ def test_kimi_k2_adds_only_its_model_specific_customer_regressions() -> None:
     )
 
 
+def test_qwen36_27b_resolves_to_the_complete_qwen_xml_profile() -> None:
+    assert probe.model_case_profile("Qwen/Qwen3.6-27B") == "qwen3_coder_xml"
+    cases = probe.build_cases("qwen3_coder_xml")
+    assert len(cases) == 61
+    assert all(case.request_overrides == {} for case in cases)
+
+
 def test_customer_regressions_are_in_the_qualification_profile() -> None:
     qualification_ids = set(qualification_case_ids("kimi_k2"))
     customer_cases = {

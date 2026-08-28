@@ -26,6 +26,8 @@ def model_case_profile(model: str) -> str:
         return "deepseek_v4"
     if "gemma-4" in normalized or "gemma4" in normalized:
         return "gemma4"
+    if "qwen3.6-27b" in normalized or "qwen3-6-27b" in normalized:
+        return "qwen3_coder_xml"
     if (
         "qwen3.6" in normalized
         or "qwen3-6" in normalized
