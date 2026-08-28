@@ -328,6 +328,19 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
 # are pure fd/stream I/O and carry no codec implementation.
 #
+# BITSTREAM FILTERS: --disable-bsfs is the baseline, with exactly two
+# exceptions — h264_mp4toannexb and hevc_mp4toannexb. The NVDEC decode path
+# (PyNvVideoCodec) resolves them via av_bsf_get_by_name() to reframe AVCC-in-mp4
+# into Annex B before handing the stream to libnvcuvid, and it resolves against
+# whichever libavcodec.so.62 the loader mapped first — which is this one, since
+# dynamo._core is built with the media-ffmpeg feature, DT_NEEDEDs the plain
+# soname, and is imported before PyNvVideoCodec. They have to be requested
+# explicitly: no enabled muxer pulls them in under --disable-bsfs (that holds
+# for aac_adtstoasc, not for h264_mp4toannexb), and without them the lookup
+# returns NULL and hardware decode fails for every codec. A bitstream filter
+# reframes an already-encoded stream and carries no codec implementation, so
+# enabling these two adds no royalty-bearing surface.
+#
 # Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
 # this also trims the decoder surface to what we ship.
 # Do not delete the source tarball for legal reasons.
@@ -383,6 +396,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-x86asm \
         --disable-network \
         --disable-bsfs \
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
@@ -405,15 +419,28 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
     # match here means a config regression. Check the implementation-carrying
     # surfaces (encoders/decoders/parsers), not -codecs (lists names even when no
-    # implementation is built) and not -bsfs: bitstream filters (e.g.
-    # aac_adtstoasc, h264_mp4toannexb) only reframe an already-encoded stream, are
-    # pulled in as mov/mp4 muxer dependencies, and carry no codec implementation.
+    # implementation is built) and not -bsfs: a bitstream filter only reframes an
+    # already-encoded stream and carries no codec implementation, so the two
+    # h264_/hevc_mp4toannexb filters are expected on that surface and are checked
+    # positively below instead.
     for surface in encoders decoders parsers; do \
         if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
              | grep -qiE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
             echo "ERROR: in-tree ffmpeg exposes a disallowed codec via -${surface}" >&2; \
             /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
              | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; \
+            exit 1; \
+        fi; \
+    done && \
+    # Positive guard: the NVDEC reframing filters must actually be built. Nothing
+    # else pulls them in under --disable-bsfs, so a configure edit that drops the
+    # --enable-bsf flag would leave av_bsf_get_by_name() returning NULL and break
+    # hardware decode at runtime with a green build. Fail here instead.
+    for bsf in h264_mp4toannexb hevc_mp4toannexb; do \
+        if ! /usr/local/bin/ffmpeg -hide_banner -bsfs 2>/dev/null \
+             | grep -q "^[[:space:]]*${bsf}$"; then \
+            echo "ERROR: in-tree ffmpeg is missing bitstream filter ${bsf}" >&2; \
+            /usr/local/bin/ffmpeg -hide_banner -bsfs 2>/dev/null | grep -v '^$' >&2; \
             exit 1; \
         fi; \
     done && \
