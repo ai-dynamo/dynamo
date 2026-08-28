@@ -98,6 +98,8 @@ trace at concurrency 32 with AIPerf 0.12.0. See
   cache state.
 - Async scheduling and CUDA graphs remain enabled. `--enforce-eager` and
   `--no-async-scheduling` are intentionally absent.
+- Each TP4 worker requests 400 GiB of host memory, matching the proven A.X-K2
+  TP4 cluster deployment while allowing both replicas to schedule.
 - This branch-specific image is experimental and hosted under `nvstaging`.
   Replace it with the corresponding released runtime image when the A.X-K2
   patches land in a Dynamo release.
