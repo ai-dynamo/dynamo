@@ -100,6 +100,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Model snapshot path inside --model-cache-pvc.",
     )
     parser.addoption(
+        "--recipe",
+        type=str,
+        default=None,
+        help="Path to any DynamoGraphDeployment manifest (for example "
+        "recipes/<model>/<backend>/<profile>/deploy.yaml) to deploy and run "
+        "recipe-scoped tests against. The cluster is chosen by KUBECONFIG.",
+    )
+    parser.addoption(
+        "--recipe-model",
+        type=str,
+        default=None,
+        help="Served model name to send in requests. Defaults to the model "
+        "parsed out of the --recipe manifest's worker args.",
+    )
+    parser.addoption(
+        "--recipe-deploy-timeout",
+        type=int,
+        default=1800,
+        help="Seconds to wait for a --recipe deployment to become ready.",
+    )
+    parser.addoption(
         "--dgdr-total-gpus",
         type=int,
         default=0,
