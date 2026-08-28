@@ -26,7 +26,9 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
-use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
+use super::metrics::{
+    CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
+};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
     get_or_create_request_id, smart_json_error_middleware,
@@ -43,6 +45,32 @@ use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
+
+fn canonical_generate_models(
+    manager: &crate::discovery::ModelManager,
+    models: Vec<String>,
+) -> Vec<String> {
+    models
+        .into_iter()
+        .map(|model| manager.resolve_canonical_name(&model))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn generate_metric_error_type(status: StatusCode) -> ErrorType {
+    match status {
+        StatusCode::BAD_REQUEST => ErrorType::Validation,
+        StatusCode::NOT_FOUND => ErrorType::NotFound,
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable,
+        _ if status.as_u16() == 499 => ErrorType::Cancelled,
+        _ if status.as_u16() == 529 => ErrorType::Overload,
+        _ if status.is_client_error() => ErrorType::Validation,
+        _ => ErrorType::Internal,
+    }
+}
 
 #[derive(Debug)]
 struct GenerateRequestContext {
@@ -504,12 +532,33 @@ fn generate_mm_routing_info(
 /// Project routing controls while retaining all engine-owned fields in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
+#[cfg(test)]
 fn preprocessed_from_generate(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
     routing_metadata: GenerateRoutingMetadata,
+) -> anyhow::Result<PreprocessedRequest> {
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(request.token_ids.len(), None);
+    preprocessed_from_generate_with_tracker(
+        request,
+        model,
+        data_parallel_rank,
+        request_id,
+        routing_metadata,
+        tracker,
+    )
+}
+
+fn preprocessed_from_generate_with_tracker(
+    request: GenerateRequest,
+    model: &str,
+    data_parallel_rank: Option<u32>,
+    request_id: &str,
+    routing_metadata: GenerateRoutingMetadata,
+    tracker: Arc<RequestTracker>,
 ) -> anyhow::Result<PreprocessedRequest> {
     let GenerateRoutingMetadata {
         kv_cache_block_size,
@@ -554,8 +603,6 @@ fn preprocessed_from_generate(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.record_isl(request.token_ids.len(), None);
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -611,6 +658,38 @@ struct GenerateMetricCollector {
     worker_info_observed: bool,
 }
 
+struct GenerateMetricLifecycle {
+    metric_model: String,
+    inflight: InflightGuard,
+    collector: GenerateMetricCollector,
+}
+
+impl GenerateMetricLifecycle {
+    fn new(
+        state: &service_v2::State,
+        metric_model: String,
+        request_id: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        let metrics = state.metrics_clone();
+        Self {
+            inflight: metrics.clone().create_inflight_guard(
+                &metric_model,
+                super::metrics::Endpoint::Generate,
+                false,
+                request_id,
+            ),
+            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            metric_model,
+        }
+    }
+
+    fn mark_error(&mut self, error_type: ErrorType) {
+        self.inflight.mark_error(error_type);
+    }
+}
+
 impl GenerateMetricCollector {
     fn new(
         metrics: Arc<super::metrics::Metrics>,
@@ -648,10 +727,22 @@ impl GenerateMetricCollector {
         self.worker_info_observed = true;
     }
 
-    fn observe(&mut self, annotated: &Annotated<LLMEngineOutput>) {
-        let Some(output) = annotated.data.as_ref() else {
+    fn observe(&mut self, annotated: &mut Annotated<LLMEngineOutput>) {
+        let Some(output) = annotated.data.as_mut() else {
             return;
         };
+
+        if let Some(routing_data) = output.routing_data.take() {
+            if let Some(timing) = routing_data.timing {
+                self.tracker.set_external_timing(timing);
+            }
+            if let Some(worker_id) = routing_data.worker_id {
+                self.tracker.set_external_worker_info(worker_id);
+            }
+            if let Some(token_ids) = routing_data.token_ids {
+                self.tracker.set_external_query_token_ids(token_ids);
+            }
+        }
 
         self.observe_worker_info();
 
@@ -697,17 +788,54 @@ impl Drop for GenerateMetricCollector {
 async fn handler_generate(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<GenerateRequest>,
+    Json(mut request): Json<GenerateRequest>,
 ) -> Response {
+    let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
+    let implicit_models = if request.model.is_none() {
+        canonical_generate_models(
+            state.manager(),
+            state
+                .manager()
+                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        )
+    } else {
+        Vec::new()
+    };
+    let resolved_model = request
+        .model
+        .as_deref()
+        .map(|model| state.manager().resolve_canonical_name(model))
+        .or_else(|| (implicit_models.len() == 1).then(|| implicit_models[0].clone()));
+    let metric_model = resolved_model
+        .as_deref()
+        .map(|model| state.manager().metric_model_for(model))
+        .unwrap_or(crate::discovery::UNKNOWN_METRIC_MODEL)
+        .to_string();
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(request.token_ids.len(), None);
+    let dispatch_span = generate_dispatch_span(&request_context.request_id, &metric_model);
+    let mut metric_lifecycle = dispatch_span.in_scope(|| {
+        GenerateMetricLifecycle::new(
+            state.as_ref(),
+            metric_model,
+            &request_context.request_id,
+            tracker.clone(),
+            request.token_ids.len(),
+        )
+    });
+
     if let Err(response) = check_ready(&state) {
+        metric_lifecycle.mark_error(generate_metric_error_type(response.0));
         return response.into_response();
     }
 
     if let Err(message) = request.validate() {
+        metric_lifecycle.mark_error(ErrorType::Validation);
         return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
     }
 
     if request.stream {
+        metric_lifecycle.mark_error(ErrorType::NotImplemented);
         return generate_error_response(
             StatusCode::NOT_IMPLEMENTED,
             "not_implemented",
@@ -716,34 +844,31 @@ async fn handler_generate(
     }
     let response_options = request.response_options();
 
-    let model = match &request.model {
-        Some(model) => model.clone(),
+    let model = match resolved_model {
+        Some(model) => model,
+        None if implicit_models.is_empty() => {
+            metric_lifecycle.mark_error(ErrorType::NotFound);
+            return generate_error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no generate-capable model is registered".to_string(),
+            );
+        }
         None => {
-            let models = state
-                .manager()
-                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY);
-            match models.len() {
-                1 => models.into_iter().next().unwrap(),
-                0 => {
-                    return generate_error_response(
-                        StatusCode::NOT_FOUND,
-                        "not_found",
-                        "no generate-capable model is registered".to_string(),
-                    );
-                }
-                _ => {
-                    return generate_error_response(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        "multiple models are registered; specify `model` in the request"
-                            .to_string(),
-                    );
-                }
-            }
+            metric_lifecycle.mark_error(ErrorType::Validation);
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "multiple models are registered; specify `model` in the request".to_string(),
+            );
         }
     };
+    if request.model.is_some() {
+        request.model = Some(model.clone());
+    }
 
     if let Err(response) = check_model_serving_ready(&state, &model) {
+        metric_lifecycle.mark_error(generate_metric_error_type(response.0));
         return response.into_response();
     }
 
@@ -761,6 +886,7 @@ async fn handler_generate(
                 }
                 _ => (StatusCode::NOT_FOUND, "not_found"),
             };
+            metric_lifecycle.mark_error(generate_metric_error_type(status));
             return generate_error_response(status, error_type, error.to_string());
         }
     };
@@ -771,16 +897,17 @@ async fn handler_generate(
     };
     let engine = selection.engine;
 
-    let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
-    let preprocessed = match preprocessed_from_generate(
+    let preprocessed = match preprocessed_from_generate_with_tracker(
         request,
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
         routing_metadata,
+        tracker,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
+            metric_lifecycle.mark_error(ErrorType::Validation);
             return generate_error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -793,11 +920,14 @@ async fn handler_generate(
     let context: Context<PreprocessedRequest> =
         match context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
-            Err(response) => return response.into_response(),
+            Err(response) => {
+                metric_lifecycle.mark_error(generate_metric_error_type(response.0));
+                return response.into_response();
+            }
         };
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&model).to_string(),
+        model: metric_lifecycle.metric_model.clone(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
         request_type: "unary".to_string(),
     };
@@ -808,7 +938,6 @@ async fn handler_generate(
     )
     .await;
 
-    let dispatch_span = generate_dispatch_span(&request_id, &model);
     // Unary work must outlive the Axum handler so dropping the handler can signal
     // the armed connection monitor. The detached dispatch observes that kill at
     // each backend await point and then exits promptly.
@@ -817,9 +946,9 @@ async fn handler_generate(
             engine,
             context,
             request_id,
-            model,
             state.clone(),
             response_options,
+            metric_lifecycle,
         )
         .instrument(dispatch_span),
     )
@@ -840,25 +969,15 @@ async fn generate_dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
     request_id: String,
-    model: String,
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
+    metric_lifecycle: GenerateMetricLifecycle,
 ) -> Response {
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-    let input_tokens = context.content().token_ids.len();
-    let tracker = context.content().tracker.clone().unwrap_or_else(|| {
-        let tracker = Arc::new(RequestTracker::new());
-        tracker.record_isl(input_tokens, None);
-        tracker
-    });
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &metric_model,
-        super::metrics::Endpoint::Generate,
-        false,
-        &request_id,
-    );
-    let mut metric_collector =
-        GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, input_tokens);
+    let GenerateMetricLifecycle {
+        metric_model,
+        inflight: mut inflight_guard,
+        collector: mut metric_collector,
+    } = metric_lifecycle;
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -905,7 +1024,10 @@ async fn generate_dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = stream.inspect(move |annotated| metric_collector.observe(annotated));
+    let stream = stream.map(move |mut annotated| {
+        metric_collector.observe(&mut annotated);
+        annotated
+    });
     let response_result = match run_until_killed(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
@@ -1394,6 +1516,144 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_alias_uses_primary_model_for_routing_and_metrics() {
+        const PRIMARY: &str = "generate-primary-model";
+        const ALIAS: &str = "generate-alias-model";
+
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MetricEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model(PRIMARY, "generate-alias-test", engine)
+            .unwrap();
+        assert!(state.manager().register_alias(ALIAS, PRIMARY));
+        assert_eq!(
+            canonical_generate_models(
+                state.manager(),
+                vec![PRIMARY.to_string(), ALIAS.to_string()],
+            ),
+            vec![PRIMARY.to_string()]
+        );
+
+        let request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-alias-request",
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "model": ALIAS
+        }))
+        .unwrap();
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                PRIMARY,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_early_failures_are_counted() {
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = crate::discovery::UNKNOWN_METRIC_MODEL;
+
+        let invalid_request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-invalid-request",
+            "token_ids": [],
+            "sampling_params": {},
+            "model": "missing-generate-model"
+        }))
+        .unwrap();
+        let invalid_response = handler_generate(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(invalid_request),
+        )
+        .await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+        let missing_model_request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-missing-model-request",
+            "token_ids": [1],
+            "sampling_params": {},
+            "model": "missing-generate-model"
+        }))
+        .unwrap();
+        let missing_model_response = handler_generate(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(missing_model_request),
+        )
+        .await;
+        assert_eq!(missing_model_response.status(), StatusCode::NOT_FOUND);
+
+        let metrics = state.metrics_clone();
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Validation,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::NotFound,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let families = registry.gather();
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_requests_started_total",
+                &[("model", metric_model), ("endpoint", "generate")],
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_request_duration_seconds",
+                &[("model", metric_model)],
+            )
+            .get_histogram()
+            .get_sample_count(),
+            2
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_queued_requests",
+                &[("model", metric_model)],
+            )
+            .get_gauge()
+            .value(),
+            0.0
+        );
     }
 
     #[tokio::test]
@@ -2003,6 +2263,38 @@ mod tests {
         )
     }
 
+    async fn generate_dispatch_for_test(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        context: Context<PreprocessedRequest>,
+        request_id: String,
+        model: String,
+        state: Arc<service_v2::State>,
+        response_options: GenerateResponseOptions,
+    ) -> Response {
+        let input_tokens = context.content().token_ids.len();
+        let tracker = context.content().tracker.clone().unwrap_or_else(|| {
+            let tracker = Arc::new(RequestTracker::new());
+            tracker.record_isl(input_tokens, None);
+            tracker
+        });
+        let metric_lifecycle = GenerateMetricLifecycle::new(
+            state.as_ref(),
+            state.manager().metric_model_for(&model).to_string(),
+            &request_id,
+            tracker,
+            input_tokens,
+        );
+        generate_dispatch(
+            engine,
+            context,
+            request_id,
+            state,
+            response_options,
+            metric_lifecycle,
+        )
+        .await
+    }
+
     fn metric_value<'a>(
         families: &'a [prometheus::proto::MetricFamily],
         name: &str,
@@ -2120,7 +2412,7 @@ mod tests {
         let request_context = context.context();
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
-        let task = tokio::spawn(generate_dispatch(
+        let task = tokio::spawn(generate_dispatch_for_test(
             engine,
             context,
             "req-pending-dispatch".to_string(),
@@ -2148,7 +2440,7 @@ mod tests {
             Arc::new(TerminalEngine(finish_reason));
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
-        let response = generate_dispatch(
+        let response = generate_dispatch_for_test(
             engine,
             dispatch_test_context(),
             "req-terminal-dispatch".to_string(),
@@ -2204,7 +2496,7 @@ mod tests {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
 
-        let response = generate_dispatch(
+        let response = generate_dispatch_for_test(
             engine,
             dispatch_test_context(),
             "req-immediate-cancel".to_string(),
@@ -2231,7 +2523,7 @@ mod tests {
         let request_context = context.context();
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
-        let task = tokio::spawn(generate_dispatch(
+        let task = tokio::spawn(generate_dispatch_for_test(
             engine,
             context,
             "req-token-then-pending".to_string(),
@@ -2331,7 +2623,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         state.metrics_clone().register(&registry).unwrap();
 
-        let response = generate_dispatch(
+        let response = generate_dispatch_for_test(
             engine,
             context,
             "req-generate-metrics".to_string(),
@@ -2467,6 +2759,70 @@ mod tests {
     }
 
     #[test]
+    fn split_router_worker_metadata_populates_generate_metrics() {
+        const MODEL: &str = "generate-split-router-metric-test-model";
+        const PREFILL_WORKER_ID: &str = "8765432101";
+        const DECODE_WORKER_ID: &str = "8765432102";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, None);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let mut collector =
+            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let mut first = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![10],
+            index: Some(0),
+            routing_data: Some(crate::protocols::common::timing::RoutingData {
+                worker_id: Some(crate::protocols::common::extensions::WorkerIdInfo {
+                    prefill_worker_id: Some(8_765_432_101),
+                    prefill_dp_rank: Some(4),
+                    decode_worker_id: Some(8_765_432_102),
+                    decode_dp_rank: Some(5),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        collector.observe(&mut first);
+        std::thread::sleep(Duration::from_millis(1));
+        let mut second = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![11],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            ..Default::default()
+        });
+        collector.observe(&mut second);
+
+        assert!(first.data.unwrap().routing_data.is_none());
+        let prefill_labels = [
+            PREFILL_WORKER_ID,
+            "4",
+            crate::discovery::WORKER_TYPE_PREFILL,
+        ];
+        assert_eq!(
+            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(&prefill_labels)
+                .get(),
+            3
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(&prefill_labels)
+                .get()
+                > 0.0
+        );
+        let decode_labels = [DECODE_WORKER_ID, "5", crate::discovery::WORKER_TYPE_DECODE];
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(&decode_labels)
+                .get()
+                > 0.0
+        );
+    }
+
+    #[test]
     fn generate_metrics_fall_back_to_tracker_cached_tokens() {
         const MODEL: &str = "generate-tracker-cache-test-model";
 
@@ -2481,12 +2837,13 @@ mod tests {
         {
             let mut collector =
                 GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
-            collector.observe(&Annotated::from_data(LLMEngineOutput {
+            let mut annotated = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![10],
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
                 ..Default::default()
-            }));
+            });
+            collector.observe(&mut annotated);
         }
 
         let families = registry.gather();
@@ -2539,7 +2896,7 @@ mod tests {
                 backend: backend.clone(),
             });
 
-        let response = generate_dispatch(
+        let response = generate_dispatch_for_test(
             engine,
             context,
             "req-generate-migration-metrics".to_string(),
