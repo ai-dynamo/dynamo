@@ -267,6 +267,8 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
 }
@@ -279,6 +281,10 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal prompt logprobs payload for non-streaming response aggregation.
+    /// This must never be serialized to client-facing streams.
+    #[serde(skip)]
+    pub prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(skip)]
@@ -297,6 +303,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.inner.usage = None;
     data.llm_metrics = None;
     data.nvext = None;
+    data.prompt_logprobs = None;
     Some(())
 }
 
