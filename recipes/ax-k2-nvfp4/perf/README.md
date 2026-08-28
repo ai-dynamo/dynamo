@@ -66,6 +66,15 @@ DGD manifest, pod logs, AIPerf expanded configs, raw reports, and frontend
 
 The AIPerf-side Transformers build does not recognize the custom `axk2` model
 configuration. The runner therefore downloads only four tokenizer assets from
-the same pinned model revision into `/tmp/axk2-tokenizer`, verifies the
-163,840-token vocabulary, and points AIPerf at that local tokenizer directory.
-The server still loads the full model from the shared Hugging Face cache.
+the same pinned model revision. It places them in an isolated, tokenizer-only
+Hugging Face snapshot under `/tmp/axk2-tokenizer-hf`, verifies the 163,840-token
+vocabulary, and points AIPerf at the revision-pinned repo ID through that
+offline snapshot.
+
+The synthetic snapshot layout is necessary for AIPerf 0.12.0 Mooncake traces:
+parallel prompt synthesis forces offline mode and resolves tokenizers through
+the Hugging Face cache API, so an arbitrary absolute tokenizer path fails in
+the child processes. Keeping `config.json` out of this isolated snapshot also
+avoids the unsupported `axk2` model-type lookup. The snapshot exists only in
+the benchmark container's `/tmp`; the server still loads the full model from
+the shared Hugging Face cache.
