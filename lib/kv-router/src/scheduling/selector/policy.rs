@@ -589,6 +589,10 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn retains_eligible_affinity_target(&self) -> bool {
+        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
             WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
@@ -639,6 +643,10 @@ mod tests {
     use super::*;
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
+    fn retains_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
+        selector.retains_eligible_affinity_target()
+    }
+
     #[test]
     fn default_policy_matches_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -664,6 +672,7 @@ mod tests {
             ))
             .unwrap();
         let policy = WorkerSelectionPolicy::default(config, "test");
+        assert!(retains_affinity(&policy));
         let actual = policy
             .select_worker(WorkerSelectionInput::configured(
                 &workers,
@@ -1021,6 +1030,7 @@ mod tests {
             Vec::new(),
             Box::new(AffinityPicker),
         );
+        assert!(!retains_affinity(&policy));
 
         let selected = policy
             .select_worker(WorkerSelectionInput::configured(

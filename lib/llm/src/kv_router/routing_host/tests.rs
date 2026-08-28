@@ -582,7 +582,10 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[real_worker]
     );
-    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(AffinityTarget::worker(stale_worker))
+    );
 
     drop(host);
     runtime.shutdown();
@@ -1281,6 +1284,12 @@ async fn stale_affinity_rank_rebinds_once() {
     let mut request = Context::new(request());
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
+    assert!(
+        router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .is_err()
+    );
     let (selection, operation) = router
         .select_with_affinity(&request, RequestPhase::Aggregated, false)
         .await
@@ -1341,6 +1350,12 @@ async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_
     let mut retry_request = Context::new(retry_input);
     retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
+    assert!(
+        router
+            .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+            .await
+            .is_err()
+    );
     let (selection, operation) = router
         .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
         .await

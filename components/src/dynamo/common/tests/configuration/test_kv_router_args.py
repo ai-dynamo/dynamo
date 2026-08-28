@@ -27,6 +27,7 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
         "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
+        "DYN_ROUTER_SESSION_AFFINITY_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
 
