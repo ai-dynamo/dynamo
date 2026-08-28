@@ -980,6 +980,16 @@ class HandlerBase(BaseGenerativeHandler):
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
+        prompt_logprobs = (request.get("output_options") or {}).get("prompt_logprobs")
+        if prompt_logprobs is not None and self.engine.engine_args.get(
+            "speculative_config"
+        ):
+            raise ValueError(
+                "TRT-LLM does not support prompt log probabilities "
+                "(requested by echo=true or prompt_logprobs) with speculative "
+                "decoding; disable echo/prompt_logprobs or speculative decoding"
+            )
+
         request_token_ids = request.get("token_ids")
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
