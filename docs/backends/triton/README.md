@@ -223,7 +223,7 @@ graph LR
     B --> C["Dynamo Triton Runtime"]
 ```
 
-The worker ([`components/src/dynamo/triton/main.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/triton/main.py)):
+The worker ([`components/src/dynamo/triton/main.py`](blob/main/components/src/dynamo/triton/main.py)):
 1. Starts an in-process server object
 2. Loads all models from the model repository
 3. Reads each model's configuration (`config.pbtxt`)

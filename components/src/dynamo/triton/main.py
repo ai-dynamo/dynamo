@@ -74,7 +74,7 @@ async def _register_and_serve(
         f"✓ Created endpoint '{endpoint_path.replace('.', '/')}' for model '{model_name}'"
     )
 
-    model = server.model(model_name)  # type: TritonModel
+    model = server.model(model_name)
     logger.info(f"✓ Model '{model_name}' loaded")
 
     # Read Triton model config from config.pbtxt

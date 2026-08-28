@@ -186,9 +186,9 @@ def test_generate_converts_dynamo_request_to_triton(
     ids=[
         "fp32",
         "int64",
+        "bytes",
         "2d-shape",
         "unknown-dtype-passthrough",
-        "bytes",
     ],
 )
 def test_generate_converts_triton_response_to_dynamo(
