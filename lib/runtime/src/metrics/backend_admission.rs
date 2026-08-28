@@ -11,10 +11,20 @@
 //! from its authoritative state under the gate lock, so no transition can drift
 //! a gauge.
 //!
+//! The two live counts each pair with the bound that governs them —
+//! `engine_request_count` with `engine_request_limit`, `request_queue_count`
+//! with `request_queue_limit` — so saturation reads off the family without
+//! knowing how the gate is configured.
+//!
+//! Every request the gate receives is classified exactly once by
+//! [`REQUEST_TOTAL`], and the counters that follow it describe what became of
+//! the ones that queued. Cancellation is counted on its own: the caller went
+//! away, which is neither a rejection nor an overload.
+//!
 //! The TCP request plane's own pool saturation metrics are an unrelated family
 //! and stay in [`super::work_handler_pool`].
 
-use prometheus::{IntCounterVec, IntGauge, Opts};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, Opts};
 
 use super::prometheus_names::clamp_u64_to_i64;
 use crate::MetricsRegistry;
@@ -23,16 +33,38 @@ use crate::MetricsRegistry;
 /// [`super::prometheus_names`] because that module is the source for generated
 /// Python constants and these are not needed there.
 const METRIC_PREFIX: &str = "dynamo_backend_admission";
-const ACTIVE_REQUESTS: &str = "active_requests";
-const QUEUE_DEPTH: &str = "queue_depth";
-const CONCURRENCY_LIMIT: &str = "concurrency_limit";
-const QUEUE_CAPACITY: &str = "queue_capacity";
-const REJECTIONS_TOTAL: &str = "rejections_total";
+const ENGINE_REQUEST_COUNT: &str = "engine_request_count";
+const ENGINE_REQUEST_LIMIT: &str = "engine_request_limit";
+const REQUEST_QUEUE_COUNT: &str = "request_queue_count";
+const REQUEST_QUEUE_LIMIT: &str = "request_queue_limit";
+const REQUEST_TOTAL: &str = "request_total";
+const DEQUEUE_TOTAL: &str = "dequeue_total";
+const REJECTION_TOTAL: &str = "rejection_total";
+const CANCELLATION_TOTAL: &str = "cancellation_total";
+
+/// Which admission path a request took. Every request the gate receives lands
+/// on exactly one of these.
+const PATH_LABEL: &str = "path";
+/// Took a backend concurrency slot immediately.
+const PATH_DIRECT: &str = "direct";
+/// No slot was free, so the request took the queue-admission path. A request
+/// shed because the queue was also full counts here too: it is the outcome of
+/// the queue path, not a fourth path of its own.
+const PATH_QUEUE: &str = "queue";
+/// Already cancelled when the gate looked, so neither live path was selected.
+const PATH_CANCELLED: &str = "cancelled";
+
+/// Which end of the FIFO a queued request was admitted from.
+const SOURCE_LABEL: &str = "source";
+const SOURCE_FIFO: &str = "fifo";
+const SOURCE_ADAPTIVE_LIFO: &str = "adaptive_lifo";
+
+/// Why the gate refused a request. A cancellation has no value here.
 const REASON_LABEL: &str = "reason";
-/// Values for [`REASON_LABEL`]. A cancellation is neither a rejection nor an
-/// overload — the caller went away — so it has no value here and is never counted.
 const REASON_QUEUE_FULL: &str = "queue_full";
-const REASON_QUEUE_TIMEOUT: &str = "queue_timeout";
+/// The request outlived its permitted queue residence. The queue did not time
+/// out; this one request did.
+const REASON_REQUEST_EXPIRED: &str = "request_expired";
 
 fn metric_name(suffix: &str) -> String {
     format!("{METRIC_PREFIX}_{suffix}")
@@ -46,72 +78,129 @@ fn gauge_value(count: usize) -> i64 {
 
 /// One gate's Prometheus view, under [`METRIC_PREFIX`].
 pub(crate) struct BackendAdmissionMetrics {
-    active_requests: IntGauge,
-    queue_depth: IntGauge,
-    concurrency_limit: IntGauge,
-    queue_capacity: IntGauge,
+    engine_request_count: IntGauge,
+    engine_request_limit: IntGauge,
+    request_queue_count: IntGauge,
+    request_queue_limit: IntGauge,
+    requests: IntCounterVec,
+    dequeues: IntCounterVec,
     rejections: IntCounterVec,
+    cancellations: IntCounter,
 }
 
 impl BackendAdmissionMetrics {
     /// The sizing gauges are published here rather than by the caller, so an
-    /// instance is never scrapeable with an unset limit or capacity. The queue
-    /// length is fixed for its life; the limit can still move when a late
-    /// capacity hint lands.
-    pub(crate) fn new(concurrency_limit: usize, queue_capacity: usize) -> Self {
+    /// instance is never scrapeable with an unset limit or queue bound. The
+    /// queue bound is fixed for its life; the engine request limit can still
+    /// move when a late capacity hint lands.
+    pub(crate) fn new(engine_request_limit: usize, request_queue_limit: usize) -> Self {
         let gauge = |suffix, help: &str| {
             IntGauge::new(metric_name(suffix), help).expect("backend admission gauge")
         };
-        let rejections = IntCounterVec::new(
-            Opts::new(
-                metric_name(REJECTIONS_TOTAL),
-                "Requests refused by the backend admission gate",
-            ),
-            &[REASON_LABEL],
-        )
-        .expect("backend admission rejections counter");
         // A counter vec has no child until it is labelled, so a gate that has
-        // not refused anything yet would expose no series at all. Create both at
-        // zero, so a rate() over them reads as quiet rather than as a gap.
-        for reason in [REASON_QUEUE_FULL, REASON_QUEUE_TIMEOUT] {
-            rejections.with_label_values(&[reason]);
-        }
+        // counted nothing yet would expose no series at all. Create every series
+        // at zero, so a rate() over one reads as quiet rather than as a gap.
+        let counter_vec = |suffix, help: &str, label: &str, values: &[&str]| {
+            let counter = IntCounterVec::new(Opts::new(metric_name(suffix), help), &[label])
+                .expect("backend admission counter");
+            for value in values {
+                counter.with_label_values(&[value]);
+            }
+            counter
+        };
         let metrics = Self {
-            active_requests: gauge(
-                ACTIVE_REQUESTS,
-                "Requests currently holding an admitted backend slot",
+            engine_request_count: gauge(
+                ENGINE_REQUEST_COUNT,
+                "Requests currently holding a backend admission concurrency slot",
             ),
-            queue_depth: gauge(
-                QUEUE_DEPTH,
-                "Requests currently waiting in the backend admission queue",
-            ),
-            concurrency_limit: gauge(
-                CONCURRENCY_LIMIT,
+            engine_request_limit: gauge(
+                ENGINE_REQUEST_LIMIT,
                 "Effective concurrent-request limit of the backend admission gate",
             ),
-            queue_capacity: gauge(
-                QUEUE_CAPACITY,
-                "Configured length of the backend admission queue",
+            request_queue_count: gauge(
+                REQUEST_QUEUE_COUNT,
+                "Requests currently waiting in the backend admission queue",
             ),
-            rejections,
+            request_queue_limit: gauge(
+                REQUEST_QUEUE_LIMIT,
+                "Effective length bound of the backend admission queue",
+            ),
+            requests: counter_vec(
+                REQUEST_TOTAL,
+                "Requests received by the backend admission gate, by admission path",
+                PATH_LABEL,
+                &[PATH_DIRECT, PATH_QUEUE, PATH_CANCELLED],
+            ),
+            dequeues: counter_vec(
+                DEQUEUE_TOTAL,
+                "Queued requests given a backend admission concurrency slot, by queue end",
+                SOURCE_LABEL,
+                &[SOURCE_FIFO, SOURCE_ADAPTIVE_LIFO],
+            ),
+            rejections: counter_vec(
+                REJECTION_TOTAL,
+                "Requests refused by the backend admission gate",
+                REASON_LABEL,
+                &[REASON_QUEUE_FULL, REASON_REQUEST_EXPIRED],
+            ),
+            cancellations: IntCounter::new(
+                metric_name(CANCELLATION_TOTAL),
+                "Requests cancelled before backend admission",
+            )
+            .expect("backend admission cancellations counter"),
         };
-        metrics.set_concurrency_limit(concurrency_limit);
-        metrics.queue_capacity.set(gauge_value(queue_capacity));
+        metrics.set_engine_request_limit(engine_request_limit);
+        metrics
+            .request_queue_limit
+            .set(gauge_value(request_queue_limit));
         metrics
     }
 
     /// Publish the occupancy gauges. The caller passes its authoritative counts
     /// rather than stepping these per transition, so no transition can drift
     /// them.
-    pub(crate) fn set_occupancy(&self, active: usize, queued: usize) {
-        self.active_requests.set(gauge_value(active));
-        self.queue_depth.set(gauge_value(queued));
+    pub(crate) fn set_occupancy(&self, engine_requests: usize, queued: usize) {
+        self.engine_request_count.set(gauge_value(engine_requests));
+        self.request_queue_count.set(gauge_value(queued));
     }
 
     /// Publish the effective concurrent-request limit, which a late capacity
     /// hint can still change.
-    pub(crate) fn set_concurrency_limit(&self, limit: usize) {
-        self.concurrency_limit.set(gauge_value(limit));
+    pub(crate) fn set_engine_request_limit(&self, limit: usize) {
+        self.engine_request_limit.set(gauge_value(limit));
+    }
+
+    /// Count one request admitted straight into a free slot.
+    pub(crate) fn received_direct(&self) {
+        self.received(PATH_DIRECT);
+    }
+
+    /// Count one request that found no free slot and took the queue path,
+    /// whether it went on to wait or was shed for a full queue.
+    pub(crate) fn received_queue(&self) {
+        self.received(PATH_QUEUE);
+    }
+
+    /// Count one request that was already cancelled when the gate looked.
+    pub(crate) fn received_cancelled(&self) {
+        self.received(PATH_CANCELLED);
+    }
+
+    fn received(&self, path: &str) {
+        self.requests.with_label_values(&[path]).inc();
+    }
+
+    /// Count one queued request that took a slot, from the adaptive-LIFO tail
+    /// when `from_tail` and from the FIFO front otherwise. Counted where the
+    /// request consumes the offer, so a candidate that never becomes an
+    /// admission — expired, cancelled or departed — never reaches here.
+    pub(crate) fn dequeued(&self, from_tail: bool) {
+        let source = if from_tail {
+            SOURCE_ADAPTIVE_LIFO
+        } else {
+            SOURCE_FIFO
+        };
+        self.dequeues.with_label_values(&[source]).inc();
     }
 
     /// Count one request shed with the limit and the queue both full.
@@ -119,9 +208,10 @@ impl BackendAdmissionMetrics {
         self.rejected(REASON_QUEUE_FULL);
     }
 
-    /// Count one request given up on for outliving the queue delay.
-    pub(crate) fn rejected_queue_timeout(&self) {
-        self.rejected(REASON_QUEUE_TIMEOUT);
+    /// Count one request given up on for outliving its permitted queue
+    /// residence.
+    pub(crate) fn rejected_request_expired(&self) {
+        self.rejected(REASON_REQUEST_EXPIRED);
     }
 
     /// Count one refusal. Cancellation has no reason value here: the caller
@@ -130,14 +220,36 @@ impl BackendAdmissionMetrics {
         self.rejections.with_label_values(&[reason]).inc();
     }
 
+    /// Count one request cancelled before backend admission, whether it was
+    /// already cancelled when the gate looked or went away while queued. It
+    /// keeps whichever path it was classified under.
+    pub(crate) fn cancelled(&self) {
+        self.cancellations.inc();
+    }
+
     /// Expose this instance's collectors for scraping.
     pub(crate) fn register(&self, registry: &MetricsRegistry) {
-        let collectors: [(Box<dyn prometheus::core::Collector>, &str); 5] = [
-            (Box::new(self.active_requests.clone()), ACTIVE_REQUESTS),
-            (Box::new(self.queue_depth.clone()), QUEUE_DEPTH),
-            (Box::new(self.concurrency_limit.clone()), CONCURRENCY_LIMIT),
-            (Box::new(self.queue_capacity.clone()), QUEUE_CAPACITY),
-            (Box::new(self.rejections.clone()), REJECTIONS_TOTAL),
+        let collectors: [(Box<dyn prometheus::core::Collector>, &str); 8] = [
+            (
+                Box::new(self.engine_request_count.clone()),
+                ENGINE_REQUEST_COUNT,
+            ),
+            (
+                Box::new(self.engine_request_limit.clone()),
+                ENGINE_REQUEST_LIMIT,
+            ),
+            (
+                Box::new(self.request_queue_count.clone()),
+                REQUEST_QUEUE_COUNT,
+            ),
+            (
+                Box::new(self.request_queue_limit.clone()),
+                REQUEST_QUEUE_LIMIT,
+            ),
+            (Box::new(self.requests.clone()), REQUEST_TOTAL),
+            (Box::new(self.dequeues.clone()), DEQUEUE_TOTAL),
+            (Box::new(self.rejections.clone()), REJECTION_TOTAL),
+            (Box::new(self.cancellations.clone()), CANCELLATION_TOTAL),
         ];
         for (collector, name) in collectors {
             registry.add_metric_or_warn(collector, name);
@@ -149,20 +261,37 @@ impl BackendAdmissionMetrics {
 /// module.
 #[cfg(test)]
 impl BackendAdmissionMetrics {
-    /// Published as (active, queued, limit, capacity).
+    /// Published as (engine requests, queued, engine limit, queue limit).
     pub(crate) fn published(&self) -> (i64, i64, i64, i64) {
         (
-            self.active_requests.get(),
-            self.queue_depth.get(),
-            self.concurrency_limit.get(),
-            self.queue_capacity.get(),
+            self.engine_request_count.get(),
+            self.request_queue_count.get(),
+            self.engine_request_limit.get(),
+            self.request_queue_limit.get(),
         )
     }
 
-    /// Refusals as (queue_full, queue_timeout).
+    /// Requests received as (direct, queue, cancelled).
+    pub(crate) fn received_paths(&self) -> (u64, u64, u64) {
+        let count = |path| self.requests.with_label_values(&[path]).get();
+        (count(PATH_DIRECT), count(PATH_QUEUE), count(PATH_CANCELLED))
+    }
+
+    /// Queued requests admitted as (fifo, adaptive_lifo).
+    pub(crate) fn dequeues(&self) -> (u64, u64) {
+        let count = |source| self.dequeues.with_label_values(&[source]).get();
+        (count(SOURCE_FIFO), count(SOURCE_ADAPTIVE_LIFO))
+    }
+
+    /// Refusals as (queue_full, request_expired).
     pub(crate) fn refusals(&self) -> (u64, u64) {
         let count = |reason| self.rejections.with_label_values(&[reason]).get();
-        (count(REASON_QUEUE_FULL), count(REASON_QUEUE_TIMEOUT))
+        (count(REASON_QUEUE_FULL), count(REASON_REQUEST_EXPIRED))
+    }
+
+    /// Requests cancelled before admission.
+    pub(crate) fn cancellations(&self) -> u64 {
+        self.cancellations.get()
     }
 }
 
@@ -171,10 +300,10 @@ mod tests {
     use super::*;
 
     /// A fresh instance that has counted nothing: the whole family, including
-    /// both reason series, must already be scrapeable, and a registry must
-    /// receive exactly these five collectors.
+    /// every label series, must already be scrapeable, and a registry must
+    /// receive exactly these eight collectors.
     #[test]
-    fn a_registry_receives_exactly_the_five_collectors() {
+    fn a_registry_receives_exactly_the_whole_family() {
         let metrics = BackendAdmissionMetrics::new(7, 9);
         // Construction publishes the sizing it was given, so nothing is
         // scraped before the gate has said how it is sized.
@@ -189,25 +318,60 @@ mod tests {
         assert_eq!(
             names,
             [
-                "dynamo_backend_admission_active_requests",
-                "dynamo_backend_admission_concurrency_limit",
-                "dynamo_backend_admission_queue_capacity",
-                "dynamo_backend_admission_queue_depth",
-                "dynamo_backend_admission_rejections_total",
+                "dynamo_backend_admission_cancellation_total",
+                "dynamo_backend_admission_dequeue_total",
+                "dynamo_backend_admission_engine_request_count",
+                "dynamo_backend_admission_engine_request_limit",
+                "dynamo_backend_admission_rejection_total",
+                "dynamo_backend_admission_request_queue_count",
+                "dynamo_backend_admission_request_queue_limit",
+                "dynamo_backend_admission_request_total",
             ]
         );
-        let mut reasons: Vec<(&str, u64)> = families
+
+        // Every counter series exists at zero before its first event.
+        assert_eq!(metrics.received_paths(), (0, 0, 0));
+        assert_eq!(metrics.dequeues(), (0, 0));
+        assert_eq!(metrics.refusals(), (0, 0));
+        assert_eq!(metrics.cancellations(), 0);
+        let series: Vec<(&str, usize)> = families
             .iter()
-            .filter(|family| family.name().ends_with(REJECTIONS_TOTAL))
-            .flat_map(|family| family.get_metric())
-            .map(|metric| {
-                (
-                    metric.get_label()[0].value(),
-                    metric.get_counter().value() as u64,
-                )
-            })
+            .filter(|family| family.name().ends_with("_total"))
+            .map(|family| (family.name(), family.get_metric().len()))
             .collect();
-        reasons.sort();
-        assert_eq!(reasons, [(REASON_QUEUE_FULL, 0), (REASON_QUEUE_TIMEOUT, 0)]);
+        assert_eq!(
+            series,
+            [
+                ("dynamo_backend_admission_cancellation_total", 1),
+                ("dynamo_backend_admission_dequeue_total", 2),
+                ("dynamo_backend_admission_rejection_total", 2),
+                ("dynamo_backend_admission_request_total", 3),
+            ]
+        );
+    }
+
+    /// Each counter reaches its own series, so no transition can be attributed
+    /// to the wrong one.
+    #[test]
+    fn every_counter_lands_on_its_own_series() {
+        let metrics = BackendAdmissionMetrics::new(1, 1);
+
+        metrics.received_direct();
+        metrics.received_queue();
+        metrics.received_queue();
+        metrics.received_cancelled();
+        assert_eq!(metrics.received_paths(), (1, 2, 1));
+
+        metrics.dequeued(false);
+        metrics.dequeued(true);
+        metrics.dequeued(true);
+        assert_eq!(metrics.dequeues(), (1, 2));
+
+        metrics.rejected_queue_full();
+        metrics.rejected_request_expired();
+        assert_eq!(metrics.refusals(), (1, 1));
+
+        metrics.cancelled();
+        assert_eq!(metrics.cancellations(), 1);
     }
 }

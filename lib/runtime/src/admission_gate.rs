@@ -29,7 +29,16 @@
 //! 1. a positive [`DYN_DYNAMO_REQUEST_QUEUE_LIMIT`];
 //! 2. [`DEFAULT_QUEUE_CAPACITY`].
 //!
-//! # Controlled delay
+//! # Controlled delay and adaptive LIFO
+//!
+//! Two separate policies act on the queue, each with its own switch. Controlled
+//! delay decides *whether* a request that has waited too long is rejected
+//! instead of eventually entering the backend; adaptive LIFO decides *which*
+//! still-eligible request the next freed slot goes to once controlled delay has
+//! rejected one. Adaptive LIFO does nothing until controlled delay has actually
+//! rejected a live waiter, but neither switch changes the other's behaviour.
+//!
+//! ## Controlled delay
 //!
 //! Queueing is bounded in time as well as in length. Every entry is stamped
 //! with `enqueue time + queue delay` under the state lock, so FIFO order is
@@ -49,18 +58,27 @@
 //! [`ErrorType::WorkerOverloaded`] naming the queue delay — an overload, not a
 //! cancellation and not a backend fault.
 //!
-//! Which request the freed capacity then goes to is the other half of the
-//! policy. Rejection is always from the front; selection is not. An admission
-//! that rejected nothing takes the oldest request, as it always has; one
-//! preceded by a rejection takes the *newest* instead, that being the request
-//! with the most of its delay budget left. One round only: the admission after
-//! it starts at the front again, however many requests the rejection removed.
-//! Only a refusal that reached a request counts — one whose ticket had already
-//! gone away is an absent request, not a rejected one. Selecting from the back
-//! needs no deadline check of its own, since the due prefix is removed
-//! immediately beforehand and the uniform budget makes deadlines nondecreasing
-//! along the FIFO, so a live front implies a live back.
-//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY`] turns the back selection
+//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY`] turns that rejection
+//! off, leaving the bounded FIFO by itself: nothing is stamped out of the queue
+//! for age, a request may wait longer than the delay and still be admitted in
+//! FIFO order, and no timer is armed at all. Such a request is not an expired
+//! one — expiry is simply not in force — so it is never counted as a rejection.
+//! The queue length bound is the only backpressure left.
+//!
+//! ## Adaptive LIFO
+//!
+//! Which request the freed capacity then goes to is the other policy. Rejection
+//! is always from the front; selection is not. An admission that rejected
+//! nothing takes the oldest request, as it always has; one preceded by a
+//! rejection takes the *newest* instead, that being the request with the most of
+//! its delay budget left. One round only: the admission after it starts at the
+//! front again, however many requests the rejection removed. Only a refusal that
+//! reached a request counts — one whose ticket had already gone away is an
+//! absent request, not a rejected one. Selecting from the back needs no deadline
+//! check of its own, since the due prefix is removed immediately beforehand and
+//! the uniform budget makes deadlines nondecreasing along the FIFO, so a live
+//! front implies a live back.
+//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO`] turns the back selection
 //! off and leaves the delay, the expiry and the front rejection untouched.
 //!
 //! # Where the hint comes from
@@ -117,11 +135,17 @@ const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 /// before it is no longer worth admitting. Environment-only: there is no flag.
 const DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS: &str = "DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS";
 
-/// Turns the back selection that follows a rejection on or off. It does not
-/// enable or disable the queue delay itself, which is always in force.
+/// Turns queue-delay expiry on or off. Off, a queued request is never rejected
+/// for age and the bounded FIFO is the only backpressure left.
 /// Environment-only: there is no flag.
 const DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY: &str =
     "DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY";
+
+/// Turns the back selection that follows a rejection on or off. It does not
+/// enable or disable the queue delay, and has no effect until controlled delay
+/// has rejected a live waiter. Environment-only: there is no flag.
+const DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO: &str =
+    "DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO";
 
 /// Final fallback concurrent-request limit. This is the limit itself, not a
 /// `max_num_seqs` stand-in: the 3/2 factor is never applied to it.
@@ -133,8 +157,8 @@ const DEFAULT_QUEUE_CAPACITY: usize = 40_000;
 /// Default maximum queue residence before a queued request is given up on.
 const DEFAULT_QUEUE_DELAY: Duration = Duration::from_millis(5_000);
 
-/// The back selection is on unless an operator deliberately turns it off.
-const DEFAULT_CONTROLLED_DELAY: bool = true;
+/// Both queue policies are on unless an operator deliberately turns one off.
+const DEFAULT_POLICY_ENABLED: bool = true;
 
 /// The message a shed request is refused with.
 const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
@@ -210,28 +234,67 @@ fn resolve_queue_delay(env_override_ms: Option<usize>) -> Duration {
     }
 }
 
-/// Resolve the back-selection switch from an already-read raw value. Pure, so
-/// the vocabulary and the default are testable without touching the process
-/// environment.
+/// Resolve one queue-policy switch from an already-read raw value. Pure, so the
+/// vocabulary and the default are testable without touching the process
+/// environment, and shared by both switches so they cannot drift apart.
 ///
 /// The vocabulary is the canonical Dynamo one, parsed by its single owner so
 /// `on` and `yes` cannot mean something here that they do not mean elsewhere.
 /// Unset and declared-empty are not choices, so only an unrecognized value is
-/// warned about; all three keep [`DEFAULT_CONTROLLED_DELAY`].
-fn resolve_controlled_delay(raw: Option<&str>) -> bool {
+/// warned about; all three keep [`DEFAULT_POLICY_ENABLED`].
+fn resolve_policy_switch(env: &str, raw: Option<&str>) -> bool {
     let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) else {
-        return DEFAULT_CONTROLLED_DELAY;
+        return DEFAULT_POLICY_ENABLED;
     };
     crate::config::parse_bool(raw).unwrap_or_else(|_| {
         tracing::warn!(
-            env = DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
+            env,
             value = %raw,
-            default = DEFAULT_CONTROLLED_DELAY,
-            "Ignoring invalid backend admission controlled-delay switch; expected \
+            default = DEFAULT_POLICY_ENABLED,
+            "Ignoring invalid backend admission queue-policy switch; expected \
              one of: true/false, 1/0, on/off, yes/no"
         );
-        DEFAULT_CONTROLLED_DELAY
+        DEFAULT_POLICY_ENABLED
     })
+}
+
+/// Read one queue-policy switch from the process environment.
+fn policy_switch_from_env(env: &str) -> bool {
+    resolve_policy_switch(env, std::env::var(env).ok().as_deref())
+}
+
+/// The two independent queue policies, resolved once at construction.
+///
+/// Kept together so the pair is passed as one named value: they are both plain
+/// booleans, and a positional pair of those is easy to transpose.
+#[derive(Clone, Copy, Debug)]
+struct QueuePolicy {
+    /// Whether a queued request that outlives its deadline is rejected.
+    controlled_delay: bool,
+    /// Whether the admission that follows such a rejection takes the newest
+    /// queued request rather than the oldest.
+    adaptive_lifo: bool,
+}
+
+impl QueuePolicy {
+    fn from_environment() -> Self {
+        Self {
+            controlled_delay: policy_switch_from_env(
+                DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
+            ),
+            adaptive_lifo: policy_switch_from_env(DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for QueuePolicy {
+    fn default() -> Self {
+        Self {
+            controlled_delay: DEFAULT_POLICY_ENABLED,
+            adaptive_lifo: DEFAULT_POLICY_ENABLED,
+        }
+    }
 }
 
 /// Parse a positive `usize` from `name`. Unset, unparseable, zero, or negative
@@ -251,13 +314,33 @@ fn positive_env(name: &str) -> Option<usize> {
     }
 }
 
+/// Which end of the FIFO an admission was selected from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DequeueSource {
+    Fifo,
+    AdaptiveLifo,
+}
+
+impl DequeueSource {
+    fn is_tail(self) -> bool {
+        matches!(self, Self::AdaptiveLifo)
+    }
+}
+
 /// The outcome the gate hands a queued ticket.
 ///
 /// `Slot` transfers one unit of `active` capacity, so a ticket that has gone
 /// away must refund it. `Expired` carries no capacity and its FIFO entry is
 /// already removed, so it is never refunded and never unregistered.
+///
+/// A `Slot` carries the end it was selected from, because the gate cannot know
+/// at send time whether the ticket will consume it: a queued request whose
+/// context stopped keeps its receiver open, so the send succeeds and the ticket
+/// still refuses the slot. The source has to travel with the offer so the ticket
+/// can count the dequeue it actually took, and so a refund can put back a tail
+/// selection that was never spent.
 enum Handoff {
-    Slot,
+    Slot(DequeueSource),
     Expired,
 }
 
@@ -335,9 +418,8 @@ struct GateState {
     queue_capacity: usize,
     /// Fixed maximum queue residence, applied to every entry at enqueue.
     queue_delay: Duration,
-    /// Whether a rejection re-points the next admission at the back. Read once;
-    /// the queue delay it layers on top of is always in force.
-    controlled_delay: bool,
+    /// The two queue policies, read once at construction.
+    policy: QueuePolicy,
     /// Set by a rejection and cleared by the admission that follows it, so
     /// however many there were they buy exactly one admission from the back.
     admit_from_back: bool,
@@ -401,8 +483,15 @@ impl GateState {
     /// Deadlines are nondecreasing along the FIFO, so the first live entry ends
     /// the scan: this is one `pop_front` per expired request and never looks at
     /// the unexpired tail. Reaching the deadline exactly counts as expired.
+    ///
+    /// With controlled delay off nothing is ever due: this is the one place
+    /// deadlines are acted on, so disabling it here is what leaves the bounded
+    /// FIFO alone and lets a long-waiting request still be admitted in order.
     fn drain_expired(&mut self, now: Instant) -> Vec<Waiter> {
         let mut expired = Vec::new();
+        if !self.policy.controlled_delay {
+            return expired;
+        }
         while self.waiters.front().is_some_and(|waiter| waiter.due <= now) {
             expired.push(self.waiters.pop_front().expect("front was just observed"));
         }
@@ -413,14 +502,23 @@ impl GateState {
     /// back if any of those refusals reached a request.
     ///
     /// A ticket that has already gone away drops the outcome: that request left
-    /// of its own accord, so it is absent rather than rejected and must not buy
-    /// an admission from the back.
+    /// of its own accord, so it is absent rather than rejected — it is neither
+    /// counted nor allowed to buy an admission from the back.
+    ///
+    /// A refusal that does reach a request is committed here, under the state
+    /// lock that also arms the tail selection, so the two are one transition: a
+    /// scrape can never see the tail admission a rejection bought without also
+    /// seeing the rejection that bought it. The request learns its fate later,
+    /// and whether it ever reads that outcome no longer changes the count.
     fn reject_expired(&mut self, expired: Vec<Waiter>) {
         let mut rejected = false;
         for waiter in expired {
-            rejected |= waiter.tx.send(Handoff::Expired).is_ok();
+            if waiter.tx.send(Handoff::Expired).is_ok() {
+                rejected = true;
+                self.metrics.rejected_request_expired();
+            }
         }
-        self.admit_from_back |= self.controlled_delay && rejected;
+        self.admit_from_back |= self.policy.adaptive_lifo && rejected;
     }
 
     /// Take the next candidate from whichever end the selection points at. The
@@ -487,8 +585,9 @@ impl GateState {
         }
     }
 
-    /// Hand freed capacity to the oldest live waiters, skipping any that went
-    /// away between enqueue and wake-up so their slot is refunded to the next.
+    /// Hand freed capacity to the waiters the selection points at — the front
+    /// ordinarily, the back for the one round a rejection buys — skipping any
+    /// that went away between enqueue and wake-up so their slot passes on.
     ///
     /// The due prefix is rejected before every candidate, under this same lock
     /// and against a freshly sampled clock, so a slot is never handed to a
@@ -508,10 +607,23 @@ impl GateState {
                 if state.active >= state.limit {
                     return;
                 }
+                // Read before `take_slot` clears it, so the offer names the end
+                // this waiter was actually selected from.
+                let source = if state.admit_from_back {
+                    DequeueSource::AdaptiveLifo
+                } else {
+                    DequeueSource::Fifo
+                };
                 let Some(waiter) = state.take_next_waiter() else {
                     return;
                 };
-                if waiter.tx.send(Handoff::Slot).is_ok() {
+                // A successful send means the ticket is still there to receive
+                // the offer, not that it will take it: a request cancelled while
+                // queued keeps its receiver open and may still refuse the slot,
+                // refunding it as it settles. The capacity moves here because
+                // the ticket now owns it; the dequeue is counted where it is
+                // consumed.
+                if waiter.tx.send(Handoff::Slot(source)).is_ok() {
                     state.take_slot();
                 }
                 // Otherwise the waiter is gone; popping it already reclaimed its
@@ -527,7 +639,7 @@ impl GateState {
         }
         let previous = self.limit;
         self.limit = resolved;
-        self.metrics.set_concurrency_limit(resolved);
+        self.metrics.set_engine_request_limit(resolved);
         if resolved > previous {
             // Growth releases queued work immediately.
             self.wake_waiters();
@@ -619,19 +731,16 @@ impl BackendAdmissionGate {
         let queue_capacity =
             positive_env(DYN_DYNAMO_REQUEST_QUEUE_LIMIT).unwrap_or(DEFAULT_QUEUE_CAPACITY);
         let queue_delay = resolve_queue_delay(positive_env(DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS));
-        let controlled_delay = resolve_controlled_delay(
-            std::env::var(DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY)
-                .ok()
-                .as_deref(),
-        );
-        let gate = Self::new(env_override, queue_capacity, queue_delay, controlled_delay);
+        let policy = QueuePolicy::from_environment();
+        let gate = Self::new(env_override, queue_capacity, queue_delay, policy);
         tracing::debug!(
             limit = gate.limit(),
             queue_capacity,
             // The gate's own value, so a delay it rejected as unrepresentable is
             // reported as the default it fell back to.
             queue_delay_ms = gate.queue_delay().as_millis(),
-            controlled_delay,
+            controlled_delay = policy.controlled_delay,
+            adaptive_lifo = policy.adaptive_lifo,
             has_env_override = env_override.is_some(),
             "Backend admission gate created"
         );
@@ -648,7 +757,7 @@ impl BackendAdmissionGate {
         env_override: Option<usize>,
         queue_capacity: usize,
         queue_delay: Duration,
-        controlled_delay: bool,
+        policy: QueuePolicy,
     ) -> Arc<Self> {
         let limit = resolve_concurrency_limit(env_override, None);
         // Checked once here rather than per request: a delay the monotonic clock
@@ -675,7 +784,7 @@ impl BackendAdmissionGate {
                 limit,
                 queue_capacity,
                 queue_delay,
-                controlled_delay,
+                policy,
                 admit_from_back: false,
                 active: 0,
                 waiters: VecDeque::new(),
@@ -700,7 +809,15 @@ impl BackendAdmissionGate {
 
     /// Start the single expiry driver this gate will ever own. Called only from
     /// the queued admission path, which is always inside a Tokio runtime.
+    ///
+    /// With controlled delay off there is nothing for it to do: no entry is ever
+    /// due, so a timer armed on a head deadline would fire, reject nothing and
+    /// immediately re-arm on the same elapsed instant.
     fn ensure_expiry_driver(&self) {
+        let controlled_delay = self.state.lock().policy.controlled_delay;
+        if !controlled_delay {
+            return;
+        }
         self.expiry_driver.get_or_init(|| {
             let head_changed = self.state.lock().head_generation.subscribe();
             tokio::spawn(drive_expiry(Arc::downgrade(&self.state), head_changed));
@@ -780,6 +897,10 @@ impl BackendAdmissionGate {
         // re-checks in `AdmissionTicket::wait`, where the context can also stop
         // while the request waits.
         if context.is_some_and(|context| context.is_stopped()) {
+            // Classified as its own path — neither live path was selected — and
+            // counted as a cancellation, which a rejection never is.
+            self.metrics.received_cancelled();
+            self.metrics.cancelled();
             return Err(reject(Rejection::Cancelled, context));
         }
 
@@ -813,15 +934,24 @@ impl BackendAdmissionGate {
             }
         };
 
+        // Counted here rather than under the lock: the decision is what
+        // classifies the request, and every request reaches exactly one arm.
         match decision {
-            Decision::Granted => Ok(ActiveSlot {
-                gate: Arc::clone(self),
-            }),
+            Decision::Granted => {
+                self.metrics.received_direct();
+                Ok(ActiveSlot {
+                    gate: Arc::clone(self),
+                })
+            }
+            // Shed for a full queue is how the queue path ended for this
+            // request, not a path of its own.
             Decision::Rejected => {
+                self.metrics.received_queue();
                 self.metrics.rejected_queue_full();
                 Err(reject(Rejection::QueueFull, context))
             }
             Decision::Queued(id, rx) => {
+                self.metrics.received_queue();
                 // The queue is only reachable from an async caller, so this is
                 // the first point at which a runtime is guaranteed to exist.
                 self.ensure_expiry_driver();
@@ -837,10 +967,27 @@ impl BackendAdmissionGate {
         }
     }
 
-    /// Release one held slot back to the oldest live waiter, or to the limit.
+    /// Release one held slot to whichever waiter the selection points at, or
+    /// back to the limit when nothing is queued.
     fn release(&self) {
+        self.give_back_slot(false);
+    }
+
+    /// Return a slot that was offered to a ticket which never consumed it.
+    ///
+    /// The admission it was selected for never happened, so a tail selection it
+    /// spent is put back: the rejection that bought that one round has still not
+    /// been paid out, and without this the refunded slot would restart at the
+    /// front and the round would be lost. A front selection owes nothing, so it
+    /// restores nothing.
+    fn refund(&self, source: DequeueSource) {
+        self.give_back_slot(source.is_tail());
+    }
+
+    fn give_back_slot(&self, restore_tail_selection: bool) {
         let mut state = self.state.lock();
         state.active = state.active.saturating_sub(1);
+        state.admit_from_back |= restore_tail_selection;
         state.wake_waiters();
     }
 
@@ -891,7 +1038,7 @@ impl BackendAdmissionGate {
 /// caller can reach: it is only ever owned by an [`AdmittedStream`], so no
 /// caller can hold, forget or forge one. Dropping it — on end-of-stream, a
 /// generate error, an encode or publish error, task abort, or cancellation —
-/// releases the slot to the oldest queued request.
+/// releases the slot to the next queued request the selection points at.
 struct ActiveSlot {
     gate: Arc<BackendAdmissionGate>,
 }
@@ -952,56 +1099,110 @@ struct AdmissionTicket {
     gate: Arc<BackendAdmissionGate>,
     id: u64,
     rx: Option<oneshot::Receiver<Handoff>>,
-    /// Set once the gate's outcome has been consumed — a slot converted into an
-    /// [`ActiveSlot`], or an expiry that already removed this entry — so `Drop`
-    /// has nothing left to refund or unregister.
+    /// Set once the gate's outcome has been settled — a slot converted into an
+    /// [`ActiveSlot`], an expiry that already removed this entry, or a slot
+    /// refused and refunded on the spot — so `Drop` has nothing left to account
+    /// for, refund or unregister.
     taken: bool,
 }
 
 impl AdmissionTicket {
+    /// Resolve a cancellation against whatever the gate has already sent.
+    ///
+    /// Closing first makes this single-winner: nothing can arrive afterwards.
+    /// The two handoffs are then deliberately treated differently.
+    ///
+    /// An expiry the gate committed to is reported as the expiry it is. Sending
+    /// it already removed the entry, counted the rejection and armed the
+    /// one-round tail selection, all under one lock; a cancellation noticed
+    /// afterwards is later news about the same request and must not reclassify
+    /// it or add a second outcome to the counts.
+    ///
+    /// A slot is the opposite case, and cancellation still wins it: honoring it
+    /// would admit a caller that has already gone and hold capacity ahead of
+    /// live waiters. Taking it out of the channel is what makes it this
+    /// function's to settle — `Drop` could no longer find it — so the
+    /// cancellation is counted and the capacity returned here and now, and the
+    /// ticket is marked settled so `Drop` does neither again.
+    fn resolve_cancelled(&mut self) -> Option<Handoff> {
+        let handoff = {
+            let rx = self.rx.as_mut()?;
+            rx.close();
+            rx.try_recv()
+        };
+        match handoff {
+            Ok(Handoff::Expired) => Some(Handoff::Expired),
+            Ok(Handoff::Slot(source)) => {
+                self.taken = true;
+                self.gate.metrics.cancelled();
+                self.gate.refund(source);
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
     async fn wait(
         mut self,
         context: Option<&dyn AsyncEngineContext>,
     ) -> Result<ActiveSlot, DynamoError> {
-        let outcome = {
-            let rx = self.rx.as_mut().expect("ticket always holds its receiver");
-            match context {
-                // Cancellation while queued must be prompt, and it must win a
-                // simultaneous handoff. A slot can be sent to this waiter after
-                // the context was stopped but before this future is polled
-                // again; admitting then would run a request the caller already
-                // abandoned and would hold capacity ahead of live waiters. The
-                // precheck plus the biased ordering make cancellation strictly
-                // higher priority; `Drop` returns the already-sent slot to the
-                // next waiter.
-                Some(context) if context.is_stopped() => None,
-                Some(context) => tokio::select! {
-                    biased;
-                    _ = context.stopped() => None,
-                    handoff = &mut *rx => handoff.ok(),
-                },
-                None => rx.await.ok(),
+        // Cancellation while queued must be prompt, and it must win a
+        // simultaneous *slot*: one can be sent to this waiter after the context
+        // stopped but before this future is polled again, and admitting then
+        // would run a request the caller already abandoned. The precheck plus
+        // the biased ordering give the stop strictly higher priority; what the
+        // gate had already committed to is then settled in `resolve_cancelled`.
+        let outcome = match context {
+            Some(context) if context.is_stopped() => self.resolve_cancelled(),
+            Some(context) => {
+                let handoff = {
+                    let rx = self.rx.as_mut().expect("ticket always holds its receiver");
+                    tokio::select! {
+                        biased;
+                        _ = context.stopped() => None,
+                        handoff = &mut *rx => Some(handoff.ok()),
+                    }
+                };
+                match handoff {
+                    Some(handoff) => handoff,
+                    None => self.resolve_cancelled(),
+                }
+            }
+            None => {
+                let rx = self.rx.as_mut().expect("ticket always holds its receiver");
+                rx.await.ok()
             }
         };
 
         match outcome {
-            Some(Handoff::Slot) => {
+            Some(Handoff::Slot(source)) => {
+                // The one place a queued request actually becomes an admission,
+                // so the one place a dequeue is counted: only an offer that is
+                // consumed counts. An offer this ticket refuses never reaches
+                // here — it is settled by the cancellation path, or by `Drop`
+                // when the ticket went away without resolving anything.
                 self.taken = true;
+                self.gate.metrics.dequeued(source.is_tail());
                 Ok(ActiveSlot {
                     gate: Arc::clone(&self.gate),
                 })
             }
             Some(Handoff::Expired) => {
                 // The gate popped this entry before sending, so there is no
-                // queue slot to release and no capacity to refund. Counted here
-                // rather than where the entry was drained, so a request that
-                // walked away before collecting its outcome is not reported as
-                // a timeout rejection it never saw.
+                // queue slot to release and no capacity to refund — and the
+                // rejection was already counted where the gate committed to it,
+                // so reporting it here is metric-neutral.
                 self.taken = true;
-                self.gate.metrics.rejected_queue_timeout();
                 Err(reject(Rejection::Expired, context))
             }
-            // A cancellation is the caller leaving; not counted as a rejection.
+            // A cancellation is the caller leaving: never a rejection, and it
+            // keeps the queue path it was classified under. It is counted
+            // exactly once either way. Where a slot had to be refused,
+            // `resolve_cancelled` already counted and refunded it and set
+            // `taken`, so the `Drop` this return runs immediately is a no-op;
+            // otherwise `taken` is still unset and that `Drop` is what counts
+            // the cancellation and unregisters the waiter — the same path a
+            // ticket dropped without ever resolving anything takes.
             None => Err(reject(Rejection::Cancelled, context)),
         }
     }
@@ -1009,6 +1210,11 @@ impl AdmissionTicket {
 
 impl Drop for AdmissionTicket {
     fn drop(&mut self) {
+        // `taken` is set only where `wait` already settled an outcome, so
+        // reaching here with it unset means this request left the queue without
+        // becoming an admission — because `wait` resolved a cancellation, or
+        // because the whole future was dropped before it could. Everything left
+        // to account for is settled from here, exactly once.
         if self.taken {
             return;
         }
@@ -1020,11 +1226,24 @@ impl Drop for AdmissionTicket {
         // the send fails and the releaser moves on to the next waiter.
         rx.close();
         match rx.try_recv() {
-            Ok(Handoff::Slot) => self.gate.release(),
-            // Cancellation beat a ready expiry. The entry is already out of the
-            // FIFO and no slot was ever allocated, so `active` must not move.
+            // The gate committed to this rejection, and counted it, when it sent
+            // the outcome. The request going away before reading it changes
+            // neither: it is that rejection, not a cancellation, and the entry
+            // is already out of the FIFO with no slot ever allocated, so
+            // `active` must not move and nothing is unregistered.
             Ok(Handoff::Expired) => {}
-            Err(_) => self.gate.remove_waiter(self.id),
+            // An offer this request never consumed. The slot goes back and, if
+            // it was selected from the tail, so does the one-round tail
+            // selection: this candidate is absent, not admitted, so the
+            // rejection that armed it is still owed an admission from the back.
+            Ok(Handoff::Slot(source)) => {
+                self.gate.metrics.cancelled();
+                self.gate.refund(source);
+            }
+            Err(_) => {
+                self.gate.metrics.cancelled();
+                self.gate.remove_waiter(self.id);
+            }
         }
     }
 }
@@ -1044,13 +1263,43 @@ mod tests {
     }
 
     fn gate_with_delay(limit: usize, queue: usize, delay: Duration) -> Arc<BackendAdmissionGate> {
-        BackendAdmissionGate::new(Some(limit), queue, delay, DEFAULT_CONTROLLED_DELAY)
+        gate_with_policy(limit, queue, delay, QueuePolicy::default())
+    }
+
+    fn gate_with_policy(
+        limit: usize,
+        queue: usize,
+        delay: Duration,
+        policy: QueuePolicy,
+    ) -> Arc<BackendAdmissionGate> {
+        BackendAdmissionGate::new(Some(limit), queue, delay, policy)
+    }
+
+    /// Adaptive LIFO off, controlled delay untouched.
+    fn without_adaptive_lifo() -> QueuePolicy {
+        QueuePolicy {
+            adaptive_lifo: false,
+            ..QueuePolicy::default()
+        }
+    }
+
+    /// Controlled delay off, adaptive LIFO untouched.
+    fn without_controlled_delay() -> QueuePolicy {
+        QueuePolicy {
+            controlled_delay: false,
+            ..QueuePolicy::default()
+        }
     }
 
     /// A gate with no environment override, so its limit comes from a hint or
     /// the fallback.
     fn hint_sized_gate(queue: usize) -> Arc<BackendAdmissionGate> {
-        BackendAdmissionGate::new(None, queue, Duration::from_secs(3_600), true)
+        BackendAdmissionGate::new(
+            None,
+            queue,
+            Duration::from_secs(3_600),
+            QueuePolicy::default(),
+        )
     }
 
     /// The scheduling tests drive [`BackendAdmissionGate::acquire`] directly:
@@ -1356,6 +1605,7 @@ mod tests {
         assert!(is_cancelled(&admission));
         assert_eq!(gate.queued(), 0, "cancellation frees the queue slot");
         assert_eq!(refusals(&gate), (0, 0));
+        assert_eq!(cancellations(&gate), 1);
         assert_eq!(published(&gate), (1, 0, 1, 4));
     }
 
@@ -1476,34 +1726,63 @@ mod tests {
             let delay = resolve_queue_delay(override_ms);
             assert_eq!(delay, expected, "override {override_ms:?}");
             assert_eq!(
-                BackendAdmissionGate::new(Some(1), 1, delay, true).queue_delay(),
+                gate_with_policy(1, 1, delay, QueuePolicy::default()).queue_delay(),
                 expected,
                 "the resolved delay must reach the gate"
             );
         }
     }
 
-    /// The switch speaks the canonical Dynamo boolean vocabulary, and every way
-    /// of not making a choice — unset, declared empty, or a spelling outside it
-    /// — keeps the enabled default.
+    /// Both switches speak the canonical Dynamo boolean vocabulary, and every
+    /// way of not making a choice — unset, declared empty, or a spelling outside
+    /// it — keeps the enabled default.
     #[test]
-    fn the_back_selection_switch_defaults_on_and_reads_the_canonical_vocabulary() {
-        const { assert!(DEFAULT_CONTROLLED_DELAY) };
-        for (raw, expected) in [
-            (None, true),
-            (Some(""), true),
-            (Some("   "), true),
-            (Some("enabled"), true),
-            (Some("1"), true),
-            (Some("TRUE"), true),
-            (Some("On"), true),
-            (Some(" yes "), true),
-            (Some("0"), false),
-            (Some("false"), false),
-            (Some("OFF"), false),
-            (Some("no"), false),
+    fn both_queue_policy_switches_default_on_and_read_the_canonical_vocabulary() {
+        const { assert!(DEFAULT_POLICY_ENABLED) };
+        for env in [
+            DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
+            DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO,
         ] {
-            assert_eq!(resolve_controlled_delay(raw), expected, "{raw:?}");
+            for (raw, expected) in [
+                (None, true),
+                (Some(""), true),
+                (Some("   "), true),
+                (Some("enabled"), true),
+                (Some("1"), true),
+                (Some("TRUE"), true),
+                (Some("On"), true),
+                (Some(" yes "), true),
+                (Some("0"), false),
+                (Some("false"), false),
+                (Some("OFF"), false),
+                (Some("no"), false),
+            ] {
+                assert_eq!(resolve_policy_switch(env, raw), expected, "{env} {raw:?}");
+            }
+        }
+        // Two names, not one renamed: an operator can set either independently.
+        assert_ne!(
+            DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
+            DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO
+        );
+        assert!(DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO.ends_with("ADAPTIVE_LIFO"));
+    }
+
+    /// The two switches are independent: each reaches its own field, and
+    /// neither disturbs the other.
+    #[test]
+    fn the_two_policies_are_configured_independently() {
+        for (controlled_delay, adaptive_lifo) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let policy = QueuePolicy {
+                controlled_delay,
+                adaptive_lifo,
+            };
+            let gate = gate_with_policy(1, 1, Duration::from_millis(50), policy);
+            let state = gate.state.lock();
+            assert_eq!(state.policy.controlled_delay, controlled_delay);
+            assert_eq!(state.policy.adaptive_lifo, adaptive_lifo);
         }
     }
 
@@ -1512,7 +1791,7 @@ mod tests {
         // Enqueue stamps `now + delay`, so an unbounded override must degrade
         // rather than panic there.
         assert_eq!(
-            BackendAdmissionGate::new(Some(1), 1, Duration::MAX, true).queue_delay(),
+            gate_with_policy(1, 1, Duration::MAX, QueuePolicy::default()).queue_delay(),
             DEFAULT_QUEUE_DELAY
         );
     }
@@ -1607,7 +1886,8 @@ mod tests {
             )
         }
 
-        let gate = BackendAdmissionGate::new(None, 8, Duration::from_millis(50), true);
+        let gate =
+            BackendAdmissionGate::new(None, 8, Duration::from_millis(50), QueuePolicy::default());
         gate.set_limit_for_test(1);
         let held = permit(gate.acquire(None).await);
 
@@ -1619,7 +1899,7 @@ mod tests {
             "a slot must never be granted to an entry that was already due"
         );
         assert!(
-            matches!(live.try_recv(), Ok(Handoff::Slot)),
+            matches!(live.try_recv(), Ok(Handoff::Slot(_))),
             "the handoff must advance to the oldest unexpired request"
         );
         assert_eq!(gate.active(), 1, "exactly one slot was handed over");
@@ -1628,7 +1908,7 @@ mod tests {
         let (mut overdue, mut live) = due_then_live(&gate);
         gate.record_capacity_report(Some(4), Some(1));
         assert!(matches!(overdue.try_recv(), Ok(Handoff::Expired)));
-        assert!(matches!(live.try_recv(), Ok(Handoff::Slot)));
+        assert!(matches!(live.try_recv(), Ok(Handoff::Slot(_))));
         assert_eq!(gate.active(), 2);
         assert_eq!(gate.queued(), 0);
 
@@ -1644,7 +1924,7 @@ mod tests {
             matches!(overdue.try_recv(), Ok(Handoff::Expired)),
             "skipping a departed waiter must not hand its slot to an expired one"
         );
-        assert!(matches!(live.try_recv(), Ok(Handoff::Slot)));
+        assert!(matches!(live.try_recv(), Ok(Handoff::Slot(_))));
         assert_eq!(gate.active(), 3);
         assert_eq!(gate.queued(), 0);
     }
@@ -1669,8 +1949,17 @@ mod tests {
         );
     }
 
+    /// A rejection the gate has already committed to is reported as the
+    /// rejection it is, even though the caller stopped before collecting it.
+    ///
+    /// Cancellation wins a simultaneous *slot*, because honoring one would admit
+    /// an abandoned request; it does not win a simultaneous *expiry*, because
+    /// sending that expiry already removed the entry, counted the rejection and
+    /// armed the one-round tail selection. A cancellation observed afterwards is
+    /// later news about the same request: reclassifying it would contradict
+    /// counts the gate had already published.
     #[tokio::test]
-    async fn cancellation_stays_distinct_from_expiry_and_never_refunds_capacity() {
+    async fn a_committed_expiry_outranks_a_later_observed_cancellation() {
         use crate::pipeline::context::Controller;
 
         let gate = gate_with_delay(1, 4, Duration::from_millis(50));
@@ -1683,26 +1972,51 @@ mod tests {
         assert!(futures::poll!(&mut doomed).is_pending());
         assert_eq!(gate.queued(), 1);
 
-        // Make both outcomes ready before the ticket is polled again.
+        // A live request behind it, to show where the tail round the rejection
+        // armed actually goes.
+        let mut behind_it = live(&gate);
+        let mut newest = live(&gate);
+
+        // Make both outcomes ready before the ticket is polled again: the
+        // context stops, and only then does the gate expire the entry.
         controller.stop_generating();
-        gate.expire_due_for_test(Instant::now() + Duration::from_secs(1));
-        assert_eq!(gate.queued(), 0, "expiry removed the entry from the FIFO");
+        assert_eq!(
+            gate.expire_due_for_test(Instant::now() + Duration::from_secs(1)),
+            1,
+            "expiry removed the entry from the FIFO"
+        );
 
         let admission = doomed.await;
         assert!(
-            is_cancelled(&admission),
-            "cancellation must win a simultaneous expiry, and stay distinct from it"
+            is_expired(&admission),
+            "the rejection the gate committed to is what the request is told"
         );
         drop(admission);
+        assert_eq!(
+            refusals(&gate),
+            (0, 1),
+            "and it is counted, so the armed tail round has a rejection behind it"
+        );
+        assert_eq!(
+            cancellations(&gate),
+            0,
+            "an expiry is not also a cancellation"
+        );
         assert_eq!(
             gate.active(),
             1,
             "an expiry carries no slot, so there is nothing to refund"
         );
 
+        // The tail round that rejection armed is spent on the newest request.
         drop(held);
-        assert_eq!(gate.active(), 0);
-        assert_eq!(gate.queued(), 0);
+        assert_eq!(
+            granted_from(&mut newest),
+            Some(DequeueSource::AdaptiveLifo),
+            "the rejection sends the freed slot to the back"
+        );
+        assert!(still_queued(&mut behind_it), "the front keeps its place");
+        assert_eq!(gate.active(), 1);
     }
 
     ///////////////////// CONTROLLED DELAY: SELECTION /////////////////////
@@ -1718,9 +2032,18 @@ mod tests {
         gate.push_waiter_for_test(Instant::now() + Duration::from_secs(60))
     }
 
-    /// What the gate has told a queued entry so far.
+    /// What the gate has told a queued entry so far. A raw entry has no ticket
+    /// to consume the offer, so these read the handoff itself — which is also
+    /// where the selected end is now carried.
+    fn granted_from(rx: &mut oneshot::Receiver<Handoff>) -> Option<DequeueSource> {
+        match rx.try_recv() {
+            Ok(Handoff::Slot(source)) => Some(source),
+            _ => None,
+        }
+    }
+
     fn granted(rx: &mut oneshot::Receiver<Handoff>) -> bool {
-        matches!(rx.try_recv(), Ok(Handoff::Slot))
+        granted_from(rx).is_some()
     }
 
     fn rejected(rx: &mut oneshot::Receiver<Handoff>) -> bool {
@@ -1783,24 +2106,108 @@ mod tests {
             "an expiry no request received must leave the admission at the front"
         );
         assert!(still_queued(&mut newest));
+        assert_eq!(
+            refusals(&gate),
+            (0, 0),
+            "and a refusal that reached nobody is not counted either: the send \
+             that fails is the same event that declines to arm the tail"
+        );
     }
 
-    /// The switch governs selection alone: rejection, the queue delay and the
-    /// order of everything else are exactly as they are without it.
+    /// Adaptive LIFO off governs selection alone: the same request is still
+    /// rejected by controlled delay, and the freed slot goes to the front.
     #[tokio::test]
-    async fn the_switch_off_rejects_from_the_front_and_admits_from_the_front() {
-        let gate = BackendAdmissionGate::new(Some(1), 8, Duration::from_millis(50), false);
+    async fn adaptive_lifo_off_rejects_from_the_front_and_admits_from_the_front() {
+        let gate = gate_with_policy(1, 8, Duration::from_millis(50), without_adaptive_lifo());
         let held = permit(gate.acquire(None).await);
         let (mut stale, mut oldest, mut newest) = (due(&gate), live(&gate), live(&gate));
 
         drop(held);
         assert!(rejected(&mut stale), "the same request is still rejected");
-        assert!(
-            granted(&mut oldest),
+        assert_eq!(
+            granted_from(&mut oldest),
+            Some(DequeueSource::Fifo),
             "with the back selection off the freed slot goes to the front"
         );
         assert!(still_queued(&mut newest));
         assert_eq!((gate.active(), gate.queued()), (1, 1));
+    }
+
+    ///////////////////// CONTROLLED DELAY: DISABLED /////////////////////
+
+    /// Controlled delay off leaves the bounded FIFO by itself: a request that
+    /// has waited well past the delay is still admitted, in FIFO order, and is
+    /// never counted as expired.
+    #[tokio::test(start_paused = true)]
+    async fn controlled_delay_off_admits_a_request_that_outwaited_the_delay() {
+        let delay = Duration::from_millis(200);
+        let gate = gate_with_policy(1, 8, delay, without_controlled_delay());
+        let held = permit(gate.acquire(None).await);
+
+        let first = spawn_queued_admit(&gate).await;
+        let second = spawn_queued_admit(&gate).await;
+
+        // Far past the deadline both entries would have carried. Nothing may
+        // remove them: with expiry off there is no timer to do it, and the
+        // grant-path check must find nothing due either.
+        tokio::time::sleep(delay * 10).await;
+        assert_eq!(gate.queued(), 2, "no entry may leave the queue for age");
+
+        drop(held);
+        // Held, not dropped in place: releasing it here would pass the slot
+        // straight on and make the counts below the pair's, not the first's.
+        let admitted = first.await.expect("waiter completes");
+        assert!(
+            admitted.is_ok(),
+            "a long-waiting request is admitted rather than rejected"
+        );
+        assert_eq!(
+            refusals(&gate),
+            (0, 0),
+            "nothing expired, so nothing counted"
+        );
+        assert_eq!(dequeues(&gate), (1, 0), "and it came from the FIFO front");
+        assert_eq!(gate.queued(), 1, "the one behind it kept its place");
+
+        drop(admitted);
+        second.abort();
+        let _ = second.await;
+    }
+
+    /// With expiry off, an entry that is already past its deadline is neither
+    /// rejected nor skipped on any grant-producing path.
+    #[tokio::test]
+    async fn controlled_delay_off_never_rejects_an_overdue_head() {
+        let gate = gate_with_policy(1, 8, Duration::from_millis(50), without_controlled_delay());
+        let held = permit(gate.acquire(None).await);
+        let (mut overdue, mut behind) = (due(&gate), live(&gate));
+
+        drop(held);
+        assert_eq!(
+            granted_from(&mut overdue),
+            Some(DequeueSource::Fifo),
+            "an overdue head keeps its place at the front and is admitted"
+        );
+        assert!(still_queued(&mut behind));
+        assert_eq!(refusals(&gate), (0, 0));
+    }
+
+    /// With expiry off there is nothing for a timer to do, so none is started:
+    /// arming one on a deadline that is never acted on would fire, reject
+    /// nothing and immediately re-arm on the same elapsed instant.
+    #[tokio::test]
+    async fn controlled_delay_off_starts_no_expiry_driver() {
+        let gate = gate_with_policy(1, 1, Duration::from_millis(50), without_controlled_delay());
+        let _held = permit(gate.acquire(None).await);
+        let waiting = spawn_queued_admit(&gate).await;
+
+        assert!(
+            gate.expiry_driver.get().is_none(),
+            "no expiry driver may be started when nothing can expire"
+        );
+
+        waiting.abort();
+        let _ = waiting.await;
     }
 
     /// The gate's own timer arms the same one-round selection a handoff does.
@@ -2092,14 +2499,28 @@ mod tests {
 
     ///////////////////// METRICS /////////////////////
 
-    /// Published as (active, queued, limit, capacity).
+    /// Published as (engine requests, queued, engine limit, queue limit).
     fn published(gate: &Arc<BackendAdmissionGate>) -> (i64, i64, i64, i64) {
         gate.metrics.published()
     }
 
-    /// Refusals as (queue_full, queue_timeout).
+    /// Refusals as (queue_full, request_expired).
     fn refusals(gate: &Arc<BackendAdmissionGate>) -> (u64, u64) {
         gate.metrics.refusals()
+    }
+
+    /// Requests received as (direct, queue, cancelled).
+    fn received(gate: &Arc<BackendAdmissionGate>) -> (u64, u64, u64) {
+        gate.metrics.received_paths()
+    }
+
+    /// Queued requests admitted as (fifo, adaptive_lifo).
+    fn dequeues(gate: &Arc<BackendAdmissionGate>) -> (u64, u64) {
+        gate.metrics.dequeues()
+    }
+
+    fn cancellations(gate: &Arc<BackendAdmissionGate>) -> u64 {
+        gate.metrics.cancellations()
     }
 
     /// Gauges come from the gate's own counts, so they follow every transition,
@@ -2123,54 +2544,260 @@ mod tests {
         assert_eq!(published(&hinted), (0, 0, 3, 4), "late hint");
     }
 
-    /// Only the two refusal reasons count. A timeout counts where the waiting
-    /// request receives it, so a cancellation and a request that walked away
-    /// first both add nothing.
+    /// Every request the gate receives lands on exactly one path, and a shed
+    /// request is the queue path ending badly rather than a path of its own.
     #[tokio::test]
-    async fn rejections_are_counted_by_reason_only() {
+    async fn every_request_is_classified_exactly_once() {
         use crate::pipeline::context::Controller;
 
-        let gate = gate(1, 0);
-        let _held = permit(gate.acquire(None).await);
+        let gate = gate(1, 1);
+        assert_eq!(received(&gate), (0, 0, 0));
+
+        let held = permit(gate.acquire(None).await);
+        assert_eq!(received(&gate), (1, 0, 0), "a free slot is the direct path");
+
+        let queued = spawn_queued_admit(&gate).await;
+        assert_eq!(received(&gate), (1, 1, 0), "no free slot is the queue path");
+
         assert!(is_queue_full(&gate.acquire(None).await));
+        assert_eq!(
+            received(&gate),
+            (1, 2, 0),
+            "a shed request took the queue path too"
+        );
+        assert_eq!(refusals(&gate), (1, 0));
+
         let controller = Arc::new(Controller::default());
         controller.stop_generating();
         let context: Arc<dyn AsyncEngineContext> = controller;
         assert!(is_cancelled(&gate.acquire(Some(context.as_ref())).await));
-        assert_eq!(refusals(&gate), (1, 0), "a cancellation is not a refusal");
+        assert_eq!(
+            received(&gate),
+            (1, 2, 1),
+            "already cancelled is neither live path"
+        );
+        assert_eq!(cancellations(&gate), 1);
+        assert_eq!(refusals(&gate), (1, 0), "which is not a refusal");
 
-        // Expiry, collected by the waiter it happened to.
+        drop(held);
+        drop(permit(queued.await.expect("waiter completes")));
+    }
+
+    /// Only the two refusal reasons count, and an expiry counts once, where the
+    /// gate commits to it.
+    #[tokio::test]
+    async fn rejections_are_counted_by_reason_only() {
         let expiring = gate_with_delay(1, 4, Duration::from_millis(1));
         let _busy = permit(expiring.acquire(None).await);
         let waiter = spawn_queued_admit(&expiring).await;
         assert!(is_expired(&waiter.await.expect("waiter completes")));
         assert_eq!(refusals(&expiring), (0, 1));
         assert_eq!(published(&expiring), (1, 0, 1, 4));
+        assert_eq!(dequeues(&expiring), (0, 0), "an expiry is not a dequeue");
+        assert_eq!(cancellations(&expiring), 0, "nor a cancellation");
+    }
 
-        // The same expiry, handed off successfully but never collected: the
-        // ticket is dropped without ever calling `wait`. The receiver is live
-        // through the drain, so this catches counting inside `drain_expired`,
-        // `expire_due` or `Drop` — not merely a failed handoff.
-        // `push_waiter_for_test` takes `next_ticket`, which is 0 on a fresh gate.
-        let orphaned = gate_with_delay(1, 4, Duration::from_millis(1));
-        let now = Instant::now();
-        let ticket = AdmissionTicket {
-            gate: Arc::clone(&orphaned),
-            id: 0,
-            rx: Some(orphaned.push_waiter_for_test(now - Duration::from_millis(1))),
-            taken: false,
-        };
+    /// A queued request aborted after the gate expired it, but before it read
+    /// the outcome. The expiry is the gate's committed rejection either side of
+    /// that race: it is counted as one, it is not a cancellation, and the tail
+    /// round it armed is still spent on the newest queued request.
+    #[tokio::test]
+    async fn an_expiry_the_request_never_collected_is_still_the_committed_rejection() {
+        let gate = gate_with_delay(1, 8, Duration::from_millis(50));
+        let held = permit(gate.acquire(None).await);
+
+        // A real queued admission, polled once so its ticket registers and then
+        // never polled again — the shape a task abort leaves behind.
+        let mut abandoned = Box::pin(gate.acquire(None));
+        assert!(futures::poll!(&mut abandoned).is_pending());
+        let mut front = live(&gate);
+        let mut newest = live(&gate);
+        assert_eq!(gate.queued(), 3);
+
+        // Only the abandoned entry is due; the two behind it are nowhere near.
         assert_eq!(
-            orphaned.expire_due_for_test(now),
+            gate.expire_due_for_test(Instant::now() + Duration::from_secs(1)),
             1,
-            "the entry was drained"
+            "exactly the abandoned entry expired"
         );
-        drop(ticket);
-        assert_eq!(orphaned.queued(), 0, "its queue place is freed");
         assert_eq!(
-            refusals(&orphaned),
+            refusals(&gate),
+            (0, 1),
+            "the rejection is counted at the moment the gate commits to it, not \
+             when some request gets around to reading it"
+        );
+        drop(abandoned);
+        assert_eq!(
+            refusals(&gate),
+            (0, 1),
+            "abandoning it neither double-counts nor withdraws the rejection"
+        );
+        assert_eq!(cancellations(&gate), 0, "and it is not a cancellation");
+
+        drop(held);
+        assert_eq!(
+            granted_from(&mut newest),
+            Some(DequeueSource::AdaptiveLifo),
+            "the tail round that rejection armed is still honored"
+        );
+        assert!(still_queued(&mut front), "the front keeps its place");
+    }
+
+    /// A queued request that leaves without being admitted is a cancellation
+    /// exactly once, whether its own future observed the stop or the whole task
+    /// was dropped first. Neither shape is a rejection or a dequeue.
+    #[tokio::test]
+    async fn a_queued_cancellation_counts_once_whether_observed_or_dropped() {
+        use crate::pipeline::context::Controller;
+
+        let gate = gate(1, 4);
+        let _held = permit(gate.acquire(None).await);
+
+        // Observed: the waiting request is polled again and sees the stop.
+        let controller = Arc::new(Controller::default());
+        let waiting = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            let context: Arc<dyn AsyncEngineContext> = controller.clone();
+            async move { gate.acquire(Some(context.as_ref())).await }
+        });
+        while gate.queued() == 0 {
+            tokio::task::yield_now().await;
+        }
+        controller.stop_generating();
+        assert!(is_cancelled(&waiting.await.expect("waiter completes")));
+        assert_eq!(cancellations(&gate), 1, "counted where it was observed");
+
+        // Dropped: the task is aborted, so nothing ever reaches the arm above
+        // and only the ticket's own `Drop` can account for it.
+        let abandoned = spawn_queued_admit(&gate).await;
+        abandoned.abort();
+        let _ = abandoned.await;
+        while gate.queued() != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            cancellations(&gate),
+            2,
+            "an abandoned ticket is a cancellation too"
+        );
+
+        assert_eq!(
+            refusals(&gate),
             (0, 0),
-            "an uncollected expiry is not counted"
+            "a cancellation is never a rejection"
+        );
+        assert_eq!(dequeues(&gate), (0, 0), "and never a dequeue");
+        assert_eq!(
+            received(&gate),
+            (1, 2, 0),
+            "both kept the queue path they arrived on"
+        );
+    }
+
+    /// A dequeue is counted where a real request consumes the offer, and named
+    /// by the end it was selected from. Driven through `acquire` rather than raw
+    /// FIFO entries, because it is the ticket, not the send, that takes the slot.
+    #[tokio::test(start_paused = true)]
+    async fn dequeues_are_counted_by_the_end_the_request_came_from() {
+        let gate = gate_with_delay(1, 8, Duration::from_millis(400));
+        let held = permit(gate.acquire(None).await);
+
+        let doomed = spawn_queued_admit(&gate).await;
+        // Far enough behind that these two are still live when it is rejected.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let oldest = spawn_queued_admit(&gate).await;
+        let newest = spawn_queued_admit(&gate).await;
+
+        assert!(is_expired(&doomed.await.expect("waiter completes")));
+        assert_eq!(dequeues(&gate), (0, 0), "a rejection is not a dequeue");
+
+        // That rejection sends this one admission to the tail.
+        drop(held);
+        let admitted = tokio::time::timeout(Duration::from_millis(50), newest)
+            .await
+            .expect("the newest queued request inherits the freed slot")
+            .expect("waiter completes");
+        assert_eq!(
+            dequeues(&gate),
+            (0, 1),
+            "a tail admission counts as its own"
+        );
+
+        // Releasing it rejects nothing, so the next starts at the front again.
+        drop(permit(admitted));
+        let admitted = tokio::time::timeout(Duration::from_millis(50), oldest)
+            .await
+            .expect("the front is served next")
+            .expect("waiter completes");
+        assert_eq!(dequeues(&gate), (1, 1));
+
+        drop(permit(admitted));
+        assert_eq!(refusals(&gate), (0, 1));
+        assert_eq!(cancellations(&gate), 0);
+        assert_eq!(received(&gate), (1, 3, 0));
+    }
+
+    /// A tail candidate whose caller has already gone is absent, not admitted.
+    /// It must not be counted as a dequeue, and the one-round tail selection the
+    /// rejection bought must survive its refusal — otherwise a cancellation
+    /// silently converts that round back into a front admission.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_tail_candidate_is_absent_and_keeps_the_tail_selection_owed() {
+        use crate::pipeline::context::Controller;
+
+        let gate = gate_with_delay(1, 8, Duration::from_millis(400));
+        let held = permit(gate.acquire(None).await);
+
+        // Front to back: an entry that will come due, two live entries, and a
+        // cancellable newest that the tail selection will pick. The first is
+        // still live while the queue is built, because `acquire` drains the due
+        // prefix and would otherwise reject it before the rest arrived.
+        let mut stale = gate.push_waiter_for_test(Instant::now() + Duration::from_millis(100));
+        let mut front = live(&gate);
+        let mut middle = live(&gate);
+        let controller = Arc::new(Controller::default());
+        let context: Arc<dyn AsyncEngineContext> = controller.clone();
+        let mut doomed = Box::pin(gate.acquire(Some(context.as_ref())));
+        assert!(futures::poll!(&mut doomed).is_pending());
+        assert_eq!(gate.queued(), 4);
+
+        // Stopped before the handoff reaches it, but its receiver stays open, so
+        // the gate's send succeeds and only the ticket can refuse the slot.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        controller.stop_generating();
+        drop(held);
+        assert!(rejected(&mut stale), "the due entry is rejected as ever");
+        assert_eq!(gate.active(), 1, "the slot was handed to the newest entry");
+
+        let admission = doomed.await;
+        assert!(is_cancelled(&admission), "cancellation wins the handoff");
+        drop(admission);
+
+        assert_eq!(
+            dequeues(&gate),
+            (0, 0),
+            "a candidate that refused the offer never dequeued"
+        );
+        assert_eq!(
+            granted_from(&mut middle),
+            Some(DequeueSource::AdaptiveLifo),
+            "the refunded slot still owes the tail admission the rejection bought"
+        );
+        assert!(
+            still_queued(&mut front),
+            "so the front is passed over exactly as it would have been"
+        );
+        assert_eq!(gate.active(), 1, "the refund handed the slot straight on");
+        assert_eq!(
+            cancellations(&gate),
+            1,
+            "the tail candidate that went away is the one cancellation here"
+        );
+        assert_eq!(
+            refusals(&gate),
+            (0, 1),
+            "and the only rejection is the due entry that armed the round, not \
+             the candidate that refused the slot it bought"
         );
     }
 

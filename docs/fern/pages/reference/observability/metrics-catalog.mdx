@@ -251,24 +251,36 @@ The following worker-side gauges and counter appear only when a hard concurrency
 
 The `dynamo_backend_admission_*` family below is emitted by the backend admission gate, which bounds concurrent backend work for the whole worker process across every transport. It is independent of the worker-pool metrics above and is always present; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
 
-<ParamField path="dynamo_backend_admission_active_requests" type="gauge">
-  Requests currently holding an admitted backend slot.
+<ParamField path="dynamo_backend_admission_engine_request_count" type="gauge">
+  Requests currently holding a gate concurrency slot. The slot is held for the whole admitted backend stream.
 </ParamField>
 
-<ParamField path="dynamo_backend_admission_queue_depth" type="gauge">
-  Requests currently waiting in the admission queue.
+<ParamField path="dynamo_backend_admission_engine_request_limit" type="gauge">
+  Effective concurrent-request limit, matching `DYN_ENGINE_REQUEST_LIMIT` when it is set. Changes if a model card reports a capacity hint after startup.
 </ParamField>
 
-<ParamField path="dynamo_backend_admission_concurrency_limit" type="gauge">
-  Effective concurrent-request limit. Changes if a model card reports a capacity hint after startup.
+<ParamField path="dynamo_backend_admission_request_queue_count" type="gauge">
+  Requests currently waiting in the gate queue. It excludes requests already holding a slot, requests in a TCP request-plane queue, and requests in the engine's own scheduler.
 </ParamField>
 
-<ParamField path="dynamo_backend_admission_queue_capacity" type="gauge">
-  Configured admission-queue length. Static for the life of the process.
+<ParamField path="dynamo_backend_admission_request_queue_limit" type="gauge">
+  Effective queue bound, matching `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`. Static for the life of the process.
 </ParamField>
 
-<ParamField path="dynamo_backend_admission_rejections_total" type="counter">
-  Cumulative requests the gate refused, labelled `reason`: `queue_full` when the limit was busy and the queue was full, `queue_timeout` when the request waited past the queue delay. A request cancelled while queued is not a rejection and is not counted under either reason.
+<ParamField path="dynamo_backend_admission_request_total" type="counter">
+  Cumulative requests received by the gate, labelled `path` and classified exactly once: `direct` took a free slot immediately, `queue` found none and took the queue path, and `cancelled` was already cancelled before either live path was selected. A request shed for a full queue is counted under `queue`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_dequeue_total" type="counter">
+  Cumulative queued requests given a slot, labelled `source`: `fifo` from the front of the queue, `adaptive_lifo` from the tail. Candidates removed while searching — expired, cancelled or departed — are not counted.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_rejection_total" type="counter">
+  Cumulative requests the gate refused, labelled `reason`: `queue_full` when the limit was busy and the queue was full, `request_expired` when the request exceeded its permitted queue residence. A cancelled request is not a rejection and is counted under neither.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_cancellation_total" type="counter">
+  Cumulative requests cancelled before backend admission, whether already cancelled when the gate observed them or cancelled while queued. Cancellation is neither a rejection nor an overload; a request cancelled after taking the queue path keeps its `path="queue"` classification.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.

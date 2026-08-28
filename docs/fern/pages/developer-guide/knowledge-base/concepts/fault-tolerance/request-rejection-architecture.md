@@ -121,9 +121,11 @@ and never passes through the gate.
 
 A request takes a free engine slot when one is available, otherwise it joins the FIFO queue, and
 otherwise the worker refuses it with `Server overloaded: worker at capacity`. A slot is released when
-the admitted request finishes, errors, or is cancelled, and passes to the oldest queued request. New
-arrivals never bypass an older waiter, and a request cancelled while queued frees its queue slot
-immediately.
+the admitted request finishes, errors, or is cancelled, and passes to a queued request. Selection is
+FIFO — the oldest queued request, so a new arrival does not bypass an older waiter — with one
+exception: the single admission that follows a Controlled Delay rejection may take the newest queued
+request instead, as [Adaptive LIFO](#adaptive-lifo) describes. A request cancelled while queued frees
+its queue slot immediately.
 
 The refusal happens before the backend is asked to do any work, so the request never reaches the
 engine. It is reported through the same pre-stream error path a failed `generate` uses, which today
@@ -171,7 +173,17 @@ queued request also re-checks the head deadline first, so a slot released before
 still never given to a request the delay budget has already given up on. This is
 transport-independent: the same gate, timer and expiry result apply over TCP and NATS.
 
-Which queued request the freed capacity then goes to is the other half of the policy. Rejection is
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` turns that expiry rejection off. It accepts
+`1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively, and is environment-only with no
+command-line flag. Unset, empty and unrecognized values leave it enabled, and an unrecognized one is
+logged. Disabled, the bounded FIFO stands alone: nothing leaves the queue for age, a request may wait
+longer than the delay and still be admitted in its FIFO turn, and the gate arms no timer at all. Such
+a request is not an expired one — expiry is simply not in force — so it is never counted as a
+rejection, and the queue length bound becomes the only backpressure.
+
+### Adaptive LIFO
+
+Which queued request the freed capacity goes to is a separate policy. Rejection is
 always from the front of the queue; selection is not. An admission that rejected nothing takes the
 oldest queued request, exactly as before; one that rejected at least one request takes the newest
 instead, that being the request with the most of its delay budget left. That applies to one
@@ -182,11 +194,11 @@ request — its caller had already gone — counts for nothing. Selecting from t
 deadline check, because the due prefix is removed immediately before every admission and one
 process-wide delay budget makes deadlines nondecreasing along the queue.
 
-`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` turns the back selection off. It accepts
-`1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively, and is environment-only with no
-command-line flag. Unset, empty and unrecognized values leave it enabled, and an unrecognized one is
-logged. Turning it off changes selection alone: the queue delay, the deadlines and which requests are
-rejected are all unaffected.
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` turns the back selection off, with the same boolean
+vocabulary, the same enabled default and the same environment-only scope. Turning it off changes
+selection alone: the queue delay, the deadlines and which requests are rejected are all unaffected.
+Adaptive LIFO also does nothing until Controlled Delay has actually rejected a live waiter, so with
+Controlled Delay disabled it never takes effect — but neither switch changes the other's behavior.
 
 ### Where The Capacity Hint Comes From
 
@@ -221,12 +233,20 @@ The two controls report separately. The pre-existing `dynamo_rejection_request_t
 `dynamo_engine_request` and `dynamo_request_queue` count TCP request-plane pool activity. The gate
 has its own independent family:
 
-- `dynamo_backend_admission_active_requests` and `dynamo_backend_admission_queue_depth` — current
-  occupancy of the limit and the FIFO queue.
-- `dynamo_backend_admission_concurrency_limit` and `dynamo_backend_admission_queue_capacity` — the
-  sizing actually in force, including a limit resized by a late capacity hint.
-- `dynamo_backend_admission_rejections_total` — refusals, labelled `reason` as `queue_full` or
-  `queue_timeout`. A request cancelled while queued is not a rejection and is counted under neither.
+- `dynamo_backend_admission_engine_request_count` and
+  `dynamo_backend_admission_request_queue_count` — current occupancy of the limit and the FIFO queue.
+- `dynamo_backend_admission_engine_request_limit` and
+  `dynamo_backend_admission_request_queue_limit` — the sizing actually in force, including a limit
+  resized by a late capacity hint. Each live count pairs with the bound that governs it.
+- `dynamo_backend_admission_request_total` — every request the gate receives, labelled `path` and
+  classified exactly once as `direct`, `queue` or `cancelled`. A request shed for a full queue is
+  counted under `queue`, that being how its queue path ended.
+- `dynamo_backend_admission_dequeue_total` — queued requests that took a slot, labelled `source` as
+  `fifo` or `adaptive_lifo`. Candidates removed while searching are not counted.
+- `dynamo_backend_admission_rejection_total` — refusals, labelled `reason` as `queue_full` or
+  `request_expired`. A request cancelled while queued is not a rejection and is counted under neither.
+- `dynamo_backend_admission_cancellation_total` — requests cancelled before admission, on either
+  path. A cancelled request keeps whichever `path` it was classified under.
 
 See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
 for metric types and labels.

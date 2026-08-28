@@ -147,10 +147,15 @@ a full queue refuses one. Set it lower when a stale queued request is worth less
 it holds, and higher when clients would rather wait. It does not limit how long an admitted request
 may run.
 
-After the worker has rejected a queued request that way, the next slot it frees goes to the newest
+Set `DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `0` on the **worker** component to stop
+rejecting queued requests for age altogether. Nothing then leaves the queue for waiting too long: a
+request may wait longer than the delay and is still admitted in its FIFO turn, and the queue length
+limit is the only backpressure left.
+
+After the worker has rejected a queued request for age, the next slot it frees goes to the newest
 queued request rather than the oldest, and the slot after that goes to the oldest again — so a worker
 recovering from a backlog does not work through requests whose queue delay is nearly spent. Set
-`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `0` on the **worker** component to serve the
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` to `0` on the **worker** component to serve the
 oldest queued request in every case. The queue delay, the deadlines and which requests are rejected
 are the same either way.
 
@@ -177,11 +182,16 @@ rejection:
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
 
 The worker-side hard cap is verified differently: the refused request fails rather than returning a
-particular status, and `dynamo_backend_admission_rejections_total` increases with
-`reason="queue_full"` or `reason="queue_timeout"`. The worker also logs `Worker at capacity (engine
+particular status, and `dynamo_backend_admission_rejection_total` increases with
+`reason="queue_full"` or `reason="request_expired"`. The worker also logs `Worker at capacity (engine
 limit and queue both full), rejecting request` with the shed request's `request_id`. Do not look at
 `dynamo_rejection_request_total` for this: it counts only TCP request-plane pool rejections and does
 not move when the gate sheds a request.
+
+`dynamo_backend_admission_request_queue_count` and `dynamo_backend_admission_engine_request_count`
+show live occupancy against their `_limit` counterparts, and
+`dynamo_backend_admission_dequeue_total{source="adaptive_lifo"}` increases when a freed slot goes to
+the newest queued request after a rejection.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).
