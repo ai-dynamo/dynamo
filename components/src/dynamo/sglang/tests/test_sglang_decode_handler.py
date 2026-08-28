@@ -1905,6 +1905,7 @@ async def test_process_token_stream_aligns_cumulative_logprobs_with_buffered_sto
         {
             "index": 0,
             "finish_reason": "stop",
+            "stop_reason": [128001, 128009],
             "token_ids": [],
             "log_probs": [],
             "top_logprobs": [],
