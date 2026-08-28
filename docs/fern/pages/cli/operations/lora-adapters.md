@@ -345,7 +345,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
 
 ## Serve a LoRA Adapter with SGLang
 
-**Experimental.** The repository validates dynamic loading, unloading, discovery, and inference for aggregated SGLang workers. Prefill and decode lifecycle registration has unit coverage, but disaggregated SGLang LoRA and feature pairings such as KV-aware routing are not end-to-end validated. The Kubernetes workflow above and the adapter-aware routing demo below are vLLM-specific.
+**Experimental.** The repository validates dynamic loading, discovery, and inference for aggregated SGLang workers. Unloading is implemented but not exercised by an end-to-end test. Prefill and decode lifecycle registration has unit coverage, but disaggregated SGLang LoRA and feature pairings such as KV-aware routing are not end-to-end validated. The Kubernetes workflow above and the adapter-aware routing demo below are vLLM-specific.
 
 <Steps>
   <Step title="Prepare the adapter">
