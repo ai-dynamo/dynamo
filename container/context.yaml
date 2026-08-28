@@ -105,7 +105,11 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.27.1
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
-  vllm_omni_ref: "v0.27.0rc1"
+  # Moves WITH the vLLM runtime pin above: vllm-omni asserts matching major/minor
+  # against the installed vLLM at import, so leaving this at 0.27.0rc1 while vLLM
+  # is 0.28.0 fails `vllm-runtime / Test` on both arches with
+  # "vLLM and vLLM-Omni appear to have mismatched major/minor versions".
+  vllm_omni_ref: "v0.28.0rc1"
   # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
   # support that landed upstream after the release. Remove this pin when the
   # vLLM base images include https://github.com/vllm-project/vllm/pull/49797.
