@@ -234,13 +234,15 @@ class ThunderAgentRouterHandler:
             estimated_prompt_tokens=estimated_prompt_tokens,
         )
         worker_pin = decision.assigned_worker_hint
+        worker_dp_rank = decision.assigned_dp_rank_hint
         logger.debug(
             "thunderagent.route path=program program=%s prompt_tokens=%d "
-            "worker_hint=%s waited_seconds=%.4f was_paused=%s "
+            "worker_hint=%s dp_rank_hint=%s waited_seconds=%.4f was_paused=%s "
             "soft_demoted=%s priority_jump=%.3f",
             program_id,
             estimated_prompt_tokens,
             worker_pin,
+            worker_dp_rank,
             decision.waited_seconds,
             decision.was_paused,
             decision.was_soft_demoted,
@@ -254,9 +256,16 @@ class ThunderAgentRouterHandler:
             routing["priority_jump"] = float(existing) + decision.priority_jump
             preprocessed["routing"] = routing
 
-        if worker_pin is not None:
+        if worker_pin is not None and (
+            worker_dp_rank is not None or self._pin_needs_no_rank(worker_pin)
+        ):
             routing = preprocessed.get("routing") or {}
             routing["backend_instance_id"] = worker_pin
+            # RoutingHints reads (backend_instance_id, dp_rank) together.
+            # Include rank when known; omit only for single-rank workers where
+            # the router can resolve it via unique_dp_rank_for_worker.
+            if worker_dp_rank is not None:
+                routing["dp_rank"] = worker_dp_rank
             preprocessed["routing"] = routing
 
         prompt_tokens_seen = 0
@@ -283,20 +292,15 @@ class ThunderAgentRouterHandler:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if first_chunk and worker_pin is None:
+                # Observation only: the replica is decided at admission, never
+                # back-filled from the response. Recorded so pin adherence is auditable.
+                if first_chunk:
                     first_chunk = False
                     selected_worker = self._extract_worker_id(chunk)
                     if selected_worker is not None:
-                        await self._scheduler.assign_worker(program_id, selected_worker)
                         selected_worker_id = selected_worker
                         if proof is not None:
                             proof["selected_worker_id"] = selected_worker
-                        logger.debug(
-                            "thunderagent.route_selected program=%s worker=%s "
-                            "source=first_chunk",
-                            program_id,
-                            selected_worker,
-                        )
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
@@ -408,6 +412,20 @@ class ThunderAgentRouterHandler:
                 return worker_id
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")
         return None
+
+    def _pin_needs_no_rank(self, worker_id: int) -> bool:
+        """Return True if *worker_id* can be pinned by id alone (no explicit rank).
+
+        Only single-rank workers qualify: the router's
+        ``unique_dp_rank_for_worker`` fills in the rank when
+        ``data_parallel_size == 1``, and raises otherwise. Unknown cases
+        (subscriber not yet up, card missing, older engine without the field)
+        return False so an unexpressible pin degrades to KV-overlap routing
+        rather than an error.
+        """
+        if self._capacity is None:
+            return False
+        return self._capacity.dp_size_for_worker(worker_id) == 1
 
     def _warn_unexpected_chunk_shape(self, reason: str) -> None:
         if self._worker_id_extract_warned:
