@@ -28,20 +28,7 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 
 ## Who Owns What
 
-<CardGroup cols={2}>
-  <Card title="RL framework" icon="regular terminal">
-    Owns training, rewards, environments, retries, policy freshness, checkpoints, and sample acceptance.
-  </Card>
-  <Card title="Dynamo" icon="regular sliders">
-    Owns the shared frontend, request routing, worker management, serving health, and telemetry.
-  </Card>
-  <Card title="Inference backend" icon="regular microchip">
-    Generates tokens and log probabilities, publishes worker state, and applies backend-specific weight updates.
-  </Card>
-  <Card title="Policy refresh" icon="regular database">
-    The framework selects and gates the policy, Dynamo exposes serving controls and health, and the backend applies the update.
-  </Card>
-</CardGroup>
+![The RL framework owns training and policy decisions, Dynamo owns the rollout-serving plane, and the inference backend owns execution and backend-specific weight application.](./_assets/rl-serving-ownership.svg)
 
 > [!IMPORTANT]
 > Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
