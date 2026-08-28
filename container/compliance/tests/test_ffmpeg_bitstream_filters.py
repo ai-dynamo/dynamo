@@ -122,9 +122,8 @@ def configure_flags(tmp_path_factory) -> list[str]:
 
 
 def test_nvdec_reframing_bitstream_filters_are_built(configure_flags):
-    # Without these two the NVDEC path's av_bsf_get_by_name() returns NULL and
-    # hardware decode fails for every codec. Nothing else pulls them in: no
-    # enabled muxer depends on them under --disable-bsfs.
+    # Without these two, av_bsf_get_by_name() returns NULL on the NVDEC path
+    # and hardware decode fails for every codec.
     enabled = _enabled(configure_flags, "bsf")
     missing = [bsf for bsf in _REQUIRED_BSFS if bsf not in enabled]
     assert not missing, (
@@ -134,9 +133,8 @@ def test_nvdec_reframing_bitstream_filters_are_built(configure_flags):
 
 
 def test_bitstream_filter_baseline_stays_narrow(configure_flags):
-    # The two filters above are re-enabled on top of --disable-bsfs, not by
-    # dropping the baseline. Losing the baseline would ship ffmpeg's whole
-    # bitstream-filter set.
+    # The two filters are re-enabled on top of --disable-bsfs; dropping the
+    # baseline would ship ffmpeg's whole bitstream-filter set.
     assert "--disable-bsfs" in configure_flags
     assert "--enable-bsfs" not in configure_flags
 
