@@ -561,7 +561,12 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .unwrap();
     let failed_worker = failed_selection.worker;
     let failed_guard = router
-        .track_selection(&failed_request, &mut failed_selection, false)
+        .track_selection(
+            &failed_request,
+            &mut failed_selection,
+            RequestPhase::Aggregated,
+            false,
+        )
         .await
         .unwrap();
     let failure = Annotated {
@@ -597,7 +602,12 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .unwrap();
     assert_eq!(retry_selection.worker, failed_worker);
     let mut retry_guard = router
-        .track_selection(&retry_request, &mut retry_selection, false)
+        .track_selection(
+            &retry_request,
+            &mut retry_selection,
+            RequestPhase::Aggregated,
+            false,
+        )
         .await
         .expect("same-worker booking must be released before yielding the error");
     retry_guard.abort().await;
@@ -791,7 +801,7 @@ async fn admitted_request_stopped_before_dispatch(
         .await
         .unwrap();
     let guard = router
-        .track_selection(&request, &mut selection, false)
+        .track_selection(&request, &mut selection, phase, false)
         .await
         .unwrap();
 
@@ -803,41 +813,12 @@ async fn admitted_request_stopped_before_dispatch(
     (request, selection, guard)
 }
 
-/// DYN-4143: a disconnected decode client must still reach its worker, because
-/// only that worker releases the KV blocks remote prefill staged for it.
+/// Covers the `CancelWhenStopped` arm inside `dispatch_selection` itself. The
+/// `generate()`-level tests cancel earlier, at selection, so without this the
+/// arm could be replaced by a bare `dispatch.await` and stay green.
 #[tokio::test]
 #[serial_test::serial]
-async fn stopped_decode_request_is_still_delivered_to_the_worker() {
-    let (router, dispatch, worker_id, runtime) =
-        router_with_recorded_dispatch("kv-decode-dispatch-after-stop").await;
-    let (request, selection, guard) = admitted_request_stopped_before_dispatch(
-        &router,
-        "post-prefill-decode-cleanup",
-        RequestPhase::Decode,
-    )
-    .await;
-
-    let mut stream = router
-        .dispatch_selection(request, selection, guard, false)
-        .await
-        .expect("decode dispatch must survive an already-stopped context");
-    while stream.next().await.is_some() {}
-
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[worker_id],
-        "the decode worker must receive the request so it can run its KV-transfer cleanup"
-    );
-
-    drop(router);
-    runtime.shutdown();
-}
-
-/// The other half of DYN-4143: every phase except decode keeps cancelling before
-/// dispatch, so a disconnected aggregated client never reaches a worker at all.
-#[tokio::test]
-#[serial_test::serial]
-async fn stopped_aggregated_request_is_cancelled_before_dispatch() {
+async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     let (router, dispatch, _worker_id, runtime) =
         router_with_recorded_dispatch("kv-aggregated-dispatch-after-stop").await;
     let (request, selection, guard) = admitted_request_stopped_before_dispatch(
@@ -875,7 +856,12 @@ async fn track_request(
         .await
         .unwrap();
     let guard = router
-        .track_selection(&request, &mut selection, is_query_only)
+        .track_selection(
+            &request,
+            &mut selection,
+            RequestPhase::Aggregated,
+            is_query_only,
+        )
         .await
         .unwrap();
     (request, selection, guard)
@@ -935,7 +921,12 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         .unwrap();
     let failed_worker = failed_selection.worker.worker_id;
     let failed_dispatch_guard = router
-        .track_selection(&failed_request, &mut failed_selection, false)
+        .track_selection(
+            &failed_request,
+            &mut failed_selection,
+            RequestPhase::Aggregated,
+            false,
+        )
         .await
         .unwrap();
     assert!(
@@ -1553,4 +1544,207 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         "all scheduler bookings must be released after migration: {loads:?}"
     );
     runtime.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// DYN-4143 — a client that disconnects while remote prefill is still running.
+//
+// These enter through `RoutingHost::generate`, the real entry point, with the
+// context already stopped on entry. That is the production sequence: the prefill
+// router deliberately continues to the decode leg on a killed context
+// (`prefill_router/mod.rs`, NVBugs 5969206) so the decode worker can release the
+// KV blocks prefill staged for it.
+//
+// The dispatch mock must yield before recording (see `PendingThenCompletedDispatch`).
+// A mock that is ready on its first poll wins `cancel_on_stop`'s biased race for
+// every phase and is green even on an unfixed build.
+// ---------------------------------------------------------------------------
+
+/// Build a builtin-plane routing host (round-robin, random, occupancy, direct)
+/// whose dispatch plane records the workers it was asked to serve.
+async fn builtin_host_with_recorded_dispatch(
+    namespace: &str,
+    mode: RouterMode,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace(namespace.to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(PendingThenCompletedDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        mode,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+    (host, dispatch, worker_id, runtime)
+}
+
+/// A request in `phase` whose client has already gone away, ready to be handed
+/// to `generate()` exactly as the prefill router hands over the decode leg.
+async fn stopped_request_in_phase(
+    phase: RequestPhase,
+    context_id: &str,
+    target: Option<u64>,
+) -> SingleIn<PreprocessedRequest> {
+    let tracker = Arc::new(RequestTracker::new());
+    drop(tracker.set_phase(phase).await);
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    if let Some(worker_id) = target {
+        input.routing_mut().backend_instance_id = Some(worker_id);
+    }
+    let request = Context::with_id_and_metadata(input, context_id.to_string(), Default::default());
+    request.context().stop();
+    assert!(request.context().is_stopped());
+    request
+}
+
+/// DYN-4143 on the builtin plane, which is what the failing vLLM cancellation
+/// test uses (`tests/fault_tolerance/cancellation/utils.py` sets
+/// `router_mode="round-robin"`). Covers all four dispatch arms of
+/// `select_and_dispatch_builtin`.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_path() {
+    // (label, mode, pin the worker explicitly?)
+    let cases: [(&str, RouterMode, bool); 4] = [
+        ("round-robin", RouterMode::RoundRobin, false),
+        ("least-loaded", RouterMode::LeastLoaded, false),
+        ("explicit-target", RouterMode::RoundRobin, true),
+        ("direct", RouterMode::Direct, true),
+    ];
+
+    for (index, (label, mode, pin_worker)) in cases.into_iter().enumerate() {
+        let (host, dispatch, worker_id, runtime) = builtin_host_with_recorded_dispatch(
+            &format!("builtin-decode-after-stop-{index}"),
+            mode,
+        )
+        .await;
+        let request = stopped_request_in_phase(
+            RequestPhase::Decode,
+            &format!("post-prefill-decode-cleanup-{label}"),
+            pin_worker.then_some(worker_id),
+        )
+        .await;
+
+        let mut stream = host.generate(request).await.unwrap_or_else(|error| {
+            panic!("{label}: decode dispatch must survive a stopped context: {error:#}")
+        });
+        while stream.next().await.is_some() {}
+
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[worker_id],
+            "{label}: the decode worker must receive the request exactly once so it can run its KV-transfer cleanup"
+        );
+
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+/// The carve-out must stay narrow: on the builtin plane every phase except
+/// decode still cancels before any worker is contacted.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_stopped_prefill_and_aggregated_requests_never_reach_a_worker() {
+    for (index, phase) in [RequestPhase::Prefill, RequestPhase::Aggregated]
+        .into_iter()
+        .enumerate()
+    {
+        let (host, dispatch, _worker_id, runtime) = builtin_host_with_recorded_dispatch(
+            &format!("builtin-non-decode-after-stop-{index}"),
+            RouterMode::RoundRobin,
+        )
+        .await;
+        let request =
+            stopped_request_in_phase(phase, &format!("builtin-cancelled-{phase}"), None).await;
+
+        let error = host
+            .generate(request)
+            .await
+            .expect_err("a stopped non-decode request must be cancelled before dispatch");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]),
+            "{phase}: expected a cancellation error, got {error:#}"
+        );
+        assert!(
+            dispatch.worker_ids.lock().unwrap().is_empty(),
+            "{phase}: no worker should have been asked to serve a cancelled request"
+        );
+
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+/// The same guarantee on the KV plane, entered through `generate()`. This walks
+/// worker selection, routing-decision recording, and dispatch in turn — the
+/// stages a stopped decode context has to survive in production.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_stopped_decode_request_reaches_the_worker_through_generate() {
+    let (router, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("kv-decode-generate-after-stop").await;
+    let request =
+        stopped_request_in_phase(RequestPhase::Decode, "kv-post-prefill-decode-cleanup", None)
+            .await;
+
+    let mut stream = router
+        .generate(request)
+        .await
+        .expect("kv decode dispatch must survive an already-stopped context");
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id],
+        "the decode worker must receive the request so it can run its KV-transfer cleanup"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// KV-plane negative control. Cancellation here happens at worker selection,
+/// which is a different stage from the builtin plane's dispatch-time check.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_stopped_prefill_and_aggregated_requests_never_reach_a_worker() {
+    for (index, phase) in [RequestPhase::Prefill, RequestPhase::Aggregated]
+        .into_iter()
+        .enumerate()
+    {
+        let (router, dispatch, _worker_id, runtime) =
+            router_with_recorded_dispatch(&format!("kv-non-decode-after-stop-{index}")).await;
+        let request = stopped_request_in_phase(phase, &format!("kv-cancelled-{phase}"), None).await;
+
+        let error = router
+            .generate(request)
+            .await
+            .expect_err("a stopped non-decode request must be cancelled before dispatch");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]),
+            "{phase}: expected a cancellation error, got {error:#}"
+        );
+        assert!(
+            dispatch.worker_ids.lock().unwrap().is_empty(),
+            "{phase}: no worker should have been asked to serve a cancelled request"
+        );
+
+        drop(router);
+        runtime.shutdown();
+    }
 }

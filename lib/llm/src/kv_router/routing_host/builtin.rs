@@ -336,8 +336,9 @@ where
         guard.record_prefill_start();
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
-            cancel_on_stop(
+            await_with_phase_policy(
                 request_context.as_ref(),
+                phase,
                 self.inner.direct_within_prepared(
                     request,
                     target.worker_id,
@@ -366,16 +367,18 @@ where
                     return Err(error);
                 }
             };
-            cancel_on_stop(
+            await_with_phase_policy(
                 request_context.as_ref(),
+                phase,
                 self.inner.dispatch_exact(request, target.worker_id),
             )
             .await
             .and_then(|result| result)
             .map(|stream| (metadata, target, selected_occupancy, stream))
         } else if uses_occupancy {
-            cancel_on_stop(
+            await_with_phase_policy(
                 request_context.as_ref(),
+                phase,
                 self.inner.dispatch_preselected_prepared(
                     request,
                     initial_worker,
@@ -391,8 +394,9 @@ where
             .and_then(|result| result)
             .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         } else {
-            cancel_on_stop(
+            await_with_phase_policy(
                 request_context.as_ref(),
+                phase,
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,

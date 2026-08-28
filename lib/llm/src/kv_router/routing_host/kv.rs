@@ -3,25 +3,6 @@
 
 use super::*;
 
-/// Whether a disconnected client's request still reaches its worker. Decode must
-/// dispatch: only that worker frees the KV blocks remote prefill staged for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DispatchCancellation {
-    /// Skip the dispatch when the context is already stopped.
-    CancelWhenStopped,
-    /// Issue the dispatch even when the context is already stopped.
-    DispatchWhenStopped,
-}
-
-impl DispatchCancellation {
-    fn for_phase(phase: RequestPhase) -> Self {
-        match phase {
-            RequestPhase::Decode => Self::DispatchWhenStopped,
-            RequestPhase::Prefill | RequestPhase::Aggregated => Self::CancelWhenStopped,
-        }
-    }
-}
-
 impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -56,7 +37,7 @@ where
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        cancel_on_stop(request_context.as_ref(), selection_future).await?
+        await_with_phase_policy(request_context.as_ref(), phase, selection_future).await?
     }
 
     pub(super) async fn select_with_affinity(
@@ -75,6 +56,7 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<RequestGuard<Sel>, Error> {
         let context_id = request.context().id().to_string();
@@ -122,14 +104,16 @@ where
                     }
                 };
                 let record_result = if guard.has_approximate_lru() {
-                    cancel_on_stop(
+                    await_with_phase_policy(
                         request_context.as_ref(),
+                        phase,
                         guard.acquire_approximate_lru(hashes),
                     )
                     .await?
                 } else {
-                    cancel_on_stop(
+                    await_with_phase_policy(
                         request_context.as_ref(),
+                        phase,
                         chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
@@ -233,13 +217,9 @@ where
             overlap_blocks = selection.overlap_amount,
             phase = ?phase,
         ));
-        let dispatch_result = match DispatchCancellation::for_phase(phase) {
-            DispatchCancellation::CancelWhenStopped => {
-                cancel_on_stop(request_context.as_ref(), dispatch).await
-            }
-            DispatchCancellation::DispatchWhenStopped => Ok(dispatch.await),
-        }
-        .and_then(|result| result);
+        let dispatch_result = await_with_phase_policy(request_context.as_ref(), phase, dispatch)
+            .await
+            .and_then(|result| result);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
@@ -304,7 +284,7 @@ where
             .select_with_affinity(&request, phase, is_query_only)
             .await?;
         let mut guard = match self
-            .track_selection(&request, &mut selection, is_query_only)
+            .track_selection(&request, &mut selection, phase, is_query_only)
             .await
         {
             Ok(guard) => guard,

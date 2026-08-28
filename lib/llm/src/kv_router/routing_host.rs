@@ -51,7 +51,7 @@ mod occupancy;
 mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
-use cancellation::cancel_on_stop;
+use cancellation::await_with_phase_policy;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 use request_guard::{LoraLoadGuard, RequestGuard};
@@ -585,7 +585,10 @@ where
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = match self.track_selection(&request, &mut selection, false).await {
+        let guard = match self
+            .track_selection(&request, &mut selection, phase, false)
+            .await
+        {
             Ok(guard) => guard,
             Err(error) => {
                 invalidate_on_non_cancellation(&mut operation, &error);
