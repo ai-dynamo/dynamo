@@ -1836,6 +1836,59 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
+func TestAddTransportTLSEnvVars(t *testing.T) {
+	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
+	tlsCases := []struct {
+		env  string
+		set  func(c *configv1alpha1.InfrastructureConfiguration)
+		want string
+	}{
+		{"NATS_TLS_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.NATSTLSCAPath = "/etc/certs/nats-ca.pem" }, "/etc/certs/nats-ca.pem"},
+		{"NATS_TLS_CLIENT_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.NATSTLSClientCertPath = "/etc/certs/nats-client.pem"
+		}, "/etc/certs/nats-client.pem"},
+		{"NATS_TLS_CLIENT_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.NATSTLSClientKeyPath = "/etc/certs/nats-client-key.pem"
+		}, "/etc/certs/nats-client-key.pem"},
+		{"DYN_TCP_TLS_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSCertPath = "/etc/certs/server.pem" }, "/etc/certs/server.pem"},
+		{"DYN_TCP_TLS_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSKeyPath = "/etc/certs/server-key.pem" }, "/etc/certs/server-key.pem"},
+		{"DYN_TCP_TLS_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSCAPath = "/etc/certs/ca.pem" }, "/etc/certs/ca.pem"},
+		{"DYN_TCP_TLS_CLIENT_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSClientCertPath = "/etc/certs/client.pem" }, "/etc/certs/client.pem"},
+		{"DYN_TCP_TLS_CLIENT_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.TCPTLSClientKeyPath = "/etc/certs/client-key.pem"
+		}, "/etc/certs/client-key.pem"},
+		{"DYN_TCP_TLS_CLIENT_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSClientCAPath = "/etc/certs/client-ca.pem" }, "/etc/certs/client-ca.pem"},
+		{"DYN_TCP_TLS_SERVER_NAME", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.TCPTLSServerName = "dynamo-worker.dynamo-system.svc.cluster.local"
+		}, "dynamo-worker.dynamo-system.svc.cluster.local"},
+	}
+	for _, tc := range tlsCases {
+		t.Run(tc.env, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
+			}
+			tc.set(&operatorConfig.Infrastructure)
+			AddTransportTLSEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+			assert.Equal(t, tc.want, envByName[tc.env])
+		})
+	}
+
+	t.Log("An empty Infrastructure injects none of the TLS env vars.")
+	t.Run("empty config omits all TLS env vars", func(t *testing.T) {
+		container := &corev1.Container{}
+		operatorConfig := &configv1alpha1.OperatorConfiguration{
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
+		}
+		AddTransportTLSEnvVars(container, operatorConfig)
+		envByName := envVarsToMap(container.Env)
+		for _, tc := range tlsCases {
+			assert.NotContains(t, envByName, tc.env)
+		}
+	})
+}
+
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
