@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any, cast
 
 import pytest
@@ -57,21 +57,12 @@ class _Client:
 class _Endpoint:
     def __init__(self) -> None:
         self.handler: Callable[..., AsyncIterator[Any]] | None = None
-        self.options: dict[str, Any] = {}
 
     async def serve_endpoint(
         self,
         handler: Callable[..., AsyncIterator[Any]],
-        graceful_shutdown: bool = True,
-        metrics_labels: list[tuple[str, str]] | None = None,
-        health_check_payload: dict[str, Any] | None = None,
     ) -> None:
         self.handler = handler
-        self.options = {
-            "graceful_shutdown": graceful_shutdown,
-            "metrics_labels": metrics_labels,
-            "health_check_payload": health_check_payload,
-        }
 
 
 async def _invoke_served(
@@ -123,7 +114,7 @@ async def test_unary_client_propagates_stream_failure(error: BaseException) -> N
     assert stream.closed
 
 
-async def test_serve_unary_endpoint_adapts_context_and_options() -> None:
+async def test_serve_unary_endpoint_propagates_context() -> None:
     endpoint = _Endpoint()
     seen: list[tuple[Any, Any]] = []
 
@@ -131,57 +122,23 @@ async def test_serve_unary_endpoint_adapts_context_and_options() -> None:
         seen.append((request, context))
         return {"result": request["value"]}
 
-    await serve_unary_endpoint(
-        endpoint,
-        handler,
-        graceful_shutdown=False,
-        metrics_labels=[("kind", "unary")],
-        health_check_payload={"value": "health"},
-    )
+    await serve_unary_endpoint(endpoint, handler)
     context = object()
 
     assert await _invoke_served(endpoint, {"value": 7}, context=context) == [
         {"result": 7}
     ]
     assert seen == [({"value": 7}, context)]
-    assert endpoint.options == {
-        "graceful_shutdown": False,
-        "metrics_labels": [("kind", "unary")],
-        "health_check_payload": {"value": "health"},
-    }
-
-
-async def test_serve_unary_endpoint_preserves_handler_without_context() -> None:
-    endpoint = _Endpoint()
-
-    async def handler(request: Any) -> Any:
-        return request
-
-    await serve_unary_endpoint(endpoint, handler)
-
-    assert await _invoke_served(endpoint, "value", context=object()) == ["value"]
 
 
 async def test_serve_unary_endpoint_propagates_handler_failure() -> None:
     endpoint = _Endpoint()
 
-    async def handler(request: Any) -> Any:
-        del request
+    async def handler(request: Any, *, context: Any) -> Any:
+        del request, context
         raise ValueError("handler failed")
 
     await serve_unary_endpoint(endpoint, handler)
 
     with pytest.raises(ValueError, match="handler failed"):
-        await _invoke_served(endpoint, {})
-
-
-async def test_serve_unary_endpoint_rejects_non_awaitable_handler() -> None:
-    endpoint = _Endpoint()
-
-    def handler(request: Any) -> Any:
-        return request
-
-    await serve_unary_endpoint(endpoint, cast(Callable[..., Awaitable[Any]], handler))
-
-    with pytest.raises(TypeError, match="must return an awaitable"):
         await _invoke_served(endpoint, {})

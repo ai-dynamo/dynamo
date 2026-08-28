@@ -5,8 +5,7 @@
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -28,14 +27,13 @@ class _Endpoint(Protocol):
     async def serve_endpoint(
         self,
         handler: Callable[..., AsyncIterator[Any]],
-        graceful_shutdown: bool = True,
-        metrics_labels: list[tuple[str, str]] | None = None,
-        health_check_payload: dict[str, Any] | None = None,
     ) -> None:
         ...
 
 
-UnaryHandler = Callable[..., Awaitable[Any]]
+class _UnaryHandler(Protocol):
+    async def __call__(self, request: Any, *, context: Context) -> Any:
+        ...
 
 
 class UnaryClient:
@@ -45,7 +43,7 @@ class UnaryClient:
         self._client = client
 
     async def complete(self, request: Any, *, context: Context | None = None) -> Any:
-        """Invoke the endpoint and return its sole unannotated response."""
+        """Return one response, linking the call to ``context`` when provided."""
 
         stream = await self._client.round_robin(
             request,
@@ -57,46 +55,18 @@ class UnaryClient:
 
 async def serve_unary_endpoint(
     endpoint: _Endpoint,
-    handler: UnaryHandler,
-    *,
-    graceful_shutdown: bool = True,
-    metrics_labels: list[tuple[str, str]] | None = None,
-    health_check_payload: dict[str, Any] | None = None,
+    handler: _UnaryHandler,
 ) -> None:
-    """Serve an async unary handler through Dynamo's streaming endpoint ABI."""
-
-    has_context = _accepts_context(handler)
+    """Serve a unary handler that accepts Dynamo's per-request ``context``."""
 
     async def generate(
         request: Any,
         *,
-        context: Context | None = None,
+        context: Context,
     ) -> AsyncIterator[Any]:
-        result = handler(request, context=context) if has_context else handler(request)
-        if not inspect.isawaitable(result):
-            raise TypeError("unary endpoint handler must return an awaitable")
-        yield await result
+        yield await handler(request, context=context)
 
-    await endpoint.serve_endpoint(
-        generate,
-        graceful_shutdown=graceful_shutdown,
-        metrics_labels=metrics_labels,
-        health_check_payload=health_check_payload,
-    )
-
-
-def _accepts_context(handler: UnaryHandler) -> bool:
-    parameters = inspect.signature(handler).parameters
-    context = parameters.get("context")
-    if context is not None and context.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    ):
-        return True
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
+    await endpoint.serve_endpoint(generate)
 
 
 async def _collect_one(stream: AsyncIterator[Any]) -> Any:
