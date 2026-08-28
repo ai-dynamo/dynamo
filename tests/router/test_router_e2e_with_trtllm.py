@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Timing notes (measured in a TRT-LLM-enabled container):
-# - GPU-1 subset (`-m "gpu_1"`): 136.36s total for 3 tests.
+# Timing notes (measured in H100 parallel CI):
+# - Two-worker GPU-1 router cases took up to 157s, including process teardown.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
@@ -307,7 +307,7 @@ def test_router_decisions_trtllm_attention_dp(
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.timeout(480)  # 3x observed 157s H100 runtime incl. teardown
 def test_router_decisions_trtllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -368,7 +368,7 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.timeout(480)  # 3x observed 157s H100 runtime incl. teardown
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_trtllm_indexers_sync(
