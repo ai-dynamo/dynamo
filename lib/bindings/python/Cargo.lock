@@ -2211,6 +2211,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
