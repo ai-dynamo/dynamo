@@ -6,7 +6,7 @@ name: AWS GB300 runner smoke test
 on:
   push:
     branches:
-      - "aws-gb300-runner-smoketest"
+      - "pull-request/[0-9]+"
 
 permissions:
   contents: read
