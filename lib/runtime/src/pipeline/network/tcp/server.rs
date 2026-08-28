@@ -59,11 +59,10 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
-    /// IP literal or exact network interface name used to bind and advertise the server.
-    /// When unset, Dynamo selects a local address automatically.
-    #[builder(default)]
     /// IP literal, bracketed IPv6 literal, wildcard, or network interface name.
+    /// When unset, Dynamo selects a local address automatically.
     /// The field name is retained for source compatibility.
+    #[builder(default)]
     pub interface: Option<String>,
 }
 
@@ -1622,7 +1621,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_ip_literals_bind_and_format_addresses() {
-        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+        let ipv6_available = std::net::TcpListener::bind("[::1]:0").is_ok();
 
         for (host, expected_ip) in [
             ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
@@ -1638,7 +1637,7 @@ mod tests {
                     port: 0,
                     interface: Some(host.to_string()),
                 },
-                FailingIpResolver,
+                StubResolver::not_found(),
             )
             .await
             .unwrap();
@@ -1657,6 +1656,7 @@ mod tests {
             let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
             let address = tcp_info.address.parse::<SocketAddr>().unwrap();
 
+            assert_eq!(address, server.local_address().unwrap());
             assert_eq!(address.ip(), expected_ip);
             assert_ne!(address.port(), 0);
             if expected_ip.is_ipv6() {

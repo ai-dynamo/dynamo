@@ -138,17 +138,20 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 
   A wildcard advertises a reachable address in its requested family. If only the other family has a
   usable non-loopback address, Dynamo switches the bind wildcard to that family. IPv4 link-local
-  addresses are accepted. Unspecified, multicast, broadcast, and unscoped IPv6 link-local
-  advertisement addresses are rejected.
+  addresses are accepted. Multicast, broadcast, and IPv6 link-local addresses are rejected.
+  Wildcards are accepted as bind addresses and are never advertised.
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected">
   Host for the TCP response-stream server. It accepts the same values and uses the same address
-  selection and wildcard-family rules as `DYN_TCP_RPC_HOST`.
+  selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. The QUIC response listener uses the
+  selected concrete address.
 </ParamField>
 
-Automatic local-address selection caches only successful non-loopback results. Dynamo retries after
-interface-enumeration errors and loopback fallbacks.
+Automatic selection for advertised URLs caches only successful non-loopback results and resolves
+again after interface-enumeration errors and loopback fallbacks. The TCP request-plane and
+response-stream servers resolve once at startup. A loopback fallback persists until restart, and an
+interface-enumeration error fails server startup.
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
   Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
@@ -167,9 +170,9 @@ interface-enumeration errors and loopback fallbacks.
 
 <ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local address">
   IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
-  If an interface name occurs more than once in the operating system's interface list, Dynamo uses
-  the last address. Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
-  such as `0.0.0.0` and `::` are invalid.
+  For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
+  whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
+  invalid. When unset, automatic advertisement stays in the IPv4 bind family.
 
   This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
   an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
