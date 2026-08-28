@@ -38,7 +38,7 @@ spec:
   {{- end }}
   podMetricsEndpoints:
   - interval: 5s
-    path: /metrics
+    path: {{ .Values.dynamo.metrics.podMonitors.frontendPath | default "/metrics" }}
     port: http
     # honorLabels ensures dynamo_namespace and other labels set by the dynamo
     # runtime (including router metrics embedded in the frontend) are preserved.
@@ -109,7 +109,7 @@ spec:
   # container port "http" (8000). Pods without that named port are dropped by
   # the Prometheus Operator keep rule, so plain workers are unaffected.
   - interval: 5s
-    path: /metrics
+    path: {{ .Values.dynamo.metrics.podMonitors.frontendPath | default "/metrics" }}
     port: http
     honorLabels: true
     relabelings:

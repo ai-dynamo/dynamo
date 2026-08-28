@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo v1.4.0
-subtitle: Release notes for Dynamo v1.4.0 (GA Aug 14, 2026)
+subtitle: Release notes for Dynamo v1.4.0 (GA Aug 14, 2026), including patch release v1.4.1
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
@@ -464,3 +464,38 @@ Dynamo v1.4.0 includes contributions from 127 developers, 29 of whom made their 
 If you would like to get involved, please see our [Contribution Guide](../../../community/contributing/overview.md).
 
 </Accordion>
+
+## Patch releases
+
+<a id="v141"></a>
+
+### v1.4.1 — Aug 21, 2026
+
+#### Summary
+
+Dynamo v1.4.1 is a patch release on top of v1.4.0. It adds the **classify and pooling endpoints**, forwards `logprob_token_ids` through the OpenAI frontend, and aligns the Go toolchain and its transitive dependencies across all three Go modules. Backend runtime versions are unchanged from v1.4.0.
+
+**Base Branch**: `release/1.4.1`
+
+#### Features
+
+- **Classify and pooling endpoints:** Added the classify and pooling stack, exposing a new classification endpoint through the frontend ([#12140](https://github.com/ai-dynamo/dynamo/pull/12140), [#12139](https://github.com/ai-dynamo/dynamo/pull/12139), [#12142](https://github.com/ai-dynamo/dynamo/pull/12142), [#12141](https://github.com/ai-dynamo/dynamo/pull/12141)).
+
+#### Bug Fixes
+
+- **logprob_token_ids forwarding:** The OpenAI frontend now forwards `logprob_token_ids` through to the client ([#12277](https://github.com/ai-dynamo/dynamo/pull/12277)).
+- **Router overload marks:** Reconciled request-path overload marks so the Router no longer diverges from the worker's own view of saturation ([#12540](https://github.com/ai-dynamo/dynamo/pull/12540)).
+- **NIXL writable buffers (vLLM):** Fixed use of a non-writable buffer for NIXL objects in the vLLM backend ([#13228](https://github.com/ai-dynamo/dynamo/pull/13228)).
+- **Operator branch labels in CI:** Sanitized truncated operator branch labels ([#12994](https://github.com/ai-dynamo/dynamo/pull/12994)).
+
+#### Key Dependencies
+
+The following dependencies changed in this release:
+
+| Dependency | Version |
+| --- | --- |
+| Go toolchain (all three Go modules) | 1.26.6 |
+| golang.org/x/net | 0.56.0 |
+| google.golang.org/grpc | 1.82.1 |
+
+The Go alignment applies to the `inference-gateway/epp`, `operator` and `snapshot` modules ([#13274](https://github.com/ai-dynamo/dynamo/pull/13274)). Container base images, backend runtimes and Helm charts are unchanged from v1.4.0.

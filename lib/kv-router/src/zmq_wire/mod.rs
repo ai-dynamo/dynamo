@@ -25,13 +25,15 @@ mod types;
 
 pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+    normalize_mm_token_runs,
 };
 pub use extra_keys::{
-    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, mark_mm_hash_for_extra_key,
+    parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
 pub use types::{
-    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventSourceKind, KvTokenIds, Locality, RawKvEvent,
+    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
 };
 
 use filter::KvCacheEventMetadata;
@@ -69,8 +71,8 @@ pub enum ZmqEventFilterReason {
     IgnoredEvent,
     NonLocalLocality,
     UnknownMedium,
-    UnsupportedSourceKind,
-    UnknownSourceKind,
+    UnsupportedOwnership,
+    UnknownOwnership,
     AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
@@ -84,8 +86,8 @@ impl ZmqEventFilterReason {
             Self::IgnoredEvent => "ignored_event",
             Self::NonLocalLocality => "non_local_locality",
             Self::UnknownMedium => "unknown_medium",
-            Self::UnsupportedSourceKind => "unsupported_source_kind",
-            Self::UnknownSourceKind => "unknown_source_kind",
+            Self::UnsupportedOwnership => "unsupported_ownership",
+            Self::UnknownOwnership => "unknown_ownership",
             Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
@@ -133,25 +135,25 @@ impl ZmqEventNormalizer {
         raw: RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
-        match raw.source_kind() {
-            Ok(KvEventSourceKind::Framework) => {}
-            Ok(KvEventSourceKind::Kvcc) => {
-                return Err(ZmqEventFilterReason::UnsupportedSourceKind);
+        match raw.ownership() {
+            Ok(KvEventOwnership::Framework) => {}
+            Ok(KvEventOwnership::Kvcr) => {
+                return Err(ZmqEventFilterReason::UnsupportedOwnership);
             }
-            Err(_) => return Err(ZmqEventFilterReason::UnknownSourceKind),
+            Err(_) => return Err(ZmqEventFilterReason::UnknownOwnership),
         }
         self.preprocess_residency_with_reason(raw, worker)
     }
 
     /// Normalize a version-gated state-agent stream which may contain both
-    /// framework and vLLM-enriched KVCC transitions.
+    /// framework and vLLM-enriched KVCR transitions.
     pub fn preprocess_residency_with_reason(
         &mut self,
         mut raw: RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
-        if raw.source_kind().is_err() {
-            return Err(ZmqEventFilterReason::UnknownSourceKind);
+        if raw.ownership().is_err() {
+            return Err(ZmqEventFilterReason::UnknownOwnership);
         }
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);

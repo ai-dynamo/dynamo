@@ -15,18 +15,16 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::{
     identity::{CacheOwnerId, IndexerDomainId},
     indexer::KvStateProtocolVersion,
-    protocols::{WorkerId, WorkerWithDpRank},
+    protocols::{RouterHintSourceMetadata, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
     discovery::{
         Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventScope, EventSourceQuery,
     },
-    pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},
-    protocols::{EndpointId, maybe_error::MaybeError},
+    protocols::EndpointId,
     traits::DistributedRuntimeProvider,
 };
-use futures::StreamExt;
 use rand::TryRngCore;
 use tokio::{
     sync::{Mutex, oneshot},
@@ -36,12 +34,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
     KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateHostControlRequest, KvStateHostStatus, KvStateIngressProtocol,
+    KvStateHostAdvertisement, KvStateIngressProtocol,
 };
 
 const HOST_COMPONENT: &str = "kv_state_agent";
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
-const HOST_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct KvStateAttachmentDescriptor {
@@ -54,16 +51,15 @@ pub struct KvStateAttachmentDescriptor {
     pub raw_zmq_endpoint: String,
     pub raw_topic: String,
     pub image_token_id: Option<u32>,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 /// Process-scoped owner of every state-agent intent emitted by one backend worker.
 pub struct KvStateAttachmentOwner {
     component: dynamo_runtime::component::Component,
-    producer_instance: Instance,
     host: KvStateHostAdvertisement,
     intents: HashMap<u32, KvStateAttachmentIntent>,
     registrations: Arc<Mutex<Vec<DiscoveryInstance>>>,
-    addressed: Arc<AddressedPushRouter>,
     closed: AtomicBool,
 }
 
@@ -77,17 +73,14 @@ impl KvStateAttachmentOwner {
         let component = endpoint.component().clone();
         let host = discover_single_host(&component).await?;
         let producer_instance = producer_instance(&endpoint).await?;
-        let addressed = AddressedPushRouter::from_runtime_provider(&component).await?;
 
         let intents = materialize_intents(&host, &producer_instance, worker_id, descriptors)?;
 
         let owner = Arc::new(Self {
             component,
-            producer_instance,
             host,
             intents,
             registrations: Arc::new(Mutex::new(Vec::new())),
-            addressed,
             closed: AtomicBool::new(false),
         });
         register_transaction(owner.clone()).await?;
@@ -96,24 +89,6 @@ impl KvStateAttachmentOwner {
 
     pub fn managed_ranks(&self) -> impl Iterator<Item = u32> + '_ {
         self.intents.keys().copied()
-    }
-
-    pub async fn set_cache_readable(&self, global_dp_rank: u32, readable: bool) -> Result<()> {
-        if self.closed.load(Ordering::Acquire) {
-            anyhow::bail!("KV state attachment owner is closed");
-        }
-        let intent = self
-            .intents
-            .get(&global_dp_rank)
-            .context("global DP rank is not managed by this attachment owner")?;
-        let request = KvStateHostControlRequest::SetCacheReadable {
-            cache_owner_id: intent.cache_owner_id,
-            producer_instance: Box::new(self.producer_instance.clone()),
-            intent_incarnation: intent.intent_incarnation,
-            readable,
-        };
-        self.query_host(request).await?;
-        Ok(())
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -135,29 +110,6 @@ impl KvStateAttachmentOwner {
         result
             .await
             .context("state-agent intent cleanup task terminated")
-    }
-
-    async fn query_host(&self, request: KvStateHostControlRequest) -> Result<KvStateHostStatus> {
-        let status = tokio::time::timeout(HOST_CONTROL_TIMEOUT, async {
-            let addressed = SingleIn::new(request).map(|request| {
-                AddressedRequest::for_instance(request, self.host.control_target.clone())
-            });
-            let mut responses: ManyOut<KvStateHostStatus> = self
-                .addressed
-                .generate(addressed)
-                .await
-                .context("failed to call KV state-agent host control endpoint")?;
-            responses
-                .next()
-                .await
-                .context("KV state-agent host returned no control response")
-        })
-        .await
-        .context("KV state-agent host control request timed out")??;
-        if let Some(error) = status.err() {
-            return Err(error).context("KV state-agent host rejected control request");
-        }
-        Ok(status)
     }
 }
 
@@ -192,6 +144,7 @@ fn materialize_intents(
                 raw_zmq_endpoint: descriptor.raw_zmq_endpoint,
                 raw_topic: descriptor.raw_topic,
                 image_token_id: descriptor.image_token_id,
+                router_hint_source: descriptor.router_hint_source,
             },
         );
     }
@@ -559,6 +512,7 @@ mod tests {
                     raw_zmq_endpoint: format!("tcp://producer.example:{}", 20_000 + rank),
                     raw_topic: String::new(),
                     image_token_id: None,
+                    router_hint_source: None,
                 }
             })
             .collect()

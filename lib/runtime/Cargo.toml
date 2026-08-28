@@ -51,6 +51,7 @@ fastrand = "2"
 futures = { workspace = true }
 fs4 = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }

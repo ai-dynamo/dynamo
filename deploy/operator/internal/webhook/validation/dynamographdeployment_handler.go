@@ -44,10 +44,12 @@ type DynamoGraphDeploymentHandler struct {
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-// mgr must not be nil.
-// operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
-// legacy workload-provider materialization and replica changes on scaling-adapter-enabled components (#7656).
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
+// mgr must not be nil. operatorPrincipal is the full Kubernetes SA username
+// used to authorize operator-owned updates.
+func NewDynamoGraphDeploymentHandler(
+	mgr manager.Manager,
+	operatorPrincipal string,
+) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
 		operatorPrincipal: operatorPrincipal,
@@ -66,11 +68,15 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj *
 
 	// Create validator with manager for API group detection and perform validation
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
-	return validator.Validate(
+	warnings, err := validator.Validate(
 		ctx,
 		obj,
 		runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
 	)
+	if err != nil {
+		return warnings, err
+	}
+	return warnings, nil
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -127,7 +133,6 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 		logger.Info("validation failed", "error", err.Error(), "user", username)
 		return updateWarnings, err
 	}
-
 	// Combine warnings
 	warnings = append(warnings, updateWarnings...)
 	return warnings, nil

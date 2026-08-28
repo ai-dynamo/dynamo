@@ -17,6 +17,7 @@ import types
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
+from _thinking_parity import RESOLVED_DISABLED, RESOLVED_ENABLED, THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -1094,17 +1095,9 @@ class _CapturingReasoningParser:
         self.force_reasoning = force_reasoning
 
 
-@pytest.mark.parametrize(
-    "request_update",
-    [
-        {"thinking": False},
-        {"thinking": {"type": "disabled"}},
-        {"reasoning_effort": "none"},
-    ],
-)
-def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(
-    request_update, monkeypatch
-):
+def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(monkeypatch):
+    """`thinking:false`, `{"type":"disabled"}` and `reasoning_effort:none` all
+    arrive here as the same resolved kwargs, so one case covers them."""
     monkeypatch.setattr(
         sglang_prepost_module,
         "ReasoningParser",
@@ -1114,8 +1107,8 @@ def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
+        "chat_template_args": RESOLVED_DISABLED,
     }
-    request.update(request_update)
 
     class CapturingTokenizer:
         chat_template = "template"
@@ -2417,7 +2410,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "deepseek-ai/DeepSeek-V4-Pro",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"},
+            "chat_template_args": {**RESOLVED_ENABLED, "reasoning_effort": "max"},
             "reasoning_effort": "max",
         }
 
@@ -2447,7 +2440,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "generic-model",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"},
+            "chat_template_args": RESOLVED_ENABLED,
         }
 
         result = preprocess_chat_request(
@@ -2466,16 +2459,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["thinking_mode"] == "enabled"
         assert "chat_template_kwargs" not in request
 
-    @pytest.mark.parametrize(
-        "request_update",
-        [
-            {"thinking": {"type": "disabled"}},
-            {"reasoning_effort": "none"},
-        ],
-    )
-    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(
-        self, request_update
-    ):
+    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(self):
         captured = {}
 
         class CapturingTokenizer:
@@ -2488,8 +2472,8 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_args": RESOLVED_DISABLED,
         }
-        request.update(request_update)
 
         result = preprocess_chat_request(
             request,
@@ -3252,6 +3236,319 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert finished is not None
         assert finished["delta"]["content"] == "\ufffd"
 
+    def test_final_stop_string_suffix_is_not_emitted(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"<|user|>"},
+        )
+
+        first = post.process_output(
+            {"token_ids": tokenizer.encode("Hello"), "finish_reason": None}
+        )
+        final = post.process_output(
+            {
+                "token_ids": tokenizer.encode("<|user|>"),
+                "finish_reason": "stop",
+                "stop_reason": "<|user|>",
+            }
+        )
+
+        assert first is not None
+        assert first["delta"]["content"] == "Hello"
+        assert final is not None
+        assert final["delta"] == {}
+        assert final["finish_reason"] == "stop"
+
+    def test_processor_passes_typed_stop_reason_to_postprocessor(self):
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(
+                items=[
+                    {
+                        "token_ids": list(b"AEND"),
+                        "finish_reason": "stop",
+                        "stop_reason": "END",
+                    }
+                ]
+            ),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-stop", {"model": "test-model"}, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
+        assert chunks[0]["choices"][0]["finish_reason"] == "stop"
+
+    def test_processor_finishes_locally_without_stopping_parent_context(self):
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": list(b"AEN"),
+                    "finish_reason": None,
+                    "log_probs": [-0.1, -0.2, -0.3],
+                },
+                {
+                    "token_ids": list(b"Dignored"),
+                    "finish_reason": None,
+                    "log_probs": [-0.4] * len(b"Dignored"),
+                },
+                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        class Context:
+            stopped = False
+
+            def stop_generating(self):
+                self.stopped = True
+
+        context = Context()
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-stop",
+                    {
+                        "model": "test-model",
+                        "stream_options": {"include_usage": True},
+                    },
+                    {},
+                    [1, 2],
+                    post,
+                    context,
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
+        assert chunks[0]["choices"][0]["finish_reason"] is None
+        assert [
+            entry["token"] for entry in chunks[0]["choices"][0]["logprobs"]["content"]
+        ] == ["A"]
+        assert "usage" not in chunks[0]
+        assert chunks[1]["choices"][0]["delta"] == {}
+        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[1]["choices"][0]["logprobs"] is None
+        assert chunks[1]["usage"] == {
+            "prompt_tokens": 2,
+            "completion_tokens": 11,
+            "total_tokens": 13,
+        }
+        assert not context.stopped
+        assert routed_engine.yielded == 2
+        assert routed_engine.stream_released
+        assert len(chunks) == 2
+
+    def test_logprob_shape_flush_finishes_without_stopping_parent_context(self):
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": list(b"A"), "finish_reason": None},
+                {"token_ids": list(b"END"), "finish_reason": None},
+                {
+                    "token_ids": list(b"x"),
+                    "finish_reason": None,
+                    "log_probs": [-0.1],
+                },
+                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        class Context:
+            stopped = False
+
+            def stop_generating(self):
+                self.stopped = True
+
+        context = Context()
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-stop",
+                    {
+                        "model": "test-model",
+                        "stream_options": {"include_usage": True},
+                    },
+                    {},
+                    [1, 2],
+                    post,
+                    context,
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
+        assert chunks[1]["choices"][0]["delta"] == {}
+        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[1]["usage"] == {
+            "prompt_tokens": 2,
+            "completion_tokens": 4,
+            "total_tokens": 6,
+        }
+        assert not context.stopped
+        assert routed_engine.yielded == 3
+        assert routed_engine.stream_released
+        assert len(chunks) == 2
+
+    def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"<|user|>"},
+        )
+
+        first = post.process_output(
+            {"token_ids": tokenizer.encode("Hello<|us"), "finish_reason": None}
+        )
+        final = post.process_output(
+            {
+                "token_ids": tokenizer.encode("er|>"),
+                "finish_reason": None,
+            }
+        )
+
+        assert first is not None
+        assert first["delta"]["content"] == "Hello"
+        assert final is not None
+        assert final["delta"] == {}
+        assert final["finish_reason"] == "stop"
+
+    def test_split_stop_string_logprobs_are_not_emitted(self):
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        first = post.process_output(
+            {
+                "token_ids": list(b"AEN"),
+                "finish_reason": None,
+                "log_probs": [-0.1, -0.2, -0.3],
+            }
+        )
+        final = post.process_output(
+            {
+                "token_ids": [ord("D")],
+                "finish_reason": None,
+                "log_probs": [-0.4],
+            }
+        )
+
+        assert first is not None
+        assert first["delta"]["content"] == "A"
+        assert [entry["token"] for entry in first["logprobs"]["content"]] == ["A"]
+        assert final is not None
+        assert final["delta"] == {}
+        assert final["finish_reason"] == "stop"
+        assert final["logprobs"] is None
+
+    def test_pending_stop_logprobs_are_flushed_without_match(self):
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        first = post.process_output(
+            {
+                "token_ids": list(b"AEN"),
+                "finish_reason": None,
+                "log_probs": [-0.1, -0.2, -0.3],
+            }
+        )
+        final = post.process_output(
+            {
+                "token_ids": [],
+                "finish_reason": "stop",
+            }
+        )
+
+        assert first is not None
+        assert first["delta"]["content"] == "A"
+        assert final is not None
+        assert final["delta"]["content"] == "EN"
+        assert [entry["token"] for entry in final["logprobs"]["content"]] == [
+            "E",
+            "N",
+        ]
+
+    def test_complete_stop_string_is_suppressed_before_backend_finish(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"\n\n"},
+        )
+
+        final = post.process_output(
+            {
+                "token_ids": tokenizer.encode("Hello\n\nignored"),
+                "finish_reason": None,
+            }
+        )
+
+        assert final is not None
+        assert final["delta"]["content"] == "Hello"
+        assert final["finish_reason"] == "stop"
+
     def test_empty_token_ids(self, tokenizer):
         """Empty token_ids with no finish_reason returns None."""
         post = SglangStreamingPostProcessor(
@@ -3787,3 +4084,26 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep SGLang's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, case):
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        assert result.request.get("chat_template_kwargs", {}) == case.expected

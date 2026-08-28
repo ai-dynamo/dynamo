@@ -1,23 +1,24 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: TCP TLS
-subtitle: Encrypt the TCP request and response streams between frontend and workers
+title: TLS
+subtitle: Encrypt the TCP request/response streams and NATS connections
 ---
 
-Dynamo supports opt-in TLS encryption on the TCP request and response streams
-between frontends and workers. When enabled, both the **request plane**
+Dynamo supports opt-in TLS encryption on the network transports between its
+components: the TCP request and response streams between frontends and workers,
+and connections to NATS. On the TCP transport, both the **request plane**
 (frontend → worker inference requests) and the **response stream** (worker →
 frontend inference output) are encrypted using
 [rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
-provider. When no TLS configuration is provided, these streams operate in
+provider. When no TLS configuration is provided, these transports operate in
 plaintext exactly as before.
 
-The same `DYN_TCP_TLS_*` environment variables apply to both transports — a
-single set of certificates encrypts the frontend↔worker TCP request and
-response streams. This does **not** cover the KV event plane, which is carried
-over ZMQ or NATS Core depending on setup and is a separate transport; those
-paths are not encrypted by this configuration.
+The `DYN_TCP_TLS_*` environment variables encrypt the frontend↔worker TCP
+request and response streams; NATS traffic is encrypted separately via NATS TLS
+(see the NATS TLS section below). The KV event plane is a separate transport:
+when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
+encrypted only if NATS TLS is configured.
 
 ## Environment variables
 
@@ -141,15 +142,107 @@ server and client depending on the stream direction.
 > allowing TLS to be configured once at the platform level and auto-injected
 > into all DGD pods without per-component env var setup.
 
+## NATS TLS
+
+NATS carries JetStream indexer recovery/replay, the audit sink, and — when the
+request plane is set to NATS (`--request-plane nats`) — inference request
+distribution. TLS is configured separately from TCP:
+
+| Variable | Description |
+|---|---|
+| `NATS_TLS_CA_CERT_PATH` | CA certificate to verify the NATS server. When set, a custom TLS config is applied. |
+| `NATS_TLS_INSECURE` | Skip NATS server certificate verification (dev only). |
+
+When only the `tls://` URL scheme is used without explicit TLS env vars,
+async-nats handles TLS natively with system roots.
+
+The `NATS_SERVER` URL accepts both `nats://` and `tls://` schemes, but setting
+any explicit NATS TLS variable (`NATS_TLS_*`) requires the `tls://` scheme —
+startup fails with a clear error otherwise.
+
+CLI flags (all backends via `DynamoRuntimeArgGroup`):
+
+```text
+--nats-tls-ca-cert-path PATH   CA certificate for NATS server verification (PEM)
+--nats-tls-insecure             Disable NATS certificate verification
+```
+
+The frontend (`dynamo.frontend`) also accepts `--nats-tls-ca-cert-path` and
+`--nats-tls-insecure`.
+
+## Mutual TLS (mTLS)
+
+By default only the server is authenticated (the client verifies the server's
+certificate). Mutual TLS additionally makes the **client present a certificate**
+that the **server verifies**, so both ends of a connection prove their identity.
+mTLS is opt-in and layered on top of the TLS configuration above.
+
+For the **TCP** transports (request plane + response stream) Dynamo owns both
+ends, so configure two things and — since every component is both TCP client and
+server — set both on every pod:
+
+- **On the client:** a client certificate/key to present.
+- **On the server:** a CA certificate (`DYN_TCP_TLS_CLIENT_CA_CERT_PATH`) to
+  verify the presented client certificate. When set, the server **requires** a
+  trusted client certificate and rejects the handshake otherwise.
+
+For **NATS** the broker is external, so Dynamo only presents a client identity —
+there is no Dynamo-side "server" half. Whether client certificates are actually
+required is enforced by the **NATS server** configuration (e.g.
+`tls { ca_file: ...; verify: true }`), not by Dynamo.
+
+### TCP request/response streams
+
+| Variable | Role | Description |
+|---|---|---|
+| `DYN_TCP_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the server. Set with `DYN_TCP_TLS_CLIENT_KEY_PATH`. |
+| `DYN_TCP_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the client certificate. |
+| `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` | Server | PEM CA used to verify client certificates. When set, clients **must** present a certificate signed by this CA. |
+
+### NATS
+
+| Variable | Role | Description |
+|---|---|---|
+| `NATS_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the NATS server. Set with `NATS_TLS_CLIENT_KEY_PATH`. |
+| `NATS_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the NATS client certificate. |
+
+> **Note:** Dynamo cannot detect whether the NATS broker actually requests a
+> client certificate. If you set `NATS_TLS_CLIENT_CERT_PATH`/`_KEY_PATH` but the
+> broker is not configured to verify client certs, the connection silently
+> falls back to ordinary one-way TLS. Enable verification on the NATS server
+> (`verify: true`) to make NATS mTLS effective.
+
+Client certificate and key must be set **together**, and a client identity
+requires a server CA (`*_CA_CERT_PATH`) — or insecure mode for development — so
+the server can still be verified. The TCP **servers** and the **NATS** client
+validate this at startup and fail closed. The TCP **client** connectors,
+however, initialize lazily on the first outbound connection, so an incomplete
+TCP client config surfaces as a per-connection handshake failure rather than a
+startup crash. The client certificate/key hot-reload from disk on rotation,
+exactly like the server certificate (see Design notes).
+
+The same options are available as CLI flags on all backends (via
+`DynamoRuntimeArgGroup`) and the frontend (`dynamo.frontend`):
+
+```text
+--tcp-tls-client-cert-path PATH      Client certificate presented for TCP mTLS (PEM)
+--tcp-tls-client-key-path PATH       Client private key for TCP mTLS (PEM)
+--tcp-tls-client-ca-cert-path PATH   CA to verify client certs; enforces TCP mTLS (PEM)
+--nats-tls-client-cert-path PATH     Client certificate presented for NATS mTLS (PEM)
+--nats-tls-client-key-path PATH      Client private key for NATS mTLS (PEM)
+```
+
 ## Encrypted paths
 
-When TLS is configured, the following frontend↔worker streams are encrypted:
+When TLS is configured, the following transports are encrypted (the ZMQ event
+plane is not covered):
 
 | Path | Direction | Data | Transport |
 |---|---|---|---|
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
+| NATS | Frontend/Worker ↔ NATS | Inference requests (when `--request-plane nats`), JetStream recovery, audit logs | `transports/nats` |
 
 ## Design notes
 
@@ -161,6 +254,10 @@ When TLS is configured, the following frontend↔worker streams are encrypted:
   once every 30s, sooner after a failed reload) and never blocks a handshake; a
   failed reload keeps serving the last valid certificate. Client trust anchors
   (the CA) are still loaded once, so rotating the CA itself requires a restart.
+- mTLS **client identity** certificates hot-reload through the same resolver, so
+  a rotated client cert/key is picked up without a restart. The CA used by the
+  server to verify client certificates is loaded once (rotating it needs a
+  restart).
 - Client TLS connectors are built once and cached via `OnceCell` on the first
   outbound connection.
 - The TLS handshake is spawned per-connection on both the request plane and

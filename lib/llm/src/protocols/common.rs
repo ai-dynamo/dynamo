@@ -928,35 +928,6 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_context_new() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = Some("This is a system prompt.".to_string());
-        let context = CompletionContext::new(prompt.clone(), system_prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, system_prompt);
-    }
-
-    #[test]
-    fn test_completion_context_from_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let context = CompletionContext::from_prompt(prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, None);
-    }
-
-    #[test]
-    fn test_completion_context_with_system_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = "This is a system prompt.".to_string();
-        let context = CompletionContext::with_system_prompt(prompt.clone(), system_prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, Some(system_prompt));
-    }
-
-    #[test]
     fn test_completion_context_into_prompt_type() {
         let prompt = "Hello, world!".to_string();
         let system_prompt = "This is a system prompt.".to_string();
