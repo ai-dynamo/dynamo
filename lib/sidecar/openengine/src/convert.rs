@@ -347,7 +347,7 @@ impl ResponseState {
                 let wire_usage = response
                     .usage
                     .ok_or_else(|| client::protocol_error("PrefillReady omitted terminal usage"))?;
-                let mut output = LLMEngineOutput::stop();
+                let mut output = LLMEngineOutput::length();
                 output.completion_usage = Some(usage(
                     wire_usage.prompt_tokens,
                     wire_usage.completion_tokens,
@@ -619,8 +619,44 @@ fn prost_value_to_json(value: &prost_types::Value) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{disagg_json_to_kv_session, json_to_prost_struct, kv_session_to_disagg_json};
+    use dynamo_backend_common::{DisaggregationMode, FinishReason};
+
+    use super::{
+        ResponseState, disagg_json_to_kv_session, json_to_prost_struct, kv_session_to_disagg_json,
+    };
     use crate::proto as pb;
+
+    #[test]
+    fn prefill_ready_is_a_decode_handoff_not_a_terminal_stop() {
+        let mut state = ResponseState::new(DisaggregationMode::Prefill, 5);
+        let output = state
+            .convert(
+                pb::GenerateResponse {
+                    request_id: "request-1".to_string(),
+                    event: Some(pb::generate_response::Event::PrefillReady(
+                        pb::PrefillReady {
+                            kv_session: Some(pb::KvSessionRef {
+                                session_id: "42".to_string(),
+                                transfer_backend: "tensorrt_llm".to_string(),
+                                ..Default::default()
+                            }),
+                        },
+                    )),
+                    usage: Some(pb::Usage {
+                        prompt_tokens: 5,
+                        completion_tokens: 0,
+                        total_tokens: 5,
+                        ..Default::default()
+                    }),
+                },
+                "request-1",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.finish_reason, Some(FinishReason::Length));
+        assert!(output.disaggregated_params.is_some());
+    }
 
     #[test]
     fn preserves_opaque_trtllm_kv_session_across_dynamo_handoff() {
