@@ -317,6 +317,7 @@ class VideoLoader:
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         decoder_error: MissingMediaDecoderError | None = None
+        value_error: ValueError | None = None
         for media_item, result in zip(video_mm_items, results):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -334,6 +335,8 @@ class VideoLoader:
                     result, MissingMediaDecoderError
                 ):
                     decoder_error = result
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             frames, metadata = result
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
@@ -348,6 +351,9 @@ class VideoLoader:
             # it, and a missing decoder is deployment configuration handlers
             # must be able to distinguish from a bad request.
             raise decoder_error
+
+        if value_error is not None:
+            raise value_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
