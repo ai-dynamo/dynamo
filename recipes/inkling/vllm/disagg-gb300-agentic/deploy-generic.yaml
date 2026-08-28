@@ -103,7 +103,6 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    runtimeVersionOverride: 1.5.0
     type: frontend
   - name: VllmPrefillWorker
     podTemplate:
@@ -241,7 +240,6 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    runtimeVersionOverride: 1.5.0
     # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
     # The operator default (8Gi) is too small for this context length.
     sharedMemorySize: 64Gi
@@ -378,6 +376,5 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     type: decode

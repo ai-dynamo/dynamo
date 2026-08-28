@@ -37,7 +37,6 @@ spec:
     - name: Frontend
       replicas: 1
       type: frontend
-      runtimeVersionOverride: "1.5.0"
       podTemplate:
         spec:
           containers:
@@ -82,7 +81,6 @@ spec:
     - name: VllmPrefillWorker
       replicas: 1
       type: prefill
-      runtimeVersionOverride: "1.5.0"
       # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
       # The operator default (8Gi) is too small for this context length.
       sharedMemorySize: 64Gi
@@ -197,7 +195,6 @@ spec:
     - name: VllmDecodeWorker
       replicas: 1
       type: decode
-      runtimeVersionOverride: "1.5.0"
       sharedMemorySize: 64Gi
       podTemplate:
         metadata:
