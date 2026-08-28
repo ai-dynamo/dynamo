@@ -270,13 +270,26 @@ impl S3LoRASource {
             .find_map(|name| std::env::var(name).ok())
     }
 
+    /// Adds the bucket to a custom endpoint when virtual-hosted addressing is enabled.
+    fn bucket_qualified_endpoint(endpoint: &str, bucket: &str) -> Result<String> {
+        let mut endpoint =
+            Url::parse(endpoint).with_context(|| format!("Invalid S3 endpoint URL: {endpoint}"))?;
+        let host = endpoint
+            .host_str()
+            .context("S3 endpoint URL must include a host")?;
+        endpoint
+            .set_host(Some(&format!("{bucket}.{host}")))
+            .map_err(|_| anyhow::anyhow!("Invalid S3 bucket name for virtual-hosted endpoint"))?;
+        Ok(endpoint.into())
+    }
+
     /// Builds an S3 object-store client builder from the resolved AWS configuration.
     fn build_s3_builder(
         bucket: &str,
         region: &str,
         credentials: AwsCredentialProvider,
         timeout_secs: u64,
-    ) -> AmazonS3Builder {
+    ) -> Result<AmazonS3Builder> {
         let mut builder = AmazonS3Builder::from_env()
             .with_region(region)
             .with_bucket_name(bucket)
@@ -287,10 +300,24 @@ impl S3LoRASource {
             .with_credentials(credentials);
 
         if let Some(endpoint) = Self::endpoint_from_env() {
+            let virtual_hosted_style = builder
+                .get_config_value(&object_store::aws::AmazonS3ConfigKey::VirtualHostedStyleRequest)
+                .map(|value| {
+                    value
+                        .parse::<bool>()
+                        .with_context(|| "AWS_VIRTUAL_HOSTED_STYLE_REQUEST must be a boolean value")
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let endpoint = if virtual_hosted_style {
+                Self::bucket_qualified_endpoint(&endpoint, bucket)?
+            } else {
+                endpoint
+            };
             builder = builder.with_endpoint(endpoint);
         }
 
-        builder
+        Ok(builder)
     }
 
     /// Loads the AWS SDK configuration once for this LoRA source.
@@ -397,7 +424,7 @@ impl S3LoRASource {
             &configuration.region,
             Arc::clone(&configuration.credentials),
             timeout_secs,
-        )
+        )?
         .build()?;
         Ok(Arc::new(store))
     }
@@ -620,17 +647,68 @@ mod tests {
                 ("AWS_ENDPOINT", Some("https://legacy.example")),
                 ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
             ],
-            || S3LoRASource::build_s3_builder("bucket", "us-east-1", credentials, 60),
+            || S3LoRASource::build_s3_builder("bucket", "us-east-1", credentials, 60).unwrap(),
         );
 
         assert_eq!(
             builder.get_config_value(&AmazonS3ConfigKey::Endpoint),
-            Some("https://s3-specific.example".to_string())
+            Some("https://bucket.s3-specific.example/".to_string())
         );
         assert_eq!(
             builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest),
             Some("true".to_string())
         );
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn s3_source_uses_bucket_qualified_virtual_hosted_endpoint() {
+        let mut server = mockito::Server::new_async().await;
+        let mut endpoint = Url::parse(&server.url()).unwrap();
+        endpoint.set_host(Some("localhost")).unwrap();
+        let expected_host = format!("bucket.localhost:{}", endpoint.port().unwrap());
+        let list = server
+            .mock("GET", "/")
+            .match_header("host", expected_host.as_str())
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("list-type".into(), "2".into()),
+                Matcher::UrlEncoded("prefix".into(), "adapter/".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/xml")
+            .with_body(
+                r#"<ListBucketResult><Contents><Key>adapter/adapter_config.json</Key><Size>2</Size><LastModified>2026-01-01T00:00:00Z</LastModified><ETag>\"etag\"</ETag></Contents></ListBucketResult>"#,
+            )
+            .create_async()
+            .await;
+
+        let exists = temp_env::async_with_vars(
+            [
+                ("AWS_ACCESS_KEY_ID", Some("test-access-key")),
+                ("AWS_SECRET_ACCESS_KEY", Some("test-secret-key")),
+                ("AWS_SESSION_TOKEN", None),
+                ("AWS_REGION", Some("us-east-1")),
+                ("AWS_DEFAULT_REGION", None),
+                ("AWS_ENDPOINT", None),
+                ("AWS_ENDPOINT_URL_S3", None),
+                ("AWS_SHARED_CREDENTIALS_FILE", None),
+                ("AWS_CONFIG_FILE", None),
+                ("AWS_PROFILE", None),
+                ("AWS_ENDPOINT_URL", Some(endpoint.as_str())),
+                ("AWS_ALLOW_HTTP", Some("true")),
+                ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
+                ("AWS_EC2_METADATA_DISABLED", Some("true")),
+            ],
+            async {
+                let source = S3LoRASource::from_env().unwrap();
+                source.exists("s3://bucket/adapter").await
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(exists);
+        list.assert_async().await;
     }
 
     #[tokio::test]
