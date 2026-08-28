@@ -479,9 +479,17 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Do NOT enable per-request perf metrics by default. With this flag set,
+    # TRT-LLM collects request perf metrics on the executor loop and, in
+    # attention-DP multiprocess paths, pickles the payload on that same loop —
+    # measured at ~2.5% end-to-end output throughput on a large disaggregated
+    # deployment, with the engine-level `return_perf_metrics` already false in
+    # both arms of the A/B. trtllm-serve does not set it. Deployments that
+    # need `prompt_tokens_details` can force it back on via an explicit
+    # engine-level override (TRT-LLM resolves the effective value as
+    # `sampling or engine`).
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+        default_sampling_params.return_perf_metrics = False
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
