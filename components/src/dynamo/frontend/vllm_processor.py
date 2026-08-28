@@ -64,62 +64,40 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
 }
 
 
-class _ReasoningUsageEstimator:
-    """Chunk-granular reasoning-token estimate for the PYTHON chat-processor path.
+class _ReasoningUsageAnnotator:
+    """Report reasoning-token usage on the PYTHON chat-processor path.
 
     NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
     (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
     which bypasses that code entirely -- and the worker's _build_completion_usage()
     emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
-    (not null) from usage. This is a port of that estimator, kept deliberately
-    behaviour-identical to the Rust so the two paths cannot disagree.
+    (not null) from usage.
 
-    Chunk-granular, exactly as upstream: if a single chunk carries both reasoning and
-    visible content, ALL of its tokens count as reasoning. Upstream documents that
-    overcount and accepts it; matching it is more useful than being cleverer here.
+    The count is NOT derived here. Each StreamingPostProcessor accumulates
+    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
+    class only sums those totals and annotates usage. Deriving it here -- from the
+    choices this path emits -- is what reported zero whenever the response projection
+    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
+    tool path's terminal-delta buffering).
+
+    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
+    both reasoning and visible content counts entirely as reasoning. The non-streaming
+    tool path has no per-chunk classification, so it counts the parsed reasoning text
+    exactly; that is more precise than the Rust rather than divergent from it.
     A positive backend-supplied count stays authoritative.
     """
 
-    __slots__ = ("total", "_active")
+    __slots__ = ("_post_processors",)
 
-    def __init__(self) -> None:
-        self.total = 0
-        self._active: set[Any] = set()
+    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
+        self._post_processors = post_processors
 
-    @staticmethod
-    def _has_visible_output(choice: dict[str, Any]) -> bool:
-        delta = choice.get("delta") or {}
-        return delta.get("content") is not None or bool(delta.get("tool_calls"))
-
-    @staticmethod
-    def _is_reasoning(choice: dict[str, Any]) -> bool:
-        return ((choice.get("delta") or {}).get("reasoning_content")) is not None
-
-    def observe(self, choices: list[dict[str, Any]], chunk_tokens: Any) -> None:
-        try:
-            count = int(chunk_tokens or 0)
-        except (TypeError, ValueError):
-            count = 0
-
-        has_reasoning = any(self._is_reasoning(c) for c in choices)
-        active_without_visible = any(
-            c.get("index") in self._active and not self._has_visible_output(c)
-            for c in choices
+    @property
+    def total(self) -> int:
+        return sum(
+            getattr(post, "reasoning_token_total", 0)
+            for post in self._post_processors.values()
         )
-        # A usage-only frame (no choices) that arrives while a choice is still
-        # reasoning still carries reasoning tokens.
-        usage_frame_while_reasoning = not choices and bool(self._active)
-
-        if count > 0 and (
-            has_reasoning or active_without_visible or usage_frame_while_reasoning
-        ):
-            self.total += count
-
-        for choice in choices:
-            if self._is_reasoning(choice):
-                self._active.add(choice.get("index"))
-            elif self._has_visible_output(choice):
-                self._active.discard(choice.get("index"))
 
     def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
         """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
@@ -905,9 +883,10 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
-        # Per-request reasoning-token estimate (NVBug 6678449b); see
-        # _ReasoningUsageEstimator. Must be per-request, never module-level.
-        reasoning_usage = _ReasoningUsageEstimator()
+        # Per-request reasoning-token usage (NVBug 6678449b); see
+        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
+        # The counts live on the post-processors, which are per-request too.
+        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
         _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
         _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
@@ -1019,8 +998,6 @@ class VllmProcessor:
 
                 if postprocess_error:
                     continue
-
-                reasoning_usage.observe(choices, chunk_tokens)
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
