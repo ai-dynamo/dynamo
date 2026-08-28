@@ -88,7 +88,13 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
             };
             // Group by the labels that identify a series; the bucket/quantile
             // label identifies a point within one.
-            let mut series: Vec<(Vec<(String, String)>, Vec<(f64, f64)>, f64, u64)> = Vec::new();
+            struct Series {
+                labels: Vec<(String, String)>,
+                points: Vec<(f64, f64)>,
+                sum: f64,
+                count: u64,
+            }
+            let mut series: Vec<Series> = Vec::new();
             for sample in samples {
                 let key: Vec<(String, String)> = sample
                     .labels
@@ -96,10 +102,15 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                     .filter(|(k, _)| k.as_str() != point_label)
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                let entry = match series.iter_mut().position(|(k, _, _, _)| *k == key) {
+                let entry = match series.iter_mut().position(|s| s.labels == key) {
                     Some(i) => &mut series[i],
                     None => {
-                        series.push((key, Vec::new(), 0.0, 0));
+                        series.push(Series {
+                            labels: key,
+                            points: Vec::new(),
+                            sum: 0.0,
+                            count: 0,
+                        });
                         series.last_mut()?
                     }
                 };
@@ -109,16 +120,22 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                         // +Inf is implicit: TextEncoder synthesises it from
                         // sample_count and would render a stored one as `inf`.
                         if bound.is_finite() {
-                            entry.1.push((bound, sample.value));
+                            entry.points.push((bound, sample.value));
                         }
                     }
-                    None if sample.name.ends_with("_sum") => entry.2 = sample.value,
-                    None if sample.name.ends_with("_count") => entry.3 = sample.value as u64,
+                    None if sample.name.ends_with("_sum") => entry.sum = sample.value,
+                    None if sample.name.ends_with("_count") => entry.count = sample.value as u64,
                     None => {}
                 }
             }
 
-            for (labels, mut points, sum, count) in series {
+            for Series {
+                labels,
+                mut points,
+                sum,
+                count,
+            } in series
+            {
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let mut metric = Metric::new();
                 metric.set_label(label_pairs(labels));

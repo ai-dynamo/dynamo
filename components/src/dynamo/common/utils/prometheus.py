@@ -193,6 +193,45 @@ def register_engine_metrics_callback(
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
 
 
+def get_prometheus_typed(
+    registry: "CollectorRegistry",
+    metric_prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+) -> list:
+    """Collect a registry as a typed structure rather than exposition text.
+
+    Returns ``[(name, help, type, [(sample_name, [(label, value)], value)])]``,
+    which pyo3 extracts natively. Nothing is serialized to a string on either
+    side, so the family name, type and help arrive authoritative instead of
+    being re-derived from ``# TYPE`` lines by a parser.
+
+    ``generate_latest`` flattens this same structure; :func:`get_prometheus_expfmt`
+    remains for ``/metrics``, where the engine's own rendering is what consumers
+    already scrape.
+    """
+    include = _compile_include_pattern(tuple(metric_prefix_filters or ()))
+    exclude = _compile_exclude_pattern(tuple(exclude_prefixes or ()))
+
+    out = []
+    for metric in registry.collect():
+        if include and not include.match(metric.name):
+            continue
+        if exclude and exclude.match(metric.name):
+            continue
+        out.append(
+            (
+                metric.name,
+                metric.documentation,
+                metric.type,
+                [
+                    (s.name, list(s.labels.items()), float(s.value))
+                    for s in metric.samples
+                ],
+            )
+        )
+    return out
+
+
 @lru_cache(maxsize=64)
 def _compile_exclude_pattern(exclude_prefixes: tuple[str, ...]) -> Pattern:
     """Compile and cache regex for excluding metric prefixes.

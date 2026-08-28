@@ -714,6 +714,11 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
+/// Returns already-built families, so engine metrics reach the structured
+/// path without being rendered to text and parsed back.
+pub type PrometheusTypedCallback =
+    Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync>;
+
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
 ///
 /// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
@@ -747,6 +752,9 @@ pub struct MetricsRegistry {
     /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
     pub prometheus_expfmt_callbacks:
         Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
+
+    /// Callbacks returning typed families; see [`PrometheusTypedCallback`].
+    pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
 }
 
 impl std::fmt::Debug for MetricsRegistry {
@@ -779,6 +787,7 @@ impl MetricsRegistry {
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            prometheus_typed_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -876,6 +885,16 @@ impl MetricsRegistry {
 
         let mut merger = FamilyMerger::from_gathered(&registries)?;
 
+        // Typed callbacks hand over families directly -- no text, no parsing.
+        for registry in &registries {
+            for family in registry.execute_typed_callbacks() {
+                let name = family.name().to_string();
+                if let Err(error) = merger.add_family(family) {
+                    tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
+                }
+            }
+        }
+
         let expfmt = collect_expfmt_text(&registries);
         if !expfmt.is_empty() {
             for family in crate::metrics::prom_text::parse_exposition(&expfmt)? {
@@ -892,6 +911,36 @@ impl MetricsRegistry {
             .write()
             .unwrap()
             .push(callback);
+    }
+
+    /// Register a callback that returns typed families directly.
+    ///
+    /// Preferred over [`Self::add_expfmt_callback`] for anything the structured
+    /// path consumes: the text callback forces a render-then-reparse round trip
+    /// whose re-inference of names and types is where parsing bugs live.
+    pub fn add_typed_callback(&self, callback: PrometheusTypedCallback) {
+        self.prometheus_typed_callbacks
+            .write()
+            .unwrap()
+            .push(callback);
+    }
+
+    /// Collect from every typed callback, logging and skipping failures so one
+    /// broken engine cannot empty the whole collection.
+    pub fn execute_typed_callbacks(&self) -> Vec<prometheus::proto::MetricFamily> {
+        self.prometheus_typed_callbacks
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|callback| match callback() {
+                Ok(families) => Some(families),
+                Err(error) => {
+                    tracing::warn!(%error, "typed metrics callback failed");
+                    None
+                }
+            })
+            .flatten()
+            .collect()
     }
 
     /// Add an exposition text callback that returns Prometheus text
