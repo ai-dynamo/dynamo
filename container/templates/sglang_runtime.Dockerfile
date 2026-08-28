@@ -241,6 +241,18 @@ RUN set -eux; \
     ldconfig
 {% endif %}
 
+# Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler
+# nothing in the serving path loads. On this image it arrives under Nsight
+# Compute rather than Nsight Systems, and both roots move with every base bump,
+# so the paths are globbed and the removal is asserted rather than pinned. This
+# stage has no overlay rebase -- `runtime` is FROM pre_runtime -- so one
+# deletion here ships.
+RUN rm -rf \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
+    [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
+
 {% if device == "cuda" %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
