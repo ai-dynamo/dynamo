@@ -106,14 +106,11 @@ impl RequestPlanePayloadCodec {
         }
     }
 
-    /// Encode into a writer the caller owns, so a hot path can reuse one buffer
-    /// across frames instead of allocating a fresh `Vec` per frame.
+    /// Encode into a caller-owned writer, so a hot path can reuse one buffer
+    /// across frames instead of allocating per frame.
     ///
-    /// Byte-identical to [`Self::encode`]: `to_vec_named` and `to_vec` are these
-    /// same two calls, just aimed at a `Vec`. That is pinned by
-    /// `encode_into_matches_encode_byte_for_byte` — if a hot path quietly emitted
-    /// different bytes than the rest of the request plane, the only symptom would
-    /// be a decode failure at the caller.
+    /// Emits the same bytes as [`Self::encode`], which
+    /// `encode_into_matches_encode_byte_for_byte` pins for both codecs.
     pub fn encode_into<T, W>(&self, value: &T, writer: &mut W) -> Result<()>
     where
         T: Serialize + ?Sized,
@@ -503,9 +500,6 @@ mod tests {
         tokens: Vec<u32>,
     }
 
-    /// `encode_into` exists so hot paths can reuse a buffer, which is only safe
-    /// if it produces the same bytes as `encode`. Both codecs are checked, and
-    /// the payload covers a nested map, a sequence, and a string.
     #[test]
     fn encode_into_matches_encode_byte_for_byte() {
         let payload = NetworkStreamWrapper {
