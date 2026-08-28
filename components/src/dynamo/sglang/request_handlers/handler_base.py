@@ -49,7 +49,6 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
-from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 logger = logging.getLogger(__name__)
@@ -613,10 +612,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._pause_controller = (
-            SGLangEnginePauseController(engine) if engine is not None else None
-        )
-        self._pause_lock = asyncio.Lock()
+        self._engine_route_lock = asyncio.Lock()
 
         # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
         # phase, so concurrent scale_elastic_ep calls must not overlap.
@@ -635,122 +631,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return {"priority": normalized}
         return {}
 
-    async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory occupation and unregister from discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Unregister from discovery - stop accepting new requests
-        2. Pause generation - drain in-flight requests
-        3. Release memory - safe now that no requests are active
-        """
-        if self._pause_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._pause_lock:
-            if self._pause_controller.is_paused:
-                return {
-                    "status": "ok",
-                    "message": "Memory already released",
-                }
-            if self._pause_controller.needs_resume_recovery:
-                return {
-                    "status": "error",
-                    "message": "resume_memory_occupation required before retrying release",
-                }
-
-            unregistered = False
-            try:
-                # Stop new requests and drain in-flight work before releasing memory.
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
-                    unregistered = True
-
-                await self._pause_controller.pause(tags)
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory released for tags: {tags}"
-                        if tags is not None
-                        else "Memory released"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to release memory occupation: {e}")
-                # If pause rolled back cleanly the engine is serving-safe again,
-                # but discovery still shows us unregistered and resume will
-                # early-return. Re-register so the worker rejoins the routing pool.
-                if (
-                    unregistered
-                    and not self._pause_controller.is_paused
-                    and not self._pause_controller.needs_resume_recovery
-                    and self.generate_endpoint is not None
-                ):
-                    try:
-                        await self.generate_endpoint.register_endpoint_instance()
-                        logging.info(
-                            "Re-registered endpoint after failed memory release rollback"
-                        )
-                    except Exception as reg_err:
-                        logging.error(
-                            f"Failed to re-register endpoint after release failure: {reg_err}"
-                        )
-                return {"status": "error", "message": str(e)}
-
-    async def resume_memory_occupation(self, body: dict) -> dict:
-        """Resume GPU memory occupation and re-register to discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Resume memory - restore GPU allocations
-        2. Continue generation - ready to serve requests
-        3. Re-register to discovery - allow frontend to route here
-        """
-        if self._pause_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._pause_lock:
-            needs_recovery = self._pause_controller.needs_resume_recovery
-            if not self._pause_controller.is_paused and not needs_recovery:
-                return {
-                    "status": "ok",
-                    "message": "Memory already resumed",
-                }
-
-            try:
-                await self._pause_controller.resume(tags)
-
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
-                self._pause_controller.mark_resumed()
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory resumed for tags: {tags}"
-                        if tags is not None
-                        else "Memory resumed"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to resume memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
-
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
         """Flush SGLang's local cache when no requests are active."""
         tokenizer_manager = (
@@ -766,7 +646,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return
 
         try:
-            async with self._pause_lock:
+            async with self._engine_route_lock:
                 if getattr(tokenizer_manager, "rid_to_state", None):
                     yield {
                         "status": "error",
@@ -1005,20 +885,11 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
     async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
         """Invoke one engine route and then synchronize worker discovery."""
-        async with self._pause_lock:
+        async with self._engine_route_lock:
             try:
-                result = await route_handler(body)
-            except BaseException:
-                try:
-                    await self._sync_discovery_with_sglang_pause_state()
-                except Exception:
-                    logger.exception(
-                        "Failed to synchronize discovery after an engine route error"
-                    )
-                raise
-
-            await self._sync_discovery_with_sglang_pause_state()
-            return result
+                return await route_handler(body)
+            finally:
+                await self._sync_discovery_with_sglang_pause_state()
 
     def _wrap_engine_route(self, route_handler):
         """Add discovery synchronization to an SGLang route."""
@@ -1041,8 +912,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         built_in_routes = {
             "control/start_profile": self.start_profile,
             "control/stop_profile": self.stop_profile,
-            "control/release_memory_occupation": self.release_memory_occupation,
-            "control/resume_memory_occupation": self.resume_memory_occupation,
             "control/update_weights_from_disk": self.update_weights_from_disk,
             "control/update_weights_from_tensor": self.update_weights_from_tensor,
             "control/update_weights_from_distributed": (
@@ -1055,9 +924,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
             built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
-            built_in_routes["control/is_scaling_elastic_ep"] = (
-                self.is_scaling_elastic_ep
-            )
+            built_in_routes[
+                "control/is_scaling_elastic_ep"
+            ] = self.is_scaling_elastic_ep
         reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
         for path, _ in configured_routes:
             if path in reserved_routes:
