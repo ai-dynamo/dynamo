@@ -109,12 +109,14 @@ The encoder vLLM instance must use an EC producer connector and the aggregated o
 
 The local examples use `Qwen/Qwen2.5-VL-3B-Instruct` with vLLM's `ECExampleConnector` and a shared directory. The directory must be accessible at the same path from the producer and consumer. Each script creates and removes an isolated temporary directory unless `EC_SHARED_STORAGE_PATH` names a caller-managed directory:
 
+In the filenames, `e_pd` means one Encode worker plus one aggregated Prefill/Decode worker, while `epd` means separate Encode, Prefill, and Decode workers.
+
 ```bash
 # Encoder + aggregated prefill/decode (2 GPUs)
-lib/sidecar/vllm/launch/encode_pd.sh
+lib/sidecar/vllm/launch/disagg_multimodal_e_pd.sh
 
 # Encoder + NIXL prefill + decode (3 GPUs)
-lib/sidecar/vllm/launch/encode_prefill_decode.sh
+lib/sidecar/vllm/launch/disagg_multimodal_epd.sh
 ```
 
 The examples run one `vllm-rs` process and one Dynamo sidecar for each role. The encoder uses `--mm-encoder-only`, eager execution, and disabled prefix caching. `ECExampleConnector` is a validation connector; production deployments should select an EC connector whose transport and storage semantics fit the deployment.
