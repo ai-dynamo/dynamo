@@ -9,15 +9,20 @@ usage() {
 Usage: dynamo-sidecar <engine> [OPTIONS]
 
 Engines:
-  vllm     Run the vLLM sidecar
-  sglang   Run the SGLang sidecar
-  trtllm   Run the TensorRT-LLM sidecar
+  openengine  Run the OpenEngine sidecar
+  vllm        Run the vLLM sidecar
+  sglang      Run the SGLang sidecar
+  trtllm      Run the TensorRT-LLM sidecar
 EOF
 }
 
 engine="${1:-}"
 
 case "$engine" in
+    openengine)
+        shift
+        exec dynamo-openengine-sidecar "$@"
+        ;;
     vllm)
         shift
         exec dynamo-vllm-sidecar "$@"

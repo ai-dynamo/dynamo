@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-openengine-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo sidecar backend for out-of-process OpenEngine gRPC servers."
+
+[package.metadata.cargo-machete]
+# Referenced by protobuf code generated into OUT_DIR.
+ignored = ["prost"]
+
+[[bin]]
+name = "dynamo-openengine-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+dynamo-sidecar-common = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+prost = { version = "0.13.5" }
+prost-types = { version = "0.13.5" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { version = "0.13.1" }
+tracing = { workspace = true }
+
+[build-dependencies]
+tonic-build = { version = "0.13.1" }

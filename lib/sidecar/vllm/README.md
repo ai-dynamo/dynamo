@@ -137,7 +137,7 @@ that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
 There is no published sidecar image yet, so build and push the image from
-`lib/sidecar/Dockerfile`. It contains the vLLM, SGLang, and TensorRT-LLM
+`lib/sidecar/Dockerfile`. It contains the OpenEngine, vLLM, SGLang, and TensorRT-LLM
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 

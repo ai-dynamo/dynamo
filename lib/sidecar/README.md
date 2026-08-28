@@ -6,11 +6,12 @@ runs in a separate process.
 
 ```text
 common/         Shared gRPC arguments, transport, and errors
+openengine/     OpenEngine sidecar
 sglang/         SGLang sidecar
 trtllm/         TensorRT-LLM sidecar
 vllm/           vLLM sidecar
-Dockerfile      Builds all three sidecar executables into a CPU-only image
-dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
+Dockerfile      Builds all four sidecar executables into a CPU-only image
+dynamo-sidecar  Convenience entrypoint selecting one of the above
 ```
 
 Engine protocols and request conversion remain in each engine's crate.
@@ -18,8 +19,9 @@ Engine protocols and request conversion remain in each engine's crate.
 ## Build the image
 
 There is no published sidecar image yet. `Dockerfile` builds one CPU-only image
-carrying all three engine-specific executables — `dynamo-vllm-sidecar`,
-`dynamo-sglang-sidecar`, and `dynamo-trtllm-sidecar` — in `/usr/local/bin`.
+carrying all four sidecar executables — `dynamo-openengine-sidecar`,
+`dynamo-vllm-sidecar`, `dynamo-sglang-sidecar`, and
+`dynamo-trtllm-sidecar` — in `/usr/local/bin`.
 Official packaging is deferred to a follow-up change.
 
 Build a multi-arch image from the repository root so it runs on any node —
@@ -56,6 +58,7 @@ ad-hoc `docker run` needs only the engine name. Deployments override it with
 docker run --rm <your-registry>/dynamo-sidecar:1.3.0 vllm --help
 docker run --rm <your-registry>/dynamo-sidecar:1.3.0 sglang --help
 docker run --rm <your-registry>/dynamo-sidecar:1.3.0 trtllm --help
+docker run --rm <your-registry>/dynamo-sidecar:1.3.0 openengine --help
 ```
 
 Plain `docker run` with no arguments uses the image `CMD` of `--help`, prints

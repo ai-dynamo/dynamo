@@ -2829,6 +2829,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-openengine-sidecar"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-parsers"
 version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
