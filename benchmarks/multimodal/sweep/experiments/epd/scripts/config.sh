@@ -122,10 +122,8 @@ wait_for_worker_log() {
 
 prepare_role_cache() {
     local role=$1 cache_root="$LOG_DIR/cache/$1"
-    mkdir -p "$cache_root"/{home,xdg,triton,torchinductor,flashinfer}
+    mkdir -p "$cache_root"/{triton,torchinductor,flashinfer}
     ROLE_CACHE_ENV=(
-        HOME="$cache_root/home"
-        XDG_CACHE_HOME="$cache_root/xdg"
         TRITON_CACHE_DIR="$cache_root/triton"
         TORCHINDUCTOR_CACHE_DIR="$cache_root/torchinductor"
         FLASHINFER_WORKSPACE_BASE="$cache_root/flashinfer"
