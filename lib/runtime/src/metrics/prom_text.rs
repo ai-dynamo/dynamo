@@ -304,6 +304,13 @@ fn build_histogram(name: &str, samples: &[Sample], claimed: &mut [bool]) -> Opti
                 let Some(bound) = sample.label("le").and_then(parse_value) else {
                     continue;
                 };
+                // The +Inf bucket is implicit: `prometheus`'s own histograms
+                // omit it and `TextEncoder` synthesises it from sample_count.
+                // Storing it explicitly makes the encoder render the bound via
+                // `to_string()`, emitting an invalid `le="inf"`.
+                if bound.is_infinite() {
+                    continue;
+                }
                 let mut bucket = Bucket::new();
                 bucket.set_upper_bound(bound);
                 bucket.set_cumulative_count(sample.value as u64);
@@ -450,9 +457,10 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="llama"} 5
         let hist = &fs[1];
         assert_eq!(hist.get_field_type(), MetricType::HISTOGRAM);
         let h = hist.get_metric()[0].get_histogram();
-        assert_eq!(h.get_bucket().len(), 2);
+        // Only finite bounds are stored; +Inf is implicit in sample_count,
+        // matching how the crate's own histograms are represented.
+        assert_eq!(h.get_bucket().len(), 1);
         assert_eq!(h.get_bucket()[0].upper_bound(), 0.1);
-        assert!(h.get_bucket()[1].upper_bound().is_infinite());
         assert_eq!(h.sample_sum(), 2.75);
         assert_eq!(h.sample_count(), 5);
         // `le` identifies the bucket, not the series.
