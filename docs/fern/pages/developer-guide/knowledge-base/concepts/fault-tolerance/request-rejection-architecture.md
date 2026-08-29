@@ -229,9 +229,9 @@ The TCP request plane keeps its own worker pool, sized by `DYN_TCP_WORKER_POOL_S
 gate and no longer changes with the engine-admission settings. The two use the same numeric defaults
 by coincidence, not by sharing constants.
 
-The two controls report separately. The pre-existing `dynamo_rejection_request_total`,
-`dynamo_engine_request` and `dynamo_request_queue` count TCP request-plane pool activity. The gate
-has its own independent family:
+The two controls report separately. The `dynamo_work_handler_*` family reports TCP worker-pool
+occupancy, queue activity and capacity, permit wait, and enqueue rejection. The gate has its own
+independent family:
 
 - `dynamo_backend_admission_engine_request_count` and
   `dynamo_backend_admission_request_queue_count` — current occupancy of the limit and the FIFO queue.

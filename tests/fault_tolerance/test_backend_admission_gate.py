@@ -30,10 +30,8 @@ processes, never threads mutating one environment.
 import asyncio
 import contextlib
 import logging
-import os
 import time
 from typing import Any, Callable, Coroutine, Iterator, NamedTuple, Optional
-from unittest import mock
 
 import aiohttp
 import pytest
@@ -159,6 +157,7 @@ async def _hold(session: aiohttp.ClientSession, url: str) -> aiohttp.ClientRespo
     async for line in response.content:
         if line.startswith(b"data:"):
             return response
+    response.close()
     raise AssertionError("holder stream ended before yielding a chunk")
 
 
@@ -181,6 +180,7 @@ async def _hold_when_routable(
             async for line in response.content:
                 if line.startswith(b"data:"):
                     return response
+            response.close()
             raise AssertionError("holder stream ended before yielding a chunk")
         body = await response.text()
         response.close()
@@ -376,7 +376,12 @@ def _assert_refused(status: int, body: Any, label: str) -> None:
 
 
 async def _result(task: asyncio.Task, label: str) -> tuple[int, str]:
-    return await asyncio.wait_for(task, timeout=OUTCOME_TIMEOUT_S)
+    try:
+        return await asyncio.wait_for(task, timeout=OUTCOME_TIMEOUT_S)
+    except asyncio.TimeoutError as error:
+        raise AssertionError(
+            f"the {label} request produced no outcome within {OUTCOME_TIMEOUT_S}s"
+        ) from error
 
 
 @contextlib.contextmanager
@@ -417,19 +422,22 @@ def _deployment(
     if data_parallel_size is not None:
         mocker_args["dp_size"] = data_parallel_size
 
-    with mock.patch.dict(os.environ, worker_env):
+    monkeypatch = request.getfixturevalue("monkeypatch")
+    with monkeypatch.context() as environment:
+        for name, value in worker_env.items():
+            environment.setenv(name, value)
         # Set explicitly or cleared, never inherited: an ambient value would
-        # otherwise decide what these scenarios are testing. `patch.dict`
-        # restores the original environment on exit.
+        # otherwise decide what these scenarios are testing. The monkeypatch
+        # context restores the original environment on exit.
         for name, value in (
             ("DYN_ENGINE_REQUEST_LIMIT", engine_request_limit),
             ("DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY", controlled_delay),
             ("DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO", adaptive_lifo),
         ):
             if value is None:
-                os.environ.pop(name, None)
+                environment.delenv(name, raising=False)
             else:
-                os.environ[name] = str(value)
+                environment.setenv(name, str(value))
         mockers = MockerProcess(
             request,
             mocker_args=mocker_args,

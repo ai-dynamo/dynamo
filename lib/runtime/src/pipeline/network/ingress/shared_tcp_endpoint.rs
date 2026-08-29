@@ -8,7 +8,6 @@
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
-    ENGINE_REQUEST_GAUGE, REJECTION_REQUEST_TOTAL, REQUEST_QUEUE_GAUGE,
     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
     WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
     WORK_HANDLER_QUEUE_DEPTH,
@@ -67,8 +66,6 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
-        // `dynamo_engine_request`: requests currently in the engine.
-        ENGINE_REQUEST_GAUGE.inc();
         Self
     }
 }
@@ -76,7 +73,6 @@ impl ActiveTaskGuard {
 impl Drop for ActiveTaskGuard {
     fn drop(&mut self) {
         WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
-        ENGINE_REQUEST_GAUGE.dec();
     }
 }
 
@@ -241,7 +237,6 @@ impl SharedTcpServer {
                         // gauge strictly reflects channel occupancy. Permit-acquire wait is
                         // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
                         WORK_HANDLER_QUEUE_DEPTH.dec();
-                        REQUEST_QUEUE_GAUGE.dec();
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
@@ -679,7 +674,6 @@ impl SharedTcpServer {
             match work_tx.try_reserve() {
                 Ok(slot) => {
                     WORK_HANDLER_QUEUE_DEPTH.inc();
-                    REQUEST_QUEUE_GAUGE.inc();
                     slot.send(work_item);
                     // Queued: the dispatcher owns inflight, so don't touch it here.
                     if !send_response(TcpResponseMessage::empty()) {
@@ -687,12 +681,13 @@ impl SharedTcpServer {
                     }
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Engine and queue both full → shed; keep the connection open.
-                    REJECTION_REQUEST_TOTAL.inc();
+                    // TCP worker pool and work queue both full → shed; keep the
+                    // connection open.
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        "Worker at capacity (engine + queue full), rejecting request"
+                        "TCP worker pool and work queue full, rejecting request"
                     );
                     send_response(TcpResponseMessage::new(Bytes::from_static(
                         b"Server overloaded: worker at capacity",

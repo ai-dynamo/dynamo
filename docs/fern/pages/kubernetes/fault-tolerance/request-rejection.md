@@ -183,10 +183,12 @@ rejection:
 
 The worker-side hard cap is verified differently: the refused request fails rather than returning a
 particular status, and `dynamo_backend_admission_rejection_total` increases with
-`reason="queue_full"` or `reason="request_expired"`. The worker also logs `Worker at capacity (engine
-limit and queue both full), rejecting request` with the shed request's `request_id`. Do not look at
-`dynamo_rejection_request_total` for this: it counts only TCP request-plane pool rejections and does
-not move when the gate sheds a request.
+`reason="queue_full"` or `reason="request_expired"`. For `queue_full`, the worker logs `Worker at
+capacity (engine limit and queue both full), rejecting request` with the shed request's
+`request_id`. For `request_expired`, it logs `Request exceeded the backend admission queue delay,
+rejecting request` with the `request_id` and refuses the request with `Server overloaded: request
+rejected after exceeding the backend admission queue delay`. TCP request-plane saturation is
+reported separately through `dynamo_work_handler_enqueue_rejected_total`.
 
 `dynamo_backend_admission_request_queue_count` and `dynamo_backend_admission_engine_request_count`
 show live occupancy against their `_limit` counterparts, and
