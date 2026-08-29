@@ -21,6 +21,7 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
+from dynamo.common.protocols import MEDIA_PASSTHROUGH_KEY
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
 
@@ -259,6 +260,13 @@ class AudioGenerationHandler:
 
         if task_type == "VoiceDesign":
             tts_params["non_streaming_mode"] = [True]
+
+        # Frontend-forwarded passthrough knobs join the engine params;
+        # fields the handler already set win.
+        for key, value in (
+            (req.extra_args or {}).get(MEDIA_PASSTHROUGH_KEY) or {}
+        ).items():
+            tts_params.setdefault(key, [value])
 
         estimated_len = self._estimate_tts_prompt_len(tts_params)
 

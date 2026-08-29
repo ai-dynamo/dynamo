@@ -26,11 +26,26 @@ pub struct NvCreateImageRequest {
 
     pub nvext: Option<NvExt>,
 
+    /// Worker-boundary contract, not a public field: the frontend moves
+    /// `passthrough` under `extra_args["media_passthrough"]` before
+    /// dispatch (see [`Self::nest_passthrough`]) so workers read one
+    /// explicit nested entry. A client-sent `extra_args` lands in
+    /// `passthrough` like any other unknown field.
+    pub extra_args: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// Unknown top-level fields are retained here and forwarded to the
     /// backend without strict validation. This matches the OpenAI client's
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     pub passthrough: serde_json::Map<String, serde_json::Value>,
+}
+
+impl NvCreateImageRequest {
+    /// Nest captured top-level unknowns under `extra_args["media_passthrough"]`
+    /// for dispatch to a worker.
+    pub fn nest_passthrough(&mut self) {
+        super::nest_media_passthrough(&mut self.passthrough, &mut self.extra_args);
+    }
 }
 
 impl<'de> Deserialize<'de> for NvCreateImageRequest {
@@ -62,6 +77,7 @@ impl<'de> Deserialize<'de> for NvCreateImageRequest {
             inner,
             input_reference,
             nvext,
+            extra_args: None,
             passthrough: body,
         })
     }
@@ -77,7 +93,7 @@ impl Serialize for NvCreateImageRequest {
             _ => {
                 return Err(serde::ser::Error::custom(
                     "image request must serialize to an object",
-                ))
+                ));
             }
         };
         // Typed fields win over passthrough entries of the same name.
@@ -94,6 +110,12 @@ impl Serialize for NvCreateImageRequest {
             body.insert(
                 "nvext".to_string(),
                 serde_json::to_value(nvext).map_err(serde::ser::Error::custom)?,
+            );
+        }
+        if let Some(extra_args) = &self.extra_args {
+            body.insert(
+                "extra_args".to_string(),
+                serde_json::Value::Object(extra_args.clone()),
             );
         }
         body.serialize(serializer)
@@ -220,5 +242,28 @@ mod tests {
         let json = r#"{"prompt":"a cat"}"#;
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
         assert!(req.passthrough.is_empty());
+    }
+
+    #[test]
+    fn image_request_nests_passthrough_for_workers() {
+        let json = r#"{"prompt":"a cat","think_mode":true}"#;
+        let mut req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        assert!(req.passthrough.is_empty());
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            out["extra_args"]["media_passthrough"]["think_mode"],
+            serde_json::json!(true)
+        );
+        assert!(out.get("think_mode").is_none());
+        assert_eq!(out["prompt"], serde_json::json!("a cat"));
+    }
+
+    #[test]
+    fn image_request_client_extra_args_is_not_the_worker_field() {
+        let json = r#"{"prompt":"a cat","extra_args":{"x":1}}"#;
+        let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+        assert!(req.extra_args.is_none());
+        assert_eq!(req.passthrough["extra_args"]["x"], serde_json::json!(1));
     }
 }

@@ -263,6 +263,35 @@ class TestI2VEngineInputs:
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
 
+    async def test_media_passthrough_reaches_sampling_params(self):
+        """A top-level SDK extra_body field, nested by the frontend under
+        extra_args["media_passthrough"], reaches the engine input."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a cat by the sea",
+            model="test-model",
+            size="832x480",
+            extra_args={
+                "media_passthrough": {
+                    "num_inference_steps": 12,
+                    "backend_custom_knob": 0.5,
+                }
+            },
+        )
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+        # Knobs matching a sampling-params attribute apply directly.
+        assert sp.num_inference_steps == 12
+        # The rest ride sampling params extra_args to the engine.
+        assert sp.extra_args["backend_custom_knob"] == 0.5
+
+    def test_media_passthrough_absent_is_a_no_op(self):
+        req = NvCreateVideoRequest(prompt="a cat", model="test-model")
+        assert req.extra_args is None
+        handler = _make_handler()
+        inputs = handler._engine_inputs_from_video(req)
+        assert inputs.sampling_params_list is not None
+
     def test_i2v_protocol_roundtrip(self):
         """VideoNvExt and NvCreateVideoRequest serialize/deserialize I2V fields correctly."""
         req = NvCreateVideoRequest(

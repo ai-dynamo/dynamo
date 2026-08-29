@@ -8,9 +8,9 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 
 class VideoNvExt(BaseModel):
@@ -53,10 +53,10 @@ class NvCreateVideoRequest(BaseModel):
     Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
     """
 
-    model_config = ConfigDict(extra="allow")
-    """Unknown top-level fields are backend passthrough knobs. Keep them
-    so handlers can read and forward them instead of dropping them at
-    the worker boundary."""
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Required fields
     prompt: str

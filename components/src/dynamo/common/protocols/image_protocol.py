@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 # For omni models, we need to support raw_request parsing and json output format. We need to have these protocols defined here for serialization and deserialization.
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
@@ -38,10 +38,10 @@ class NvCreateImageRequest(BaseModel):
     Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
     """
 
-    model_config = ConfigDict(extra="allow")
-    """Unknown top-level fields are backend passthrough knobs. Keep them
-    so handlers can read and forward them instead of dropping them at
-    the worker boundary."""
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     prompt: str
     """The text prompt for image generation."""

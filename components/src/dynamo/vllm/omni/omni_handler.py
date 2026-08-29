@@ -26,6 +26,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols import MEDIA_PASSTHROUGH_KEY
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -63,6 +64,39 @@ from dynamo.vllm.omni.utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
+
+
+def _apply_media_passthrough(
+    sp: OmniDiffusionSamplingParams, extra_args: Optional[Dict[str, Any]]
+) -> None:
+    """Apply frontend-forwarded passthrough knobs to diffusion sampling params.
+
+    The frontend nests a request's unknown top-level fields (an OpenAI
+    client's ``extra_body``) under ``extra_args["media_passthrough"]``.
+    Knobs matching a sampling-params attribute are set directly; the rest
+    land in ``sp.extra_args`` for the engine to interpret.
+    """
+    knobs = (extra_args or {}).get(MEDIA_PASSTHROUGH_KEY) or {}
+    unmatched: Dict[str, Any] = {}
+    for key, value in knobs.items():
+        if key != "extra_args" and hasattr(sp, key):
+            setattr(sp, key, value)
+        else:
+            unmatched[key] = value
+    if not unmatched:
+        return
+    existing = getattr(sp, "extra_args", None)
+    if isinstance(existing, dict):
+        existing.update(unmatched)
+    else:
+        try:
+            sp.extra_args = unmatched
+        except (AttributeError, TypeError):
+            logger.warning(
+                "Dropping media passthrough knobs %s: sampling params expose "
+                "no matching attribute and no extra_args",
+                sorted(unmatched),
+            )
 
 
 @dataclass
@@ -682,6 +716,7 @@ class OmniHandler(BaseOmniHandler):
         sp.seed = (
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         )
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
@@ -743,6 +778,7 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)

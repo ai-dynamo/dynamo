@@ -13,7 +13,12 @@ from dynamo.common.protocols.video_protocol import (
     VideoData,
 )
 
+MEDIA_PASSTHROUGH_KEY = "media_passthrough"
+"""Key under a media request's ``extra_args`` where the frontend nests
+unknown top-level request fields (an OpenAI client's ``extra_body``)."""
+
 __all__ = [
+    "MEDIA_PASSTHROUGH_KEY",
     "NvCreateVideoRequest",
     "NvVideosResponse",
     "VideoData",
