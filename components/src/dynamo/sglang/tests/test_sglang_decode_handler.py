@@ -51,6 +51,28 @@ pytestmark = [
 ]
 
 
+@pytest.mark.asyncio
+async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = asyncio.Event()
+
+    async def set_shutdown_when_cancelled(*_args):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            handler.shutdown_event.set()
+            raise
+
+    handler._handle_cancellation = set_shutdown_when_cancelled
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("sglang-request-id")
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async with handler._cancellation_monitor(request_id_future, context):
+            await asyncio.sleep(0)
+
+
 def _read_zstd_payload(path):
     import zstandard as zstd
 
