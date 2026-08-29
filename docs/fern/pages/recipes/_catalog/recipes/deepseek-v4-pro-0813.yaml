@@ -79,8 +79,8 @@ targets:
   - kv-aware-routing
   - prefix-caching
   workload:
-    type: synthetic
-    traffic: '64K ISL / 400 OSL, 90% prefix reuse; TP8 + EP, Marlin MoE, max_model_len 1048576'
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; TP8 + EP, Marlin MoE, max_model_len 1048576'
     sla: user output >= 50 tok/s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-h200-agentic/deploy.yaml
