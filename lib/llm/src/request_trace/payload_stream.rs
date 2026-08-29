@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
+use crate::protocols::common::metrics::LLMMetricAnnotation;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::chat_completions::{
     DeltaAggregator, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
@@ -124,13 +125,30 @@ where
 
     let single_chunk_stream = async move {
         let chunks: Vec<_> = stream.collect().await;
+
+        // Folding discards the per-chunk metrics: capture the last
+        // LLMMetricAnnotation (either transport) and re-attach it to the
+        // folded chunk for audit-enabled non-streaming requests (#11349).
+        let mut last_llm_metrics: Option<LLMMetricAnnotation> = None;
+        for chunk in &chunks {
+            if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(chunk) {
+                last_llm_metrics = Some(metrics);
+            } else if let Some(metrics) = chunk
+                .data
+                .as_ref()
+                .and_then(|data| data.llm_metrics.as_ref())
+            {
+                last_llm_metrics = Some(metrics.clone());
+            }
+        }
+
         let chunks_stream = futures::stream::iter(chunks);
         let parsing_options = ParsingOptions::default();
 
         match DeltaAggregator::apply(chunks_stream, parsing_options).await {
             Ok(final_resp) => {
                 let _ = tx.send(final_resp.clone());
-                final_response_to_one_chunk_stream(final_resp)
+                final_response_to_one_chunk_stream_with_metrics(final_resp, last_llm_metrics)
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
@@ -179,6 +197,18 @@ where
 /// Put the entire final text/tool-calls into `delta` so downstream aggregate is a no-op.
 pub fn final_response_to_one_chunk_stream(
     resp: NvCreateChatCompletionResponse,
+) -> std::pin::Pin<
+    Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+> {
+    final_response_to_one_chunk_stream_with_metrics(resp, None)
+}
+
+/// Same as [`final_response_to_one_chunk_stream`], but attaches the request's
+/// final `LLMMetricAnnotation` to the emitted chunk so downstream metric
+/// collectors observe the per-request usage exactly once (#11349).
+pub(crate) fn final_response_to_one_chunk_stream_with_metrics(
+    resp: NvCreateChatCompletionResponse,
+    llm_metrics: Option<LLMMetricAnnotation>,
 ) -> std::pin::Pin<
     Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
 > {
@@ -243,7 +273,7 @@ pub fn final_response_to_one_chunk_stream(
             usage: resp.inner.usage.clone(),
         },
         nvext: resp.nvext.clone(),
-        llm_metrics: None,
+        llm_metrics,
     };
 
     let annotated = Annotated {
@@ -705,5 +735,67 @@ mod tests {
 
         assert!(resp1.is_none());
         assert!(resp2.is_none());
+    }
+
+    fn sample_llm_metrics(output_tokens: usize) -> LLMMetricAnnotation {
+        LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens,
+            chunk_tokens: 1,
+            cached_tokens: Some(4),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fold_attaches_last_llm_metrics_to_folded_chunk() {
+        let mut field_chunk = create_mock_chunk("Hello ".to_string(), 0);
+        field_chunk.data.as_mut().unwrap().llm_metrics = Some(sample_llm_metrics(1));
+
+        let mut event_chunk = create_mock_chunk("World".to_string(), 0);
+        let final_metrics = sample_llm_metrics(2);
+        let annotation = final_metrics.to_annotation::<()>().unwrap();
+        event_chunk.event = annotation.event;
+        event_chunk.comment = annotation.comment;
+
+        let chunks = vec![field_chunk, event_chunk, create_final_chunk(0)];
+
+        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
+        let results: Vec<_> = folded.collect().await;
+        let final_resp = future.await.expect("aggregation should produce a record");
+
+        assert_eq!(results.len(), 1, "fold must emit exactly one chunk");
+        let folded_metrics = results[0]
+            .data
+            .as_ref()
+            .unwrap()
+            .llm_metrics
+            .as_ref()
+            .expect("folded chunk must carry the final LLMMetricAnnotation (#11349)");
+        assert_eq!(folded_metrics, &final_metrics);
+
+        assert_eq!(
+            final_resp.inner.choices[0]
+                .message
+                .content
+                .as_ref()
+                .unwrap(),
+            &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fold_without_metrics_leaves_llm_metrics_none() {
+        let chunks = vec![
+            create_mock_chunk("Hello".to_string(), 0),
+            create_final_chunk(0),
+        ];
+
+        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
+        let results: Vec<_> = folded.collect().await;
+        let _ = future.await.expect("aggregation should produce a record");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].data.as_ref().unwrap().llm_metrics.is_none());
     }
 }
