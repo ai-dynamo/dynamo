@@ -199,15 +199,22 @@ fn sita_band_occupancy(loads: &[f64], slice: SitaSlice) -> f64 {
     inside / denominator
 }
 
-/// Widen `band` into the next band up when the target band holds more than
+/// Widen `band` into an adjacent band when the target holds more than
 /// `spill_threshold` of the pool's load and that neighbor is genuinely quieter.
 ///
-/// Spilling is deliberately one-directional. Sending a short request to a
-/// long-band worker costs roughly its own (small) service time, but admitting a
-/// long request into the short band parks a multi-thousand-token prefill in
-/// front of every short request queued behind it — the head-of-line blocking
-/// SITA exists to prevent. Downward spilling therefore gives back more than it
-/// gains, so the largest band absorbs pressure instead of exporting it.
+/// Which neighbor is allowed is asymmetric, because the two directions have very
+/// different costs. Sending a request *up* into a longer band costs roughly its
+/// own service time. Sending a long request *down* parks a multi-thousand-token
+/// prefill in front of everything queued behind it — the head-of-line blocking
+/// SITA exists to prevent. So band 0 is not a spill target merely because it is
+/// the nearest neighbor: the short band's isolation is the entire source of the
+/// mean-TTFT win. See `sita_borrow_idle_short_band` for the one exception.
+///
+/// Every other band still needs a relief valve. Without one the largest band is
+/// a saturation sink — it receives spill from below and can never shed it — and
+/// the resulting queue on its few workers wrecks tail latency (p99 end-to-end
+/// blows up even as the mean improves). The top band may therefore widen
+/// downward into band 1, which holds medium requests.
 fn sita_apply_spill(
     band: usize,
     band_count: usize,
@@ -216,18 +223,64 @@ fn sita_apply_spill(
     spill_threshold: f64,
 ) -> SitaSlice {
     let target = slices[band];
-    if spill_threshold >= 1.0 || band + 1 >= band_count {
-        return target;
-    }
-    if sita_band_occupancy(loads, target) <= spill_threshold {
+    if spill_threshold >= 1.0 {
         return target;
     }
 
-    let neighbor = slices[band + 1];
-    if neighbor == target || sita_slice_mean(loads, neighbor) >= sita_slice_mean(loads, target) {
+    let widened = if sita_band_occupancy(loads, target) > spill_threshold {
+        // Prefer the band above; the top band falls back to the one below, which
+        // is band 1 (never band 0, since reaching here needs `band >= 2`).
+        let neighbor_band = if band + 1 < band_count {
+            Some(band + 1)
+        } else if band >= 2 {
+            Some(band - 1)
+        } else {
+            None
+        };
+        match neighbor_band.map(|next| slices[next]) {
+            Some(neighbor)
+                if neighbor != target
+                    && sita_slice_mean(loads, neighbor) < sita_slice_mean(loads, target) =>
+            {
+                (target.0.min(neighbor.0), target.1.max(neighbor.1))
+            }
+            _ => target,
+        }
+    } else {
+        target
+    };
+
+    sita_borrow_idle_short_band(widened, slices, loads, spill_threshold)
+}
+
+/// Last-resort valve: let a saturated long band borrow band 0's workers, but
+/// only while band 0 is measurably *idle*.
+///
+/// Reserving workers for short requests is what makes SITA work, but the
+/// reservation is only free when the short band is actually using them. A
+/// statically fenced-off band 0 starves the long bands of KV capacity: the huge
+/// requests that must share the remaining workers pile up their multi-thousand
+/// token contexts on a fraction of the pool, and end-to-end tail latency blows
+/// up even though their time-to-first-token is unchanged. Lending idle short-band
+/// workers hands that capacity back exactly when doing so costs nothing.
+///
+/// `spill_threshold` sets both directions of the dial: a band is "saturated"
+/// above it and "idle" below its complement, so a high threshold means both a
+/// reluctance to spill and a strict definition of idle.
+fn sita_borrow_idle_short_band(
+    target: SitaSlice,
+    slices: &[SitaSlice; 3],
+    loads: &[f64],
+    spill_threshold: f64,
+) -> SitaSlice {
+    let short = slices[0];
+    if target.0 <= short.0 {
         return target;
     }
-    (target.0.min(neighbor.0), target.1.max(neighbor.1))
+    if sita_band_occupancy(loads, short) >= 1.0 - spill_threshold {
+        return target;
+    }
+    (short.0, target.1)
 }
 
 /// Inclusive worker-id bounds of the SITA band this request may route to.
@@ -2403,6 +2456,118 @@ mod tests {
         .worker;
 
         assert!(worker.worker_id < 4);
+    }
+
+    /// The largest band has no band above it, so without a downward relief
+    /// valve it accumulates spill it can never shed and its queue wrecks tail
+    /// latency. It may widen into band 1 — but never into the protected band 0.
+    #[test]
+    fn sita_top_band_spills_down_but_never_into_the_short_band() {
+        // share 0.5 over 8 workers => band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
+        let workers = sita_workers(8, 1_000);
+        let mut request = base_request(9_000);
+        // Saturate the top band while keeping band 0 busy enough not to be
+        // lendable, so the only relief available is the step down into band 1.
+        // Band 2 occupancy = 950/(950+100) = 0.90 > 0.85, so it spills; band 0
+        // occupancy = 150/(150+475) = 0.24 >= 1 - 0.85, so it stays reserved.
+        for worker_id in 0..8 {
+            let active_decode_blocks = match worker_id {
+                0..=3 => 150, // band 0: in use, not lendable
+                4..=5 => 0,   // band 1: idle
+                _ => 950,     // band 2: saturated
+            };
+            request.worker_loads.insert(
+                WorkerWithDpRank::from_worker_id(worker_id),
+                crate::sequences::WorkerLoadProjection {
+                    active_decode_blocks,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let no_spill = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                sita_spill_threshold: 1.0,
+                ..sita_config(0.5)
+            }),
+            "test",
+        )
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            64,
+        ))
+        .unwrap()
+        .worker;
+        let with_spill = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                sita_spill_threshold: 0.85,
+                ..sita_config(0.5)
+            }),
+            "test",
+        )
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            64,
+        ))
+        .unwrap()
+        .worker;
+
+        assert!(
+            no_spill.worker_id >= 6,
+            "with spilling off the top band stays confined to its own slice"
+        );
+        assert!(
+            (4..6).contains(&with_spill.worker_id),
+            "a saturated top band must reach band 1, and must not touch band 0"
+        );
+    }
+
+    /// Band 0's reservation is only free while band 0 is idle. A saturated long
+    /// band may borrow it then, but must not touch it while short requests are
+    /// actually using those workers.
+    #[test]
+    fn sita_long_band_borrows_band_0_only_while_it_is_idle() {
+        // share 0.5 over 8 workers => band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
+        let workers = sita_workers(8, 1_000);
+        let config = KvRouterConfig {
+            sita_spill_threshold: 0.85,
+            ..sita_config(0.5)
+        };
+
+        let saturate_long = |band_0_load: usize| {
+            let mut request = base_request(9_000);
+            for worker_id in 0..8 {
+                request.worker_loads.insert(
+                    WorkerWithDpRank::from_worker_id(worker_id),
+                    crate::sequences::WorkerLoadProjection {
+                        active_decode_blocks: if worker_id < 4 { band_0_load } else { 950 },
+                        ..Default::default()
+                    },
+                );
+            }
+            DefaultWorkerSelector::new(Some(config.clone()), "test")
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    64,
+                ))
+                .unwrap()
+                .worker
+        };
+
+        assert!(
+            saturate_long(0).worker_id < 4,
+            "an idle band 0 should be lent to a saturated long band"
+        );
+        assert!(
+            saturate_long(950).worker_id >= 4,
+            "a busy band 0 keeps its workers reserved for short requests"
+        );
     }
 
     #[test]
