@@ -192,6 +192,23 @@ def register_engine_metrics_callback(
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
 
+    def get_typed() -> list:
+        """Callback returning engine metrics as a typed structure."""
+        return get_prometheus_typed(
+            registry,
+            metric_prefix_filters=metric_prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+        )
+
+    # Registered alongside the text callback, not instead of it: /metrics keeps
+    # serving the engine's own rendering while the structured path (OTLP) reads
+    # the typed form. Adopting typed therefore cannot change what scrapers see.
+    register_typed = getattr(
+        endpoint.metrics, "register_prometheus_typed_callback", None
+    )
+    if register_typed is not None:
+        register_typed(get_typed)
+
 
 def get_prometheus_typed(
     registry: "CollectorRegistry",

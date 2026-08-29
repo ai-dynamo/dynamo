@@ -25,6 +25,11 @@ pub struct TypedSample {
     pub name: String,
     pub labels: BTreeMap<String, String>,
     pub value: f64,
+    /// Present in the exposition format and in `prometheus_client`'s model.
+    /// Nothing populates it today, but the boundary should not narrow the
+    /// contract on its own.
+    #[serde(default)]
+    pub timestamp: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,10 +42,54 @@ pub struct TypedFamily {
 }
 
 /// Convert typed families into `MetricFamily`, sorted by name.
+///
+/// `_created` samples are promoted to standalone gauge families, which is how
+/// `generate_latest` renders them and therefore what the text path already
+/// exports. Dropping them here would silently stop exporting series that ship
+/// today.
 pub fn build_families(typed: Vec<TypedFamily>) -> Vec<MetricFamily> {
-    let mut out: Vec<MetricFamily> = typed.into_iter().filter_map(build_one).collect();
+    let mut out = Vec::new();
+    for family in typed {
+        out.extend(promote_created(&family));
+        if let Some(built) = build_one(family) {
+            out.push(built);
+        }
+    }
     out.sort_by(|a, b| a.name().cmp(b.name()));
     out
+}
+
+/// `_created` carries the construction timestamp, not a measurement, and the
+/// typed model nests it inside its parent while the text model gives it its own
+/// family. Emit one gauge family per `_created` sample so both agree.
+fn promote_created(family: &TypedFamily) -> Vec<MetricFamily> {
+    let mut by_name: BTreeMap<&str, MetricFamily> = BTreeMap::new();
+    for sample in family
+        .samples
+        .iter()
+        .filter(|s| s.name.ends_with("_created"))
+    {
+        let entry = by_name.entry(sample.name.as_str()).or_insert_with(|| {
+            let mut f = MetricFamily::new();
+            f.set_name(sample.name.clone());
+            f.set_help(family.help.clone());
+            f.set_field_type(MetricType::GAUGE);
+            f
+        });
+        let mut metric = Metric::new();
+        metric.set_label(label_pairs(
+            sample
+                .labels
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ));
+        let mut gauge = Gauge::new();
+        gauge.set_value(sample.value);
+        metric.set_gauge(gauge);
+        entry.mut_metric().push(metric);
+    }
+    by_name.into_values().collect()
 }
 
 fn build_one(family: TypedFamily) -> Option<MetricFamily> {
