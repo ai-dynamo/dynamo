@@ -35,6 +35,11 @@
 # path as it runs from -- CRIU restores file-backed mappings by path, not via
 # PATH search -- and so must this placeholder image (same BASE_IMAGE).
 #
+# This image additionally ships the POSIX CUDA VMM interposer at
+# /usr/local/lib/snapshot/libcuinterposer.so for GMS V1 workloads. See the
+# cuinterposer build stage below for why, and agent/cmd/cuinterpose/README.md
+# in ai-dynamo/snapshot for the launch contract.
+#
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot agent
 # restores into the container.
@@ -60,6 +65,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && rm -rf /var/lib/apt/lists/* \
     && git clone --depth 1 https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
+# The POSIX CUDA VMM interposer. GMS V1 hands the engine its weights as VMM
+# allocations shared with CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, and the GMS
+# servers that export them are deliberately NOT in the checkpoint. Without the
+# shim, cuda-checkpoint blocks forever trying to checkpoint memory whose creator
+# lives outside the target process tree.
+#
+# Per agent/cmd/cuinterpose/README.md the workload image must provide the shim
+# at /usr/local/lib/snapshot/libcuinterposer.so; snapshot never injects it into
+# the workload image. Only the engine sets LD_PRELOAD -- the GMS server must not
+# preload it -- and restore pods must not preload either, because CRIU restores
+# the already-interposed tree.
+#
+# SNAPSHOT_REF must match the snapshot agent build serving these pods: the shim
+# and the agent's coordinator speak a versioned wire protocol
+# (CUINTERPOSER_VERSION in protocol.h).
+ARG SNAPSHOT_REPO=https://github.com/ai-dynamo/snapshot.git
+ARG SNAPSHOT_REF=main
+FROM ${DOCKER_PROXY}nvidia/cuda:13.0.0-devel-ubuntu24.04 AS cuinterposer
+ARG SNAPSHOT_REPO
+ARG SNAPSHOT_REF
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --filter=blob:none --no-checkout "${SNAPSHOT_REPO}" /src \
+    && git -C /src fetch --depth 1 origin "${SNAPSHOT_REF}" \
+    && git -C /src checkout FETCH_HEAD
+RUN make -C /src/agent/cmd/cuinterpose CUDA_HOME=/usr/local/cuda \
+    && test -f /src/agent/cmd/cuinterpose/build/libcuinterposer.so
+
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
@@ -73,6 +106,8 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
     fi
 
 COPY --from=cuda-ckpt /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/bin/cuda-checkpoint
+COPY --from=cuinterposer /src/agent/cmd/cuinterpose/build/libcuinterposer.so /usr/local/lib/snapshot/libcuinterposer.so
+RUN chmod 0644 /usr/local/lib/snapshot/libcuinterposer.so
 
 # Checkpoint volume mount point. This is a storage concern -- no restore
 # tooling is provisioned here; see the file header above.

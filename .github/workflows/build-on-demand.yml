@@ -27,6 +27,11 @@ on:
         type: boolean
         default: false
 
+      snapshot_ref:
+        description: 'Git ref of ai-dynamo/snapshot to build the CUDA VMM interposer (libcuinterposer.so) from, baked into the placeholder image. MUST match the snapshot agent build serving the cluster: the shim and the agent coordinator speak a versioned wire protocol.'
+        type: string
+        default: 'main'
+
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -137,6 +142,7 @@ jobs:
             ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
           extra_build_args: |
             BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+            SNAPSHOT_REF=${{ inputs.snapshot_ref }}
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
