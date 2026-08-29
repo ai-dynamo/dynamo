@@ -35,10 +35,11 @@
 # path as it runs from -- CRIU restores file-backed mappings by path, not via
 # PATH search -- and so must this placeholder image (same BASE_IMAGE).
 #
-# This image additionally ships the POSIX CUDA VMM interposer at
-# /usr/local/lib/snapshot/libcuinterposer.so for GMS V1 workloads. See the
-# cuinterposer build stage below for why, and agent/cmd/cuinterpose/README.md
-# in ai-dynamo/snapshot for the launch contract.
+# This image additionally ships the POSIX CUDA VMM interposer for GMS V1
+# workloads: the shim at /usr/local/lib/snapshot/libcuinterposer.so and its
+# coordinator at /usr/local/bin/cuinterposer-coordinator. See the cuinterposer
+# build stage below for why, and agent/cmd/cuinterpose/README.md in
+# ai-dynamo/snapshot for the launch contract.
 #
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot agent
@@ -83,8 +84,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # preload it -- and restore pods must not preload either, because CRIU restores
 # the already-interposed tree.
 #
+# The coordinator ships alongside it: nsrestore runs inside this container's
+# mount namespace and execs /usr/local/bin/cuinterposer-coordinator by absolute
+# path (agent/internal/cuda/cuinterpose.go), and it is NOT part of the agent's
+# injected /tmp/snapshot-binaries bundle. Missing it fails restore with
+#   restore CUDA interposition: /usr/local/bin/cuinterposer-coordinator failed:
+#   no such file or directory
+# after CRIU has already restored the process tree. ai-dynamo/snapshot's own
+# placeholder stage installs both for the same reason.
+#
 # SNAPSHOT_REF must match the snapshot agent build serving these pods: the shim
-# and the agent's coordinator speak a versioned wire protocol
+# and the coordinator speak a versioned wire protocol
 # (CUINTERPOSER_VERSION in protocol.h).
 # SNAPSHOT_REF/SNAPSHOT_REPO are declared above the first FROM so they reach
 # this stage; they are re-declared here to bring them into its scope.
@@ -97,7 +107,8 @@ RUN git clone --filter=blob:none --no-checkout "${SNAPSHOT_REPO}" /src \
     && git -C /src fetch --depth 1 origin "${SNAPSHOT_REF}" \
     && git -C /src checkout FETCH_HEAD
 RUN make -C /src/agent/cmd/cuinterpose CUDA_HOME=/usr/local/cuda \
-    && test -f /src/agent/cmd/cuinterpose/build/libcuinterposer.so
+    && test -f /src/agent/cmd/cuinterpose/build/libcuinterposer.so \
+    && test -f /src/agent/cmd/cuinterpose/build/cuinterposer-coordinator
 
 FROM ${BASE_IMAGE}
 
@@ -113,7 +124,9 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
 
 COPY --from=cuda-ckpt /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/bin/cuda-checkpoint
 COPY --from=cuinterposer /src/agent/cmd/cuinterpose/build/libcuinterposer.so /usr/local/lib/snapshot/libcuinterposer.so
-RUN chmod 0644 /usr/local/lib/snapshot/libcuinterposer.so
+COPY --from=cuinterposer /src/agent/cmd/cuinterpose/build/cuinterposer-coordinator /usr/local/bin/cuinterposer-coordinator
+RUN chmod 0644 /usr/local/lib/snapshot/libcuinterposer.so \
+    && chmod 0755 /usr/local/bin/cuinterposer-coordinator
 
 # Checkpoint volume mount point. This is a storage concern -- no restore
 # tooling is provisioned here; see the file header above.
