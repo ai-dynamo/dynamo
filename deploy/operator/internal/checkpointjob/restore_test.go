@@ -276,10 +276,10 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 	annotations := map[string]string{TargetContainersAnnotation: "main"}
-	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true, "main"); err != nil {
 		t.Fatalf("first PrepareRestorePodSpec error: %v", err)
 	}
-	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true, "main"); err != nil {
 		t.Fatalf("second PrepareRestorePodSpec error: %v", err)
 	}
 
@@ -372,7 +372,7 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 		}},
 	}
 
-	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true); err != nil {
+	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true, "main"); err != nil {
 		t.Fatalf("PrepareRestorePodSpec error: %v", err)
 	}
 
@@ -407,7 +407,7 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		}},
 	}
 
-	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true); err != nil {
+	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true, "main"); err != nil {
 		t.Fatalf("PrepareRestorePodSpec error: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 		}},
 	}
 
-	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true); err != nil {
+	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true, "main"); err != nil {
 		t.Fatalf("PrepareRestorePodSpec error: %v", err)
 	}
 

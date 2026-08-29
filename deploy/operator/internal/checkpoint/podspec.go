@@ -262,6 +262,7 @@ func InjectResolvedCheckpointIntoPodSpec(
 		restore.storage,
 		seccompProfile,
 		restore.info.Ready,
+		restore.info.CaptureSourceContainer,
 	); err != nil {
 		return err
 	}

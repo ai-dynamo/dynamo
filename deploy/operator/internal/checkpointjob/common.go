@@ -30,6 +30,14 @@ const (
 	// restore target is simply ignored and its containers sit in standby.
 	RestoreFromAnnotation = "nvidia.com/restore-from"
 
+	// RestoreContainerMapAnnotation maps the single captured source container
+	// to one or more restore destinations as comma-separated source=destination
+	// pairs. Intra-pod failover clones the captured "main" container into
+	// engine-0..N, so without this the agent looks for a destination named
+	// after the source and fails preflight with "restore pod has no destination
+	// container named \"main\"".
+	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
+
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the

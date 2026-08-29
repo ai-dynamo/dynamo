@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
@@ -38,6 +39,10 @@ type CheckpointInfo struct {
 	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
+	// CaptureSourceContainer is the container the checkpoint captured
+	// (DynamoCheckpoint job.targetContainerName). Restore destinations that do
+	// not share this name need an explicit restore-container-map for the agent.
+	CaptureSourceContainer string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -54,7 +59,18 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 		ArtifactVersion:  checkpointArtifactVersion(ckpt),
 		CheckpointName:   ckpt.Name,
 		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+
+		CaptureSourceContainer: captureSourceContainer(ckpt),
 	}, nil
+}
+
+// captureSourceContainer returns the container the checkpoint captured,
+// defaulting to main to match the DynamoCheckpoint CRD default.
+func captureSourceContainer(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	if ckpt != nil && ckpt.Spec.Job.TargetContainerName != "" {
+		return ckpt.Spec.Job.TargetContainerName
+	}
+	return commonconsts.MainContainerName
 }
 
 func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {

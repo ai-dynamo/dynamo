@@ -28,6 +28,9 @@ type PodOptions struct {
 	ArtifactVersion string
 	Storage         Storage
 	SeccompProfile  string
+	// CaptureSourceContainer is the container the checkpoint captured. Empty
+	// means "same name as the destination", the agent's default.
+	CaptureSourceContainer string
 }
 
 const (
@@ -49,7 +52,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.Storage, opts.SeccompProfile, true); err != nil {
+	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.Storage, opts.SeccompProfile, true, opts.CaptureSourceContainer); err != nil {
 		return nil, err
 	}
 	pod.Namespace = opts.Namespace
@@ -62,18 +65,64 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 // sets DYN_SNAPSHOT_RESTORE_STANDBY=1 so Dynamo standby entrypoints
 // sleep before CRIU restore; generic images that do not honor the env must
 // still provide their own inert restore command.
+// ApplyRestoreContainerMap publishes the agent's one-source-to-many-destinations
+// restore map. The agent resolves the captured source name from the
+// PodSnapshotContent and, absent this annotation, restores into a destination of
+// the same name. Intra-pod failover renames the destinations (engine-0..N), so
+// the map must be explicit. A single same-named destination is the agent's
+// default, so the annotation is cleared in that case to keep the simple path
+// byte-identical to before.
+func ApplyRestoreContainerMap(annotations map[string]string, captureSource string, targets []string) error {
+	if annotations == nil {
+		return nil
+	}
+	captureSource = strings.TrimSpace(captureSource)
+	if len(targets) == 0 || captureSource == "" {
+		delete(annotations, RestoreContainerMapAnnotation)
+		return nil
+	}
+	if len(targets) == 1 && targets[0] == captureSource {
+		delete(annotations, RestoreContainerMapAnnotation)
+		return nil
+	}
+	pairs := make([]string, 0, len(targets))
+	for _, name := range targets {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("restore destination container name is empty")
+		}
+		pairs = append(pairs, captureSource+"="+name)
+	}
+	annotations[RestoreContainerMapAnnotation] = strings.Join(pairs, ",")
+	return nil
+}
+
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
 	storage Storage,
 	seccompProfile string,
 	isCheckpointReady bool,
+	captureSource string,
 ) error {
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
 	targets, err := TargetContainersFromAnnotations(annotations, 1, 0)
 	if err != nil {
+		return fmt.Errorf("restore pod spec: %w", err)
+	}
+	// The capture always targets a single source container (the checkpoint
+	// Job's targetContainerName, "main" by default) and the agent resolves that
+	// name from the PodSnapshotContent. Intra-pod failover clones it into
+	// engine-0..N, so the destinations do not share the source's name and the
+	// agent's default same-name restore fails preflight with "restore pod has
+	// no destination container named \"main\"". Publish the explicit
+	// one-source-to-many-destinations map instead.
+	//
+	// The source side is filled in by the caller that knows the captured
+	// container; see ApplyRestoreContainerMap.
+	if err := ApplyRestoreContainerMap(annotations, captureSource, targets); err != nil {
 		return fmt.Errorf("restore pod spec: %w", err)
 	}
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
@@ -356,13 +405,14 @@ func PrepareRestorePodSpecForCheckpoint(
 	artifactVersion string,
 	seccompProfile string,
 	isCheckpointReady bool,
+	captureSource string,
 ) error {
 	storage, err := DiscoverAndResolveStorage(ctx, reader, namespace, checkpointID, artifactVersion)
 	if err != nil {
 		return err
 	}
 
-	return PrepareRestorePodSpec(podSpec, annotations, storage, seccompProfile, isCheckpointReady)
+	return PrepareRestorePodSpec(podSpec, annotations, storage, seccompProfile, isCheckpointReady, captureSource)
 }
 
 // InjectCheckpointVolume adds the checkpoint PVC volume to the pod spec if

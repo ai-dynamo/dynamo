@@ -31,3 +31,39 @@ func TestApplyRestoreTargetMetadataSetsRestoreFromAnnotation(t *testing.T) {
 		t.Fatalf("%s should be cleared when restore is disabled", RestoreFromAnnotation)
 	}
 }
+
+// Intra-pod failover clones the captured "main" container into engine-0..N, so
+// the agent's default same-name restore cannot resolve a destination and fails
+// preflight with: restore pod has no destination container named "main".
+func TestApplyRestoreContainerMap(t *testing.T) {
+	t.Run("failover clones get an explicit map", func(t *testing.T) {
+		annotations := map[string]string{}
+		if err := ApplyRestoreContainerMap(annotations, "main", []string{"engine-0", "engine-1"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := "main=engine-0,main=engine-1"
+		if got := annotations[RestoreContainerMapAnnotation]; got != want {
+			t.Fatalf("%s = %q, want %q", RestoreContainerMapAnnotation, got, want)
+		}
+	})
+
+	t.Run("single same-named destination stays on the agent default", func(t *testing.T) {
+		annotations := map[string]string{RestoreContainerMapAnnotation: "stale=value"}
+		if err := ApplyRestoreContainerMap(annotations, "main", []string{"main"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := annotations[RestoreContainerMapAnnotation]; ok {
+			t.Fatalf("annotation should be cleared for the same-name case: %v", annotations)
+		}
+	})
+
+	t.Run("unknown capture source clears the map", func(t *testing.T) {
+		annotations := map[string]string{RestoreContainerMapAnnotation: "stale=value"}
+		if err := ApplyRestoreContainerMap(annotations, "", []string{"engine-0"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := annotations[RestoreContainerMapAnnotation]; ok {
+			t.Fatalf("annotation should be cleared without a capture source: %v", annotations)
+		}
+	})
+}
