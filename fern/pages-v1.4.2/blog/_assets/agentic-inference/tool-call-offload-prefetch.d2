@@ -1,0 +1,199 @@
+vars: {
+  d2-config: {
+    theme-overrides: {
+      N1: "#e0e0e0"
+      N2: "#a0a0a0"
+      N3: "#707070"
+      N4: "#404040"
+      N5: "#5d5d5d"
+      N6: "#151515"
+      N7: "#0a0a0a"
+
+      B1: "#0a0a0a"
+      B2: "#111111"
+      B3: "#181818"
+      B4: "#222222"
+      B5: "#5d5d5d"
+      B6: "#404040"
+
+      AA2: "#76b900"
+      AA4: "#3d7ab5"
+      AA5: "#c4a035"
+
+      AB4: "#7a3050"
+      AB5: "#2a6b55"
+    }
+  }
+}
+
+grid-rows: 2
+grid-gap: 40
+
+# Row 1: GPU timeline
+timeline: "" {
+  direction: right
+  style: {
+    fill: transparent
+    stroke: transparent
+  }
+
+  prefill: "Prefill" {
+    style: {
+      fill: "#2a4a10"
+      stroke: "#76b900"
+      stroke-width: 2
+      font-color: "#e0e0e0"
+      font-size: 18
+      bold: true
+      border-radius: 0
+    }
+  }
+
+  call1: "LLM Call 1" {
+    style: {
+      fill: "#2a4a10"
+      stroke: "#76b900"
+      stroke-width: 2
+      font-color: "#e0e0e0"
+      font-size: 18
+      bold: true
+      border-radius: 0
+    }
+  }
+
+  tool: "Tool Call" {
+    style: {
+      fill: "#1a1a2e"
+      stroke: "#5d5d5d"
+      stroke-width: 2
+      font-color: "#a0a0a0"
+      font-size: 18
+      bold: true
+      border-radius: 0
+    }
+  }
+
+  call2: "LLM Call 2" {
+    style: {
+      fill: "#2a4a10"
+      stroke: "#76b900"
+      stroke-width: 2
+      font-color: "#e0e0e0"
+      font-size: 18
+      bold: true
+      border-radius: 0
+    }
+  }
+
+  prefill -> call1: {
+    style: {
+      stroke: "#5d5d5d"
+      stroke-width: 1
+    }
+  }
+  call1 -> tool: {
+    style: {
+      stroke: "#5d5d5d"
+      stroke-width: 1
+    }
+  }
+  tool -> call2: {
+    style: {
+      stroke: "#5d5d5d"
+      stroke-width: 1
+    }
+  }
+}
+
+# Row 2: Storage
+storage: "" {
+  direction: right
+  style: {
+    fill: transparent
+    stroke: transparent
+  }
+
+  pad_left: "" {
+    style: {
+      fill: transparent
+      stroke: transparent
+      font-size: 8
+      font-color: transparent
+    }
+    width: 120
+    height: 1
+  }
+
+  host: "Host Memory" {
+    style: {
+      fill: "#0f1e30"
+      stroke: "#3d7ab5"
+      stroke-width: 2
+      font-color: "#e0e0e0"
+      font-size: 18
+      bold: true
+      border-radius: 0
+    }
+  }
+
+  disk: "Storage" {
+    shape: cylinder
+    style: {
+      fill: "#142025"
+      stroke: "#50a090"
+      stroke-width: 2
+      font-color: "#e0e0e0"
+      font-size: 18
+      bold: true
+    }
+  }
+
+  pad_left -> host: {
+    style: {
+      stroke: transparent
+      stroke-width: 0
+    }
+  }
+  host -> disk: {
+    style: {
+      stroke: "#5d5d5d"
+      stroke-width: 1
+    }
+  }
+  disk -> pad_right: {
+    style: {
+      stroke: transparent
+      stroke-width: 0
+    }
+  }
+
+  pad_right: "" {
+    style: {
+      fill: transparent
+      stroke: transparent
+      font-size: 8
+      font-color: transparent
+    }
+    width: 120
+    height: 1
+  }
+}
+
+# Cross-row connections
+timeline.call1 -> storage.host: "KV offload" {
+  style: {
+    stroke: "#c4a035"
+    stroke-width: 2
+    font-color: "#c4a035"
+    font-size: 16
+  }
+}
+
+storage.host -> timeline.call2: "KV prefetch" {
+  style: {
+    stroke: "#76b900"
+    stroke-width: 2
+    font-color: "#76b900"
+    font-size: 16
+  }
+}
