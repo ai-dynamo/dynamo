@@ -355,6 +355,13 @@ def main() -> int:
             print("::error::--stage-version: cannot read [workspace.package].version", file=sys.stderr)
             return 1
         cur = wm.group(1)
+        # STAGE_VERSION's base comes from pyproject.toml (release.yml); nothing
+        # else gates pyproject against Cargo.toml, so a bump that missed one
+        # file would otherwise publish crates under the wrong base silently.
+        if not (stage_version == cur or stage_version.startswith(f"{cur}-")):
+            print(f"::warning::stage-version '{stage_version}' does not extend the "
+                  f"workspace version '{cur}' — pyproject.toml and Cargo.toml may "
+                  f"have drifted", file=sys.stderr)
         if cur != stage_version:
             n = rewrite_versions([root / "Cargo.toml", *member_manifests], cur, stage_version)
             print(f"stage-version: rewrote {cur} -> {stage_version} across {n} manifest(s)")

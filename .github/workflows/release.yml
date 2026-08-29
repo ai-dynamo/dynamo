@@ -313,13 +313,23 @@ jobs:
             # keeps same-day re-runs unique on immutable ChartMuseum; its `g`
             # prefix keeps an all-digit sha from being invalid SemVer.
             HELM_CHART_VERSION="${BASE_VERSION}-dev.${DATE_UTC}.g${SHORT_SHA}"
+            # Crate version: dotted SemVer pre-release identifiers so they sort
+            # numerically (dev.20260828 < dev.20260901; an undotted -devYYYYMMDD
+            # is one TEXT identifier and sorts wrong against any other shape,
+            # e.g. -dev9 > -dev20260828). Date-only, matching the wheel's
+            # .devYYYYMMDD: a same-day re-run at a new SHA is idempotently
+            # SKIPPED by the immutable registry — the day's first staging wins.
+            SEMVER_BASE=$(echo "${BASE_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+            CRATE_VERSION_NIGHTLY="${SEMVER_BASE}-dev.${DATE_UTC}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
             echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
             echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
+            echo "crate_version=${CRATE_VERSION_NIGHTLY}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
             echo "Nightly wheel version: ${WHEEL_VERSION}"
             echo "Nightly Helm chart version: ${HELM_CHART_VERSION}"
+            echo "Nightly crate version: ${CRATE_VERSION_NIGHTLY}"
             exit 0
           fi
 
@@ -1446,12 +1456,12 @@ jobs:
   # cargo needs the native toolchain, so we `docker run` the ECR build image on
   # prod-builder-amd-v1 (the DinD builder release-publish uses). A job-level
   # `container:` cannot pull the image on a delayed release dispatch (registry
-  # creds are only fresh in-step). On-demand only.
+  # creds are only fresh in-step). On-demand and nightly; rc stays crate-less.
 
   stage-crates-artifactory:
     name: Stage Crates to Artifactory
     needs: [prepare-release]
-    if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && inputs.crates != 'none' && inputs.crates != '' }}
+    if: ${{ needs.prepare-release.result == 'success' && (needs.prepare-release.outputs.on_demand == 'true' || needs.prepare-release.outputs.nightly == 'true') && inputs.crates != 'none' && inputs.crates != '' }}
     runs-on: prod-builder-amd-v1
     environment: automated-release
     # Fail-soft: crate staging must never block the release. The job turns red
@@ -1469,6 +1479,7 @@ jobs:
       crates_status: ${{ steps.publish_crates.outputs.crates_status }}
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
     steps:
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1489,7 +1500,13 @@ jobs:
         run: |
           set -euo pipefail
           aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-          echo "ECR_IMAGE=${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-dynamo-runtime-test" >> "${GITHUB_ENV}"
+          # Nightly builds tag the toolchain image with the suffix BEFORE -test
+          # (<sha>-dynamo-runtime-nightly-test, shared-build-image.yml); a missing
+          # nightly build must not fall through to the post-merge image at the
+          # same SHA (it carries stable, non-dev wheel versions).
+          NIGHTLY_TAG_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then NIGHTLY_TAG_SUFFIX="-nightly"; fi
+          echo "ECR_IMAGE=${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}-test" >> "${GITHUB_ENV}"
 
       - name: Inventory crate build image in ECR
         env:
@@ -1497,7 +1514,8 @@ jobs:
         run: |
           set -uo pipefail
           # Report-only: is the crate build image in ECR? Never fails (publish step errors if absent).
-          TAG="${COMMIT_SHA}-dynamo-runtime-test"
+          # Single source of truth: the tag the login step derived into ECR_IMAGE.
+          TAG="${ECR_IMAGE##*:}"
           {
             echo "### Crate build image availability (ECR)"
             echo ""
@@ -1525,8 +1543,10 @@ jobs:
           STAGE_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
           CRATE_SUBSET: ${{ inputs.crates }}
         run: |
-          # No `set -e`: outputs must be set even when the publish fails partway;
-          # we exit with the real code afterwards.
+          # The step shell is GitHub's implicit `bash -e {0}` (set -uo does not
+          # clear -e): every fallible command below is guarded so the outputs are
+          # written even when the publish fails partway; the real exit code is
+          # raised at the end.
           set -uo pipefail
           # Mask the registry host: cargo error output embeds the index URL in
           # forms (https://<host>/...config.json) that exact-secret masking of
@@ -1535,6 +1555,7 @@ jobs:
           if [ -n "${CARGO_HOST}" ]; then echo "::add-mask::${CARGO_HOST}"; fi
           # Run stage_crates.py inside the ECR build image: repo mounted at /work, cargo uses
           # the image toolchain, root so it can write Cargo.lock/.cargo and the target dir.
+          rc=0
           docker run --rm --user 0:0 \
             --network host \
             --ulimit nofile=65536:65536 \
@@ -1549,12 +1570,19 @@ jobs:
             -e CRATE_SUBSET \
             "${ECR_IMAGE}" \
             bash -lc 'python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"' \
-            2>&1 | tee /tmp/stage_crates.log
-          rc="${PIPESTATUS[0]}"
+            2>&1 | tee /tmp/stage_crates.log || rc=$?
+          # `|| rc=$?` keeps a nonzero exit non-fatal: the step shell is `bash -e {0}`
+          # (set -uo above does NOT clear -e), and errexit here would skip the
+          # output-writing tail — crates_status could never be 'partial' and the
+          # staged list would be lost on failure. pipefail makes rc docker's code.
 
           # stage_crates.py emits `STAGED_CRATE=<name>` and `FAILED_CRATE=<name> <reason>` lines.
           STAGED="$(sed -n 's/^STAGED_CRATE=//p' /tmp/stage_crates.log | paste -sd, - || true)"
           FAILED="$(sed -n 's/^FAILED_CRATE=\([^ ]*\).*/\1/p' /tmp/stage_crates.log | paste -sd, - || true)"
+          # Idempotent skips: the registry is immutable, so an already-present
+          # version keeps its FIRST content — an all-'already' run is a no-op
+          # re-stage, not a fresh publish, and must be tellable from the summary.
+          ALREADY="$(grep -c 'already on the registry (skip)' /tmp/stage_crates.log || true)"
           if [ "${rc}" -eq 0 ]; then
             STATUS="success"
           elif [ -n "${STAGED}" ]; then
@@ -1573,6 +1601,14 @@ jobs:
             echo "Staged: \`${STAGED:-<none>}\`"
             echo ""
             echo "Failed: \`${FAILED:-<none>}\`"
+            if [ "${ALREADY:-0}" -gt 0 ]; then
+              echo ""
+              echo "Already present (idempotent skip, content unchanged from the first staging at this version): ${ALREADY}"
+            fi
+            if [ "${NIGHTLY}" = "true" ]; then
+              echo ""
+              echo "Nightly consumers must pin with '=' (e.g. \`= ${STAGE_VERSION}\`): a bare pre-release pin resolves upward to any later rc/GA on the index."
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "Staged crates: ${STAGED:-<none>}"
           if [ "${rc}" -ne 0 ]; then
@@ -1776,6 +1812,13 @@ jobs:
             # helm only when charts were actually pushed (fail-soft).
             if [ -n "${STAGED_HELM}" ]; then
               ARTIFACTS="${ARTIFACTS},helm"
+            fi
+            # Nightly crates: staged fail-soft to the internal cargo registry at
+            # the dated -dev.YYYYMMDD version. Never crates.io (immutable,
+            # undeletable). Keyed on ACTUALS like helm above — a wholesale-failed
+            # staging must not tell GitLab a crate artifact exists.
+            if [ -n "${STAGED_CRATES}" ]; then
+              ARTIFACTS="${ARTIFACTS},crate"
             fi
             NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
