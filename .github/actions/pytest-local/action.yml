@@ -42,6 +42,18 @@ inputs:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
     default: 'auto'
+  parallel_dist:
+    description: 'pytest-xdist distribution mode (for example: loadscope or load)'
+    required: false
+    default: 'loadscope'
+  dynamo_runtime_num_worker_threads:
+    description: 'Optional Tokio worker-thread cap inherited by Dynamo test subprocesses'
+    required: false
+    default: ''
+  dynamo_runtime_max_blocking_threads:
+    description: 'Optional Tokio blocking-thread cap inherited by Dynamo test subprocesses'
+    required: false
+    default: ''
   max_vram_gib:
     description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Tests without @pytest.mark.profiled_vram_gib(N) are deselected by tests/conftest.py.'
     required: false
@@ -118,9 +130,34 @@ runs:
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         HF_XET_HIGH_PERFORMANCE: 1
+        INPUT_DYN_RUNTIME_NUM_WORKER_THREADS: ${{ inputs.dynamo_runtime_num_worker_threads }}
+        INPUT_DYN_RUNTIME_MAX_BLOCKING_THREADS: ${{ inputs.dynamo_runtime_max_blocking_threads }}
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+
+        case "${INPUT_DYN_RUNTIME_NUM_WORKER_THREADS}" in
+          '') ;;
+          0*|*[!0-9]*)
+            echo "::error::dynamo_runtime_num_worker_threads must be a positive integer"
+            exit 1
+            ;;
+          *)
+            export DYN_RUNTIME_NUM_WORKER_THREADS="${INPUT_DYN_RUNTIME_NUM_WORKER_THREADS}"
+            echo "Dynamo Tokio worker threads: ${DYN_RUNTIME_NUM_WORKER_THREADS}"
+            ;;
+        esac
+        case "${INPUT_DYN_RUNTIME_MAX_BLOCKING_THREADS}" in
+          '') ;;
+          0*|*[!0-9]*)
+            echo "::error::dynamo_runtime_max_blocking_threads must be a positive integer"
+            exit 1
+            ;;
+          *)
+            export DYN_RUNTIME_MAX_BLOCKING_THREADS="${INPUT_DYN_RUNTIME_MAX_BLOCKING_THREADS}"
+            echo "Dynamo Tokio max blocking threads: ${DYN_RUNTIME_MAX_BLOCKING_THREADS}"
+            ;;
+        esac
 
         # Get absolute path for test-results directory and ensure it has proper permissions.
         # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
@@ -210,8 +247,10 @@ runs:
             DIST_OPTS=""
             echo "🧮 GPU-parallel mode: --max-vram-gib=${{ inputs.max_vram_gib }} (xdist replaced by VRAM-aware orchestrator)"
           else
-            # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-            DIST_OPTS="--dist=loadscope"
+            # loadscope remains the conservative default for stateful tests. Suites
+            # with independently isolated cases can opt into load balancing across
+            # individual tests via parallel_dist=load.
+            DIST_OPTS="--dist=${{ inputs.parallel_dist }}"
           fi
 
           # Add coverage flags if enabled

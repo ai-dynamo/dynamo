@@ -69,6 +69,21 @@ on:
         required: false
         type: string
         default: 'auto'
+      cpu_parallel_dist:
+        description: 'pytest-xdist distribution mode for CPU-only tests'
+        required: false
+        type: string
+        default: 'loadscope'
+      cpu_dynamo_runtime_num_worker_threads:
+        description: 'Optional Tokio worker-thread cap for Dynamo CPU test processes'
+        required: false
+        type: string
+        default: ''
+      cpu_dynamo_runtime_max_blocking_threads:
+        description: 'Optional Tokio blocking-thread cap for Dynamo CPU test processes'
+        required: false
+        type: string
+        default: ''
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false
@@ -218,6 +233,9 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
+          parallel_dist: ${{ inputs.cpu_parallel_dist }}
+          dynamo_runtime_num_worker_threads: ${{ inputs.cpu_dynamo_runtime_num_worker_threads }}
+          dynamo_runtime_max_blocking_threads: ${{ inputs.cpu_dynamo_runtime_max_blocking_threads }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run GPU tests (parallel)

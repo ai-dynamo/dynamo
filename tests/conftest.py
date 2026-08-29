@@ -983,7 +983,14 @@ class SharedManagedProcess:
         self.resource_name = resource_name
         self._server: Optional[ManagedProcess] = None
 
-        root_tmp = Path(tempfile.gettempdir()) / "pytest_shared_services"
+        # All xdist workers for one invocation have sibling basetemp directories
+        # (``.../popen-gw0``, ``.../popen-gw1``, ...). Coordinate through their
+        # parent so workers share services without reusing stale state from a
+        # different pytest invocation in the same container.
+        root_tmp = tmp_path_factory.getbasetemp()
+        if hasattr(request.config, "workerinput"):
+            root_tmp = root_tmp.parent
+        root_tmp = root_tmp / "shared_services"
         root_tmp.mkdir(parents=True, exist_ok=True)
 
         self.port_file = root_tmp / f"{resource_name}_port"
@@ -1036,10 +1043,16 @@ class SharedManagedProcess:
                     logging.warning(
                         f"[{self.resource_name}] Stale port file: port {stored_port} not in use, starting fresh"
                     )
-                self.port = allocate_port(self.start_port)
-                self._write_port(self.port)
-                self._server = self._create_server(self.port)
+                # Passing port=0 lets each service allocate every port it needs.
+                # In particular, EtcdServer allocates both its client and peer
+                # listeners; passing only an explicit client port would make all
+                # xdist workers contend for etcd's default peer port 2380.
+                self._server = self._create_server(0)
                 self._server.__enter__()
+                self.port = self._server.port
+                # Publish only a healthy server. Writing before __enter__ succeeds
+                # leaves a stale port that makes the next worker retry needlessly.
+                self._write_port(self.port)
                 logging.info(
                     f"[{self.resource_name}] Started process on port {self.port}"
                 )
@@ -1052,7 +1065,7 @@ class SharedManagedProcess:
 
 
 class SharedEtcdServer(SharedManagedProcess):
-    """EtcdServer with file-based reference counting for multi-process sharing."""
+    """EtcdServer shared across xdist workers through a lock and port file."""
 
     def __init__(self, request, tmp_path_factory, start_port=2380, timeout=300):
         super().__init__(request, tmp_path_factory, "etcd", start_port, timeout)
@@ -1062,13 +1075,17 @@ class SharedEtcdServer(SharedManagedProcess):
     def _create_server(self, port: int) -> ManagedProcess:
         """Create EtcdServer instance."""
         server = EtcdServer(self.request, port=port, timeout=self.timeout)
+        # Shared services run alongside function-scoped instances under xdist.
+        # EtcdServer treats an explicit nonzero port as a legacy singleton and
+        # otherwise kills every matching process name before startup.
+        server.terminate_all_matching_process_names = False
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
 
 
 class SharedNatsServer(SharedManagedProcess):
-    """NatsServer with file-based reference counting for multi-process sharing."""
+    """NatsServer shared across xdist workers through a lock and port file."""
 
     def __init__(
         self,
@@ -1091,6 +1108,9 @@ class SharedNatsServer(SharedManagedProcess):
             timeout=self.timeout,
             disable_jetstream=self._disable_jetstream,
         )
+        # Do not let first-worker startup kill per-test NATS servers owned by
+        # other xdist workers merely because this wrapper chose the shared port.
+        server.terminate_all_matching_process_names = False
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server

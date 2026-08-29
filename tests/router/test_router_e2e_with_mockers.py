@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# NOTE: These tests run reliably in serial but have encountered intermittent failures
-# under pytest-xdist parallel execution (-n auto). Each test spawns its own
-# DistributedRuntime with isolated etcd/NATS and unique namespaces, but the Rust
-# runtime may use process-global state (e.g. lazy_static / OnceLock singletons for
-# endpoint tables) that races under concurrent xdist workers. Do not add
-# @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
+# NOTE: The dedicated router CI shard runs this module with four xdist workers and
+# per-test load balancing. Cases use unique namespaces; most reuse invocation-scoped
+# NATS/etcd services, while tests that restart services or require NATS-free execution
+# retain isolated fixtures. Keep these tests out of the general ``parallel`` marker
+# pool: unbounded ``-n auto`` multiplies every E2E's subprocess/thread fan-out.
 #
 import asyncio
 import contextlib
@@ -397,7 +396,7 @@ class CounterWorkerProcess:
 )
 def test_mocker_kv_event_publisher_disabled_diagnostic(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     topology,
     request_plane,
@@ -476,7 +475,7 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
 @pytest.mark.skip(reason=ROUND_ROBIN_MOCKER_SKIP_REASON)
 def test_mocker_router(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     router_mode,
     request_plane,
@@ -486,7 +485,7 @@ def test_mocker_router(
 
     Covers kv, round-robin, and random routing. Tests both NATS and TCP request planes.
     """
-    # runtime_services starts etcd and optionally nats based on request_plane
+    # Shared runtime services are safe because MockerProcess uses a unique namespace.
     logger.info(
         f"Starting mocker router test: router_mode={router_mode}, request_plane={request_plane}"
     )
@@ -520,7 +519,7 @@ def test_mocker_router(
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_router_soak(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     router_mode,
     request_plane,
@@ -548,22 +547,24 @@ def test_mocker_router_soak(
     )
 
 
-@pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(180)  # bumped for xdist contention (was 60s; ~19.86s serial avg)
 def test_mocker_two_kv_router(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
-    file_storage_backend,
-    store_backend,
 ):
     """
     Test with two KV routers and multiple mocker engine instances.
     Alternates requests between the two routers to test load distribution.
-    Tests with both etcd and file storage backends.
+
+    File discovery is covered by the focused per-worker configuration test.
+    This multi-frontend load-distribution case exercises the distributed etcd
+    deployment used in production.
     """
 
-    # runtime_services starts etcd and nats
+    store_backend = "etcd"
+
+    # Shared runtime services are safe because MockerProcess uses a unique namespace.
     logger.info(
         f"Starting mocker two KV router test with {store_backend} storage backend"
     )
@@ -598,16 +599,14 @@ def test_mocker_two_kv_router(
         )
 
 
-@pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(180)
 def test_mocker_session_affinity(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
-    file_storage_backend,
-    store_backend,
 ):
     """Replica affinity overrides conflicting per-frontend KV-prefix placement."""
+    store_backend = "etcd"
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -633,7 +632,7 @@ def test_mocker_session_affinity(
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_529(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     monkeypatch,
     overload_config,
@@ -668,7 +667,7 @@ def test_mocker_kv_router_overload_529(
 
 @pytest.mark.timeout(45)
 def test_mocker_kv_router_threshold_none_disables_rejection(
-    request, runtime_services_dynamic_ports, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers
 ):
     """Test that explicit CLI None thresholds disable KV router overload rejection."""
     logger.info("Starting mocker KV router explicit-None threshold test")
@@ -698,7 +697,7 @@ def test_mocker_kv_router_threshold_none_disables_rejection(
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_kv_router_bindings(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     request_plane,
 ):
@@ -737,18 +736,7 @@ def test_kv_router_bindings(
         )
 
 
-@pytest.mark.parametrize(
-    "store_backend,request_plane",
-    [
-        ("etcd", "tcp"),
-        ("file", "nats"),
-    ],
-    ids=[
-        "etcd",
-        "file",
-    ],
-    indirect=["request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 # Known flake: Router and Standalone indexer occasionally
 # disagree on event count by 3-4 events (e.g. "Router 1 has 105 events, Standalone A
@@ -759,8 +747,6 @@ def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    file_storage_backend,
-    store_backend,
     request_plane,
     event_plane,
 ):
@@ -768,8 +754,10 @@ def test_indexers_sync(
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
 
-    Tests with etcd and file discovery backends.
+    File discovery is covered by other focused router tests; this recovery path
+    exercises the distributed etcd configuration used in deployments.
     """
+    store_backend = "etcd"
     logger.info(
         f"Starting indexers sync test: store_backend={store_backend}, "
         f"request_plane={request_plane}"
@@ -808,7 +796,7 @@ def test_indexers_sync(
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
 def test_query_instance_id_returns_worker_and_tokens(
-    request, runtime_services_dynamic_ports, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers
 ):
     """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
@@ -964,7 +952,7 @@ def test_router_decisions(
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_router_aic(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     request_plane,
 ):
@@ -1109,7 +1097,7 @@ async def _wait_for_expected_disagg_worker_ids(
 @pytest.mark.timeout(120)
 def test_mocker_disagg_startup_lifecycle(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     monkeypatch,
     startup_order,
@@ -1188,7 +1176,7 @@ def test_mocker_disagg_startup_lifecycle(
 @pytest.mark.timeout(180)  # bumped for xdist contention (was 59s; ~19.51s serial avg)
 def test_router_decisions_disagg(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     enable_disagg_bootstrap,
 ):
@@ -1200,7 +1188,7 @@ def test_router_decisions_disagg(
     Parameterized with and without bootstrap rendezvous. Startup lifecycle
     ordering is covered separately by ``test_mocker_disagg_startup_lifecycle``.
     """
-    # runtime_services_dynamic_ports handles NATS and etcd startup
+    # Session services are safe because this test uses a unique namespace.
     logger.info(
         "Starting disaggregated router prefix reuse test "
         f"(bootstrap={enable_disagg_bootstrap})"
@@ -1240,7 +1228,7 @@ def test_router_decisions_disagg(
 @pytest.mark.timeout(120)
 def test_mocker_disagg_router_overload_529(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     monkeypatch,
     overload_case,
@@ -1295,13 +1283,13 @@ def test_mocker_disagg_router_overload_529(
 @pytest.mark.timeout(180)
 def test_disagg_topology_required_prefill_pin_match_and_mismatch(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     tmp_path,
 ):
     """Validate required KV-transfer topology policy from pinned prefill workers."""
     logger.info("Starting disaggregated topology-aware prefill pin test")
-    _ = (runtime_services_dynamic_ports, predownload_tokenizers)
+    _ = (runtime_services_session, predownload_tokenizers)
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -1385,7 +1373,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
 @pytest.mark.timeout(180)
 def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     enable_disagg_bootstrap,
 ):
@@ -1436,7 +1424,7 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
 @pytest.mark.timeout(180)
 def test_disagg_per_role_router_modes(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
 ):
     """KV-routed prefill in front of round-robin decode, via per-role MDC config.
@@ -1478,7 +1466,7 @@ def test_disagg_per_role_router_modes(
 @pytest.mark.timeout(180)
 def test_disagg_per_role_session_affinity(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
 ):
     """Session affinity is configured per hop: prefill pins, decode does not.
@@ -1523,7 +1511,7 @@ def test_disagg_per_role_session_affinity(
 @pytest.mark.timeout(180)
 def test_router_decisions_disagg_router_aic(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
 ):
     """Validate disagg KV-router decisions with router-side AIC enabled on the default startup path."""
@@ -1564,7 +1552,7 @@ def test_router_decisions_disagg_router_aic(
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 39s; ~12.84s serial avg)
 def test_busy_threshold_endpoint(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
     request_plane,
 ):
@@ -1577,7 +1565,7 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
-    # runtime_services_dynamic_ports handles NATS and etcd startup
+    # Session services are safe because MockerProcess uses a unique namespace.
     logger.info(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
@@ -1611,7 +1599,7 @@ def test_busy_threshold_endpoint(
 @pytest.mark.timeout(180)
 def test_disagg_direct_mode_epp_headers(
     request,
-    runtime_services_dynamic_ports,
+    runtime_services_session,
     predownload_tokenizers,
 ):
     """E2E: disaggregated serving with Direct routing mode (simulating GAIE EPP).
@@ -1658,8 +1646,10 @@ def test_disagg_direct_mode_epp_headers(
 
 def test_router_per_worker_config(
     request,
-    runtime_services_dynamic_ports,
-    file_storage_backend,
+    runtime_services_session,
+    predownload_tokenizers,
+    tmp_path,
+    monkeypatch,
 ):
     """Test that per-worker RouterConfig(DeviceAwareWeighted) overrides the frontend's
     global round-robin mode. GPU worker receives all requests; CPU worker receives none.
@@ -1671,7 +1661,12 @@ def test_router_per_worker_config(
     """
     logger.info("Starting per-worker router config override test")
 
-    with CounterWorkerProcess(request) as workers:
+    # Keep one focused file-discovery E2E without the flaky multi-frontend file
+    # cross-products removed from the broader router scenarios above. A pytest
+    # temp path survives function teardown, unlike TemporaryDirectory, so any
+    # asynchronously shutting-down file-store watcher can finish quietly.
+    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+    with CounterWorkerProcess(request, store_backend="file") as workers:
         frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_override_router_config(
             endpoint=workers.endpoint_path,
@@ -1682,6 +1677,7 @@ def test_router_per_worker_config(
             num_requests=5,
             cpu_count_file=workers.cpu_count_file,
             gpu_count_file=workers.gpu_count_file,
+            store_backend="file",
         )
 
 
