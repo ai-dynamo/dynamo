@@ -19,9 +19,7 @@ use pyo3::types::PyModule;
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
 
-fn routed_engine_invalid_argument_message<'a>(
-    error: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a str> {
+fn invalid_argument_message<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a str> {
     let error = error.downcast_ref::<DynamoError>()?;
     matches!(
         error.error_type(),
@@ -30,9 +28,16 @@ fn routed_engine_invalid_argument_message<'a>(
     .then(|| error.message())
 }
 
+pub(crate) fn invalid_argument_to_pyerr(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<PyErr> {
+    let message = invalid_argument_message(error)?;
+    Some(InvalidArgument::new_err(message.to_owned()))
+}
+
 pub fn routed_engine_error_to_pyerr(error: anyhow::Error) -> PyErr {
-    if let Some(message) = routed_engine_invalid_argument_message(error.as_ref()) {
-        return InvalidArgument::new_err(message.to_owned());
+    if let Some(error) = invalid_argument_to_pyerr(error.as_ref()) {
+        return error;
     }
     crate::to_pyerr(error)
 }
@@ -182,13 +187,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routed_engine_invalid_argument_classification_uses_outer_error_only() {
+    fn invalid_argument_classification_uses_outer_error_only() {
         let invalid_argument = DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::InvalidArgument))
             .message("bad request")
             .build();
         assert_eq!(
-            routed_engine_invalid_argument_message(&invalid_argument),
+            invalid_argument_message(&invalid_argument),
             Some("bad request")
         );
 
@@ -197,6 +202,6 @@ mod tests {
             .message("worker unavailable")
             .cause(invalid_argument)
             .build();
-        assert_eq!(routed_engine_invalid_argument_message(&outer), None);
+        assert_eq!(invalid_argument_message(&outer), None);
     }
 }
