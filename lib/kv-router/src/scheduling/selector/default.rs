@@ -283,6 +283,37 @@ fn sita_borrow_idle_short_band(
     (short.0, target.1)
 }
 
+/// Widen a long request's band to every non-short worker when it has no cached
+/// prefix to come back to.
+///
+/// Band confinement pays for itself through *cache affinity*: repeatedly sending
+/// same-sized requests to the same few workers concentrates their shared
+/// prefixes there, so the blocks are still resident on the next hit. That is a
+/// real effect for the short and medium bands, whose requests share prompt
+/// templates and corpus chunks.
+///
+/// A request that matched nothing in any worker's cache has no affinity to
+/// preserve — it will prefill from scratch wherever it lands. Confining it buys
+/// nothing and costs plenty: the long band's requests are exactly the ones with
+/// multi-thousand-token contexts and the longest decodes, so pinning them to a
+/// slice of the pool multiplies the resident KV and decode-batch contention on
+/// those workers. That shows up as inter-token latency on the requests that
+/// already have the worst end-to-end latency, which is what wrecks the tail.
+///
+/// So a zero-overlap request keeps out of band 0 — the short band's isolation is
+/// still what earns the mean-TTFT win — but may use the whole rest of the pool.
+fn sita_widen_uncached_long_band(
+    band: usize,
+    slices: &[SitaSlice; 3],
+    worker_count: usize,
+    best_cached_tokens: usize,
+) -> SitaSlice {
+    if band == 0 || best_cached_tokens > 0 {
+        return slices[band];
+    }
+    (slices[0].1, worker_count)
+}
+
 /// Inclusive worker-id bounds of the SITA band this request may route to.
 ///
 /// Returns `None` whenever SITA must not change routing: the knob is off, the
@@ -335,13 +366,22 @@ fn sita_worker_id_bounds<C: WorkerConfigLike>(
         band_count,
     );
     let loads = sita_worker_loads(&worker_ids, workers, request, block_size);
-    let (start, end) = sita_apply_spill(
+    let spilled = sita_apply_spill(
         band,
         band_count,
         &slices,
         &loads,
         kv_router_config.sita_spill_threshold,
     );
+    // A request with no cache to return to gains nothing from confinement, so
+    // prefer the widest of the two candidate slices.
+    let widened =
+        sita_widen_uncached_long_band(band, &slices, worker_ids.len(), best_cached_tokens);
+    let (start, end) = if widened.1 - widened.0 > spilled.1 - spilled.0 {
+        widened
+    } else {
+        spilled
+    };
 
     tracing::debug!(
         request_id = request.mode.request_id().unwrap_or("-"),
@@ -2174,6 +2214,23 @@ mod tests {
         }
     }
 
+    /// A request that already has a cached prefix somewhere, so it keeps the
+    /// cache affinity that band confinement exists to protect. Tests about band
+    /// *placement* need this: a request with no overlap anywhere is
+    /// deliberately allowed out of its band (see
+    /// `sita_widen_uncached_long_band`), which would otherwise mask the
+    /// behavior under test.
+    /// The overlap is deliberately tiny so it does not move the request across a
+    /// band boundary — only its presence matters here.
+    fn sita_cached_request(isl_tokens: usize) -> SchedulingRequest {
+        let mut request = base_request(isl_tokens);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(WorkerWithDpRank::from_worker_id(0), 64);
+        request
+    }
+
     /// Workers that report KV capacity, so band occupancy is computable.
     fn sita_workers(count: u64, total_kv_blocks: u64) -> HashMap<WorkerId, SitaWorkerConfig> {
         (0..count)
@@ -2274,8 +2331,8 @@ mod tests {
         let workers = sita_workers(8, 1_000);
         let selector = DefaultWorkerSelector::new(Some(sita_config(0.5)), "test");
 
-        let short = base_request(256);
-        let long = base_request(16_384);
+        let short = sita_cached_request(256);
+        let long = sita_cached_request(16_384);
 
         let short_worker = selector
             .select_worker(WorkerSelectionInput::configured(
@@ -2299,6 +2356,76 @@ mod tests {
         // share=0.5 over 8 workers: band 0 = ids 0..4, band 1 = 4..6, band 2 = 6..8.
         assert!(short_worker.worker_id < 4, "short request left band 0");
         assert!(long_worker.worker_id >= 6, "long request left band 2");
+    }
+
+    /// Band confinement is paid for by cache affinity, so a request with no
+    /// overlap anywhere gets the whole pool above band 0 instead of its own
+    /// narrow slice — but band 0 stays reserved for short requests.
+    #[test]
+    fn sita_uncached_long_request_widens_beyond_its_band() {
+        // share=0.5 over 8 workers: band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
+        let slices = sita_band_slices(8, 0.5, 3);
+        assert_eq!(slices, [(0, 4), (4, 6), (6, 8)]);
+
+        // A cached request stays inside its own band.
+        assert_eq!(sita_widen_uncached_long_band(2, &slices, 8, 64), (6, 8));
+        assert_eq!(sita_widen_uncached_long_band(1, &slices, 8, 64), (4, 6));
+
+        // With no cached prefix, bands 1 and 2 open up to every non-short worker.
+        assert_eq!(sita_widen_uncached_long_band(2, &slices, 8, 0), (4, 8));
+        assert_eq!(sita_widen_uncached_long_band(1, &slices, 8, 0), (4, 8));
+
+        // Band 0 is never widened: short requests keep their reservation, and a
+        // zero-overlap short request must not escape into the long workers.
+        assert_eq!(sita_widen_uncached_long_band(0, &slices, 8, 0), (0, 4));
+    }
+
+    /// End-to-end through the selector: the same long request lands outside its
+    /// band when it has nothing cached, and inside it when it does.
+    #[test]
+    fn sita_uncached_long_request_can_use_the_medium_band() {
+        let workers = sita_workers(8, 1_000);
+        let selector = DefaultWorkerSelector::new(Some(sita_config(0.5)), "test");
+
+        // Saturate the top band so the widened slice is genuinely preferred;
+        // spilling is off in `sita_config`, so only the widening can move it.
+        let saturate_top_band = |request: &mut SchedulingRequest| {
+            for worker_id in 6..8 {
+                request.worker_loads.insert(
+                    WorkerWithDpRank::from_worker_id(worker_id),
+                    crate::sequences::WorkerLoadProjection {
+                        active_decode_blocks: 900,
+                        ..Default::default()
+                    },
+                );
+            }
+        };
+        let mut uncached = base_request(16_384);
+        saturate_top_band(&mut uncached);
+        let mut cached = sita_cached_request(16_384);
+        saturate_top_band(&mut cached);
+
+        let pick = |request: &SchedulingRequest| {
+            selector
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    request,
+                    request.eligibility(),
+                    64,
+                ))
+                .unwrap()
+                .worker
+                .worker_id
+        };
+
+        assert!(
+            (4..6).contains(&pick(&uncached)),
+            "an uncached long request should reach the idle medium band"
+        );
+        assert!(
+            pick(&cached) >= 6,
+            "a request with cache affinity stays in its own band"
+        );
     }
 
     #[test]
@@ -2465,7 +2592,7 @@ mod tests {
     fn sita_top_band_spills_down_but_never_into_the_short_band() {
         // share 0.5 over 8 workers => band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
         let workers = sita_workers(8, 1_000);
-        let mut request = base_request(9_000);
+        let mut request = sita_cached_request(9_000);
         // Saturate the top band while keeping band 0 busy enough not to be
         // lendable, so the only relief available is the step down into band 1.
         // Band 2 occupancy = 950/(950+100) = 0.90 > 0.85, so it spills; band 0
