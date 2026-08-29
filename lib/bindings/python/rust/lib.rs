@@ -4,7 +4,7 @@
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
-use dynamo_runtime::discovery::EventTransportKind;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, EventTransportKind};
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
@@ -17,6 +17,7 @@ use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
@@ -822,6 +823,91 @@ fn update_model_taints<'p>(
             .await
             .map_err(to_pyerr)
     })
+}
+
+/// Snapshot the taints each of this endpoint's workers advertises through its
+/// registered base model card.
+///
+/// `only_live` restricts the snapshot to workers that currently have a live
+/// endpoint instance registered. The live filter reads the discovery snapshot
+/// directly instead of building an endpoint `Client`, which would spawn a
+/// background instance-reconciliation task just to answer one snapshot query.
+async fn endpoint_taint_snapshot(
+    endpoint: &rs::component::Endpoint,
+    only_live: bool,
+) -> anyhow::Result<HashMap<String, HashSet<String>>> {
+    let endpoint_id = endpoint.id();
+    let discovery = endpoint.drt().discovery();
+
+    let live_ids = if only_live {
+        let instances = discovery
+            .list(DiscoveryQuery::Endpoint {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await?;
+        Some(
+            instances
+                .into_iter()
+                .map(|instance| instance.instance_id())
+                .collect::<HashSet<u64>>(),
+        )
+    } else {
+        None
+    };
+
+    let models = discovery
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        })
+        .await?;
+
+    let mut snapshot = HashMap::new();
+    for model in models {
+        // LoRA adapter cards share a worker's runtime config but are not
+        // worker registrations; only base cards advertise worker taints.
+        if matches!(
+            &model,
+            DiscoveryInstance::Model {
+                model_suffix: Some(_),
+                ..
+            }
+        ) {
+            continue;
+        }
+
+        let instance_id = model.instance_id();
+        if let Some(live_ids) = &live_ids
+            && !live_ids.contains(&instance_id)
+        {
+            continue;
+        }
+
+        let card = match model.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>() {
+            Ok(card) => card,
+            Err(error) => {
+                tracing::warn!(
+                    instance_id,
+                    error = %error,
+                    "Skipping malformed model card while listing endpoint taints"
+                );
+                continue;
+            }
+        };
+
+        // The suffix is the normal LoRA discriminator. Check the card too so
+        // inconsistent discovery records cannot expose an adapter's taints.
+        if card.lora.is_some() {
+            continue;
+        }
+
+        let taints = card.runtime_config.taints;
+        snapshot.insert(instance_id.to_string(), taints);
+    }
+    Ok(snapshot)
 }
 
 /// Download a model from Hugging Face, returning its local path
@@ -1680,6 +1766,25 @@ impl Endpoint {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
+        })
+    }
+
+    /// Snapshot the taints advertised by this endpoint's workers.
+    ///
+    /// Returns a dict mapping each worker's instance ID (as a string) to the
+    /// set of taints that worker advertises through its registered model's
+    /// runtime config. With `only_live=True` only workers that currently have
+    /// a live endpoint instance are included; `only_live=False` also includes
+    /// advertised model records from workers that are not currently live.
+    #[pyo3(signature = (only_live = true))]
+    fn list_endpoint_taints<'p>(
+        &self,
+        py: Python<'p>,
+        only_live: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            endpoint_taint_snapshot(&inner, only_live).await.map_err(to_pyerr)
         })
     }
 }
