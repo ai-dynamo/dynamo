@@ -47,7 +47,6 @@ from typing import (
 
 import yaml
 
-
 REQUIRED_KUSTOMIZE_VERSION = "v5.8.1"
 BETA_DGD_API_VERSION = "nvidia.com/v1beta1"
 BETA_DGD_KIND = "DynamoGraphDeployment"
