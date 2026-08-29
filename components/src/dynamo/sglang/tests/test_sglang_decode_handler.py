@@ -294,6 +294,42 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
             pass
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
+    processor_name,
+):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+
+    class ShutdownUploader:
+        async def upload_choice(self, *_args):
+            handler.shutdown_event.set()
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(
+            stream(), context, metadata_uploader=ShutdownUploader()
+        ):
+            pass
+
+
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     request = {
         "rid": "resolved-request",
