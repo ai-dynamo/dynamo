@@ -58,3 +58,35 @@ def test_save_device_sets_cuda_context_before_storage_client(monkeypatch):
     assert calls[2][2]["socket_path"] == "/tmp/gms-3"
     assert calls[2][2]["device"] == 3
     assert calls[3] == ("save", {"max_workers": 8})
+
+
+def test_v1_fanout_accepts_module_entrypoint_argv_default(monkeypatch):
+    """main() defaults argv to None (`python -m ...`); the V1 fan-out must not
+    iterate it directly."""
+    import sys
+
+    from gpu_memory_service.cli import snapshot as snapshot_cli
+
+    started = {}
+
+    def fake_start_per_device(module, argv, devices):
+        started["module"] = module
+        started["argv"] = list(argv)
+        started["devices"] = list(devices)
+        return []
+
+    class FakeVMM:
+        def list_devices(self):
+            return [0, 1]
+
+    monkeypatch.setattr(snapshot_cli, "start_per_device", fake_start_per_device)
+    monkeypatch.setattr(snapshot_cli, "init_vmm", lambda *_a, **_k: None)
+    monkeypatch.setattr(snapshot_cli, "get_vmm", lambda: FakeVMM())
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(sys, "argv", ["saver", "--checkpoint-dir", "/checkpoints/x"])
+
+    saver.main()
+
+    assert started["argv"] == ["--checkpoint-dir", "/checkpoints/x"]
+    assert started["devices"] == [0, 1]
+    assert started["module"] == "gpu_memory_service.v1.snapshot.saver"

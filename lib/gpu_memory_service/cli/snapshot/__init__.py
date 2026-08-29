@@ -31,7 +31,12 @@ def start_per_device(
     return processes
 
 
-def run_per_device(module: str, argv: list[str]) -> None:
+def run_per_device(module: str, argv: list[str] | None) -> None:
+    # main(argv=None) is the module-entrypoint default (`python -m ...`), which
+    # means "read sys.argv". Normalize before use: iterating None raises
+    # TypeError and kills the V1 fan-out before any device starts.
+    if argv is None:
+        argv = sys.argv[1:]
     scoped = any(
         argument in {"-h", "--help"}
         or argument == "--device"
