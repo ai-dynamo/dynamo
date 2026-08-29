@@ -46,6 +46,12 @@
 
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
 ARG DOCKER_PROXY=
+# Global build args must precede the first FROM to be visible to every stage.
+# SNAPSHOT_REF must match the snapshot agent build serving these pods: the shim
+# and the agent's coordinator speak a versioned wire protocol
+# (CUINTERPOSER_VERSION in protocol.h).
+ARG SNAPSHOT_REPO=https://github.com/ai-dynamo/snapshot.git
+ARG SNAPSHOT_REF=main
 
 # cuda-checkpoint is the one piece of tooling this image cannot receive from the
 # agent's bind-mounted bundle. When the target requests more than one GPU the
@@ -80,8 +86,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # SNAPSHOT_REF must match the snapshot agent build serving these pods: the shim
 # and the agent's coordinator speak a versioned wire protocol
 # (CUINTERPOSER_VERSION in protocol.h).
-ARG SNAPSHOT_REPO=https://github.com/ai-dynamo/snapshot.git
-ARG SNAPSHOT_REF=main
+# SNAPSHOT_REF/SNAPSHOT_REPO are declared above the first FROM so they reach
+# this stage; they are re-declared here to bring them into its scope.
 FROM ${DOCKER_PROXY}nvidia/cuda:13.0.0-devel-ubuntu24.04 AS cuinterposer
 ARG SNAPSHOT_REPO
 ARG SNAPSHOT_REF
