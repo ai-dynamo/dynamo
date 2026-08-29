@@ -8,8 +8,8 @@ use dynamo_kv_router::protocols::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
 use dynamo_runtime::protocols::EndpointId;
-use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::local_model::runtime_config::NixlPushEndpoint as RsNixlPushEndpoint;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
@@ -343,9 +343,31 @@ impl ModelRuntimeConfig {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) {
-        self.inner.disaggregated_endpoint = Some(RsDisaggregatedEndpoint {
-            bootstrap_host,
-            bootstrap_port,
+        // Mutate in place: the bootstrap fields and `nixl_push` are set by
+        // different backends and must not clobber each other.
+        let endpoint = self.inner.disaggregated_endpoint.get_or_insert_default();
+        endpoint.bootstrap_host = bootstrap_host;
+        endpoint.bootstrap_port = bootstrap_port;
+    }
+
+    /// Publish the NIXL side-channel coordinates of a vLLM `NixlPushConnector`
+    /// prefill engine, so the frontend can hand them to decode before this
+    /// worker's prefill has run.
+    fn set_nixl_push_endpoint(
+        &mut self,
+        engine_id: String,
+        host: String,
+        port: u16,
+        tensor_parallel_size: u32,
+        pipeline_parallel_size: u32,
+    ) {
+        let endpoint = self.inner.disaggregated_endpoint.get_or_insert_default();
+        endpoint.nixl_push = Some(RsNixlPushEndpoint {
+            engine_id,
+            host,
+            port,
+            tensor_parallel_size,
+            pipeline_parallel_size,
         });
     }
 

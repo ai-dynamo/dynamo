@@ -106,12 +106,28 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         }
 
 
+# ``KVTransferConfig.kv_connector`` value that selects push mode.
+PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
+
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
+# Push shares pull's protocol class because the parts *this layer* controls
+# coincide: seed ``do_remote_decode`` on the prefill leg, which both connectors
+# read the same way to identify the producer, and pass the engine's response
+# through untouched on the decode leg. The params vLLM itself generates do
+# differ -- push adds ``pp_size`` and overwrites ``remote_block_ids``, pull adds
+# ``remote_blocks_expiry_time`` -- but nothing here inspects them.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
+    PUSH_CONNECTOR_NAME: NixlConnectorProtocol,
     "NeuronNixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
+
+# Connectors that transfer over NIXL and therefore need the side-channel host
+# resolved before the engine starts. Both directions use the same side channel.
+# NeuronNixlConnector is deliberately absent: it shares the params shape but
+# main does not resolve a side-channel host for it.
+NIXL_CONNECTOR_NAMES: Tuple[str, ...] = ("NixlConnector", PUSH_CONNECTOR_NAME)
 
 # Wrapper connectors that compose sub-connectors under
 # ``kv_connector_extra_config["connectors"]``. ``PdConnector``
@@ -227,6 +243,36 @@ def _resolve_multi_connector_protocol(
     return KV_CONNECTOR_PROTOCOLS[name](
         _child_vllm_config(vllm_config, kv_cfg, sub_config)
     )
+
+
+def resolve_nixl_push_kv_transfer_config(vllm_config: Any) -> Optional[Any]:
+    """Return the ``KVTransferConfig`` the engine's ``NixlPushConnector`` runs
+    under, or ``None`` when the engine is not in push mode.
+
+    Deliberately *not* routed through :func:`make_kv_connector_protocol`: that
+    raises on any connector it doesn't recognize, which is right at request
+    setup but wrong here. Registration must stay silent for engines using
+    connectors that have no PD protocol at all (LMCache, FlexKV, KVBM alone).
+
+    Resolves through wrapper connectors so the returned config is the child's
+    view, carrying the ``engine_id`` a peer has to name -- the wrapper's would
+    not match the connector that owns the transfer.
+    """
+    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return None
+    if kv_cfg.kv_connector == PUSH_CONNECTOR_NAME:
+        return kv_cfg
+    if kv_cfg.kv_connector not in MULTI_CONNECTOR_WRAPPERS:
+        return None
+
+    extra = getattr(kv_cfg, "kv_connector_extra_config", None) or {}
+    if not isinstance(extra, dict):
+        return None
+    for sub in extra.get("connectors") or []:
+        if isinstance(sub, dict) and sub.get("kv_connector") == PUSH_CONNECTOR_NAME:
+            return _child_vllm_config(vllm_config, kv_cfg, sub).kv_transfer_config
+    return None
 
 
 def _child_vllm_config(

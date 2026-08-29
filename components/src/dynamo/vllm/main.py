@@ -48,6 +48,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.nixl_push import publish_nixl_push_endpoint
 from dynamo.vllm.router_hints import enable_router_hint_support
 from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -893,6 +894,10 @@ async def register_vllm_model(
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
+
+    # Push-mode KV transfer needs the prefill engine to be nameable before it
+    # has run, so decode can register its blocks while prefill is in flight.
+    publish_nixl_push_endpoint(runtime_config, vllm_config, worker_type, dp_range)
 
     # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(

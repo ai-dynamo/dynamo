@@ -341,6 +341,26 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg()) is False
 
 
+def test_uses_nixl_connector_recognizes_push_mode():
+    """Push mode transfers over the same NIXL side channel as pull, so it must
+    trigger the same side-channel host resolution."""
+    assert _uses_nixl_connector(_make_engine_cfg("NixlPushConnector")) is True
+    assert (
+        _uses_nixl_connector(
+            _make_engine_cfg(
+                "PdConnector",
+                {
+                    "connectors": [
+                        {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+                        {"kv_connector": "NixlPushConnector", "kv_role": "kv_both"},
+                    ]
+                },
+            )
+        )
+        is True
+    )
+
+
 def test_uses_dynamo_connector_direct_and_nested():
     """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
     assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True

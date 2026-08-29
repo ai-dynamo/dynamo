@@ -31,7 +31,7 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::ModelManager,
     kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    local_model::runtime_config::{ModelRuntimeConfig, NixlPushEndpoint},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -89,9 +89,36 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
+/// What decode needs in order to reach the prefill worker directly.
+///
+/// The variants differ in what the engine uses to rendezvous and in which field
+/// on the decode request carries it. The routing workflow around them -- select
+/// a prefill worker, dispatch both legs, pin decode to that worker -- is the
+/// same, which is why they share an outcome rather than a branch each.
+enum DisaggHandoff {
+    /// SGLang: both legs carry the same room and meet at prefill's bootstrap
+    /// server.
+    Bootstrap(BootstrapInfo),
+    /// vLLM `NixlPushConnector`: decode registers its blocks with the named
+    /// prefill engine, which WRITEs into them.
+    NixlPush(PrefillResult),
+}
+
+impl DisaggHandoff {
+    fn attach_to_decode(self, request: &mut PreprocessedRequest) {
+        match self {
+            Self::Bootstrap(info) => request.bootstrap_info = Some(info),
+            Self::NixlPush(result) => request.prefill_result = Some(result),
+        }
+    }
+}
+
 enum PrefillOutcome {
-    Bootstrap {
-        bootstrap_info: BootstrapInfo,
+    /// Decode can reach the prefill worker without the router relaying its
+    /// output. Reached either from discovery before prefill runs, or from the
+    /// prefill response afterwards -- the decode-side handling is identical.
+    Handoff {
+        handoff: DisaggHandoff,
         worker_id: u64,
     },
     Completed {
@@ -116,9 +143,62 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
     })
 }
 
+/// Build the decode leg's KV handoff from the coordinates a `NixlPushConnector`
+/// prefill worker published to discovery.
+///
+/// This is why push mode can overlap: the payload only names the prefill
+/// engine, and the rest -- which blocks, where they land -- is negotiated
+/// worker-to-worker over NIXL. Pull mode cannot, since its handoff carries
+/// `remote_block_ids`, which do not exist until prefill has run.
+///
+/// Both legs are dispatched under the frontend's context id, so `request_id`
+/// names the prefill-side request that decode echoes back in its heartbeats.
+fn nixl_push_handoff(endpoint: &NixlPushEndpoint, request_id: &str) -> PrefillResult {
+    PrefillResult {
+        disaggregated_params: serde_json::json!({
+            "kv_transfer_params": {
+                "do_remote_decode": false,
+                "do_remote_prefill": true,
+                "remote_engine_id": endpoint.engine_id,
+                "remote_request_id": request_id,
+                "remote_host": endpoint.host,
+                "remote_port": endpoint.port,
+                "tp_size": endpoint.tensor_parallel_size,
+                "pp_size": endpoint.pipeline_parallel_size,
+            }
+        }),
+        // Pull mode lifts this off the prefill response. Decode is dispatched
+        // before that response exists here, so cached-prompt-token reporting is
+        // unavailable in push mode -- the same trade the bootstrap path makes.
+        prompt_tokens_details: None,
+    }
+}
+
+/// Decide whether decode may be dispatched concurrently with prefill.
+///
+/// Overlapping means *synthesizing* the handoff rather than forwarding the
+/// prefill response, and the response is what carries `embedding_params` --
+/// multimodal metadata the decode worker requires, derived from prefill's own
+/// output and so unavailable before prefill runs. A multimodal request
+/// therefore takes the sequential path, where the real response is forwarded
+/// verbatim. Push mode still applies to it; only the overlap is given up.
+fn push_handoff_for(
+    request: &PreprocessedRequest,
+    nixl_push: Option<&NixlPushEndpoint>,
+    request_id: &str,
+) -> Option<PrefillResult> {
+    if request.multi_modal_data.is_some() {
+        return None;
+    }
+    nixl_push.map(|endpoint| nixl_push_handoff(endpoint, request_id))
+}
+
 struct PreparedPrefill {
     worker_id: u64,
-    bootstrap_info: Option<BootstrapInfo>,
+    /// Set when the selected prefill worker advertised coordinates decode can
+    /// reach it by, which is what lets decode be dispatched without awaiting
+    /// prefill.
+    handoff: Option<DisaggHandoff>,
     topology_constraints: Option<RoutingConstraints>,
 }
 
@@ -416,43 +496,54 @@ where
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    self.prepare_prefill_dispatch(request, target, endpoint_id, &request_id)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
-            let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
-                PrefillOutcome::Bootstrap {
-                    bootstrap_info,
-                    worker_id: prepared.worker_id,
+            let outcome = match prepared.handoff {
+                // Awaiting prefill here would defeat the point: decode must be
+                // in flight and holding allocated blocks for the prefill worker
+                // to have somewhere to send to the moment prefill lands.
+                Some(handoff) => {
+                    self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                    PrefillOutcome::Handoff {
+                        handoff,
+                        worker_id: prepared.worker_id,
+                    }
                 }
-            } else {
-                drop(prefill_phase_barrier);
-                let completion =
-                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
-                        .await?;
+                None => {
+                    drop(prefill_phase_barrier);
+                    let completion = Self::consume_prefill_stream(
+                        prefill_stream,
+                        tracker,
+                        self.task_guard.clone(),
+                    )
+                    .await?;
 
-                match completion {
-                    PrefillCompletion::Handoff {
-                        result,
-                        worker_link,
-                    } => {
-                        if let Some(bootstrap_info) =
-                            extract_bootstrap_info(&result.disaggregated_params)
-                        {
-                            PrefillOutcome::Bootstrap {
-                                bootstrap_info,
-                                worker_id: prepared.worker_id,
-                            }
-                        } else {
-                            PrefillOutcome::Completed {
-                                result,
-                                worker_id: prepared.worker_id,
-                                worker_link,
+                    match completion {
+                        PrefillCompletion::Handoff {
+                            result,
+                            worker_link,
+                        } => {
+                            if let Some(bootstrap_info) =
+                                extract_bootstrap_info(&result.disaggregated_params)
+                            {
+                                PrefillOutcome::Handoff {
+                                    handoff: DisaggHandoff::Bootstrap(bootstrap_info),
+                                    worker_id: prepared.worker_id,
+                                }
+                            } else {
+                                PrefillOutcome::Completed {
+                                    result,
+                                    worker_id: prepared.worker_id,
+                                    worker_link,
+                                }
                             }
                         }
+                        PrefillCompletion::Terminal { output } => {
+                            PrefillOutcome::Terminal { output }
+                        }
                     }
-                    PrefillCompletion::Terminal { output } => PrefillOutcome::Terminal { output },
                 }
             };
             Ok((outcome, topology_constraints))
@@ -517,11 +608,11 @@ where
 
         let mut decode_req = req;
         match outcome {
-            PrefillOutcome::Bootstrap {
-                bootstrap_info,
-                worker_id,
-            } => {
-                decode_req.bootstrap_info = Some(bootstrap_info);
+            PrefillOutcome::Handoff { handoff, worker_id } => {
+                // No `migration_link`: the prefill worker's `engine.generate`
+                // span is only reported on its response, which on the
+                // overlapped path has by design not arrived yet.
+                handoff.attach_to_decode(&mut decode_req);
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
             }
             PrefillOutcome::Completed {
@@ -592,14 +683,27 @@ where
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
         endpoint_id: &EndpointId,
+        request_id: &str,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
 
-        let bootstrap_info = self
+        let disaggregated_endpoint = self
             .model_manager
-            .get_disaggregated_endpoint(endpoint_id, worker_id)
+            .get_disaggregated_endpoint(endpoint_id, worker_id);
+        // Built unconditionally, but `bootstrap_info` takes precedence at
+        // dispatch. No worker advertises both -- bootstrap is SGLang, push is
+        // vLLM -- so this is a discarded allocation only in a configuration
+        // that does not exist.
+        let push_handoff = push_handoff_for(
+            request,
+            disaggregated_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.nixl_push.as_ref()),
+            request_id,
+        );
+        let bootstrap_info = disaggregated_endpoint
             .map(|endpoint| (endpoint_id, endpoint))
             .and_then(|(endpoint_id, endpoint)| {
                 let host = endpoint.bootstrap_host?;
@@ -616,14 +720,27 @@ where
                     handoff_id: Some(Uuid::new_v4()),
                 })
             });
+        // Bootstrap wins when a worker somehow advertises both; the two belong
+        // to different backends, so no deployment produces both today.
+        let handoff = bootstrap_info
+            .map(DisaggHandoff::Bootstrap)
+            .or_else(|| push_handoff.map(DisaggHandoff::NixlPush));
+
         let routing = request.routing_mut();
         routing.prefill_worker_id = Some(worker_id);
         routing.prefill_dp_rank = dp_rank;
-        request.bootstrap_info = bootstrap_info.clone();
+        // Assigned unconditionally so a client-supplied value cannot survive
+        // into the prefill leg. Only the bootstrap rendezvous needs both legs
+        // to carry the payload -- push names an engine that already knows its
+        // own identity, so its prefill leg is dispatched unchanged.
+        request.bootstrap_info = match handoff.as_ref() {
+            Some(DisaggHandoff::Bootstrap(info)) => Some(info.clone()),
+            _ => None,
+        };
 
         Ok(PreparedPrefill {
             worker_id,
-            bootstrap_info,
+            handoff,
             topology_constraints,
         })
     }
@@ -704,7 +821,7 @@ mod tests {
 
     use crate::protocols::common::{
         FinishReason,
-        preprocessor::{PreprocessedRequest, RoutingHints},
+        preprocessor::{MultimodalData, PreprocessedRequest, RoutingHints},
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
@@ -932,5 +1049,128 @@ mod tests {
             "bootstrap_room": 1,
         });
         assert!(extract_bootstrap_info(&params).is_none());
+    }
+
+    fn push_endpoint() -> NixlPushEndpoint {
+        NixlPushEndpoint {
+            engine_id: "prefill-engine-001".to_string(),
+            host: "10.0.0.1".to_string(),
+            port: 5600,
+            tensor_parallel_size: 4,
+            pipeline_parallel_size: 2,
+        }
+    }
+
+    fn text_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    fn multimodal_request() -> PreprocessedRequest {
+        let mut request = text_request();
+        let mut mm = HashMap::new();
+        mm.insert(
+            "image".to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.invalid/a.png".to_string(),
+            )],
+        );
+        request.multi_modal_data = Some(mm);
+        request
+    }
+
+    /// Decode reads `embedding_params` off the forwarded prefill response, and
+    /// prefill only produces them by running. The overlapped path synthesizes
+    /// the handoff instead of forwarding it, so overlapping a multimodal
+    /// request strands decode without that metadata.
+    #[test]
+    fn multimodal_requests_do_not_take_the_overlapped_push_path() {
+        let endpoint = push_endpoint();
+
+        assert!(
+            push_handoff_for(&multimodal_request(), Some(&endpoint), "req-42").is_none(),
+            "multimodal request must fall back to the sequential handoff"
+        );
+    }
+
+    #[test]
+    fn text_requests_still_take_the_overlapped_push_path() {
+        let endpoint = push_endpoint();
+
+        let handoff = push_handoff_for(&text_request(), Some(&endpoint), "req-42")
+            .expect("text request with advertised coordinates should overlap");
+        assert_eq!(
+            handoff.disaggregated_params["kv_transfer_params"]["remote_engine_id"],
+            "prefill-engine-001"
+        );
+    }
+
+    /// The variants share an outcome but not a destination: each engine reads
+    /// the handoff from a different field, so routing the payload to the wrong
+    /// one strands decode with no way to reach prefill.
+    #[test]
+    fn each_handoff_lands_on_the_field_its_engine_reads() {
+        let mut request = text_request();
+        DisaggHandoff::NixlPush(nixl_push_handoff(&push_endpoint(), "req-42"))
+            .attach_to_decode(&mut request);
+        assert!(request.prefill_result.is_some());
+        assert!(request.bootstrap_info.is_none());
+
+        let mut request = text_request();
+        DisaggHandoff::Bootstrap(BootstrapInfo::default()).attach_to_decode(&mut request);
+        assert!(request.bootstrap_info.is_some());
+        assert!(request.prefill_result.is_none());
+    }
+
+    /// Without advertised coordinates there is nothing to overlap with, and the
+    /// multimodal guard must not change that either way.
+    #[test]
+    fn no_advertised_coordinates_means_no_overlap() {
+        assert!(push_handoff_for(&text_request(), None, "req-42").is_none());
+        assert!(push_handoff_for(&multimodal_request(), None, "req-42").is_none());
+    }
+
+    /// A wire contract with vLLM, not an internal detail. Asserted whole
+    /// because both presence and absence matter:
+    /// `NixlConnectorMetadata::add_new_req_to_recv` indexes these keys rather
+    /// than `.get()`-ing them, so a missing one kills the decode engine with a
+    /// `KeyError` mid-step; and `remote_block_ids` must stay absent, since
+    /// vLLM's push scheduler seeds it itself once decode has allocated.
+    #[test]
+    fn nixl_push_handoff_names_the_prefill_engine() {
+        let handoff = nixl_push_handoff(&push_endpoint(), "req-42");
+
+        assert_eq!(
+            handoff.disaggregated_params,
+            serde_json::json!({
+                "kv_transfer_params": {
+                    "do_remote_decode": false,
+                    "do_remote_prefill": true,
+                    "remote_engine_id": "prefill-engine-001",
+                    "remote_request_id": "req-42",
+                    "remote_host": "10.0.0.1",
+                    "remote_port": 5600,
+                    "tp_size": 4,
+                    "pp_size": 2,
+                }
+            })
+        );
+    }
+
+    /// Prefill has not run when this handoff is built, so there is no usage
+    /// report to carry -- the field must be absent rather than fabricated.
+    #[test]
+    fn nixl_push_handoff_has_no_prompt_token_details() {
+        assert!(
+            nixl_push_handoff(&push_endpoint(), "req-42")
+                .prompt_tokens_details
+                .is_none()
+        );
     }
 }

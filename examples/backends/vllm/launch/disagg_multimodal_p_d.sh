@@ -20,6 +20,8 @@ WORKER_MODULE="dynamo.vllm"
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
 SINGLE_GPU=false
+# --kv-push selects the push connector; see the vLLM reference guide.
+KV_CONNECTOR="NixlConnector"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --kv-push)
+            KV_CONNECTOR="NixlPushConnector"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -41,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model (default: $MODEL_NAME)"
             echo "  --single-gpu           Pack both workers on 1 GPU (for small models)"
+            echo "  --kv-push              Use NixlPushConnector instead of NixlConnector"
             echo "  -h, --help             Show this help message"
             exit 0
             ;;
@@ -112,7 +119,7 @@ python -m "$WORKER_MODULE" \
   $PREFILL_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config "{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_both\"}" \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
@@ -128,7 +135,7 @@ python -m "$WORKER_MODULE" \
   $DECODE_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config "{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_both\"}" \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 
 echo "=================================================="

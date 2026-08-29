@@ -21,6 +21,8 @@ import pytest
 
 from dynamo.vllm.kv_connector_protocols import (
     KV_CONNECTOR_PROTOCOLS,
+    NIXL_CONNECTOR_NAMES,
+    PUSH_CONNECTOR_NAME,
     KvConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
@@ -477,11 +479,54 @@ def test_registry_keys_match_vllm_connector_names():
     vLLM uses in ``KVTransferConfig.kv_connector``."""
     assert set(KV_CONNECTOR_PROTOCOLS) == {
         "NixlConnector",
+        "NixlPushConnector",
         "NeuronNixlConnector",
         "MooncakeConnector",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
+
+
+# ---------------------------------------------------------------------------
+# NixlPushConnector (shares NixlConnectorProtocol)
+# ---------------------------------------------------------------------------
+
+
+def test_make_kv_connector_protocol_dispatches_nixl_push():
+    proto = make_kv_connector_protocol(_config("NixlPushConnector"))
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_nixl_push_resolves_inside_pd_connector():
+    """KVBM composition must see push as the PD-capable child, same as pull."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "PdConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "DynamoConnector"},
+                    {"kv_connector": "NixlPushConnector"},
+                ]
+            },
+            engine_id="wrapper-engine",
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_nixl_connector_names_cover_every_registered_nixl_protocol():
+    """``NIXL_CONNECTOR_NAMES`` gates side-channel host resolution. A NIXL
+    connector missing from it starts an engine with no reachable side channel.
+    """
+    registered_nixl = {
+        name
+        for name, cls in KV_CONNECTOR_PROTOCOLS.items()
+        if issubclass(cls, NixlConnectorProtocol)
+    }
+    # Subset, not equality: sharing the params shape does not imply needing a
+    # side channel resolved (NeuronNixlConnector shares one but is not gated).
+    assert set(NIXL_CONNECTOR_NAMES) <= registered_nixl
+    assert {"NixlConnector", PUSH_CONNECTOR_NAME} <= set(NIXL_CONNECTOR_NAMES)
 
 
 # ---------------------------------------------------------------------------
