@@ -152,6 +152,10 @@ impl DeltaGeneratorState {
         // the embedding sequence length computed by the worker.
         if let Some(completion_usage) = output.completion_usage.as_ref() {
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
+            self.usage.completion_tokens = self
+                .usage
+                .completion_tokens
+                .max(completion_usage.completion_tokens);
 
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());

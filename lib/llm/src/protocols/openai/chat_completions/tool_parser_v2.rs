@@ -1121,7 +1121,8 @@ mod tests {
         )]);
         let mut finished = HashSet::new();
         let mut tool_emitted = HashSet::from([3]);
-        let template = usage_chunk().data.expect("usage response data");
+        let mut template = usage_chunk().data.expect("usage response data");
+        template.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
 
         let responses =
             finish_unterminated_choices(&mut states, &mut finished, &mut tool_emitted, &template);
@@ -1139,6 +1140,10 @@ mod tests {
         assert!(
             response.llm_metrics.is_none(),
             "terminal chunk must not repeat LLM metrics"
+        );
+        assert!(
+            response.nvext.is_none(),
+            "terminal chunk must not repeat nvext"
         );
         assert_eq!(response.inner.choices.len(), 1);
         assert_eq!(response.inner.choices[0].index, 3);
@@ -1270,7 +1275,10 @@ mod tests {
             .chunks(8)
             .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
             .collect();
-        chunks.push(usage_chunk());
+        let mut usage = usage_chunk();
+        usage.data.as_mut().expect("usage data").nvext =
+            Some(serde_json::json!({"completion_token_ids": [42]}));
+        chunks.push(usage);
 
         let out: Vec<_> =
             apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
@@ -1307,6 +1315,24 @@ mod tests {
         assert!(
             finish_position < usage_position,
             "synthesized finish chunk must precede usage"
+        );
+        let finish_data = out[finish_position]
+            .data
+            .as_ref()
+            .expect("synthesized finish data");
+        assert!(
+            finish_data.nvext.is_none(),
+            "synthetic terminal chunk must not duplicate nvext"
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|response| response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.nvext.is_some()))
+                .count(),
+            1,
+            "only the real usage chunk may carry nvext"
         );
     }
 
