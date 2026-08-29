@@ -432,9 +432,9 @@ impl ResponseStreamConverter {
                     }
                     if let Some(func) = &tc.function {
                         if let Some(name) = &func.name {
-                            self.function_call_items[tc_index].name = name.clone();
-                            self.function_call_items[tc_index].namespace =
-                                self.params.namespace_for_function(name);
+                            let (namespace, name) = self.params.external_function(name);
+                            self.function_call_items[tc_index].name = name;
+                            self.function_call_items[tc_index].namespace = namespace;
                         }
                         if let Some(args) = &func.arguments {
                             self.function_call_items[tc_index]
@@ -1462,24 +1462,29 @@ mod tests {
 
     #[test]
     fn test_function_call_preserves_namespace() {
-        let params = ResponseParams {
-            tools: Some(
-                serde_json::from_value(serde_json::json!([{
+        let params = ResponseParams::default().with_tools(Some(
+            serde_json::from_value(serde_json::json!([
+                {
                     "type": "namespace",
-                    "name": "agents",
-                    "description": "Subagent tools",
-                    "tools": [{"type": "function", "name": "spawn_agent"}],
-                }]))
-                .unwrap(),
-            ),
-            ..default_params()
-        };
+                    "name": "crm",
+                    "description": "CRM tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                },
+                {
+                    "type": "namespace",
+                    "name": "billing",
+                    "description": "Billing tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                }
+            ]))
+            .unwrap(),
+        ));
         let mut conv = ResponseStreamConverter::new("test-model".into(), params);
         let added_events = conv.process_chunk(&tool_call_chunk(
             0,
             Some("call-1"),
-            Some("spawn_agent"),
-            Some(r#"{"agent_type":"worker"}"#),
+            Some("crm__lookup"),
+            Some(r#"{"key":"42"}"#),
         ));
         let done_events = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
 
@@ -1492,7 +1497,7 @@ mod tests {
                 .find(|event| event_type(event) == expected_type)
                 .unwrap();
             assert!(
-                format!("{event:?}").contains(r#"\"namespace\":\"agents\""#),
+                format!("{event:?}").contains(r#"\"namespace\":\"crm\""#),
                 "{expected_type} did not preserve the namespace"
             );
         }
@@ -1500,7 +1505,8 @@ mod tests {
         let OutputItem::FunctionCall(call) = &conv.completed_output()[0] else {
             panic!("expected function call");
         };
-        assert_eq!(call.namespace.as_deref(), Some("agents"));
+        assert_eq!(call.namespace.as_deref(), Some("crm"));
+        assert_eq!(call.name, "lookup");
     }
 
     #[test]

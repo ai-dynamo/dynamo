@@ -3,7 +3,7 @@
 
 pub mod stream_converter;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
@@ -485,6 +485,7 @@ impl PendingAssistant {
 /// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
 fn convert_input_items_to_messages(
     items: &[InputItem],
+    tool_names: &ToolNameMap,
 ) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
     let mut messages = Vec::with_capacity(items.len());
     let mut pending = PendingAssistant::default();
@@ -544,7 +545,7 @@ fn convert_input_items_to_messages(
                         id: fc.call_id.clone(),
                         r#type: FunctionType::Function,
                         function: dynamo_protocols::types::FunctionCall {
-                            name: fc.name.clone(),
+                            name: tool_names.backend_name(fc.namespace.as_deref(), &fc.name),
                             arguments: fc.arguments.clone(),
                         },
                     });
@@ -658,58 +659,125 @@ fn convert_input_items_to_messages(
     Ok(messages)
 }
 
-/// Convert Responses API tools to the flat Chat Completions representation.
-///
-/// Bare function names are preserved for model compatibility. Reject collisions
-/// from different origins instead of guessing which namespace to restore on the
-/// response path.
-fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
-    let mut converted = Vec::new();
-    let mut origins = HashMap::<String, Option<String>>::new();
-    let mut push_function = |name: &str,
-                             description: &Option<String>,
-                             parameters: &Option<serde_json::Value>,
-                             strict: Option<bool>,
-                             namespace: Option<&str>|
-     -> anyhow::Result<()> {
-        if let Some(previous_namespace) = origins.get(name) {
-            if previous_namespace.as_deref() != namespace {
-                return Err(ResponsesConversionError::InvalidArgument(
-                    "Responses function tool names are ambiguous after namespace flattening"
-                        .to_string(),
-                )
-                .into());
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolNameMap {
+    forward: HashMap<(Option<String>, String), String>,
+    reverse: HashMap<String, (Option<String>, String)>,
+}
+
+impl ToolNameMap {
+    fn new(tools: &[Tool]) -> Self {
+        let mut functions = Vec::new();
+        for tool in tools {
+            match tool {
+                Tool::Function(function) => functions.push((None, function.name.as_str())),
+                Tool::Namespace(namespace) => {
+                    for tool in &namespace.tools {
+                        if let NamespaceToolParamTool::Function(function) = tool {
+                            functions.push((Some(namespace.name.as_str()), function.name.as_str()));
+                        }
+                    }
+                }
+                _ => {}
             }
-        } else {
-            origins.insert(name.to_owned(), namespace.map(str::to_owned));
         }
-        converted.push(ChatCompletionTool {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionObject {
-                name: name.to_owned(),
-                description: description.clone(),
-                parameters: parameters.clone(),
-                strict,
-            },
-        });
-        Ok(())
-    };
+
+        let mut origins = HashMap::<&str, HashSet<Option<&str>>>::new();
+        for &(namespace, name) in &functions {
+            origins.entry(name).or_default().insert(namespace);
+        }
+
+        let mut used = HashSet::new();
+        for (name, origins) in &origins {
+            if origins.len() == 1 || origins.contains(&None) {
+                used.insert((*name).to_owned());
+            }
+        }
+
+        let mut map = Self::default();
+        for (namespace, name) in functions {
+            let key = (namespace.map(str::to_owned), name.to_owned());
+            if map.forward.contains_key(&key) {
+                continue;
+            }
+
+            let mut backend_name = name.to_owned();
+            if let Some(namespace) = namespace
+                && origins[name].len() > 1
+            {
+                let base = format!("{namespace}__{name}");
+                backend_name = base.clone();
+                let mut suffix = 2;
+                while used.contains(&backend_name) {
+                    backend_name = format!("{base}__{suffix}");
+                    suffix += 1;
+                }
+            }
+
+            used.insert(backend_name.clone());
+            map.reverse.insert(backend_name.clone(), key.clone());
+            map.forward.insert(key, backend_name);
+        }
+        map
+    }
+
+    fn backend_name(&self, namespace: Option<&str>, name: &str) -> String {
+        self.forward
+            .get(&(namespace.map(str::to_owned), name.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+
+    fn backend_choice_name(&self, name: &str) -> String {
+        if let Some(backend_name) = self.forward.get(&(None, name.to_owned())) {
+            return backend_name.clone();
+        }
+        if let Some((namespace, name)) = name.split_once('.')
+            && let Some(backend_name) = self
+                .forward
+                .get(&(Some(namespace.to_owned()), name.to_owned()))
+        {
+            return backend_name.clone();
+        }
+        name.to_owned()
+    }
+
+    fn external_name(&self, backend_name: &str) -> (Option<String>, String) {
+        self.reverse
+            .get(backend_name)
+            .cloned()
+            .unwrap_or_else(|| (None, backend_name.to_owned()))
+    }
+}
+
+/// Convert Responses API tools to the flat Chat Completions representation.
+fn convert_tools(tools: &[Tool], tool_names: &ToolNameMap) -> Vec<ChatCompletionTool> {
+    let mut converted = Vec::new();
 
     for tool in tools {
         match tool {
-            Tool::Function(f) => {
-                push_function(&f.name, &f.description, &f.parameters, f.strict, None)?
-            }
+            Tool::Function(function) => converted.push(ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: tool_names.backend_name(None, &function.name),
+                    description: function.description.clone(),
+                    parameters: function.parameters.clone(),
+                    strict: function.strict,
+                },
+            }),
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
-                            &f.name,
-                            &f.description,
-                            &f.parameters,
-                            f.strict,
-                            Some(&namespace.name),
-                        )?;
+                    if let NamespaceToolParamTool::Function(function) = tool {
+                        converted.push(ChatCompletionTool {
+                            r#type: ChatCompletionToolType::Function,
+                            function: FunctionObject {
+                                name: tool_names
+                                    .backend_name(Some(&namespace.name), &function.name),
+                                description: function.description.clone(),
+                                parameters: function.parameters.clone(),
+                                strict: function.strict,
+                            },
+                        });
                     }
                 }
             }
@@ -717,11 +785,14 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             _ => {}
         }
     }
-    Ok(converted)
+    converted
 }
 
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
+fn convert_tool_choice(
+    tc: &ToolChoiceParam,
+    tool_names: &ToolNameMap,
+) -> ChatCompletionToolChoiceOption {
     match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
@@ -732,7 +803,7 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
-                    name: f.name.clone(),
+                    name: tool_names.backend_choice_name(&f.name),
                 },
             })
         }
@@ -775,6 +846,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
+        let tool_names = ToolNameMap::new(resp.inner.tools.as_deref().unwrap_or_default());
 
         // Prepend instructions as system message if present
         if let Some(instructions) = &resp.inner.instructions {
@@ -797,7 +869,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ));
             }
             InputParam::Items(items) => {
-                let item_messages = convert_input_items_to_messages(items)?;
+                let item_messages = convert_input_items_to_messages(items, &tool_names)?;
                 messages.extend(item_messages);
             }
         }
@@ -854,12 +926,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .inner
             .tools
             .as_ref()
-            .map(|t| convert_tools(t))
-            .transpose()?
+            .map(|tools| convert_tools(tools, &tool_names))
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(|tool_choice| convert_tool_choice(tool_choice, &tool_names));
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -1026,6 +1101,7 @@ pub struct ResponseParams {
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub safety_identifier: Option<String>,
+    pub(crate) tool_names: ToolNameMap,
 }
 
 impl ResponseParams {
@@ -1036,29 +1112,14 @@ impl ResponseParams {
             .is_some()
     }
 
-    fn namespace_for_function(&self, name: &str) -> Option<String> {
-        let tools = self.tools.as_deref()?;
-        if tools
-            .iter()
-            .any(|tool| matches!(tool, Tool::Function(function) if function.name == name))
-        {
-            return None;
-        }
+    pub(crate) fn with_tools(mut self, tools: Option<Vec<Tool>>) -> Self {
+        self.tool_names = ToolNameMap::new(tools.as_deref().unwrap_or_default());
+        self.tools = tools;
+        self
+    }
 
-        let mut namespaces = tools.iter().filter_map(|tool| {
-            let Tool::Namespace(namespace) = tool else {
-                return None;
-            };
-            namespace
-                .tools
-                .iter()
-                .any(|tool| matches!(tool, NamespaceToolParamTool::Function(function) if function.name == name))
-                .then_some(namespace.name.as_str())
-        });
-        let namespace = namespaces.next()?;
-        namespaces
-            .all(|other_namespace| other_namespace == namespace)
-            .then(|| namespace.to_owned())
+    fn external_function(&self, backend_name: &str) -> (Option<String>, String) {
+        self.tool_names.external_name(backend_name)
     }
 }
 
@@ -1158,11 +1219,12 @@ pub fn chat_completion_to_response(
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
+                let (namespace, name) = params.external_function(&tc.function.name);
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
                     arguments: tc.function.arguments.clone(),
                     call_id: tc.id.clone(),
-                    namespace: params.namespace_for_function(&tc.function.name),
-                    name: tc.function.name.clone(),
+                    namespace,
+                    name,
                     id: Some(format!("fc_{}", Uuid::new_v4().simple())),
                     status: Some(OutputStatus::Completed),
                 }));
@@ -1186,8 +1248,8 @@ pub fn chat_completion_to_response(
         {
             let parsed_calls = parse_tool_call_text(&content_text);
             if !parsed_calls.is_empty() {
-                for (name, arguments) in parsed_calls {
-                    let namespace = params.namespace_for_function(&name);
+                for (backend_name, arguments) in parsed_calls {
+                    let (namespace, name) = params.external_function(&backend_name);
                     output.push(make_function_call(name, arguments, namespace));
                 }
                 let remaining = strip_tool_call_text(&content_text);
@@ -1819,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn test_function_call_input_items() {
+    fn test_namespaced_function_call_history_uses_backend_alias() {
         let req = NvCreateResponse {
             inner: CreateResponse {
                 input: InputParam::Items(vec![
@@ -1833,8 +1895,8 @@ mod tests {
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
                         arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
-                        namespace: None,
-                        name: "get_weather".into(),
+                        namespace: Some("crm".into()),
+                        name: "lookup".into(),
                         id: None,
                         status: None,
                     })),
@@ -1846,6 +1908,23 @@ mod tests {
                     })),
                 ]),
                 model: Some("test-model".into()),
+                tools: Some(
+                    serde_json::from_value(serde_json::json!([
+                        {
+                            "type": "namespace",
+                            "name": "crm",
+                            "description": "CRM tools",
+                            "tools": [{"type": "function", "name": "lookup"}]
+                        },
+                        {
+                            "type": "namespace",
+                            "name": "billing",
+                            "description": "Billing tools",
+                            "tools": [{"type": "function", "name": "lookup"}]
+                        }
+                    ]))
+                    .unwrap(),
+                ),
                 ..Default::default()
             },
             nvext: None,
@@ -1856,10 +1935,13 @@ mod tests {
         let messages = &chat_req.inner.messages;
         assert_eq!(messages.len(), 3);
         assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
-        assert!(matches!(
-            messages[1],
-            ChatCompletionRequestMessage::Assistant(_)
-        ));
+        let ChatCompletionRequestMessage::Assistant(assistant) = &messages[1] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(
+            assistant.tool_calls.as_ref().unwrap()[0].function.name,
+            "crm__lookup"
+        );
         assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
     }
 
@@ -2621,7 +2703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_function_name_collision_is_rejected() {
+    fn test_namespace_function_name_collision_uses_backend_aliases() {
         let mut req = make_response_with_input("hello");
         req.inner.tools = Some(
             serde_json::from_value(serde_json::json!([
@@ -2641,22 +2723,18 @@ mod tests {
             .unwrap(),
         );
 
-        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Responses function tool names are ambiguous after namespace flattening"
-        );
-        assert!(matches!(
-            error.downcast_ref::<ResponsesConversionError>(),
-            Some(ResponsesConversionError::InvalidArgument(_))
-        ));
+        let chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        let tools = chat_req.inner.tools.unwrap();
+        assert_eq!(tools[0].function.name, "crm__lookup");
+        assert_eq!(tools[1].function.name, "billing__lookup");
     }
 
     #[test]
-    fn test_top_level_namespace_function_name_collision_is_rejected() {
+    fn test_top_level_name_stays_bare_when_namespace_name_collides() {
         let mut req = make_response_with_input("hello");
         req.inner.tools = Some(
             serde_json::from_value(serde_json::json!([
+                {"type": "function", "name": "crm__lookup"},
                 {"type": "function", "name": "lookup"},
                 {
                     "type": "namespace",
@@ -2667,12 +2745,24 @@ mod tests {
             ]))
             .unwrap(),
         );
-
-        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Responses function tool names are ambiguous after namespace flattening"
+        req.inner.tool_choice = Some(
+            serde_json::from_value(serde_json::json!({
+                "type": "function",
+                "name": "crm.lookup"
+            }))
+            .unwrap(),
         );
+
+        let chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        let tools = chat_req.inner.tools.unwrap();
+        assert_eq!(tools[0].function.name, "crm__lookup");
+        assert_eq!(tools[1].function.name, "lookup");
+        assert_eq!(tools[2].function.name, "crm__lookup__2");
+        let Some(ChatCompletionToolChoiceOption::Named(tool_choice)) = chat_req.inner.tool_choice
+        else {
+            panic!("expected named tool choice");
+        };
+        assert_eq!(tool_choice.function.name, "crm__lookup__2");
     }
 
     #[test]
@@ -2846,8 +2936,8 @@ mod tests {
                             id: "call_abc".into(),
                             r#type: dynamo_protocols::types::FunctionType::Function,
                             function: dynamo_protocols::types::FunctionCall {
-                                name: "spawn_agent".into(),
-                                arguments: r#"{"agent_type":"worker"}"#.into(),
+                                name: "crm__lookup".into(),
+                                arguments: r#"{"key":"42"}"#.into(),
                             },
                         }]),
                         role: dynamo_protocols::types::Role::Assistant,
@@ -2867,24 +2957,30 @@ mod tests {
             },
             nvext: None,
         };
-        let params = ResponseParams {
-            tools: Some(
-                serde_json::from_value(serde_json::json!([{
+        let params = ResponseParams::default().with_tools(Some(
+            serde_json::from_value(serde_json::json!([
+                {
                     "type": "namespace",
-                    "name": "agents",
-                    "description": "Subagent tools",
-                    "tools": [{"type": "function", "name": "spawn_agent"}],
-                }]))
-                .unwrap(),
-            ),
-            ..Default::default()
-        };
+                    "name": "crm",
+                    "description": "CRM tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                },
+                {
+                    "type": "namespace",
+                    "name": "billing",
+                    "description": "Billing tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                }
+            ]))
+            .unwrap(),
+        ));
 
         let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
             panic!("expected function call");
         };
-        assert_eq!(call.namespace.as_deref(), Some("agents"));
+        assert_eq!(call.namespace.as_deref(), Some("crm"));
+        assert_eq!(call.name, "lookup");
     }
 
     #[test]

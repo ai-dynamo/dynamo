@@ -3395,7 +3395,7 @@ async fn responses(
         max_output_tokens: request.inner.max_output_tokens,
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
-        tools: request.inner.tools.clone(),
+        tools: None,
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
@@ -3415,7 +3415,9 @@ async fn responses(
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
-    };
+        tool_names: Default::default(),
+    }
+    .with_tools(request.inner.tools.clone());
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
