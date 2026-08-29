@@ -61,22 +61,25 @@ NO_EXPIRY_DELAY_MS = 60_000
 
 # The delay the expiry scenarios run on. Long enough to stage a queue and watch
 # gauges settle well inside it, short enough to keep a CPU-only run brief.
-QUEUE_DELAY_MS = 3_000
+QUEUE_DELAY_MS = 8_000
 QUEUE_DELAY_S = QUEUE_DELAY_MS / 1000
 
 # The staging shape the FIFO and adaptive-LIFO scenarios share. `front` follows
 # the doomed request closely, so its deadline is close behind too and only about
-# 0.6s of it is left when that one is rejected; `fresh` arrives much later and
-# still holds about 2.1s. Both are wide enough to place the handover
-# unambiguously, and far enough apart to tell the two selections apart.
-FRONT_LAG_S = QUEUE_DELAY_S * 0.2
+# 2.0s of it is left when that one is rejected; `fresh` arrives much later and
+# still holds about 6.0s. Both are wide enough to place the handover
+# unambiguously on hardware slower than the machine this was tuned on, and far
+# enough apart to tell the two selections apart.
+FRONT_LAG_S = QUEUE_DELAY_S * 0.25
 FRESH_LAG_S = QUEUE_DELAY_S * 0.5
 
 # The mocker answers in roughly 0.16s plus 0.057s per token at the speedup ratio
-# these scenarios run on, so a 20-token request takes about 1.3s: comfortably
-# longer than the margin `front` has left, which is what lets a request admitted
-# just inside its deadline finish well after it.
-NEAR_FRONT_TOKENS = 20
+# these scenarios run on, so a 68-token request takes about 4.0s. That length is
+# bounded on both sides: it runs about 2.0s past the margin `front` has left,
+# which is what lets a request admitted just inside its deadline finish well
+# after it, and it still finishes about 2.0s inside what `fresh` holds, so the
+# request behind it is unambiguously still eligible when the slot reaches it.
+NEAR_FRONT_TOKENS = 68
 
 # How long a poll may wait for the gate to reach an expected state.
 SETTLE_TIMEOUT_S = 30
@@ -483,6 +486,7 @@ def _run(
 
 pytestmark = [
     pytest.mark.pre_merge,
+    pytest.mark.parallel,
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.fault_tolerance,
@@ -495,7 +499,7 @@ pytestmark = [
 ######################### BOUNDED FIFO QUEUE #########################
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(40)
 def test_bounded_fifo_queue_absorbs_burst(
     request,
     runtime_services_session,
@@ -580,7 +584,7 @@ def test_bounded_fifo_queue_absorbs_burst(
 ######################### CONTROLLED DELAY DISABLED #########################
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(75)
 def test_queue_delay_disabled_admits_waiting_requests(
     request,
     runtime_services_session,
@@ -639,7 +643,7 @@ def test_queue_delay_disabled_admits_waiting_requests(
 ######################### CONTROLLED DELAY ENABLED #########################
 
 
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(100)
 def test_controlled_delay_rejects_expired_front_requests(
     request,
     runtime_services_session,
@@ -727,7 +731,7 @@ def test_controlled_delay_rejects_expired_front_requests(
 ######################### FIFO AFTER A DEADLINE #########################
 
 
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(70)
 def test_fifo_can_complete_after_queue_deadline_without_adaptive_lifo(
     request,
     runtime_services_session,
@@ -802,7 +806,7 @@ def test_fifo_can_complete_after_queue_deadline_without_adaptive_lifo(
 ######################### ADAPTIVE LIFO #########################
 
 
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(65)
 def test_adaptive_lifo_avoids_near_expiry_front_admission(
     request,
     runtime_services_session,
@@ -886,7 +890,7 @@ AUTOMATIC_ENGINE_LIMIT = 3
 SIZING_OVERRIDE = 1
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(35)
 @pytest.mark.parametrize(
     "engine_request_limit, expected_limit",
     [
