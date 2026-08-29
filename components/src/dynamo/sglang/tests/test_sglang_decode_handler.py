@@ -924,10 +924,10 @@ def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch)
     monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
 
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
-        {"output_options": {"logprobs": 2}}
+        {"output_options": {"logprobs": 5}}
     )
 
-    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 5}
 
 
 def test_extract_logprobs_formats_top_tokens_as_token_ids():
@@ -936,7 +936,6 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
             "output_token_logprobs": [(-0.1, 101, "a")],
             "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         },
-        1,
         return_tokens_as_token_ids=True,
     )
 
@@ -1170,6 +1169,15 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                             "id": "request-1",
                             "finish_reason": None,
                             "output_token_logprobs": [(-0.1, 101, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.1, 101, "a"),
+                                    (-0.2, 201, "b"),
+                                    (-0.3, 202, "c"),
+                                    (-0.4, 203, "d"),
+                                    (-0.5, 204, "e"),
+                                ]
+                            ],
                         },
                         "engine_data": {"native_chunk": 1},
                     },
@@ -1181,6 +1189,15 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                             "id": "request-1",
                             "finish_reason": None,
                             "output_token_logprobs": [(-0.3, 102, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.3, 102, "c"),
+                                    (-0.4, 301, "d"),
+                                    (-0.5, 302, "e"),
+                                    (-0.6, 303, "f"),
+                                    (-0.7, 304, "g"),
+                                ]
+                            ],
                         },
                         "engine_data": {"native_chunk": 2},
                     },
@@ -1192,6 +1209,12 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
 
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+    assert [
+        [len(position) for position in chunk["top_logprobs"]] for chunk in chunks
+    ] == [
+        [5],
+        [5],
+    ]
     assert all("text" not in chunk for chunk in chunks)
     assert all("tokens" not in chunk for chunk in chunks)
     assert [chunk["engine_data"]["native_chunk"] for chunk in chunks] == [1, 2]
@@ -1364,7 +1387,7 @@ async def test_process_token_stream_upload_failure_blocks_final_chunk(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_text_stream_tracks_delta_per_choice_index():
+async def test_process_text_stream_forwards_incremental_text_per_choice():
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -1383,12 +1406,12 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
                     },
                     {
                         "index": 0,
-                        "text": "Hello",
+                        "text": "llo",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                     {
                         "index": 1,
-                        "text": "Good",
+                        "text": "od",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                 ]
@@ -1480,7 +1503,7 @@ async def test_process_text_stream_buffers_split_stop_string_suffix():
                     },
                     {
                         "index": 0,
-                        "text": "Hello<|user|>",
+                        "text": "er|>",
                         "meta_info": {
                             "id": "request-1",
                             "finish_reason": {
@@ -1518,7 +1541,7 @@ async def test_process_text_stream_removes_matched_stop_string_suffix():
                     },
                     {
                         "index": 0,
-                        "text": "Hello<|user|>",
+                        "text": "<|user|>",
                         "meta_info": {
                             "id": "request-1",
                             "finish_reason": {
@@ -1539,6 +1562,43 @@ async def test_process_text_stream_removes_matched_stop_string_suffix():
         "",
     ]
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_drops_buffered_prefix_when_sglang_trims_stop():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello<|us",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        "text": "",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {
+                                "type": "stop",
+                                "matched": "<|user|>",
+                            },
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+            request={"stop": ["<|user|>"]},
+        )
+    )
+
+    assert [chunk["choices"][0]["delta"]["content"] for chunk in chunks] == [
+        "Hello",
+        "",
+    ]
 
 
 @pytest.mark.asyncio

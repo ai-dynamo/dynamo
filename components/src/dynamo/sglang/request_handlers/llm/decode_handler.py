@@ -472,12 +472,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     @staticmethod
     def _extract_logprobs(
         meta_info: Dict[str, Any],
-        num_output_tokens_in_chunk: Optional[int] = None,
+        *,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
-            num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
@@ -814,7 +813,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # Extract logprobs for new tokens if available.
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
-                        num_output_tokens_in_chunk=len(raw_output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
 
@@ -940,10 +938,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         request = request or {}
         stop_strings = _stop_strings(request)
-        # SGLang text chunks are cumulative per choice. Keep independent text
-        # offsets so interleaved n>1 choices do not compute deltas from each
-        # other's previous text.
-        text_counts_per_choice: dict[int, int] = {}
+        # SGLang text is already incremental. Buffer only a possible stop-string
+        # prefix so a marker split across chunks is not exposed to the caller.
+        pending_text_per_choice: dict[int, str] = {}
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -966,7 +963,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
 
-                text = res.get("text", "")
+                text = pending_text_per_choice.pop(index, "") + res.get("text", "")
 
                 finish_reason = meta_info["finish_reason"]
                 finish_reason_type = (
@@ -974,20 +971,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if finish_reason
                     else None
                 )
-                next_count = len(text)
-                count = text_counts_per_choice.get(index, 0)
-                visible_text_len = next_count
                 matched = finish_reason.get("matched") if finish_reason else None
-                if (
-                    isinstance(matched, str)
-                    and matched in stop_strings
-                    and text.endswith(matched)
-                ):
-                    visible_text_len = len(text) - len(matched)
+                if isinstance(matched, str) and matched in stop_strings:
+                    if text.endswith(matched):
+                        delta = text[: -len(matched)]
+                    elif matched.startswith(text):
+                        # SGLang can trim the rest of a matched stop string from
+                        # its final delta. Drop the prefix buffered previously.
+                        delta = ""
+                    else:
+                        delta = text
                 elif not finish_reason:
-                    visible_text_len -= trailing_stop_prefix_len(text, stop_strings)
-
-                delta = text[count:visible_text_len] if visible_text_len > count else ""
+                    pending_len = trailing_stop_prefix_len(text, stop_strings)
+                    if pending_len:
+                        pending_text_per_choice[index] = text[-pending_len:]
+                        delta = text[:-pending_len]
+                    else:
+                        delta = text
+                else:
+                    delta = text
                 if res.get("output_ids") and not first_output_seen:
                     first_output_seen = True
                     context.notify_first_token()
@@ -1028,4 +1030,3 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
-                text_counts_per_choice[index] = visible_text_len

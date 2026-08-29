@@ -405,9 +405,7 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
         "output_token_logprobs": [(-0.2, 2, "b")],
         "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs = extract_from_sglang_meta(
-        meta, num_output_tokens_in_chunk=1
-    )
+    log_probs, top_logprobs = extract_from_sglang_meta(meta)
     assert log_probs == [-0.2]
     assert top_logprobs == [
         [
@@ -454,14 +452,6 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
         [],
         [{"rank": 1, "token_id": 102, "token": "b", "logprob": -0.2}],
     ]
-
-
-def test_sglang_extract_clamps_metadata_to_output_chunk():
-    meta = {
-        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
-    }
-    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
-    assert log_probs == [-0.1]
 
 
 # ---------------------------------------------------------------------------
