@@ -61,8 +61,9 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 
 ### 3. Download the model
 
-Edit `model-cache/model-download.yaml` and remove the `hf download` command for
-the checkpoint that does not match the target SKU.
+Edit `model-cache/model-download.yaml` (select between GLM-5.3 and GLM-5.2 checkpoints,
+and between FP8 and NVFP4 precisions). Uncomment the `hf download` line for your
+checkpoint and remove the others.
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
@@ -70,6 +71,10 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```
 
 ### 4. Deploy the DGD
+
+When serving GLM-5.3, update every `model-path` in the target DGD to
+`RadixArk/GLM-5.3-NVFP4` for B200 or `zai-org/GLM-5.3` for H200, and update every
+`served-model-name` to `zai-org/GLM-5.3`.
 
 Deploy the target DGD:
 

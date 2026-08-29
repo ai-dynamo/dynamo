@@ -93,7 +93,7 @@ Edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany sto
 
 ## Deploy
 
-Create the shared model cache, then download the checkpoint for your target SKU. Edit `model-cache/model-download.yaml` and remove the `hf download` line for the checkpoint you are not serving:
+Create the shared model cache, then download the checkpoint for your target SKU. Edit `model-cache/model-download.yaml` (select between GLM-5.3 and GLM-5.2 checkpoints, and between FP8 and NVFP4 precisions). Uncomment the `hf download` line for your checkpoint and remove the others:
 
 ```bash
 # Edit storageClassName in model-cache/model-cache.yaml first.
@@ -101,6 +101,8 @@ kubectl apply -f recipes/glm-5.2/model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f recipes/glm-5.2/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
+
+When serving GLM-5.3, update every `model-path` in the target DGD to `RadixArk/GLM-5.3-NVFP4` for B200 or `zai-org/GLM-5.3` for H200, and update every `served-model-name` to `zai-org/GLM-5.3`.
 
 Then deploy the target DGD:
 
@@ -172,12 +174,13 @@ kubectl port-forward svc/glm52-disagg-h200-agentic-frontend 8000:8000 -n ${NAMES
 
 </div>
 
-All four targets serve under the same model name, `zai-org/GLM-5.2`:
+Set `MODEL_NAME` to the `served-model-name` configured in the DGD: `zai-org/GLM-5.3` for GLM-5.3 or `zai-org/GLM-5.2` for GLM-5.2:
 
 ```bash
+export MODEL_NAME=zai-org/GLM-5.3 # or zai-org/GLM-5.2
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"zai-org/GLM-5.2","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a one-sentence readiness check.\"}],\"max_tokens\":64}"
 ```
 
 GLM-5.3/5.2 reasons before answering. To get the answer in the `content` field instead of `reasoning_content`, disable thinking:
@@ -185,7 +188,7 @@ GLM-5.3/5.2 reasons before answering. To get the answer in the `content` field i
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"zai-org/GLM-5.2","messages":[{"role":"user","content":"What is 17 times 24?"}],"chat_template_kwargs":{"enable_thinking":false},"max_tokens":64}'
+  -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17 times 24?\"}],\"chat_template_kwargs\":{\"enable_thinking\":false},\"max_tokens\":64}"
 ```
 
 ## Benchmark
