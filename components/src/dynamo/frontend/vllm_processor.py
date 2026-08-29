@@ -39,12 +39,13 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, InvalidArgument
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -995,10 +996,24 @@ class VllmProcessor:
 
                 yield envelope
             _nvtx.end_range(rng_stream)
-        except (VLLMClientError, InvalidArgument):
-            # Preserve typed client errors for Dynamo's HTTP boundary.
+        except VLLMClientError:
+            # Preserve request-side 400/404/422 errors for generator(), which
+            # translates them at Dynamo's HTTP boundary. The generic handler
+            # below is reserved for genuine internal failures.
             raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))
         finally:
