@@ -29,7 +29,7 @@ It is a standalone Rust executable and is also compiled into
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
-- Image URL and data-URI inputs, including media UUIDs
+- Image URL and data-URI inputs, including media UUIDs and multimodal-aware KV routing
 
 The protocol does not support LoRA, encode workers, beam search, `n > 1`,
 preprocessed multimodal features, audio/video media, or Dynamo tool-call and
@@ -95,6 +95,21 @@ The RL endpoint and engine routes are unauthenticated administrative surfaces th
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+
+For a multimodal model, the sidecar resolves the model's chat image-placeholder
+token from its local or Hugging Face configuration and attaches it to every ZMQ
+source. This lets backend events use the same canonical image hash as frontend
+routing. If the model configuration or exact-routing prerequisites cannot be
+resolved, inference remains available but falls back to ordinary text-prefix KV
+routing. A vLLM launch using `--revision` should expose the matching local model
+directory as its model ID and mount that path into the sidecar; otherwise the
+sidecar can only fetch the repository's default revision.
+
+The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
+and becomes part of vLLM's encoder and prefix-cache identity. Treat passed-through
+HTTP URLs as immutable: changing the bytes behind one URL can reuse stale media
+cache state. User-supplied media UUIDs retain their vLLM semantics and disable
+exact Dynamo multimodal credit.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 

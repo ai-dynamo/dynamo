@@ -15,6 +15,7 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_multimodal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +66,7 @@ impl DiscoveredModel {
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_multimodal: model.supports_multimodal,
         };
         Ok(Self {
             source,

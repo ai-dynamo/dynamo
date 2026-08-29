@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, WorkerConfig, usage,
 };
+use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::preprocessor::lightseek_mm::resolve_exact_routing_image_token_id;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
@@ -26,6 +29,7 @@ pub struct VllmSidecarEngine {
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
     client: OnceCell<VllmClient>,
+    routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
 }
 
@@ -49,6 +53,7 @@ impl VllmSidecarEngine {
             mode,
             transport,
             client: OnceCell::new(),
+            routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -167,6 +172,10 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let routing_image_token_id = resolve_routing_image_token_id(&observed).await;
+        self.routing_image_token_id
+            .set(routing_image_token_id)
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -541,6 +550,7 @@ impl LLMEngine for VllmSidecarEngine {
         if reported_sources.is_empty() {
             return Ok(Vec::new());
         }
+        let image_token_id = self.routing_image_token_id.get().copied().flatten();
         for source in reported_sources {
             if source.transport != "zmq" {
                 tracing::warn!(
@@ -574,6 +584,7 @@ impl LLMEngine for VllmSidecarEngine {
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
+                image_token_id,
             });
         }
         if ranks.len() != expected_dp_size as usize {
@@ -584,6 +595,43 @@ impl LLMEngine for VllmSidecarEngine {
         }
         Ok(sources)
     }
+}
+
+async fn resolve_routing_image_token_id(model: &DiscoveredModel) -> Option<u32> {
+    if !model.supports_multimodal {
+        return None;
+    }
+
+    let source_path = PathBuf::from(&model.source);
+    let model_dir = if source_path.is_dir() {
+        source_path
+    } else {
+        match LocalModel::fetch(&model.source, true).await {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    model = %model.source,
+                    %error,
+                    "Unable to fetch model configuration; exact multimodal KV routing is disabled"
+                );
+                return None;
+            }
+        }
+    };
+    let image_token_id = resolve_exact_routing_image_token_id(&model.source, &model_dir);
+    match image_token_id {
+        Some(image_token_id) => tracing::info!(
+            model = %model.source,
+            image_token_id,
+            "Resolved image placeholder token for multimodal KV routing"
+        ),
+        None => tracing::warn!(
+            model = %model.source,
+            model_dir = %model_dir.display(),
+            "Exact multimodal routing prerequisites are unavailable; source metadata will omit the image token"
+        ),
+    }
+    image_token_id
 }
 
 fn zmq_connect_endpoint(endpoint: &str, grpc_endpoint: &GrpcEndpoint) -> String {
