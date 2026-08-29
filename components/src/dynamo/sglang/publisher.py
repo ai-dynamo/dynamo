@@ -583,7 +583,8 @@ async def cancel_metrics_task(metrics_task: asyncio.Task) -> None:
 
     ``await metrics_task`` cannot tell the task's own cancellation from the
     caller's. ``asyncio.wait`` never raises on behalf of the task it waits on,
-    so any ``CancelledError`` escaping here is the caller's.
+    so any ``CancelledError`` escaping here is the caller's. Classifying on
+    ``metrics_task.done()`` instead looks equivalent but swallows the caller's.
     """
     metrics_task.cancel()
     await asyncio.wait([metrics_task])

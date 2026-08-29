@@ -786,13 +786,8 @@ async def test_cancel_metrics_task_propagates_a_real_failure():
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_cancel_metrics_task_propagates_a_caller_cancellation():
-    """The discriminator: a cancellation aimed at the caller while it is
-    genuinely suspended inside cancel_metrics_task must reach the caller.
-    Both the original #12672 swallow-everything shape (`metrics_task.cancel()`
-    then a bare `except asyncio.CancelledError: pass` around
-    `await metrics_task`) and the rejected `metrics_task.done()`-classification
-    shape absorb this cancellation instead of propagating it, and fail this
-    test."""
+    """A cancellation aimed at the caller while it is suspended inside
+    cancel_metrics_task must reach the caller."""
 
     async def metrics_loop():
         # Takes several event-loop ticks to unwind after cancel(), so the
@@ -871,12 +866,8 @@ async def test_run_to_completion_propagates_a_body_failure():
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_run_to_completion_warns_under_repeated_cancellation(caplog, monkeypatch):
-    """Repeated cancellation must not silence the "teardown is taking a
-    while" warning -- this is the exact scenario it exists for. Before the
-    fix, every absorbed CancelledError skipped the warning check entirely,
-    and even when it didn't, each new asyncio.wait restarted its own timeout
-    from scratch, so a caller cancelling faster than the interval produced
-    zero warnings no matter how long teardown was wedged."""
+    """A caller cancelling faster than the warn interval must still get the
+    "teardown is taking a while" warning."""
     monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 0.1)
 
     release = asyncio.Event()
