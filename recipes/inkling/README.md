@@ -350,6 +350,15 @@ audio. Do not set `--enable-multimodal` to work around it — the flag only lift
 rejection, so media is still never encoded and requests return HTTP 200 with an answer invented from
 the text prompt alone.
 
+**Some OpenAI API fields are rejected rather than silently ignored**, each with a message naming
+the reason:
+
+| Request field | Status | Reason |
+| --- | --- | --- |
+| `min_p`, `logit_bias` | 400 | Unsupported with speculative decoding, and these profiles run MTP 8. Remove `--speculative-config` to use them, at a throughput cost. |
+| `logprobs`, `top_logprobs` | 400 | Not implemented on the Dynamo vLLM chat processor. |
+| `previous_response_id` (501), `GET /v1/responses/{id}` (404) | — | The Responses API is stateless here. `store: true` is echoed back but nothing is persisted, so reuse the response from the original `POST`. |
+
 ### SGLang B200 profile
 
 `deploy.yaml` overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value. This override is
