@@ -1,15 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "GLM-5.2"
-subtitle: "Serve GLM-5.2 with Dynamo and SGLang on B200 or H200 for long-context agentic workloads."
+title: "GLM-5.3/5.2"
+subtitle: "Serve GLM-5.3/5.2 with Dynamo and SGLang on B200 or H200 for long-context agentic workloads."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit rate) with KV-aware routing and EAGLE-style MTP speculative decoding. B200 serves the NVFP4 checkpoint at up to 500K context with HiCache CPU offload; H200 serves the FP8 checkpoint at up to 250K context. Both run aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.3/5.2 tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit rate) with KV-aware routing and EAGLE-style MTP speculative decoding. B200 serves the NVFP4 checkpoint at up to 500K context with HiCache CPU offload; H200 serves the FP8 checkpoint at up to 250K context. Both run aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -28,7 +28,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
-<span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
+<span><b>Checkpoint</b> RadixArk/GLM-5.3-NVFP4 / nvidia/GLM-5.2-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>GPUs</b> 4x B200, one worker</span>
 <span><b>Parallelism</b> DTP4</span>
@@ -36,7 +36,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an
 <span><b>Context</b> Up to 500K, HiCache CPU offload</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
-<span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
+<span><b>Checkpoint</b> RadixArk/GLM-5.3-NVFP4 / nvidia/GLM-5.2-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>GPUs</b> 4x B200 prefill + 8x B200 decode</span>
 <span><b>Parallelism</b> DEP4 prefill / DTP8 decode</span>
@@ -44,7 +44,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an
 <span><b>Context</b> Up to 500K, HiCache CPU offload</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
-<span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
+<span><b>Checkpoint</b> zai-org/GLM-5.3 / zai-org/GLM-5.2-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
 <span><b>GPUs</b> 8x H200, one worker</span>
 <span><b>Parallelism</b> TP8/EP8</span>
@@ -52,7 +52,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an
 <span><b>Context</b> Up to 250K</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
-<span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
+<span><b>Checkpoint</b> zai-org/GLM-5.3 / zai-org/GLM-5.2-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
 <span><b>GPUs</b> 8x H200 prefill + 8x H200 decode</span>
 <span><b>Parallelism</b> TP8/EP8 prefill / TP8/DP8/EP1 decode</span>
@@ -66,14 +66,14 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an
 <div data-sku="b200">
 
 - A Kubernetes cluster with the Dynamo platform installed and B200 GPUs available — 4x for aggregated, 12x for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- A Hugging Face token with access to `nvidia/GLM-5.2-NVFP4`.
+- A Hugging Face token with access to `RadixArk/GLM-5.3-NVFP4` / `nvidia/GLM-5.2-NVFP4`.
 
 </div>
 
 <div data-sku="h200">
 
 - A Kubernetes cluster with the Dynamo platform installed and H200 GPUs available — 8x for aggregated, 16x for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- A Hugging Face token with access to `zai-org/GLM-5.2-FP8`.
+- A Hugging Face token with access to `zai-org/GLM-5.3` / `zai-org/GLM-5.2-FP8`.
 
 </div>
 
@@ -180,7 +180,7 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"zai-org/GLM-5.2","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
 
-GLM-5.2 reasons before answering. To get the answer in the `content` field instead of `reasoning_content`, disable thinking:
+GLM-5.3/5.2 reasons before answering. To get the answer in the `content` field instead of `reasoning_content`, disable thinking:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -220,11 +220,11 @@ Measured on the 15% agentic trace subset. System throughput is per-GPU output to
 
 ## Compare All Targets
 
-All four targets serve GLM-5.2 on SGLang with KV-aware routing and EAGLE-style MTP speculative decoding (draft length 3, SpeedBench acceptance length 2.69), benchmarked on the same agentic trace:
+All four targets serve GLM-5.3/5.2 on SGLang with KV-aware routing and EAGLE-style MTP speculative decoding (draft length 3, SpeedBench acceptance length 2.69), benchmarked on the same agentic trace:
 
 | | B200 aggregated | B200 disaggregated | H200 aggregated | H200 disaggregated |
 |---|---|---|---|---|
-| **Checkpoint** | nvidia/GLM-5.2-NVFP4 | nvidia/GLM-5.2-NVFP4 | zai-org/GLM-5.2-FP8 | zai-org/GLM-5.2-FP8 |
+| **Checkpoint** | RadixArk/GLM-5.3-NVFP4 / nvidia/GLM-5.2-NVFP4 | RadixArk/GLM-5.3-NVFP4 / nvidia/GLM-5.2-NVFP4 | zai-org/GLM-5.3 / zai-org/GLM-5.2-FP8 | zai-org/GLM-5.3 / zai-org/GLM-5.2-FP8 |
 | **Precision** | NVFP4 + FP8 KV | NVFP4 + FP8 KV | FP8 + FP8 KV | FP8 + FP8 KV |
 | **GPUs** | 4x B200 | 4x B200 prefill + 8x B200 decode | 8x H200 | 8x H200 prefill + 8x H200 decode |
 | **Parallelism** | DTP4 | DEP4 / DTP8 | TP8/EP8 | TP8/EP8 prefill / TP8/DP8/EP1 decode |
