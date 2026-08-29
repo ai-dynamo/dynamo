@@ -453,7 +453,7 @@ func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *test
 	ctx := context.Background()
 
 	// Initialize the hash
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
+	err := r.initializeWorkerHashIfNeeded(ctx, dgd, &dgd.Status)
 	require.NoError(t, err)
 
 	// Verify only the v2 hash was set.
@@ -498,12 +498,14 @@ func TestWorkerHashStatusBackfillsFromV2Annotation(t *testing.T) {
 	dgd.Annotations = map[string]string{
 		consts.AnnotationCurrentWorkerHashV2: desiredV2,
 	}
+	programStatus := dgd.Status
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &programStatus))
 
 	assert.Equal(t, desiredV2, dgd.Status.CurrentWorkerHash)
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	assert.Equal(t, desiredV2, programStatus.CurrentWorkerHash)
 	require.NoError(t, err)
 	assert.False(t, trigger)
 }
@@ -534,7 +536,7 @@ func TestWorkerHashStatusRestoresStrippedLegacySuffix(t *testing.T) {
 	})
 
 	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 
 	assert.Equal(t, legacySuffix, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	assert.Equal(t, desiredV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
@@ -564,7 +566,7 @@ func TestWorkerHashStatusDoesNotRepairMirrorDuringRollout(t *testing.T) {
 	}
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 
 	assert.Equal(t, targetHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 	assert.Equal(t, oldHash, dgd.Status.CurrentWorkerHash)
@@ -588,7 +590,7 @@ func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.
 
 	t.Log("Migrate the annotation state without interpreting or replacing v1")
 	r := createTestReconcilerWithStatus(dgd)
-	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
+	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status)
 	require.NoError(t, err)
 	assert.Equal(t, existingHash, r.getCurrentWorkerHash(dgd))
 	assert.Equal(t, desiredV2, r.getCurrentWorkerHashV2(dgd))
@@ -652,7 +654,7 @@ func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
 
 			t.Log("Run two migration and rollout passes so Pending also reaches the former stuck-rollout path")
 			for range 2 {
-				require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+				require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 				require.NoError(t, r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status))
 			}
 
@@ -715,7 +717,7 @@ func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
-	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
+	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status)
 	require.NoError(t, err)
 
 	assert.Equal(t, legacyHash, r.getCurrentWorkerHash(dgd))
@@ -765,7 +767,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
@@ -801,7 +803,7 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -814,7 +816,7 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	require.NotEqual(t, v2Hash, newV2Hash)
 	require.NotEqual(t, legacyHash, newLegacyHash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
@@ -849,7 +851,7 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.Equal(t, legacyHash, newLegacyHash)
 	require.NotEqual(t, v2Hash, newV2Hash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -885,7 +887,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	r := createTestReconcilerWithStatus(dgd)
 	require.False(t, supportsManagedRollingUpdate(dgd))
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -900,7 +902,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	require.Equal(t, legacyHash, newLegacyHash)
 	require.NotEqual(t, v2Hash, newV2Hash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -2442,7 +2444,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, withObjects(legacyWorkerDCD))
 	ctx := context.Background()
 
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
+	err := r.initializeWorkerHashIfNeeded(ctx, dgd, &dgd.Status)
 	require.NoError(t, err)
 
 	// DGD annotation should be set to the legacy sentinel, NOT the computed hash
@@ -2531,7 +2533,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, withObjects(legacyPrefillDCD, legacyDecodeDCD, frontendDCD))
 	ctx := context.Background()
 
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
+	err := r.initializeWorkerHashIfNeeded(ctx, dgd, &dgd.Status)
 	require.NoError(t, err)
 
 	// DGD should have legacy sentinel hash

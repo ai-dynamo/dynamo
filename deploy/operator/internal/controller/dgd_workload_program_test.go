@@ -360,6 +360,10 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	})
+	currentWorkerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: currentWorkerHash,
+	}
 	dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology"}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -379,10 +383,12 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		},
 	}
 	previous := dgd.DeepCopy().Status
+	expectedDGDStatus := previous
+	expectedDGDStatus.CurrentWorkerHash = currentWorkerHash
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify the failed shared reconciliation returns failure status without mutating request.DGD.Status")
+	t.Log("Verify the failed shared reconciliation preserves the explicit worker hash in both status objects")
 	require.ErrorContains(t, err, "RBAC manager not initialized")
 	assert.Equal(t, previous.Components, result.Status.Components)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
@@ -390,7 +396,8 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
-	assert.Equal(t, previous, dgd.Status)
+	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
+	assert.Equal(t, expectedDGDStatus, dgd.Status)
 }
 
 func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *testing.T) {
@@ -468,6 +475,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			err := reconciler.ReconcileUnsupported(
 				context.Background(),
 				dgd,
+				&dgd.Status,
 				true,
 			)
 			require.NoError(t, err)

@@ -117,6 +117,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	result, err := reconciler.newGroveProgram().workloads.Reconcile(
 		context.Background(),
 		dgd,
+		&dgd.Status,
 		nil,
 		nil,
 	)
@@ -226,7 +227,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			t.Log("Reconcile the full workload transition")
 			observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-			_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+			_, err = workloads.Reconcile(context.Background(), observedDGD, &observedDGD.Status, nil, nil)
 
 			t.Log("Verify the failed PCS sync leaves the persisted DGD hash unchanged")
 			require.Error(t, err)
@@ -307,7 +308,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Persist the PCS suffix, then fail the DGD hash commit")
 	observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-	_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), observedDGD, &observedDGD.Status, nil, nil)
 	require.Error(t, err)
 
 	t.Log("Verify the durable state is a suffixed PCS with the previous DGD hash")
@@ -334,7 +335,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		&commoncontroller.RuntimeConfig{},
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
 	)
-	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), freshDGD, &freshDGD.Status, nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify the retry commits the target hash without rewriting the PCS")
@@ -346,7 +347,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Verify the completed transition is idempotent")
 	idempotentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), idempotentDGD))
-	_, err = workloads.Reconcile(context.Background(), idempotentDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), idempotentDGD, &idempotentDGD.Status, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pcsUpdateCalls)
 	assert.Equal(t, 2, dgdUpdateCalls)

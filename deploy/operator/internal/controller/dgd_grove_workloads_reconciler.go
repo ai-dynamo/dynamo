@@ -72,6 +72,7 @@ func newGroveWorkloadsReconciler(
 func (r *groveWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
@@ -99,7 +100,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 	// The PCS write is the transition's write barrier. A failed DGD update
 	// leaves its hash unchanged, so the next reconcile replans from live state.
-	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, status, workerHashTransition, true); err != nil {
 		return ReconcileResult{}, failWorkloadProgram(
 			reasonRollingUpdateFailed,
 			fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err),

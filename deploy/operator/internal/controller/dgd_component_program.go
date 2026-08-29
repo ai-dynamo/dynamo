@@ -143,11 +143,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
-	defer func() {
-		status.CurrentWorkerHash = dgd.Status.CurrentWorkerHash
-	}()
-
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
+	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, status); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
@@ -155,7 +151,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+	return p.rollout.ReconcileUnsupported(ctx, dgd, status, false)
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use
@@ -174,7 +170,7 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 ) error {
 	logger := log.FromContext(ctx)
 
-	if err := p.rollout.initializeWorkerHashIfNeeded(ctx, dgd); err != nil {
+	if err := p.rollout.initializeWorkerHashIfNeeded(ctx, dgd, status); err != nil {
 		logger.Error(err, "Failed to initialize worker hash")
 		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}

@@ -1018,6 +1018,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			result, err := reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
 				dgd,
+				&dgd.Status,
 				nil,
 				nil,
 			)
@@ -1109,6 +1110,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 	_, err := reconciler.newGroveProgram().workloads.Reconcile(
 		ctx,
 		dgd,
+		&dgd.Status,
 		nil,
 		nil,
 	)
