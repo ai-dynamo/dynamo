@@ -744,6 +744,18 @@ pub struct MmImageEntry {
     pub height: u32,
 }
 
+/// One model-visible placeholder replacement in original request order.
+///
+/// The target may contain more than one token. Keeping replacement application
+/// modality-neutral lets image and video processors share the same exact
+/// routing sequence builder without teaching it model-specific prompt rules.
+#[cfg(feature = "mm-routing")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MmRoutingReplacement {
+    target_tokens: Vec<TokenIdType>,
+    replacement_tokens: Vec<TokenIdType>,
+}
+
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoutingImagePromptLayout {
@@ -852,6 +864,74 @@ fn append_mm_routing_replacement(
     Ok(())
 }
 
+/// Apply exact multimodal replacements in request order.
+///
+/// Encountering a known target out of order, an extra target, or a missing
+/// target is an alignment failure. Callers treat that as routing-only and fall
+/// back without changing the worker-bound token sequence.
+#[cfg(feature = "mm-routing")]
+fn apply_ordered_mm_replacements(
+    routing_prepend_bos: Option<TokenIdType>,
+    replacements: &[MmRoutingReplacement],
+    token_ids: &[TokenIdType],
+) -> Result<(Vec<TokenIdType>, usize)> {
+    anyhow::ensure!(
+        replacements
+            .iter()
+            .all(|replacement| !replacement.target_tokens.is_empty()),
+        "MM routing replacement targets must not be empty"
+    );
+
+    let replacement_tokens = replacements.iter().try_fold(0usize, |total, replacement| {
+        total
+            .checked_add(replacement.replacement_tokens.len())
+            .context("MM routing replacement capacity overflow")
+    })?;
+    let capacity = token_ids
+        .len()
+        .checked_add(replacement_tokens)
+        .and_then(|value| value.checked_add(routing_prepend_bos.is_some() as usize))
+        .context("MM routing token capacity overflow")?;
+    let mut expanded = Vec::with_capacity(capacity);
+    if let Some(bos) = routing_prepend_bos {
+        expanded.push(bos);
+    }
+
+    let target_matches_at = |replacement: &MmRoutingReplacement, token_index: usize| {
+        token_ids.get(token_index..token_index.saturating_add(replacement.target_tokens.len()))
+            == Some(replacement.target_tokens.as_slice())
+    };
+
+    let mut replacement_index = 0usize;
+    let mut token_index = 0usize;
+    while token_index < token_ids.len() {
+        if let Some(replacement) = replacements.get(replacement_index)
+            && target_matches_at(replacement, token_index)
+        {
+            expanded.extend_from_slice(&replacement.replacement_tokens);
+            token_index += replacement.target_tokens.len();
+            replacement_index += 1;
+            continue;
+        }
+
+        anyhow::ensure!(
+            !replacements
+                .iter()
+                .any(|replacement| target_matches_at(replacement, token_index)),
+            "multimodal placeholders do not match request order"
+        );
+        expanded.push(token_ids[token_index]);
+        token_index += 1;
+    }
+
+    anyhow::ensure!(
+        replacement_index == replacements.len(),
+        "tokenized prompt is missing multimodal placeholders"
+    );
+    let expanded_prompt_len = expanded.len();
+    Ok((expanded, expanded_prompt_len))
+}
+
 /// Construct the unpadded routing sequence and return its exact logical
 /// length. Errors are routing-only: callers must discard the partial vector
 /// and fall back without failing the inference request.
@@ -866,31 +946,23 @@ fn expand_mm_routing_tokens(
     token_ids: &[TokenIdType],
 ) -> Result<(Vec<TokenIdType>, usize)> {
     debug_assert_eq!(mm_image_entries.len(), n_tokens.len());
-    let n_total: usize = n_tokens.iter().sum();
-    let bos_extra = routing_prepend_bos.is_some() as usize;
-    let mut expanded = Vec::with_capacity(token_ids.len() + n_total + bos_extra);
-    if let Some(bos) = routing_prepend_bos {
-        expanded.push(bos);
+    let mut replacements = Vec::with_capacity(mm_image_entries.len());
+    for (&image, &num_image_tokens) in mm_image_entries.iter().zip(n_tokens) {
+        let mut replacement_tokens = Vec::with_capacity(num_image_tokens);
+        append_mm_routing_replacement(
+            &mut replacement_tokens,
+            tokenizer,
+            prompt_layout,
+            image,
+            num_image_tokens,
+        )?;
+        replacements.push(MmRoutingReplacement {
+            target_tokens: vec![find_token_id],
+            replacement_tokens,
+        });
     }
 
-    let mut image_idx = 0usize;
-    for &token_id in token_ids {
-        if token_id == find_token_id && image_idx < mm_image_entries.len() {
-            append_mm_routing_replacement(
-                &mut expanded,
-                tokenizer,
-                prompt_layout,
-                mm_image_entries[image_idx],
-                n_tokens[image_idx],
-            )?;
-            image_idx += 1;
-        } else {
-            expanded.push(token_id);
-        }
-    }
-
-    let expanded_prompt_len = expanded.len();
-    Ok((expanded, expanded_prompt_len))
+    apply_ordered_mm_replacements(routing_prepend_bos, &replacements, token_ids)
 }
 
 #[cfg(feature = "mm-routing")]
@@ -7632,6 +7704,56 @@ mod tests {
         );
 
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn ordered_mm_replacements_support_multi_token_targets() {
+        let replacements = vec![
+            MmRoutingReplacement {
+                target_tokens: vec![10],
+                replacement_tokens: vec![100, 101],
+            },
+            MmRoutingReplacement {
+                target_tokens: vec![30, 20, 31],
+                replacement_tokens: vec![200, 201, 202],
+            },
+        ];
+
+        let (expanded, prompt_len) =
+            apply_ordered_mm_replacements(Some(1), &replacements, &[7, 10, 8, 30, 20, 31, 9])
+                .unwrap();
+
+        assert_eq!(expanded, [1, 7, 100, 101, 8, 200, 201, 202, 9]);
+        assert_eq!(prompt_len, expanded.len());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn ordered_mm_replacements_reject_misalignment() {
+        let replacements = vec![
+            MmRoutingReplacement {
+                target_tokens: vec![10],
+                replacement_tokens: vec![100],
+            },
+            MmRoutingReplacement {
+                target_tokens: vec![20],
+                replacement_tokens: vec![200],
+            },
+        ];
+
+        assert!(
+            apply_ordered_mm_replacements(None, &replacements, &[20, 10]).is_err(),
+            "out-of-order placeholders must fail closed"
+        );
+        assert!(
+            apply_ordered_mm_replacements(None, &replacements, &[10, 20, 20]).is_err(),
+            "extra placeholders must fail closed"
+        );
+        assert!(
+            apply_ordered_mm_replacements(None, &replacements, &[10]).is_err(),
+            "missing placeholders must fail closed"
+        );
     }
 
     #[cfg(feature = "mm-routing")]
