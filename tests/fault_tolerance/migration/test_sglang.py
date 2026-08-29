@@ -40,6 +40,21 @@ logger = logging.getLogger(__name__)
 AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 64
 
+SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
+SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S = 300
+# Covers the existing 240s request-completion wait plus bounded coordination
+# waits.
+SGLANG_MIGRATION_BEHAVIOR_ALLOWANCE_S = 360
+SGLANG_MIGRATION_CLEANUP_ALLOWANCE_S = 60
+# Workers start concurrently, so only one worker-startup allowance contributes
+# to the whole-test deadline.
+SGLANG_MIGRATION_TEST_TIMEOUT_S = (
+    SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S
+    + SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S
+    + SGLANG_MIGRATION_BEHAVIOR_ALLOWANCE_S
+    + SGLANG_MIGRATION_CLEANUP_ALLOWANCE_S
+)
+
 
 @contextmanager
 def _sglang_graceful_shutdown(
@@ -367,7 +382,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            timeout=300,
+            timeout=SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S,
             # Every worker retains a complete per-test log. Avoid interleaving
             # verbose engine output when several GPU tests run concurrently.
             display_output=False,
@@ -393,7 +408,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(180)  # 2.9x the measured 62s average
+@pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(5.4)  # measured NVML peak with two workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
@@ -426,6 +441,7 @@ def test_request_migration_sglang_aggregated(
         request,
         migration_limit=migration_limit,
         migration_max_seq_len=migration_max_seq_len,
+        startup_timeout_s=SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S,
     ) as frontend:
         logger.info("Frontend started successfully")
 

@@ -62,6 +62,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         request,
         migration_limit: int,
         migration_max_seq_len: int | None,
+        startup_timeout_s: int = 300,
     ):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
@@ -79,6 +80,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             terminate_all_matching_process_names=False,
             display_name="frontend",
         )
+        self.timeout = startup_timeout_s
 
 
 def _make_client(frontend_port: int) -> OpenAI:
