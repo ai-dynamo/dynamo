@@ -292,15 +292,26 @@ class ThunderAgentRouterHandler:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                # Observation only: the replica is decided at admission, never
-                # back-filled from the response. Recorded so pin adherence is auditable.
-                if first_chunk:
+                # Cold-start fallback: admission had no MDC to pick a replica from, so
+                # take the pair the engine actually used. Carries the rank as well --
+                # a worker without one is neither accounted for nor pinnable.
+                if first_chunk and worker_pin is None:
                     first_chunk = False
                     selected_worker = self._extract_worker_id(chunk)
+                    selected_dp_rank = self._extract_worker_dp_rank(chunk)
                     if selected_worker is not None:
+                        await self._scheduler.assign_worker(
+                            program_id, selected_worker, selected_dp_rank
+                        )
                         selected_worker_id = selected_worker
                         if proof is not None:
                             proof["selected_worker_id"] = selected_worker
+                        logger.debug(
+                            "thunderagent.route_selected program=%s worker=%s "
+                            "source=first_chunk",
+                            program_id,
+                            selected_worker,
+                        )
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
@@ -412,6 +423,26 @@ class ThunderAgentRouterHandler:
                 return worker_id
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")
         return None
+
+    def _extract_worker_dp_rank(self, chunk: Any) -> Optional[int]:
+        """DP rank of the replica that served this chunk, if the payload names one.
+
+        Same ``routing_data.worker_id`` payload as ``_extract_worker_id``; prefers the
+        decode rank and falls back to prefill (identical in aggregated mode). Silent on
+        a missing rank -- ``_extract_worker_id`` already warns on malformed payloads.
+        """
+        if not isinstance(chunk, dict):
+            return None
+        routing_data = chunk.get("routing_data")
+        if not isinstance(routing_data, dict):
+            return None
+        info = routing_data.get("worker_id")
+        if not isinstance(info, dict):
+            return None
+        dp_rank = info.get("decode_dp_rank")
+        if not isinstance(dp_rank, int):
+            dp_rank = info.get("prefill_dp_rank")
+        return dp_rank if isinstance(dp_rank, int) else None
 
     def _pin_needs_no_rank(self, worker_id: int) -> bool:
         """Return True if *worker_id* can be pinned by id alone (no explicit rank).

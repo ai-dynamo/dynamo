@@ -265,9 +265,7 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
-        # Not gated on was_new: the cold-start path below lets a request through
-        # unassigned, and nothing back-fills it now that the rank is decided here.
-        needs_assignment = program.assigned_worker_id is None
+        needs_assignment = was_new and program.assigned_worker_id is None
         stale_replacement = False
         live_worker_ids: set[int] = set()
         if program.assigned_worker_id is not None:
@@ -300,7 +298,7 @@ class ThunderAgentScheduler:
 
         if not capacities:
             # Cold start: no MDC yet, so no replica to reason about. Let the request
-            # through unassigned; the next turn retries.
+            # through unassigned; the first response chunk back-fills the pair.
             return None, False
         replica = self._select_replica_for_admission_locked(
             capacities,
