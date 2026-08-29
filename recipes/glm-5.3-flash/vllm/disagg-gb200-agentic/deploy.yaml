@@ -4,7 +4,7 @@
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: glm53-flash-disagg-gb200-agentic-compute-domain
+  name: glm53-flash-disagg-gb200-cd
 spec:
   # 0 = on-demand; must span the full NVL72 rack so MNNVL fabric handles are valid
   # for both prefill and decode nodes. numNodes: N > 0 creates a partial domain
@@ -12,7 +12,7 @@ spec:
   numNodes: 0
   channel:
     resourceClaimTemplate:
-      name: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+      name: glm53-flash-disagg-gb200-cd-ch
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -82,7 +82,7 @@ spec:
               effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+              resourceClaimTemplateName: glm53-flash-disagg-gb200-cd-ch
           terminationGracePeriodSeconds: 60
           volumes:
             - name: model-cache
@@ -242,7 +242,7 @@ spec:
               effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: glm53-flash-disagg-gb200-agentic-compute-domain-channel
+              resourceClaimTemplateName: glm53-flash-disagg-gb200-cd-ch
           terminationGracePeriodSeconds: 60
           volumes:
             - name: model-cache
