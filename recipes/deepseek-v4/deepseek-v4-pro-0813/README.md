@@ -149,18 +149,26 @@ Joint gate: user output >= 50 tok/s **and** TTFT p50 < 5 s.
 | --- | --- | --- | --- | --- | --- | --- |
 | Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 64.88 | 55.9 | 383 ms |
 | Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 12 | 50.31 | 50.0 | 2,370 ms |
-| Agentic 64K | `agg-h200-agentic` | 8x H200 | 6 | 25.24 | 43.5 | 330 ms |
+| Agentic 64K | `agg-h200-agentic` | 8x H200 | 4 | 21.4 | 51.8 | 322 ms |
 
-Each GB200 row was measured at its own iso-SLA operating point. The H200 row is a
-**partial run (93% of the trace, 3,287 valid requests)** and **does not meet the 50 tok/s/user
-gate** at concurrency 6.
+Each row was measured at its own iso-SLA operating point. All three are complete runs over the
+full 3,541-request trace.
 
-**Why H200 falls short on this trace.** The trace's unique KV working set is ~57.5M tokens
-(113,113 distinct blocks of ~509 tokens). H200 GPU KV holds ~3.12M tokens, so the working set is
-**18.4x oversubscribed** and only ~5% of shared blocks stay resident. Measured prompt-cache read
-is **42.5%**, against the ~94% shared-block potential in the trace file. Most of the reuse the
-trace is designed to exercise cannot be realised on this SKU without a CPU KV offload tier, which
-these recipes deliberately do not use.
+**H200 operating point.** Concurrency 4 clears the joint gate (51.8 tok/s/user P50, 322 ms TTFT
+P50) over a 14.0 h run. Concurrency 6 was also measured and does **not** clear it -- 43.5
+tok/s/user -- so 4 is the SLA-respecting point on this SKU and 6 trades ~18% user throughput for
+~18% system throughput.
+
+**Distribution note.** The H200 trace has a long tail: mean E2E user throughput is 47.0 tok/s
+against the 51.8 P50, and input length ranges from 5.6K to 1.04M tokens. The table reports P50
+throughout, consistent across all rows.
+
+**KV residency on H200.** The trace's unique KV working set is ~57.5M tokens (113,113 distinct
+blocks of ~509 tokens). H200 GPU KV holds ~3.12M tokens, so the working set is **18.4x
+oversubscribed**. Measured prompt-cache read is **42.7%** (mean 27,443 of 64,197 input tokens),
+against the ~94% shared-block potential in the trace file. Most of the reuse the trace is designed
+to exercise cannot be realised on this SKU without a CPU KV offload tier, which these recipes
+deliberately do not use -- this is the main driver of the GB200/H200 gap on this workload.
 
 ### Synthetic profile (fixed 64K ISL / 400 OSL, ~90% prefix reuse)
 

@@ -223,9 +223,10 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 
 | Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
 | --- | --- | --- | --- |
+| 4 | 21.4 | 51.8 | 322 ms |
 | 6 | 25.24 | 43.5 | 330 ms |
 
-Partial run (93% of the trace) and **below the 50 tok/s/user gate**. The trace's unique KV working set is ~57.5M tokens against ~3.12M of H200 GPU KV — 18.4x oversubscribed — so measured prompt-cache read is 42.5% versus the ~94% the trace could offer. On a synthetic 64K / 400 profile whose working set fits in GPU KV, the same recipe reaches 25.0 tok/s/GPU at user output 53.0 (concurrency 4) and clears the gate.
+Complete run over all 3,541 trace requests (14.0 h). **Concurrency 4 clears the joint gate** (51.8 tok/s/user P50, 322 ms TTFT P50); concurrency 6 does not (43.5 tok/s/user). Mean user throughput is 47.0 tok/s against the 51.8 P50 — the trace has a long tail, with input length spanning 5.6K to 1.04M tokens. The trace's unique KV working set is ~57.5M tokens against ~3.12M of H200 GPU KV — 18.4x oversubscribed — so measured prompt-cache read reaches only 42.7% versus the ~94% the trace could offer. That KV-residency limit, not configuration, is the main driver of the GB200/H200 gap on this workload.
 
 </div>
 
@@ -241,7 +242,7 @@ Not yet run on the shared trace. On a synthetic 64K / 400 / 90%-reuse profile th
 | --- | --- | --- | --- | --- |
 | `agg-gb200-agentic` | 8x GB200 | Aggregated | 1,048,576 | Trace-validated |
 | `disagg-gb200-agentic` | 16x GB200 | 1P1D | 1,048,576 | Trace-validated |
-| `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Trace (partial) + synthetic |
+| `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Trace-validated |
 | `disagg-h200-agentic` | 16x H200 | 1P1D | 1,048,576 | Synthetic only |
 
 ## Notes

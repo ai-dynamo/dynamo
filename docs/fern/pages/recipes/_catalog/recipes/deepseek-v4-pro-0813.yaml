@@ -89,7 +89,7 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 'Trace replay c6 (93% partial) = 25.24 system tok/s/GPU @ user 43.5 tok/s -- below the 50 tok/s gate. Synthetic 64K/400/90%-reuse c4 = 25.0 @ user 53.0 clears it. The trace working set (~57.5M tokens) is 18.4x H200 GPU KV, so measured prompt-cache read is 42.5% vs the trace''s ~94% potential.'
+    summary: 'Trace replay c4 (complete, 3,541 requests, 14.0 h) = 21.4 system tok/s/GPU @ user 51.8 tok/s P50, TTFT 322 ms P50 -- clears the joint gate. c6 was also measured and misses it (user 43.5 tok/s). Mean user throughput is 47.0 tok/s against the 51.8 P50; the trace has a long tail (ISL 5.6K-1.04M). Prompt-cache read reaches only 42.7% because the trace working set (~57.5M tokens) is 18.4x oversubscribed against H200 GPU KV (~3.12M tokens).'
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -118,10 +118,10 @@ targets:
     available: true
     summary: 'Synthetic 64K/400/90%-reuse: SLA crossing near c6 = 18.25-19.9 system tok/s/GPU @ user ~50. Not yet run on the shared trace; expect the same KV-oversubscription penalty as the aggregated H200 target.'
 related_benchmarks: []
-maintainer: null
+maintainer:
 gaps:
-- 'The H200 trace figure is a 93% partial run (3,287 of 3,541 requests) and misses the 50 tok/s/user gate at c6. The cause is KV capacity, not configuration: the trace working set is ~57.5M tokens against ~3.12M of H200 GPU KV (18.4x oversubscribed), so measured prompt-cache read is 42.5% versus the ~94% shared-block potential in the trace. These recipes deliberately use no CPU KV offload tier.'
-- 'H200 disaggregated has synthetic numbers only; it has not been run on the shared trace.'
+- 'H200 aggregated now has a complete trace run at c4 (3,541/3,541 requests). It clears the joint gate; c6 does not. The residual GB200/H200 gap is KV capacity, not configuration: the trace working set is ~57.5M tokens against ~3.12M tokens of H200 GPU KV, so measured prompt-cache read is 42.7% versus the ~94% the trace could offer.'
+- H200 disaggregated has synthetic numbers only; a complete trace run is still outstanding.
 - 'All H200 figures are N=1 against a measured 17% run-to-run variance.'
 - 'This is a different checkpoint from deepseek-ai/DeepSeek-V4-Pro (see the deepseek-v4-pro recipe); the two must not share a model cache.'
 - maintainer unknown
