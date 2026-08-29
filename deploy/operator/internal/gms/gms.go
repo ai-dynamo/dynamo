@@ -61,6 +61,13 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
+			// A user-supplied gms-server (for example one that runs the V1
+			// restore loader with its own args) is kept as authored, but it is
+			// still a GMS process container: without DYN_GMS_USE_V1 it would
+			// silently serve the V0 protocol to V1 clients.
+			if useV1 {
+				EnableV1(&podSpec.InitContainers[i])
+			}
 			return
 		}
 	}

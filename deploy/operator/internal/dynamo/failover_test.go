@@ -861,7 +861,7 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 			"only supported for an operator-generated DCD",
 			"disaggregation mode must be aggregated",
 			"request plane must be tcp",
-			"tensor parallel size must be 1",
+			"tensor parallel size must match the main container GPU count",
 			"pipeline parallel size must be 1",
 			"data parallel size must be 1",
 		} {

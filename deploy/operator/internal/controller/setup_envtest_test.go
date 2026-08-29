@@ -125,7 +125,7 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 				checkpoint := &nvidiacomv1alpha1.DynamoCheckpoint{
 					ObjectMeta: metav1.ObjectMeta{Name: "finalizer-cleanup", Namespace: testEnv.Namespace()},
 					Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-						Identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 							Model: "test-model", BackendFramework: "vllm",
 						},
 						Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{

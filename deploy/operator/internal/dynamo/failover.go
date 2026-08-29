@@ -514,11 +514,19 @@ func validateAutomaticFailoverCheckpointProfile(
 	if main == nil {
 		return append(violations, errors.New("podTemplate must contain the main container"))
 	}
+	// Single-node tensor+expert parallel (TEP) is allowed: the engine may own
+	// every GPU in the pod as long as the whole world is one node and one
+	// process tree, which is what CRIU can dump. Tensor parallel size must
+	// therefore match the GPU count. Pipeline and data parallel stay at 1
+	// because either one spans multiple engine processes with independent
+	// CUDA contexts, which the single-target capture cannot represent.
 	gpuCount, err := getGPUCount(main.Resources)
 	if err != nil {
 		violations = append(violations, fmt.Errorf("main container GPU resources are invalid: %w", err))
-	} else if gpuCount != 1 {
-		violations = append(violations, errors.New("main container must request exactly one GPU"))
+		gpuCount = 1
+	} else if gpuCount < 1 {
+		violations = append(violations, errors.New("main container must request at least one GPU"))
+		gpuCount = 1
 	}
 	if err := configureVLLMAutomaticSnapshotLoadProfile(main.DeepCopy()); err != nil {
 		violations = append(violations, err)
@@ -532,7 +540,12 @@ func validateAutomaticFailoverCheckpointProfile(
 	}{
 		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
 		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
-		{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+		{
+			flag:         tensorParallelSizeFlag,
+			defaultValue: "1",
+			want:         strconv.FormatInt(int64(gpuCount), 10),
+			description:  "tensor parallel size must match the main container GPU count",
+		},
 		{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
 		{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
 	} {
