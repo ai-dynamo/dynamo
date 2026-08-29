@@ -9,7 +9,12 @@ import logging
 import os
 from typing import Optional, Tuple
 
-from kvbm.utils import get_consolidator_mode, is_truthy
+from kvbm.utils import (
+    DEFAULT_LEADER_ZMQ_PUB_PORT,
+    get_consolidator_mode,
+    get_port_from_env,
+    is_truthy,
+)
 from vllm.distributed.kv_events import ZmqEventPublisher
 
 __all__ = [
@@ -128,10 +133,9 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
     ).replace("*", "127.0.0.1")
 
     # Derive consolidator port deterministically from KVBM leader ZMQ pub port
-    # Default value (56001) aligns with Rust constant DEFAULT_LEADER_ZMQ_PUB_PORT defined in:
-    # dynamo/lib/bindings/python/rust/llm/block_manager/distributed/utils.rs
-    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
-    kvbm_pub_port = int(kvbm_pub_port_str)
+    kvbm_pub_port = get_port_from_env(
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT", DEFAULT_LEADER_ZMQ_PUB_PORT
+    )
 
     # Use 1000 offset to keep ports close together
     # Example: 56001 -> 57001
