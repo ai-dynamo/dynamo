@@ -1149,6 +1149,18 @@ mod tests {
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
     use super::*;
+
+    /// `handler_generate` now reads the raw body, so direct calls need both the
+    /// JSON content type and a serialized body.
+    fn generate_body(value: serde_json::Value) -> (HeaderMap, Body) {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        (headers, Body::from(serde_json::to_vec(&value).unwrap()))
+    }
+
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use dynamo_runtime::{
@@ -1601,15 +1613,13 @@ mod tests {
             vec![PRIMARY.to_string()]
         );
 
-        let request = serde_json::from_value(serde_json::json!({
+        let (headers, body) = generate_body(serde_json::json!({
             "request_id": "generate-alias-request",
             "token_ids": [1, 2, 3],
             "sampling_params": {},
             "model": ALIAS
-        }))
-        .unwrap();
-        let response =
-            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+        }));
+        let response = handler_generate(State(state.clone()), headers, body).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1630,34 +1640,24 @@ mod tests {
         let state = service.state_clone();
         let metric_model = crate::discovery::UNKNOWN_METRIC_MODEL;
 
-        let invalid_request = serde_json::from_value(serde_json::json!({
+        let (invalid_headers, invalid_body) = generate_body(serde_json::json!({
             "request_id": "generate-invalid-request",
             "token_ids": [],
             "sampling_params": {},
             "model": "missing-generate-model"
-        }))
-        .unwrap();
-        let invalid_response = handler_generate(
-            State(state.clone()),
-            HeaderMap::new(),
-            Json(invalid_request),
-        )
-        .await;
+        }));
+        let invalid_response =
+            handler_generate(State(state.clone()), invalid_headers, invalid_body).await;
         assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
 
-        let missing_model_request = serde_json::from_value(serde_json::json!({
+        let (missing_headers, missing_body) = generate_body(serde_json::json!({
             "request_id": "generate-missing-model-request",
             "token_ids": [1],
             "sampling_params": {},
             "model": "missing-generate-model"
-        }))
-        .unwrap();
-        let missing_model_response = handler_generate(
-            State(state.clone()),
-            HeaderMap::new(),
-            Json(missing_model_request),
-        )
-        .await;
+        }));
+        let missing_model_response =
+            handler_generate(State(state.clone()), missing_headers, missing_body).await;
         assert_eq!(missing_model_response.status(), StatusCode::NOT_FOUND);
 
         let metrics = state.metrics_clone();
