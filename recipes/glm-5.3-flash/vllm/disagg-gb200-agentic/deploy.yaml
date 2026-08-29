@@ -17,7 +17,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm53-flash-disagg-gb200-agentic
+  name: glm53-flash-disagg-gb200
 spec:
   backendFramework: vllm
   components:
