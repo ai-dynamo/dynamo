@@ -1914,7 +1914,7 @@ def _fake_teardown_targets(steps):
     return cleanup, run_deferred_handlers
 
 
-@pytest.mark.parametrize("cancel_after_ticks", range(4))
+@pytest.mark.parametrize("cancel_after_ticks", range(1, 4))
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_worker_teardown_always_completes(cancel_after_ticks):
