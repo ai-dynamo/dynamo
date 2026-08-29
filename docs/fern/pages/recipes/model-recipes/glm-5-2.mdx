@@ -195,7 +195,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 A single AIPerf trace-replay Job — `perf/perf.yaml` — covers all four DGDs. It replays a Mooncake-format agentic trace (64K ISL / 400 OSL, 90% KV cache hit rate) at one concurrency value and writes artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
 
-Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance](#expected-performance) numbers:
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance (run on GLM-5.2)](#expected-performance-run-on-glm-52) numbers:
 
 | Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `CONCURRENCY` |
 | --- | --- | --- | --- |
@@ -213,7 +213,7 @@ kubectl wait --for=condition=Complete job/glm52-bench -n ${NAMESPACE} --timeout=
 
 For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md).
 
-## Expected Performance
+## Expected Performance (run on GLM-5.2)
 
 Measured on the 15% agentic trace subset. System throughput is per-GPU output tokens per second; user throughput is the P50 per-request output rate.
 
