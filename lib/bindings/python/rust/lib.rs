@@ -2030,18 +2030,6 @@ impl AsyncResponseStream {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        // Preserve typed errors before Annotated::ok() reduces
-                        // them to a display string.
-                        if annotated
-                            && pyobj.is_error()
-                            && let Some(error) = pyobj
-                                .error
-                                .as_ref()
-                                .and_then(|error| errors::invalid_argument_to_pyerr(error))
-                        {
-                            return Err(error);
-                        }
-
                         let pyobj = match pyobj.ok() {
                             Ok(pyobj) => pyobj,
                             Err(e) => {
