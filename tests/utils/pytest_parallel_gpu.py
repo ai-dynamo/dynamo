@@ -553,12 +553,14 @@ def _select_launches(
     this repo models allocation as instantaneous, so none of them can see the
     window; ``_VLLM_LAUNCH_STAGGER_S`` exists because it is real.
 
-    The term is subtracted only on devices ``J`` could occupy *today*. On a
-    device it could not, ``foreign > total_gib - required`` holds by definition,
-    so the line would be ``budget_multi - foreign - required <
-    budget_multi - total_gib < 0`` for every test of every size -- the device
-    would refuse all backfill while buying ``J`` nothing, since what gates ``J``
-    there is the neighbour retiring, which this run neither owns nor hastens.
+    The foreign term is subtracted only on devices ``J`` could occupy *today*.
+    On a device it could not, subtracting foreign as well would make the line
+    ``budget_multi - foreign - required < budget_multi - total_gib < 0`` for
+    every test of every size -- B1, a whole-node freeze at ``n == gpu_count``.
+    The unusable-card line therefore drops the foreign term but still charges
+    the multi-process margin ``total_gib - budget_multi``, so admitted backfill
+    cannot forfeit the cap drop that the first tenant causes. Residual foreign
+    above that margin is a reachable state; the progress claim does not cover it.
 
     That widening is scoped to condition 1, ``r <= budget_multi``. For a gang
     profiled above ``budget_multi`` the line is ``budget_multi - r < 0`` even on

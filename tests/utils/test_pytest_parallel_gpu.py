@@ -2752,6 +2752,80 @@ def test_a_hold_survives_foreign_memory_retiring_part_way_rather_than_all_at_onc
     )
 
 
+def test_unusable_card_admits_exactly_the_margin_reserved_line_and_no_more():
+    """Unusable-card admission line is B - r - M, not B - r.
+
+    2 x 80 GiB (B=68, M=12), gang r=40, foreign 45 until pass 60.
+    Cards are unusable (80-45=35 < 40). L_unusable = 68-40-12 = 16.
+
+    Threshold lock:
+      * b = 16.0  is admitted while the gang cannot use the cards.
+      * b = 16.01 is refused.
+
+    b > L_unusable is a reachable scheduler state, not an impossible one.
+    Refusing that filler is expected conservative behavior. Maximal work
+    conservation for b > L_unusable (admit every filler that would still
+    leave room for the gang after F' = 0) is not claimed. When foreign
+    clears, the gang still launches in both cases.
+    """
+
+    def run(fill):
+        gpus = {0: _gpu(0, 80.0), 1: _gpu(1, 80.0)}
+        gang = _t("gang", 40.0, timeout=1800, gpus=2)
+        return _drive_passes(
+            gpus,
+            [gang],
+            backfill=lambda i, f=fill: _t(f"fill{i}", f, timeout=15.0),
+            passes=200,
+            external_hold=lambda now: {0: 45.0, 1: 45.0} if now < 60 else {},
+        )
+
+    at_line = run(16.0)
+    over = run(16.01)
+    early_at = [n for n, at in at_line.items() if n != "gang" and at < 60]
+    early_over = [n for n, at in over.items() if n != "gang" and at < 60]
+    assert early_at, (
+        "16.0 GiB sits on L_unusable=16 and must be admitted while the gang "
+        "cannot use the cards"
+    )
+    assert not early_over, (
+        f"{early_over} launched before pass 60 at b=16.01 > L_unusable=16 — "
+        "expected conservative refusal of filler above the unusable-card line"
+    )
+    assert "gang" in at_line and at_line["gang"] <= 61
+    assert "gang" in over and over["gang"] <= 61
+
+
+def test_known_limitation_residual_above_margin_with_on_line_filler_delays_gang():
+    """F' > M is reachable; progress is not claimed in that region.
+
+    2 x 10 GiB (B=8.5, M=1.5), gang r=6, L_unusable = 8.5-6-1.5 = 1.0.
+    Foreign 4.5 until pass 60, then residual 3.0 (> M). A 1.0 GiB filler is
+    admitted on the line. At pass 60 the empty-card arithmetic T-F'+r = 10
+    would fit the gang; the occupied card reads 3+1+6 against cap 8.5 and
+    does not. The gang waits for the filler.
+
+    This is a known limitation / excluded guarantee region, not a scheduler
+    bug and not an unreachable state. The progress claim assumes residual
+    foreign memory eventually satisfies F' <= M. Pinning the delay here
+    keeps a later observer from mistaking it for an undiscovered regression.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0)}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    started = _drive_passes(
+        gpus,
+        [gang],
+        backfill=lambda i: _t(f"fill{i}", 1.0, timeout=900.0),
+        passes=400,
+        external_hold=lambda now: {0: 4.5, 1: 4.5} if now < 60 else {0: 3.0, 1: 3.0},
+    )
+    assert "gang" in started, "limitation is delay, not a permanent freeze"
+    assert started["gang"] > 60, (
+        f"gang launched on pass {started['gang']}; F'=3.0 > M=1.5 with a 1.0 "
+        "on-line filler is a known limitation outside the progress guarantee"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # the assignment has to survive into the WORKERS, not just be derived
 #
