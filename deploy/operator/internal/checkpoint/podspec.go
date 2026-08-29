@@ -71,6 +71,7 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 	if annotations != nil {
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+		delete(annotations, snapshotprotocol.RestoreContainerMapAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
 		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
@@ -86,6 +87,17 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	// The agent gates restore on the pod's own annotations, so the
+	// one-source-to-many-destinations map has to live here alongside the
+	// destination list; the map PrepareRestorePodSpec builds is scoped to the
+	// spec rewrite and never reaches the pod template.
+	if err := snapshotprotocol.ApplyRestoreContainerMap(
+		annotations,
+		checkpointInfo.CaptureSourceContainer,
+		targets,
+	); err != nil {
+		return err
+	}
 	if ok {
 		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
 	}

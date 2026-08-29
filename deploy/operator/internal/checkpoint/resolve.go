@@ -60,13 +60,13 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 		CheckpointName:   ckpt.Name,
 		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 
-		CaptureSourceContainer: captureSourceContainer(ckpt),
+		CaptureSourceContainer: CaptureSourceContainer(ckpt),
 	}, nil
 }
 
-// captureSourceContainer returns the container the checkpoint captured,
+// CaptureSourceContainer returns the container the checkpoint captured,
 // defaulting to main to match the DynamoCheckpoint CRD default.
-func captureSourceContainer(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+func CaptureSourceContainer(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
 	if ckpt != nil && ckpt.Spec.Job.TargetContainerName != "" {
 		return ckpt.Spec.Job.TargetContainerName
 	}

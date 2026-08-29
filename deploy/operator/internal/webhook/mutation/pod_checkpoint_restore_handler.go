@@ -141,6 +141,7 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		Ready:                   true,
 		StartupPolicy:           nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
 		RestoreTargetContainers: targets,
+		CaptureSourceContainer:  checkpoint.CaptureSourceContainer(ckpt),
 	}
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}

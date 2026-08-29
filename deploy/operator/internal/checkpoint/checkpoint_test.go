@@ -1097,11 +1097,45 @@ func TestApplyRestorePodMetadata_FailoverTargets(t *testing.T) {
 func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
 	labels := map[string]string{}
 	annotations := map[string]string{
-		snapshotprotocol.TargetContainersAnnotation: "stale",
+		snapshotprotocol.TargetContainersAnnotation:    "stale",
+		snapshotprotocol.RestoreContainerMapAnnotation: "stale",
 	}
 	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
 	_, ok := annotations[snapshotprotocol.TargetContainersAnnotation]
 	assert.False(t, ok, "target-containers annotation must be cleared when checkpoint disabled")
+	_, ok = annotations[snapshotprotocol.RestoreContainerMapAnnotation]
+	assert.False(t, ok, "restore-container-map annotation must be cleared when checkpoint disabled")
+}
+
+// The snapshot agent reads the restore map off the pod's own annotations, so it
+// has to be stamped on the pod template next to the destination list. Intra-pod
+// failover renames the destinations to engine-0..N, which no longer match the
+// captured "main", and the agent's default same-name restore then fails
+// preflight with: restore pod has no destination container named "main".
+func TestApplyRestorePodMetadata_ContainerMap(t *testing.T) {
+	t.Run("failover destinations get an explicit map", func(t *testing.T) {
+		annotations := map[string]string{}
+		ApplyRestorePodMetadata(map[string]string{}, annotations, &CheckpointInfo{
+			Enabled:                 true,
+			Ready:                   true,
+			Hash:                    testHash,
+			CaptureSourceContainer:  consts.MainContainerName,
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+		})
+		assert.Equal(t, "main=engine-0,main=engine-1", annotations[snapshotprotocol.RestoreContainerMapAnnotation])
+	})
+
+	t.Run("same-named single destination stays on the agent default", func(t *testing.T) {
+		annotations := map[string]string{}
+		ApplyRestorePodMetadata(map[string]string{}, annotations, &CheckpointInfo{
+			Enabled:                true,
+			Ready:                  true,
+			Hash:                   testHash,
+			CaptureSourceContainer: consts.MainContainerName,
+		})
+		_, ok := annotations[snapshotprotocol.RestoreContainerMapAnnotation]
+		assert.False(t, ok, "same-named destination must not need an explicit map")
+	})
 }
 
 func TestApplyRestoreCandidateMetadata(t *testing.T) {
