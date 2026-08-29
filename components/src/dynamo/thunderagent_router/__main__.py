@@ -284,6 +284,7 @@ class ThunderAgentRouterHandler:
                 "waited_seconds": decision.waited_seconds,
                 "priority_jump": decision.priority_jump,
                 "assigned_worker_hint": worker_pin,
+                "assigned_dp_rank_hint": worker_dp_rank,
             }
             if want_route_proof
             else None
@@ -306,6 +307,7 @@ class ThunderAgentRouterHandler:
                         selected_worker_id = selected_worker
                         if proof is not None:
                             proof["selected_worker_id"] = selected_worker
+                            proof["selected_dp_rank"] = selected_dp_rank
                         logger.debug(
                             "thunderagent.route_selected program=%s worker=%s "
                             "source=first_chunk",

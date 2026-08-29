@@ -155,7 +155,7 @@ These are Dynamo runtime endpoints, not public OpenAI HTTP routes. Use them from
 
 ### Response Route Proof
 
-For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, and `selected_worker_id` when worker attribution is available.
+For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, `assigned_dp_rank_hint`, and `selected_worker_id` with `selected_dp_rank` when worker attribution is available.
 
 For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Agent Tracing](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 
