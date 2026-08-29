@@ -92,7 +92,13 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.28.0
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
-  vllm_omni_ref: "v0.27.0rc1"
+  vllm_omni_ref: "v0.28.0rc1"
+  # vLLM-Omni 0.28.0rc1 requires transformers>=5.10.1,<5.15, while vLLM's own
+  # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.
+  # Omni is layered against the installed Transformers version, so without
+  # this pin its dependency solve is unsatisfiable. Remove the pin once
+  # vLLM-Omni lifts its <5.15 upper bound.
+  transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "true"
