@@ -1836,6 +1836,59 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
+func TestAddTransportTLSEnvVars(t *testing.T) {
+	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
+	tlsCases := []struct {
+		env  string
+		set  func(c *configv1alpha1.InfrastructureConfiguration)
+		want string
+	}{
+		{"NATS_TLS_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.NATSTLSCAPath = "/etc/certs/nats-ca.pem" }, "/etc/certs/nats-ca.pem"},
+		{"NATS_TLS_CLIENT_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.NATSTLSClientCertPath = "/etc/certs/nats-client.pem"
+		}, "/etc/certs/nats-client.pem"},
+		{"NATS_TLS_CLIENT_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.NATSTLSClientKeyPath = "/etc/certs/nats-client-key.pem"
+		}, "/etc/certs/nats-client-key.pem"},
+		{"DYN_TCP_TLS_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSCertPath = "/etc/certs/server.pem" }, "/etc/certs/server.pem"},
+		{"DYN_TCP_TLS_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSKeyPath = "/etc/certs/server-key.pem" }, "/etc/certs/server-key.pem"},
+		{"DYN_TCP_TLS_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSCAPath = "/etc/certs/ca.pem" }, "/etc/certs/ca.pem"},
+		{"DYN_TCP_TLS_CLIENT_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSClientCertPath = "/etc/certs/client.pem" }, "/etc/certs/client.pem"},
+		{"DYN_TCP_TLS_CLIENT_KEY_PATH", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.TCPTLSClientKeyPath = "/etc/certs/client-key.pem"
+		}, "/etc/certs/client-key.pem"},
+		{"DYN_TCP_TLS_CLIENT_CA_CERT_PATH", func(c *configv1alpha1.InfrastructureConfiguration) { c.TCPTLSClientCAPath = "/etc/certs/client-ca.pem" }, "/etc/certs/client-ca.pem"},
+		{"DYN_TCP_TLS_SERVER_NAME", func(c *configv1alpha1.InfrastructureConfiguration) {
+			c.TCPTLSServerName = "dynamo-worker.dynamo-system.svc.cluster.local"
+		}, "dynamo-worker.dynamo-system.svc.cluster.local"},
+	}
+	for _, tc := range tlsCases {
+		t.Run(tc.env, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
+			}
+			tc.set(&operatorConfig.Infrastructure)
+			AddTransportTLSEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+			assert.Equal(t, tc.want, envByName[tc.env])
+		})
+	}
+
+	t.Log("An empty Infrastructure injects none of the TLS env vars.")
+	t.Run("empty config omits all TLS env vars", func(t *testing.T) {
+		container := &corev1.Container{}
+		operatorConfig := &configv1alpha1.OperatorConfiguration{
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
+		}
+		AddTransportTLSEnvVars(container, operatorConfig)
+		envByName := envVarsToMap(container.Env)
+		for _, tc := range tlsCases {
+			assert.NotContains(t, envByName, tc.env)
+		}
+	})
+}
+
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
@@ -6066,6 +6119,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		name             string
 		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
 		backendFramework BackendFramework
+		wantCommand      []string
+		wantArgs         []string
 		wantEnvVars      map[string]string
 		wantErr          bool
 	}{
@@ -6075,6 +6130,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			},
 			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
@@ -6091,8 +6148,29 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				},
 			},
 			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": "3000",
+			},
+		},
+		{
+			name: "frontend with materialized appended args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.frontend", "--router-mode", "kv"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend", "--router-mode", "kv"},
+			wantEnvVars: map[string]string{
+				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
 	}
@@ -6124,15 +6202,13 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			}
 
 			// Check command and args
-			wantCommand := []string{"python3"}
-			wantArgs := []string{"-m", "dynamo.frontend"}
-			if !reflect.DeepEqual(podSpec.Containers[0].Command, wantCommand) {
+			if !reflect.DeepEqual(podSpec.Containers[0].Command, tt.wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
-					podSpec.Containers[0].Command, wantCommand)
+					podSpec.Containers[0].Command, tt.wantCommand)
 			}
-			if !reflect.DeepEqual(podSpec.Containers[0].Args, wantArgs) {
+			if !reflect.DeepEqual(podSpec.Containers[0].Args, tt.wantArgs) {
 				t.Errorf("GenerateBasePodSpec() args = %v, want %v",
-					podSpec.Containers[0].Args, wantArgs)
+					podSpec.Containers[0].Args, tt.wantArgs)
 			}
 
 			// Check environment variables

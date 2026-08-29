@@ -99,6 +99,8 @@ struct AttachmentDescriptorInput {
     raw_topic: String,
     #[serde(default)]
     image_token_id: Option<u32>,
+    #[serde(default)]
+    router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
 }
 
 #[pyclass]
@@ -132,6 +134,7 @@ impl KvStateAttachmentOwner {
                     raw_zmq_endpoint: input.raw_zmq_endpoint,
                     raw_topic: input.raw_topic,
                     image_token_id: input.image_token_id,
+                    router_hint_source: input.router_hint_source,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()
@@ -162,21 +165,6 @@ impl KvStateAttachmentOwner {
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
-        })
-    }
-
-    fn set_cache_readable<'py>(
-        &self,
-        py: Python<'py>,
-        global_dp_rank: u32,
-        readable: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner
-                .set_cache_readable(global_dp_rank, readable)
-                .await
-                .map_err(to_pyerr)
         })
     }
 

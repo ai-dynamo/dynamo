@@ -148,6 +148,8 @@ class Endpoint:
 
     ...
 
+    async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
+
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
@@ -456,6 +458,12 @@ class ContextMetadata:
     def items(self) -> List[Tuple[str, str]]: ...
     def clear(self) -> None: ...
     def copy(self) -> Dict[str, str]: ...
+
+class FirstTokenSource:
+    """Endpoint-scoped worker prefill-completion source."""
+
+    def bind(self, context: Context, dp_rank: Optional[int] = None) -> None: ...
+
 
 class Context:
     """
@@ -1720,6 +1728,22 @@ class RouterConfig:
         """
         ...
 
+class LoadThresholdConfig:
+    """Overload-admission thresholds shared by all policies in one routing load context."""
+
+    active_decode_blocks_threshold: Optional[float]
+    active_prefill_tokens_threshold: Optional[int]
+    active_prefill_tokens_threshold_frac: Optional[float]
+
+    def __init__(
+        self,
+        *,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+    ) -> None:
+        ...
+
 class AicPerfConfig:
     def __init__(
         self,
@@ -1759,6 +1783,7 @@ class KvRouterConfig:
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
         router_ttl_secs: float = 120.0,
+        router_approximate_cache_policy: Literal["ttl", "lru"] = "ttl",
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1816,6 +1841,8 @@ class KvRouterConfig:
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_approximate_cache_policy: Process-local approximate-index retention policy,
+                "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
@@ -2279,10 +2306,10 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same per-family logic the frontend's MM-aware KV routing uses. Returns None
-    when the model isn't in the MM-routing registry or its config can't be read.
-    Only present when the bindings are built with the ``mm-routing`` feature.
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
+    present when the bindings are built with the ``mm-routing`` feature.
     """
     ...
 
@@ -2807,6 +2834,10 @@ class KvDcRelay:
     async def shutdown(self) -> None:
         ...
 
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
+        ...
+
 class KvStateAgentHost:
     def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
         ...
@@ -2832,11 +2863,6 @@ class KvStateAttachmentOwner:
     async def start(self) -> None:
         ...
 
-    async def set_cache_readable(
-        self, global_dp_rank: int, readable: bool
-    ) -> None:
-        ...
-
     async def close(self) -> None:
         ...
 
@@ -2851,6 +2877,9 @@ class KvRouter:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        load_threshold_config: Optional[LoadThresholdConfig] = None,
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2860,6 +2889,8 @@ class KvRouter:
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
+            load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
         """
         ...
 
@@ -3303,6 +3334,16 @@ class backend:
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
+    def _run_trtllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native TensorRT-LLM sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
+    def _run_vllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native vLLM sidecar with CLI-style arguments."""
         ...
 
     class DisaggregationMode:

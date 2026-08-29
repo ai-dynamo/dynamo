@@ -49,7 +49,7 @@ python3 -m dynamo.frontend --router-mode least-loaded --http-port 8000
 
 ## When To Stop And Troubleshoot
 
-Stop mode comparison and use `dynamo-troubleshoot` when:
+Stop mode comparison and use `troubleshoot-dynamo` when:
 
 - `/v1/models` is empty or unavailable
 - frontend service exists but chat completions return 503/5xx

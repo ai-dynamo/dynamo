@@ -28,10 +28,12 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{EncoderRouter, PrefillRouter, WorkerSelectorFactory},
+    kv_router::{
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
+    },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     },
@@ -60,6 +62,7 @@ use crate::{
     worker_type::WorkerType,
 };
 
+use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
@@ -153,23 +156,6 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
 
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
-
-/// Project the topology implicit in a pre-`worker_type` prefill card into the
-/// explicit contract used by current workers.
-///
-/// TODO(v1.5): Remove this projection together with the missing-role fallback
-/// in `effective_worker_type` and the legacy readiness bypass after the v1.2
-/// MDC compatibility window expires.
-fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
-    if card.worker_type.is_some() || !card.model_type.supports_prefill() {
-        return;
-    }
-
-    card.worker_type = Some(WorkerType::Prefill);
-    if card.needs.is_empty() {
-        card.needs = vec![vec![WorkerType::Decode]];
-    }
-}
 
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
@@ -495,7 +481,7 @@ where
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
-        worker_set.set_lifecycle_cancellation(cancellation);
+        worker_set.set_lifecycle_cancellation(cancellation.clone());
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -555,7 +541,6 @@ where
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let endpoint = component.endpoint(&mcid.endpoint);
             // Loading the tokenizer is expensive (~10 MiB JSON), so only do it
             // once and only when a local pipeline actually needs it.  Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
@@ -582,6 +567,27 @@ where
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
+            let load_thresholds =
+                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_context = if needs_preprocessed_routing {
+                let source = RouterLoadSource::from_worker_type(effective_worker_type(
+                    card.worker_type,
+                    card.model_type,
+                ));
+                Some(
+                    RoutingLoadContext::start(
+                        client.clone(),
+                        source,
+                        load_thresholds.clone(),
+                        &cancellation,
+                        Some(allocator_trim.clone()),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
@@ -595,8 +601,11 @@ where
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_selector_and_client(
-                            &endpoint,
-                            client.clone(),
+                            load_context
+                                .as_ref()
+                                .expect("routing load context must exist")
+                                .client()
+                                .clone(),
                             card.kv_cache_block_size,
                             selector,
                             Some(router_config.kv_router_config.clone()),
@@ -605,6 +614,14 @@ where
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
+                            load_context
+                                .as_ref()
+                                .expect("routing load context must exist")
+                                .scheduler_load_sender(),
+                            load_context
+                                .as_ref()
+                                .expect("routing load context must exist")
+                                .cancellation_token(),
                         )
                         .await?;
                     Arc::get_mut(&mut chooser)
@@ -615,33 +632,6 @@ where
                     None
                 };
 
-            // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
-            // monitor can be handed directly to PrefillRouter::new_with_selector_factory. Each
-            // WorkerSet gets its own monitor (1-to-1), scoped to this WorkerSet's Client/namespace.
-            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL
-            // cleanup); thresholds control overload detection. The monitor and prefill router are
-            // created together here, so the monitor is passed into the prefill router directly.
-            //
-            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that overload-state updates (via set_overloaded_instances) are visible to the
-            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
-            // Using a different Client instance would cause the PushRouter to never see
-            // overloaded workers, since each Client::new() creates independent ArcSwap state.
-            let worker_monitor = if needs_preprocessed_routing {
-                let monitor_client = kv_chooser
-                    .as_ref()
-                    .map(|chooser| chooser.client().clone())
-                    .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new_with_task_guard(
-                    monitor_client,
-                    router_config.load_threshold_config.clone(),
-                    allocator_trim.clone(),
-                ))
-            } else {
-                None
-            };
-
             // Only a typed Decode endpoint participates in the namespace-level
             // P/D rendezvous. Aggregated and Encode endpoints are independent
             // serving leaves and must not claim or perturb that pairing.
@@ -651,8 +641,9 @@ where
             {
                 let mut prefill_config = router_config.kv_router_config.clone();
                 prefill_config.router_track_active_blocks = false;
-                let prefill_enable_eagle = false;
 
+                // Fallback only: a prefill worker that declares its own
+                // `router_config` overrides this at activation time.
                 Some(PrefillRouter::new_with_selector_factory(
                     None,
                     self.manager.clone(),
@@ -665,8 +656,8 @@ where
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
                     namespace.clone(),
-                    prefill_enable_eagle,
-                    worker_monitor.clone(),
+                    load_thresholds.clone(),
+                    cancellation.child_token(),
                     Some(allocator_trim.clone()),
                 ))
             } else {
@@ -683,10 +674,8 @@ where
                 None
             };
 
-            // Store the worker monitor and prefill router on the WorkerSet.
-            // The prefill router is stored so the watcher can deactivate/reactivate it
-            // when prefill workers die or rejoin.
-            worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.load_thresholds =
+                needs_preprocessed_routing.then_some(load_thresholds.clone());
             worker_set.prefill_router = prefill_chooser.clone().map(|router| {
                 router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
             });
@@ -698,7 +687,9 @@ where
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,
-                        worker_monitor.clone(),
+                        load_context
+                            .clone()
+                            .expect("routing load context must exist"),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),
@@ -835,6 +826,21 @@ where
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
+            let load_thresholds =
+                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_context = RoutingLoadContext::start(
+                client,
+                RouterLoadSource::from_worker_type(effective_worker_type(
+                    card.worker_type,
+                    card.model_type,
+                )),
+                load_thresholds.clone(),
+                &cancellation,
+                Some(allocator_trim.clone()),
+            )
+            .await?;
+            let client = load_context.client().clone();
+
             if card.model_type.supports_embedding() {
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
@@ -942,6 +948,9 @@ where
                     card.model_type
                 );
             }
+
+            worker_set.load_thresholds = Some(load_thresholds);
+            worker_set.set_load_context(load_context);
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -950,7 +959,8 @@ where
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
             >::new();
 
-            let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
+            let preprocessor =
+                OpenAIPreprocessor::new_for_embeddings(card.clone())?.into_operator();
             let backend = Backend::from_mdc(card).into_operator();
 
             let router = PushRouter::<
@@ -1429,7 +1439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_pooling_family_preserves_chat_engine() {
+    async fn text_routes_retain_graph_and_preserve_declared_surfaces() {
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
@@ -1437,10 +1447,17 @@ mod tests {
             .await
             .unwrap();
         let manager = Arc::new(ModelManager::new());
+        let router_config = RouterConfig {
+            load_threshold_config: crate::discovery::LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.8),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let watcher = Arc::new(ModelWatcher::new(
             drt,
             manager.clone(),
-            RouterConfig::default(),
+            router_config.clone(),
             0,
             None,
             None,
@@ -1470,7 +1487,7 @@ mod tests {
             key: mcid.to_path(),
             mcid,
             endpoint_id,
-            fingerprint: materialization_fingerprint(&card, &RouterConfig::default()).unwrap(),
+            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             card,
             group_key: key.clone(),
@@ -1486,6 +1503,13 @@ mod tests {
             .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
             .await
             .unwrap();
+        let worker_set = prepared.worker_set.as_ref().unwrap();
+        let load_context = worker_set
+            .load_context()
+            .expect("text routing must retain its routing load context");
+        assert_eq!(load_context.source(), RouterLoadSource::Aggregated);
+        assert!(load_context.monitor().is_some());
+        assert_eq!(load_context.client().endpoint.id(), desired.endpoint_id);
         watcher
             .commit_group(&spec, prepared, &[desired], &[])
             .unwrap();
@@ -1494,6 +1518,101 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+        assert_eq!(
+            model
+                .load_threshold_config(None)
+                .unwrap()
+                .active_decode_blocks_threshold,
+            Some(0.8)
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_encode_worker_builds_kv_load_context_without_load_monitoring() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let router_config = RouterConfig {
+            router_mode: RouterMode::KV,
+            kv_router_config: dynamo_kv_router::config::KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            router_config.clone(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_surface_encode_test".to_string(),
+            ))),
+        );
+        watcher.generate_engine_capabilities = vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY];
+
+        let mcid = ModelCardInstanceId {
+            namespace: "surface-encode-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("surface-encode-model");
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Encode);
+        card.kv_cache_block_size = 16;
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+
+        let endpoint_id = model_card_endpoint_id(&mcid);
+        let key = GroupKey {
+            model_name: card.name().to_string(),
+            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+        };
+        let desired = DesiredInstance {
+            key: mcid.to_path(),
+            mcid,
+            endpoint_id,
+            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
+            projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            card,
+            group_key: key.clone(),
+        };
+        let spec = GroupSpec {
+            key,
+            fingerprint: desired.fingerprint.clone(),
+            generation: 1,
+            representative: desired,
+        };
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .worker_set
+                .as_ref()
+                .is_some_and(WorkerSet::has_generate_engine)
+        );
+        let source = RouterLoadSource::from_worker_type(effective_worker_type(
+            spec.representative.card.worker_type,
+            spec.representative.card.model_type,
+        ));
+        assert_eq!(source, RouterLoadSource::Encode);
+        assert!(!source.monitors_sequence_load());
+        runtime.shutdown();
     }
 
     #[tokio::test]

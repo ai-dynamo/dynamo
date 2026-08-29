@@ -11,7 +11,7 @@ This is a [how-to](../model-deployment/deploy-with-dgd.md) for an existing deplo
 
 ## The pattern
 
-Offloading is configured **on the worker**, not the Frontend. For vLLM workers, you pass a `--kv-transfer-config` JSON argument that names a connector, then size the offload tiers with environment variables. The shape is always the same:
+Offloading is configured **on the worker**, not the Frontend. For vLLM workers, pass a `--kv-transfer-config` JSON argument that names and configures the connector:
 
 ```yaml
 spec:
@@ -30,10 +30,7 @@ spec:
           - --model
           - Qwen/Qwen3-32B
           - --kv-transfer-config
-          - '{"kv_connector":"<Connector>","kv_role":"kv_both", ...}'
-          env:
-          - name: <TIER_SIZE_ENV>
-            value: "<gb>"
+          - '{"kv_connector":"<Connector>","kv_role":"kv_both","kv_connector_extra_config":{...}}'
 ```
 
 <Steps toc={true}>
@@ -42,8 +39,8 @@ Each offloading backend uses the same `--kv-transfer-config` hook with a differe
 
 | Backend | `kv_connector` | Sizing | Best for |
 |---|---|---|---|
-| **KVBM** (KV Block Manager) | `DynamoConnector` (with `kv_connector_module_path: kvbm.vllm_integration.connector`) | `DYN_KVBM_CPU_CACHE_GB`, `DYN_KVBM_DISK_CACHE_GB` (env) | Dynamo-native CPU/disk tiering across vLLM and TensorRT-LLM |
-| **LMCache** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
+| **LMCache** | `LMCacheConnectorV1` | `lmcache.max_local_cpu_size` in `kv_connector_extra_config` | vLLM host-memory offloading |
+| **[LMCache MP](./lmcache.mdx)** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
 | **FlexKV** | `FlexKVConnectorV1` | `DYNAMO_USE_FLEXKV=1`, `FLEXKV_CPU_CACHE_GB` (env) | Distributed KV offloading runtime |
 | **SGLang HiCache** | n/a — use `--enable-hierarchical-cache` and `DYN_SHARED_CACHE_TYPE` instead | `DYN_SHARED_CACHE_MULTIPLIER` | SGLang hierarchical cache with a tier-aware router |
 
@@ -52,8 +49,8 @@ SGLang HiCache does not use the `--kv-transfer-config` connector mechanism. On a
 </Note>
 
 </Step>
-<Step title="Worked example: KVBM on a vLLM worker" id="worked-example-kvbm-on-a-vllm-worker">
-This aggregated Qwen3-32B worker offloads KV blocks to 100 GB of host memory. It is the worker section of the [agg-kvbm recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml):
+<Step title="Configure LMCache on a vLLM worker" id="configure-lmcache-on-a-vllm-worker">
+This aggregated vLLM worker uses LMCache to offload KV blocks to 20 GB of host memory:
 
 ```yaml
 spec:
@@ -72,35 +69,31 @@ spec:
           - dynamo.vllm
           args:
           - --model
-          - Qwen/Qwen3-32B
+          - Qwen/Qwen3-0.6B
           - --kv-transfer-config
-          - '{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector"}'
+          - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.local_cpu":true,"lmcache.max_local_cpu_size":20}}'
           envFrom:
           - secretRef:
               name: hf-token-secret
-          env:
-          # Tune the CPU cache size for your node's available host memory.
-          - name: DYN_KVBM_CPU_CACHE_GB
-            value: "100"
           resources:
             limits:
               nvidia.com/gpu: "1"
-              memory: 200Gi        # host memory must hold the CPU cache tier
+              memory: 40Gi
             requests:
               nvidia.com/gpu: "1"
-              memory: 150Gi
+              memory: 30Gi
 ```
 
 Two things to size together:
 
-- `DYN_KVBM_CPU_CACHE_GB` (and optionally `DYN_KVBM_DISK_CACHE_GB`) set the offload tier sizes.
-- `resources.limits.memory` must be large enough to hold the CPU cache tier plus the engine's normal footprint. The recipe requests 150–200 GB for a 100 GB CPU cache.
+- `lmcache.max_local_cpu_size` sets the host-memory cache size in GB for each worker.
+- `resources.limits.memory` must hold the LMCache tier and the engine's normal host-memory footprint.
 
-To add a disk tier, set `DYN_KVBM_DISK_CACHE_GB` and mount a volume for it. To export offloading metrics to Prometheus, set `DYN_KVBM_METRICS=true`.
+Use LMCache's persistent L2 adapters when the deployment needs a storage tier beyond host memory.
 
 </Step>
 <Step title="Verify" id="verify">
-After the worker is `Running`, send repeated requests that share a long prefix and confirm the second request has lower TTFT. With `DYN_KVBM_METRICS=true`, check the offload hit-rate metrics — see [Metrics](../operations/observability.mdx).
+After the worker is `Running`, send repeated requests that share a long prefix. Compare Time To First Token (TTFT) and LMCache hit metrics across the requests.
 
 </Step>
 </Steps>
@@ -109,7 +102,7 @@ After the worker is `Running`, send repeated requests that share a long prefix a
 
 These cover engine internals, the local-CLI workflow, and tuning for each backend:
 
-- [KVBM Guide](../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md) — KV Block Manager architecture and the full env-var reference.
+- [Deploy LMCache MP](./lmcache.mdx) — full LMCache MP deployment walkthrough (operator, `LMCacheEngine`, worker).
 - [Local KV Cache Offloading](../../cli/kv-cache-offloading/overview.mdx) — compare the available backends and run their local examples.
 - [Using HiCache](../../developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md) — SGLang hierarchical cache.
 - [Publish KV Events](../../developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md) — publish KV events from a custom engine.

@@ -12,6 +12,7 @@ import os
 import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
@@ -61,6 +62,54 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
+
+
+class _ReasoningUsageAnnotator:
+    """Report reasoning-token usage on the PYTHON chat-processor path.
+
+    NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
+    (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
+    which bypasses that code entirely -- and the worker's _build_completion_usage()
+    emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
+    (not null) from usage.
+
+    The count is NOT derived here. Each StreamingPostProcessor accumulates
+    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
+    class only sums those totals and annotates usage. Deriving it here -- from the
+    choices this path emits -- is what reported zero whenever the response projection
+    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
+    tool path's terminal-delta buffering).
+
+    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
+    both reasoning and visible content counts entirely as reasoning. The non-streaming
+    tool path has no per-chunk classification, so it counts the parsed reasoning text
+    exactly; that is more precise than the Rust rather than divergent from it.
+    A positive backend-supplied count stays authoritative.
+    """
+
+    __slots__ = ("_post_processors",)
+
+    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
+        self._post_processors = post_processors
+
+    @property
+    def total(self) -> int:
+        return sum(
+            post.reasoning_token_total for post in self._post_processors.values()
+        )
+
+    def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
+        annotated = dict(usage)
+        details = dict(annotated.get("completion_tokens_details") or {})
+        # Only a POSITIVE backend count is authoritative. Missing, zero and
+        # negative all fall back to our own tally -- a negative would otherwise
+        # survive, since -1 is truthy.
+        backend = details.get("reasoning_tokens")
+        if not isinstance(backend, int) or backend <= 0:
+            details["reasoning_tokens"] = self.total
+        annotated["completion_tokens_details"] = details
+        return annotated
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -177,29 +226,58 @@ def _single_transfer_modality(mm_features: list[Any]) -> str | None:
     return next(iter(modalities))
 
 
+@dataclass(frozen=True)
+class _ReasoningParserMetadata:
+    """Keep engine scheduling hints separate from response parser state."""
+
+    engine_reasoning_ended: bool | None
+    response_reasoning_ended: bool | None
+    parser_kwargs: dict[str, Any] | None
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
-) -> tuple[bool | None, dict[str, Any] | None]:
+    model_config: Any = None,
+) -> _ReasoningParserMetadata:
     if reasoning_parser_class is None:
-        return None, None
+        return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
     if chat_template_kwargs.get("enable_thinking") is False:
-        return True, parser_kwargs
-    if not getattr(request_for_sampling, "include_reasoning", True):
-        return True, parser_kwargs
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
-        return True, parser_kwargs
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
 
+    # Same construction as the other two sites. is_reasoning_end() does not read
+    # model_config, but constructing this one differently is exactly the drift that
+    # let the missing model_config go unnoticed at the adjust_request() site.
+    #
+    # Deliberately NOT added to parser_kwargs: that dict goes on the wire as
+    # dynamo_preproc["reasoning_parser_kwargs"], and ModelConfig is not
+    # serializable -- the worker builds its own.
     reasoning_parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
     )
-    return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
+    response_reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
+    # include_reasoning controls response projection, not whether the model may
+    # emit reasoning tags. The engine still needs its vLLM scheduling hint, while
+    # the response parser must remain active until the generated tags are parsed.
+    engine_reasoning_ended = (
+        True
+        if not getattr(request_for_sampling, "include_reasoning", True)
+        else response_reasoning_ended
+    )
+    return _ReasoningParserMetadata(
+        engine_reasoning_ended,
+        response_reasoning_ended,
+        parser_kwargs,
+    )
 
 
 def _inject_routing_metadata(
@@ -334,6 +412,7 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict | None, list, bool]:
         """Extract MM routing info and prepare mm_kwargs transfer.
 
@@ -360,10 +439,19 @@ class VllmProcessor:
             return None, cleanup_items, nixl_transferred
 
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-            )
+            if mm_processor_kwargs:
+                # vLLM rehashes supplied UUIDs when processor kwargs are
+                # present. Fall back to text-prefix routing so the router and
+                # worker cannot publish different cache keys.
+                logger.debug(
+                    "[mm-routing] Exact MM routing disabled because "
+                    "mm_processor_kwargs is non-empty"
+                )
+            else:
+                mm_routing_info = build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
             (
                 mm_hashes_list,
                 mm_placeholders_list,
@@ -372,11 +460,15 @@ class VllmProcessor:
             ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            # Forward hashes only when this frontend built the matching exact
+            # routing sequence. Their presence is the worker's request-time
+            # readiness signal; transfer-only metadata is deliberately separate.
+            if mm_routing_info is not None:
+                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                dynamo_preproc["extra_args"][
+                    "mm_hashes_by_modality"
+                ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_hashes_by_modality"
-            ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"][
                 "mm_placeholders_by_modality"
             ] = mm_placeholders_by_modality
@@ -507,6 +599,8 @@ class VllmProcessor:
                 tokenizer=self.tokenizer,
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
+                reasoning_parser_class=self.reasoning_parser_class,
+                model_config=self.input_processor.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
@@ -603,12 +697,13 @@ class VllmProcessor:
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
         # tokenizer metadata for EOS ids when constructing the router payload.
 
-        reasoning_ended, reasoning_parser_kwargs = _build_reasoning_parser_metadata(
+        reasoning_metadata = _build_reasoning_parser_metadata(
             self.reasoning_parser_class,
             self.tokenizer,
             chat_template_kwargs,
             request_for_sampling,
             tokens,
+            self.input_processor.model_config,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -646,10 +741,12 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
-        if reasoning_ended is not None:
-            dynamo_preproc["reasoning_ended"] = reasoning_ended
-        if reasoning_parser_kwargs is not None:
-            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if reasoning_metadata.engine_reasoning_ended is not None:
+            dynamo_preproc[
+                "reasoning_ended"
+            ] = reasoning_metadata.engine_reasoning_ended
+        if reasoning_metadata.parser_kwargs is not None:
+            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_metadata.parser_kwargs
 
         # Attach user cache identities before building routing metadata. Opaque
         # UUIDs deliberately suppress multimodal exact routing and frontend
@@ -664,7 +761,11 @@ class VllmProcessor:
                 mm_routing_info,
                 cleanup_items,
                 nixl_transferred,
-            ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+            ) = await self._prepare_mm_routing(
+                vllm_preproc,
+                dynamo_preproc,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+            )
 
             # Forward multimodal URLs so the backend handler can load the media.
             # Only skip when ALL features were transferred — a partial transfer
@@ -704,7 +805,10 @@ class VllmProcessor:
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
-                    reasoning_ended=reasoning_ended,
+                    model_config=self.input_processor.model_config,
+                    response_reasoning_ended=(
+                        reasoning_metadata.response_reasoning_ended
+                    ),
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
@@ -795,6 +899,10 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        # Per-request reasoning-token usage (NVBug 6678449b); see
+        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
+        # The counts live on the post-processors, which are per-request too.
+        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
         _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
         _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
@@ -919,7 +1027,7 @@ class VllmProcessor:
                         "object": "chat.completion.chunk",
                     }
                     if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = usage
+                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
                 metrics = {

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
     StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
@@ -193,6 +194,8 @@ pub struct WorkerConfig {
     pub route_to_encoder: bool,
     /// Publish the worker's engine routes through an auxiliary RL discovery endpoint.
     pub enable_rl: bool,
+    /// Optional RL topology and weight-transfer metadata published by the worker.
+    pub rl_metadata: Option<crate::RlWorkerMetadata>,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -238,6 +241,7 @@ impl Default for WorkerConfig {
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
+            rl_metadata: None,
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
@@ -669,10 +673,9 @@ impl Worker {
     /// Build KV-event publishers and the `SnapshotPublisher` from the
     /// engine's declarations. KV events flow on the engine's own threads
     /// (via Push or ZMQ); snapshot writes flow through the publisher
-    /// inline (no polling, no GIL on the framework side). No-op if
-    /// `enable_kv_routing` is off, the engine returned no sources +
-    /// no dp_ranks, or `engine_config.kv_cache_block_size` is unset for
-    /// KV events.
+    /// inline (no polling, no GIL on the framework side). KV/snapshot setup is skipped when the
+    /// engine declares neither source, and KV events additionally require a block size. The
+    /// lifecycle publisher is independent of those engine declarations.
     async fn setup_publishing(
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
@@ -694,9 +697,18 @@ impl Worker {
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
+        let first_token_source = if matches!(&self.engine, EngineKind::Llm(_)) {
+            let (worker_type, _) = resolve_worker_type_and_needs(&self.config);
+            FirstTokenSource::for_endpoint(endpoint, worker_type).await
+        } else {
+            None
+        };
         let kv_sources = self.engine.kv_event_sources().await?;
         if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
-            tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
+            tracing::debug!(
+                "engine returned no KV sources / dp_ranks; skipping KV/snapshot publishers"
+            );
+            self.publishers = Some(PublisherHandles::lifecycle_only(first_token_source));
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
@@ -733,6 +745,7 @@ impl Worker {
             bindings.on_publisher_ready,
             kv_cache_block_size,
             enable_local_indexer,
+            first_token_source,
         )
         .await?;
         self.publishers = Some(handles);
@@ -905,10 +918,9 @@ impl Worker {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
-        // Drop publisher handles AFTER engine.cleanup so the engine's
-        // last snapshot writes complete. There is no background task to
-        // join — snapshot writes are event-driven (engine pushes
-        // synchronously); KV-event publishers own their own threads.
+        // Drop publisher handles AFTER engine.cleanup so the engine's last snapshot writes
+        // complete. The worker completion publisher follows the serving endpoint's process-local
+        // lifetime; its channel closes naturally when the adapter and any request clones drop.
         self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops. Cleanup may
         // tear down process groups that cannot safely be destroyed twice.
@@ -926,12 +938,16 @@ impl Worker {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
-            Some(crate::rl::prepare_endpoint(&endpoint).map_err(|error| {
-                err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    format!("RL endpoint configuration: {error}"),
-                )
-            })?)
+            Some(
+                crate::rl::prepare_endpoint(&endpoint, self.config.rl_metadata.clone()).map_err(
+                    |error| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("RL endpoint configuration: {error}"),
+                        )
+                    },
+                )?,
+            )
         } else {
             None
         };
@@ -991,10 +1007,16 @@ impl Worker {
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
-                    engine.clone(),
-                    self.config.disaggregation_mode,
-                ));
+                let mut engine_adapter =
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                if let Some(source) = self
+                    .publishers
+                    .as_ref()
+                    .and_then(PublisherHandles::first_token_source)
+                {
+                    engine_adapter = engine_adapter.with_first_token_source(source);
+                }
+                let engine_adapter = Arc::new(engine_adapter);
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),

@@ -19,13 +19,13 @@
 # deprecated for NixlConnector).
 #
 # PREREQUISITES / CAVEATS:
-#   - Needs a sidecar built from lib/sidecar/vllm/Dockerfile that carries the
+#   - Needs a sidecar built from lib/sidecar/Dockerfile that carries the
 #     disaggregation fixes (component-by-role + NIXL port encoding); older builds
 #     route both roles to one component and generate zero tokens.
 #   - RDMA/NIXL: the engine needs rdma/ib devices, IPC_LOCK/SYS_RESOURCE, pinned
 #     memory (ulimit -l unlimited), and UCX tuning; adjust for your fabric.
 #   - VLLM_NIXL_SIDE_CHANNEL_HOST must be a routable pod IP (set via downward API).
-#   - No published vLLM sidecar image yet — build from lib/sidecar/vllm/Dockerfile
+#   - No published sidecar image yet — build from lib/sidecar/Dockerfile
 #     and set <your-registry>.
 #
 # The prefill->decode flow was validated on a single node (prefill+decode
@@ -131,11 +131,11 @@ spec:
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
         containers:
         - name: main
-          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-vllm-sidecar
           args:
-          - --vllm-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
           - prefill
@@ -222,11 +222,11 @@ spec:
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
         containers:
         - name: main
-          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-vllm-sidecar
           args:
-          - --vllm-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
           - decode

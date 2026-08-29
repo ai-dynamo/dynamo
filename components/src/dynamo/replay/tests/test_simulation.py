@@ -8,12 +8,8 @@
 from __future__ import annotations
 
 import json
-import sys
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ValidationError
 
 pytest.importorskip(
     "aisimulate.sweeper",
@@ -26,21 +22,8 @@ from aisimulate.sweeper.replay import (
     ReplayOutputRequirements,
     ReplaySpec,
 )
-from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
-_RUN_SWEEP_PATH = (
-    Path(__file__).resolve().parents[5]
-    / "aisimulate/examples/sweeper/tools/run_sweep.py"
-)
-if not _RUN_SWEEP_PATH.is_file():
-    pytest.skip(
-        "AI Simulate example fixtures are not included in the ai-dynamo wheel",
-        allow_module_level=True,
-    )
-_RUN_SWEEP_SPEC = spec_from_file_location("dynamo_sweeper_example", _RUN_SWEEP_PATH)
-assert _RUN_SWEEP_SPEC is not None and _RUN_SWEEP_SPEC.loader is not None
-run_sweep_cli = module_from_spec(_RUN_SWEEP_SPEC)
-_RUN_SWEEP_SPEC.loader.exec_module(run_sweep_cli)
+from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -351,48 +334,6 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
     assert seen["supports_disaggregated_attention_dp"] is False
-
-
-def test_dynamo_sweep_cli_formats_adapter_validation_errors(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    class AdapterSchema(BaseModel):
-        interval: int
-
-    with pytest.raises(ValidationError) as caught:
-        AdapterSchema.model_validate({"interval": "invalid"})
-
-    config_path = tmp_path / "sweep.yaml"
-    config_path.write_text(
-        "search_space:\n"
-        "  model_name: example/model\n"
-        "  hardware_sku: h200_sxm\n"
-        "workload:\n"
-        "  isl: 128\n"
-        "  osl: 16\n"
-        "  request_rate: 1\n"
-        "  num_request_ratio: 3\n"
-    )
-
-    class RejectingSweeper:
-        def __init__(self, **kwargs):
-            del kwargs
-
-        def run(self, config):
-            del config
-            raise caught.value
-
-    monkeypatch.setattr(run_sweep_cli, "Sweeper", RejectingSweeper)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["run_sweep.py", "--config", str(config_path)],
-    )
-
-    with pytest.raises(SystemExit, match="2"):
-        run_sweep_cli.main()
-
-    assert "invalid adapter search space" in capsys.readouterr().err
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
