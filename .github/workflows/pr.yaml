@@ -775,6 +775,10 @@ jobs:
       # 24 GiB is the per-test admission threshold; the scheduler packs tests
       # against the runner's detected free-memory budget (19 GiB in recent CI).
       run_gpu_parallel_tests: true
+      # Every current non-multimodal test is VRAM-profiled, so the fallback is
+      # empty today. Keep it enabled for future unprofiled tests, but accept its
+      # specific no-tests-collected exit code rather than failing the job.
+      gpu_sequential_allow_no_tests: true
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 

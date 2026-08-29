@@ -103,6 +103,11 @@ on:
         required: false
         type: boolean
         default: false
+      gpu_sequential_allow_no_tests:
+        description: 'Allow the sequential GPU fallback to succeed when its marker expression collects no tests. Other pytest errors still fail.'
+        required: false
+        type: boolean
+        default: false
       gpu_parallel_max_vram_gib:
         description: 'Per-test VRAM budget in GiB for the parallel stage. Caps which profiled tests are admitted and feeds the orchestrator scheduler (tests/utils/pytest_parallel_gpu.py).'
         required: false
@@ -272,5 +277,6 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
+          allow_no_tests: ${{ inputs.gpu_sequential_allow_no_tests }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'

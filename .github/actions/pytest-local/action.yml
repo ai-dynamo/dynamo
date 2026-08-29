@@ -28,6 +28,10 @@ inputs:
     description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
     required: false
     default: 'false'
+  allow_no_tests:
+    description: 'Treat pytest exit code 5 (no tests collected) as success'
+    required: false
+    default: 'false'
   start_minio:
     description: 'Start MinIO service for LoRA tests (true/false)'
     required: false
@@ -272,6 +276,10 @@ runs:
         bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
+        if [[ "${TEST_EXIT_CODE}" -eq 5 && "${{ inputs.allow_no_tests }}" == "true" ]]; then
+          echo "ℹ️ No tests matched this optional stage; accepting pytest exit code 5"
+          TEST_EXIT_CODE=0
+        fi
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
