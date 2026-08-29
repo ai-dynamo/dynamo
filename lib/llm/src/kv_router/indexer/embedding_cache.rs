@@ -16,6 +16,7 @@ use dynamo_runtime::{
     transports::event_plane::EventSubscriber,
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
     MULTIMODAL_EMBEDDING_CACHE_SUBJECT, publisher::MultimodalEmbeddingCacheEvent,
@@ -24,6 +25,16 @@ use crate::protocols::common::{llm_backend::PreprocessedRequest, preprocessor::M
 
 fn multimodal_cache_key_from_url(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+/// Cancels the token when the last indexer reference is dropped.
+#[derive(Debug, Default)]
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 pub fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
@@ -58,6 +69,8 @@ pub struct EmbeddingCacheIndexer {
     key_workers: Arc<DashMap<String, HashSet<WorkerId>>>,
     worker_cache_keys: Arc<DashMap<WorkerId, HashSet<String>>>,
     started: Arc<AtomicBool>,
+    /// Cancels the subscriber when the last indexer reference is dropped.
+    drop_notify: Arc<CancelOnDrop>,
 }
 
 type SharedIndexerKey = (u64, String);
@@ -173,6 +186,7 @@ impl EmbeddingCacheIndexer {
         }
 
         let cancellation_token = endpoint.drt().child_token();
+        let drop_token = self.drop_notify.0.clone();
         let endpoint = endpoint.clone();
         let subscriber = match EventSubscriber::for_endpoint(
             &endpoint,
@@ -187,7 +201,7 @@ impl EmbeddingCacheIndexer {
             }
         };
 
-        let indexer = Arc::clone(self);
+        let indexer = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut subscriber = subscriber;
             const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
@@ -199,12 +213,23 @@ impl EmbeddingCacheIndexer {
                             tracing::debug!("Embedding cache indexer subscriber cancelled");
                             break 'reconnect;
                         }
+                        _ = drop_token.cancelled() => {
+                            tracing::debug!("Embedding cache indexer dropped; subscriber stopping");
+                            break 'reconnect;
+                        }
                         maybe_event = subscriber.next() => {
                             let Some(result) = maybe_event else {
                                 tracing::warn!(
                                     "Embedding cache indexer stream ended; reconnecting"
                                 );
                                 break;
+                            };
+
+                            let Some(indexer) = indexer.upgrade() else {
+                                tracing::debug!(
+                                    "Embedding cache indexer dropped; subscriber stopping"
+                                );
+                                break 'reconnect;
                             };
 
                             match result {
@@ -227,14 +252,22 @@ impl EmbeddingCacheIndexer {
                             tracing::debug!("Embedding cache indexer subscriber cancelled");
                             break 'reconnect;
                         }
+                        _ = drop_token.cancelled() => {
+                            tracing::debug!("Embedding cache indexer dropped; subscriber stopping");
+                            break 'reconnect;
+                        }
                     }
 
-                    match EventSubscriber::for_endpoint(
-                        &endpoint,
-                        MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
-                    )
-                    .await
-                    {
+                    let next_subscriber = tokio::select! {
+                        _ = cancellation_token.cancelled() => break 'reconnect,
+                        _ = drop_token.cancelled() => break 'reconnect,
+                        result = EventSubscriber::for_endpoint(
+                            &endpoint,
+                            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+                        ) => result,
+                    };
+
+                    match next_subscriber {
                         Ok(subscriber) => {
                             break subscriber.typed::<MultimodalEmbeddingCacheEvent>();
                         }
@@ -247,7 +280,9 @@ impl EmbeddingCacheIndexer {
                 };
             }
 
-            indexer.started.store(false, Ordering::Release);
+            if let Some(indexer) = indexer.upgrade() {
+                indexer.started.store(false, Ordering::Release);
+            }
         });
 
         Ok(())
@@ -304,6 +339,10 @@ impl MultimodalCacheIndex for EmbeddingCacheIndexer {
 
     fn remove_worker(&self, worker_id: WorkerId) {
         EmbeddingCacheIndexer::remove_worker(self, worker_id);
+    }
+
+    fn drop_token(&self) -> Option<CancellationToken> {
+        Some(self.drop_notify.0.clone())
     }
 }
 
@@ -412,5 +451,81 @@ mod tests {
 
         assert_eq!(indexer.workers_with_cached_keys(["a"]), vec![3, 4]);
         assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![3, 4]);
+    }
+
+    #[test]
+    fn drop_token_cancels_with_last_indexer_reference() {
+        let first = Arc::new(EmbeddingCacheIndexer::default());
+        let second = Arc::clone(&first);
+        let token = first
+            .drop_token()
+            .expect("embedding indexer must expose a drop token");
+
+        drop(first);
+        assert!(!token.is_cancelled());
+        drop(second);
+        assert!(token.is_cancelled());
+    }
+
+    /// The subscriber must not keep a shared indexer alive after its consumers
+    /// drop their references.
+    #[tokio::test]
+    async fn shared_registry_evicts_indexer_after_last_consumer_drops() {
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime,
+            config::environment_names::{
+                event_plane::DYN_EVENT_PLANE,
+                zmq_broker::{DYN_ZMQ_BROKER_ENABLED, DYN_ZMQ_BROKER_URL},
+            },
+            distributed::DistributedConfig,
+        };
+
+        temp_env::async_with_vars(
+            [
+                (DYN_EVENT_PLANE, None::<&str>),
+                (DYN_ZMQ_BROKER_URL, None::<&str>),
+                (DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let drt =
+                    DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                        .await
+                        .unwrap();
+                let endpoint = drt
+                    .namespace("embedding-cache-eviction-test".to_string())
+                    .unwrap()
+                    .component("workers".to_string())
+                    .unwrap()
+                    .endpoint("generate".to_string());
+
+                let first = try_build_cache_indexer(&endpoint)
+                    .await
+                    .expect("indexer should build under the local event plane");
+                let second = try_build_cache_indexer(&endpoint)
+                    .await
+                    .expect("indexer should build under the local event plane");
+                assert!(
+                    Arc::ptr_eq(&first, &second),
+                    "concurrent consumers must share one live indexer"
+                );
+
+                let weak = Arc::downgrade(&first);
+
+                drop(first);
+                assert!(
+                    weak.upgrade().is_some(),
+                    "the remaining consumer must keep the indexer alive"
+                );
+
+                drop(second);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "subscriber must not keep the indexer alive after the last consumer drops"
+                );
+                runtime.shutdown();
+            },
+        )
+        .await;
     }
 }
