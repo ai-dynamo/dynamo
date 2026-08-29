@@ -564,7 +564,7 @@ def test_request_migration_sglang_aggregated(
             )
 
 
-@pytest.mark.timeout(180)  # >3x the measured 45-54s local runtime
+@pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)  # measured NVML peak with three workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
@@ -602,6 +602,7 @@ def test_request_migration_sglang_kv_transfer(
         request,
         migration_limit=migration_limit,
         migration_max_seq_len=migration_max_seq_len,
+        startup_timeout_s=SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S,
     ) as frontend:
         logger.info("Frontend started successfully")
 
