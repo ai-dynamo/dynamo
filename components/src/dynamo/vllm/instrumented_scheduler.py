@@ -198,6 +198,16 @@ class _BenchPhase(enum.Enum):
     DONE = "done"
 
 
+class _DecodePointStage(enum.Enum):
+    """Lifecycle of one two-pass decode benchmark point."""
+
+    IDLE = "idle"
+    ADMITTING = "admitting"
+    READY = "ready"
+    MEASURING = "measuring"
+    COMPLETE = "complete"
+
+
 @dataclass
 class BenchmarkPoint:
     point_type: str  # "prefill" or "decode"
@@ -1551,6 +1561,8 @@ _BASE_SCHEDULE_TAKES_THROTTLE = (
 
 
 class InstrumentedScheduler(AsyncScheduler):
+    _bench_decode_stage: _DecodePointStage
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -1666,14 +1678,16 @@ class InstrumentedScheduler(AsyncScheduler):
                 empty = SchedulerOutput(
                     scheduled_new_reqs=[],
                     scheduled_cached_reqs=CachedRequestData.make_empty(),
-                    num_scheduled_tokens={},
+                    # Zero-valued membership retains benchmark rows in vLLM's
+                    # persistent input batch without scheduling model work.
+                    num_scheduled_tokens=dict.fromkeys(self._bench_active_req_ids, 0),
                     total_num_scheduled_tokens=0,
                     scheduled_spec_decode_tokens={},
                     scheduled_encoder_inputs={},
                     num_common_prefix_blocks=(
                         [0] * self.kv_cache_manager.num_kv_cache_groups
                     ),
-                    finished_req_ids=self.finished_req_ids,
+                    finished_req_ids=set(self.finished_req_ids),
                     free_encoder_mm_hashes=[],
                 )
                 # See _bench_inject_fake_decode for the rationale; the
@@ -1692,7 +1706,8 @@ class InstrumentedScheduler(AsyncScheduler):
                     empty.ec_connector_metadata = (
                         self.ec_connector.build_connector_meta(empty)
                     )
-                self._update_after_schedule(empty)
+                # Do not advance request state or create async placeholders.
+                # The parent update receives a copy without retention entries.
                 return empty
 
         return self._schedule_and_record_time(throttle_prefills)
@@ -1761,7 +1776,19 @@ class InstrumentedScheduler(AsyncScheduler):
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
-        result = super().update_from_output(scheduler_output, model_runner_output)
+        scheduler_update_output = scheduler_output
+        if (
+            scheduler_output.total_num_scheduled_tokens == 0
+            and scheduler_output.num_scheduled_tokens
+        ):
+            if any(scheduler_output.num_scheduled_tokens.values()):
+                raise RuntimeError(
+                    "zero-token benchmark retention output contains positive work"
+                )
+            scheduler_update_output = replace(scheduler_output, num_scheduled_tokens={})
+        result = super().update_from_output(
+            scheduler_update_output, model_runner_output
+        )
 
         if scheduler_output.total_num_scheduled_tokens > 0:
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
@@ -1769,20 +1796,11 @@ class InstrumentedScheduler(AsyncScheduler):
             is_benchmark_point = self._bench_active and (
                 self._bench_should_record_scheduled(scheduled)
             )
-            if is_benchmark_point and self._bench_steady_fpm_expected():
-                # Steady-state sample of a two-step decode point. Under async
-                # scheduling its schedule() ran while the admission step was
-                # still on the GPU, so the narrow schedule->output span would
-                # also count that wait; the inter-update period is the true
-                # iteration time (and is what the non-benchmark path reports
-                # for production steps).
-                wall_time = model_output_arrival - self._last_update_time
-            else:
-                wall_time = self._iteration_wall_time(
-                    model_output_arrival,
-                    t_sched,
-                    is_benchmark_point=is_benchmark_point,
-                )
+            wall_time = self._iteration_wall_time(
+                model_output_arrival,
+                t_sched,
+                is_benchmark_point=is_benchmark_point,
+            )
             self._last_update_time = model_output_arrival
 
             metrics = self._extract_metrics(
@@ -1792,11 +1810,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 scheduled=scheduled,
             )
             self._publish_or_record_metrics(metrics)
+            self._bench_advance_decode_stage_after_output()
         else:
             self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
         return result
+
+    def _bench_advance_decode_stage_after_output(self) -> None:
+        if not self._bench_active or self._bench_phase != _BenchPhase.DECODE_SWEEP:
+            return
+        if self._bench_decode_stage == _DecodePointStage.ADMITTING:
+            self._bench_decode_stage = _DecodePointStage.READY
+        elif self._bench_decode_stage == _DecodePointStage.MEASURING:
+            self._bench_decode_stage = _DecodePointStage.COMPLETE
 
     def _publish_or_record_metrics(self, metrics: ForwardPassMetrics) -> None:
         """Keep benchmark FPMs local; publish only post-benchmark traffic."""
@@ -1903,29 +1930,6 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_should_record_fpm(self, metrics: ForwardPassMetrics) -> bool:
         """Keep only the forward-pass type represented by the current point."""
         return self._bench_should_record_scheduled(metrics.scheduled_requests)
-
-    def _bench_steady_fpm_expected(self) -> bool:
-        """True when the FPM about to be recorded is a steady-state sample.
-
-        The admission FPM of a two-step decode point is already in
-        ``_bench_current_fpms``, so the update being processed belongs to
-        the steady step. ``_last_update_time`` is the admission step's
-        arrival: the steady step is dispatched by the first ``schedule()``
-        call after the admission step, so the two updates are adjacent in
-        the engine's FIFO and the empty-step zeroing of
-        ``_last_update_time`` (empty outputs DO flow through
-        ``update_from_output``) can only happen after the steady update.
-        Should that adjacency ever break, the ``> 0`` guard fails closed
-        to the narrow window instead of recording a garbage timestamp.
-        """
-        point = getattr(self, "_bench_current_point", None)
-        return (
-            point is not None
-            and point.point_type == "decode"
-            and getattr(self, "_bench_expected_fpms", 1) > 1
-            and len(getattr(self, "_bench_current_fpms", [])) >= 1
-            and self._last_update_time > 0
-        )
 
     def _bench_should_record_scheduled(
         self, scheduled: ScheduledRequestMetrics
@@ -2207,6 +2211,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_stop_requested = False
         self._bench_stop_reason: str | None = None
         self._bench_point_deadline = 0.0
+        self._bench_decode_stage = _DecodePointStage.IDLE
         # Steady-state decode measurement (see _bench_make_steady_step):
         # how many extra production-shaped steps remain to dispatch for the
         # current point, and how many FPMs the point must collect before it
@@ -3122,7 +3127,14 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         if max_model_len < 3:
             return 0
-        min_blocks_per_request = self._bench_blocks_per_req(2)
+        # The smallest steady decode request has two resident main-model
+        # tokens, then allocates one new token plus speculative lookahead.
+        min_blocks_per_request = self._bench_blocks_per_req(
+            min(
+                3 + getattr(self, "num_lookahead_tokens", 0),
+                max_model_len,
+            )
+        )
         if min_blocks_per_request < 1:
             feasible_max_batch = max_num_running_reqs
         else:
@@ -3181,19 +3193,23 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
         # A decode point admits at max(1, ctx-1) and measures its steady step
-        # one position later, so a request occupies max(ctx, 2) + 1 slots and
-        # the runner's post-step bookkeeping writes through slot
-        # max(ctx, 2) + 2, which must stay within the negotiated
-        # max_model_len (ctx + 2 for the ordinary ctx >= 2 case; one extra
-        # slot for clamped ctx = 1 entries, which run one token deeper than
-        # their nominal coordinate).
+        # one position later. The steady allocation reserves one new token
+        # plus speculative lookahead after max(ctx, 2) resident tokens. The
+        # runner's post-step bookkeeping writes through slot max(ctx, 2) + 2,
+        # which must stay within the negotiated max_model_len.
         max_model_len = self._bench_capacity_limit("max_model_len")
         if any(
             max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
+        lookahead_tokens = getattr(self, "num_lookahead_tokens", 0)
         required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1)
+            self._bench_blocks_per_req(
+                min(
+                    max(context_len, 2) + 1 + lookahead_tokens,
+                    max_model_len,
+                )
+            )
             for context_len in context_lengths
         )
         return required_blocks <= self._bench_grid_usable_blocks(
@@ -3518,6 +3534,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_active_req_ids.clear()
         self._schedule_times.clear()
         self._bench_extra_steps_left = 0
+        self._bench_decode_stage = _DecodePointStage.IDLE
 
     def _bench_clear_prefix_cache(self) -> None:
         """Remove all synthetic prefix entries before normal serving starts."""
@@ -3574,16 +3591,18 @@ class InstrumentedScheduler(AsyncScheduler):
                 "sum_decode_kv_tokens": 0,
             }
         else:
-            # The synchronized output is the ADMISSION step, which runs one
-            # token short of the point's coordinate (the steady step measured
-            # afterwards reads the full context).
+            measured_pass = self._bench_decode_stage == _DecodePointStage.MEASURING
             expected = {
                 "total_num_scheduled_tokens": point.batch_size,
                 "num_prefill_requests": 0,
                 "sum_prefill_tokens": 0,
                 "sum_prefill_kv_tokens": 0,
                 "num_decode_requests": point.batch_size,
-                "sum_decode_kv_tokens": self._bench_admission_kv_tokens,
+                "sum_decode_kv_tokens": (
+                    point.total_kv_read_tokens
+                    if measured_pass
+                    else self._bench_admission_kv_tokens
+                ),
             }
         if summary == expected:
             return None
@@ -3601,6 +3620,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_sync_pending = False
         self._bench_extra_steps_left = 0
         self._bench_expected_fpms = 1
+        self._bench_decode_stage = _DecodePointStage.IDLE
         self._schedule_times.clear()
         self._last_update_time = 0.0
         if resume_publisher:
@@ -3975,25 +3995,38 @@ class InstrumentedScheduler(AsyncScheduler):
             pass  # fall through to inject next point
 
         elif self._bench_active_req_ids:
+            # Rank-local deadlines cannot decide whether READY enters the ADP
+            # measurement barrier. Soft timeouts stop between points.
             if (
-                getattr(self, "_bench_extra_steps_left", 0) > 0
-                and not self._bench_point_result_timed_out()
+                self._bench_decode_stage == _DecodePointStage.READY
+                and getattr(self, "_bench_extra_steps_left", 0) > 0
             ):
-                # The steady step deliberately does NOT re-arm the READY/GO
-                # barrier: production decode steps have no per-step barrier
-                # either (ranks stay aligned through the collectives), and a
-                # ZMQ round between the admission and steady updates would be
-                # counted into the steady step's inter-update wall_time under
-                # synchronous scheduling. Group agreement on the point is
-                # still enforced at collect_result.
                 steady = self._bench_make_steady_step()
                 if steady is not None:
+                    point = self._bench_current_point
+                    if (
+                        point is None
+                        or steady.total_num_scheduled_tokens != point.batch_size
+                    ):
+                        raise RuntimeError(
+                            "steady-state decode scheduled "
+                            f"{steady.total_num_scheduled_tokens} of "
+                            f"{point.batch_size if point is not None else 0} requests"
+                        )
                     self._bench_extra_steps_left -= 1
+                    self._bench_decode_stage = _DecodePointStage.MEASURING
+                    # Re-arm the ADP barrier; schedule() timestamps after it.
+                    self._bench_sync_pending = True
                     return steady
-                # Defensive: feasibility reserved ctx+1 slots per request, so
-                # this should be unreachable. Wait out the point deadline; the
-                # admission-only FPM then fails shape validation and the point
-                # is skipped through the normal group-synchronized save path.
+                # Abort a reserved-slot failure so ADP peers do not wait.
+                raise RuntimeError(
+                    "failed to allocate the reserved steady-state decode slots"
+                )
+            if self._bench_decode_stage in {
+                _DecodePointStage.ADMITTING,
+                _DecodePointStage.MEASURING,
+            }:
+                # Wait without redispatching an in-flight pass.
                 return None
             if len(self._bench_current_fpms) < getattr(self, "_bench_expected_fpms", 1):
                 if not self._bench_point_result_timed_out():
@@ -4053,6 +4086,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_current_point = None
             self._bench_extra_steps_left = 0
             return None
+        self._bench_decode_stage = _DecodePointStage.ADMITTING
         self._bench_sync_pending = True
         return output
 
