@@ -1334,11 +1334,15 @@ async fn multimodal_image_is_forwarded_with_uuid() {
             .expect("prefill response options")
             .prompt_token_ids
     );
-    assert!(decode_wire.media.is_empty());
+    assert_eq!(decode_wire.media.len(), 1);
+    assert_eq!(
+        decode_wire.media[0].uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
+    );
     assert_eq!(
         decode_wire.prompt.as_ref(),
         Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: (0..601).collect(),
+            ids: vec![11, 22, 33],
         }))
     );
     let decode_kv = struct_to_json(
@@ -1466,10 +1470,15 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 .last()
                 .cloned()
                 .expect("decode request");
-            assert!(decode_wire.media.is_empty());
+            assert_eq!(decode_wire.media.len(), 2);
+            assert_eq!(decode_wire.media[0].uuid, "image-a");
+            assert_eq!(decode_wire.media[1].uuid, "image-b");
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
-            assert!(decode_cache.ec_transfer_params.is_none());
+            let decode_ec =
+                struct_to_json(decode_cache.ec_transfer_params.expect("decode EC metadata"))
+                    .expect("decode EC metadata JSON");
+            assert_eq!(decode_ec, encoder_handoff());
         }
     }
 }

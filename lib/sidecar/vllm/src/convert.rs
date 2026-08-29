@@ -27,21 +27,23 @@ pub(crate) fn build_generate_request(
         .multi_modal_data
         .as_ref()
         .is_some_and(|media| media.values().any(|items| !items.is_empty()));
-    // Decode reuses the prefill-expanded tokens without reprocessing media.
-    let forwarded_mm_uuids = if has_media && !mode.is_decode() {
+    // Decode receives prompt KV from prefill, but vLLM still needs the original
+    // media metadata to initialize model-specific multimodal positions (for
+    // example Qwen-VL mRoPE). A full KV hit prevents duplicate prompt compute.
+    let forwarded_mm_uuids = if has_media {
         forwarded_mm_uuids(&request)?
     } else {
         None
     };
-    let media = if mode.is_decode() {
-        Vec::new()
-    } else {
-        build_media(&request, forwarded_mm_uuids.as_deref())?
-    };
+    let media = build_media(&request, forwarded_mm_uuids.as_deref())?;
     let mut prefill_result = request.prefill_result;
-    let mut token_ids = request.token_ids;
+    let token_ids = request.token_ids;
     if mode.is_decode() && has_media {
-        token_ids = take_multimodal_prompt_token_ids(&mut prefill_result)?;
+        // Validate and consume sidecar-private prefill metadata before the KV
+        // handoff is serialized to vLLM. Decode rebuilds the same expanded
+        // prompt and multimodal positions from the original prompt, media, and
+        // encoder-cache handoff while NIXL supplies the prompt KV.
+        take_multimodal_prompt_token_ids(&mut prefill_result)?;
     }
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
@@ -501,7 +503,9 @@ fn build_kv_parameters(
     };
 
     let ec_transfer_params = match mode {
-        DisaggregationMode::Aggregated | DisaggregationMode::Prefill => match encoder_result {
+        DisaggregationMode::Aggregated
+        | DisaggregationMode::Prefill
+        | DisaggregationMode::Decode => match encoder_result {
             None => None,
             Some(serde_json::Value::Object(params)) => Some(serde_json::Value::Object(params)),
             Some(_) => {
@@ -510,7 +514,7 @@ fn build_kv_parameters(
                 ));
             }
         },
-        DisaggregationMode::Decode | DisaggregationMode::Encode => None,
+        DisaggregationMode::Encode => None,
     };
 
     Ok(pb::KvCacheParameters {
