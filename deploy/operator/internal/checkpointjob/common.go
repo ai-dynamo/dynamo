@@ -23,6 +23,13 @@ const (
 	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
 
+	// RestoreFromAnnotation names the PodSnapshot to restore from. The snapshot
+	// agent's node controller gates ALL restore work on the presence of this
+	// annotation (restorePodRequested); the labels below are Dynamo-side
+	// bookkeeping the agent never reads, so without it a correctly labelled
+	// restore target is simply ignored and its containers sit in standby.
+	RestoreFromAnnotation = "nvidia.com/restore-from"
+
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
@@ -203,6 +210,7 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
+	delete(annotations, RestoreFromAnnotation)
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {
@@ -212,8 +220,21 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	labels[RestoreTargetLabel] = labelValueTrue
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
+		// The agent restores only pods carrying this annotation, and resolves
+		// it as a same-namespace PodSnapshot name. DGD-managed checkpoints name
+		// their PodSnapshot after the DynamoCheckpoint, which is
+		// "checkpoint-<checkpointID>".
+		annotations[RestoreFromAnnotation] = PodSnapshotNameForCheckpointID(checkpointID)
 	}
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
+}
+
+// PodSnapshotNameForCheckpointID returns the PodSnapshot name a DGD-managed
+// checkpoint publishes for a checkpoint ID. The checkpoint controller names its
+// PodSnapshot after the DynamoCheckpoint object (podSnapshotName == ckpt.Name),
+// and dgd_checkpoints_reconciler names that object "checkpoint-<checkpointID>".
+func PodSnapshotNameForCheckpointID(checkpointID string) string {
+	return "checkpoint-" + checkpointID
 }
 
 func ApplyCheckpointStorageMetadata(annotations map[string]string, storage Storage) {
