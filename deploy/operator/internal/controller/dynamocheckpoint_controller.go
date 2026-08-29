@@ -452,9 +452,16 @@ func (r *CheckpointReconciler) handleCreatingJobGone(ctx context.Context, ckpt *
 }
 
 // observePodSnapshot maps PodSnapshot + Job terminal state onto the DynamoCheckpoint phase.
-// Ready requires a successful bound PodSnapshot and a live JobComplete. JobFailed wins even
-// after PodSnapshot Ready. If the Job is already gone while still Creating, fail rather than
-// Ready (phase=Ready is the durable success record, set only while the Job is present).
+// Ready requires a successful bound PodSnapshot. The Job's own terminal state is only
+// consulted while the capture has NOT succeeded.
+//
+// A successful capture always terminates the source process: the agent dumps with
+// LeaveRunning=false and documents the source's death as the expected outcome. The Job
+// therefore reports JobFailed (BackoffLimitExceeded) on exactly the successful path, so
+// JobFailed cannot be treated as authoritative once the PodSnapshot is Ready. The agent
+// independently fails the PodSnapshotContent when a checkpoint helper container (for
+// example gms-saver) exits non-zero, so a genuine helper failure still surfaces as
+// PodSnapshotFailed rather than being masked here.
 func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
 	// Failed can land before bind; Ready is only meaningful once bound.
 	if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
@@ -464,21 +471,24 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 	podSnapshotReady := snap.Status.BoundPodSnapshotContentName != nil &&
 		snapshotv1alpha1.IsPodSnapshotSucceeded(snap)
 
-	// Helper failure must win even if capture already succeeded (Owns(&Job) watch).
-	if failed, message := checkpointJobFailed(job); failed {
-		return r.failCreating(ctx, ckpt, "JobFailed", message)
-	}
-
 	if !podSnapshotReady {
+		// Capture has not succeeded, so a terminal Job is a real failure.
+		if failed, message := checkpointJobFailed(job); failed {
+			return r.failCreating(ctx, ckpt, "JobFailed", message)
+		}
 		return ctrl.Result{}, nil
 	}
 
 	if job == nil {
 		return r.failCreating(ctx, ckpt, "JobDeletedBeforeComplete",
-			"checkpoint job was deleted before JobComplete was observed")
+			"checkpoint job was deleted before its terminal state was observed")
 	}
+	// The capture succeeded. Wait only for the Job to reach a terminal state;
+	// CRIU killing the source makes JobFailed the normal terminal state here.
 	if !checkpointJobComplete(job) {
-		return ctrl.Result{}, nil
+		if failed, _ := checkpointJobFailed(job); !failed {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, snapshotv1alpha1.PodSnapshotConditionReady))

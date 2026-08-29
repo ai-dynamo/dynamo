@@ -1100,14 +1100,18 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 	})
 
-	t.Run("PodSnapshot Ready with JobFailed transitions to Failed", func(t *testing.T) {
-		// Helper crash after capture must not promote Ready.
+	t.Run("PodSnapshot Ready with JobFailed transitions to Ready", func(t *testing.T) {
+		// A successful capture ALWAYS kills the source: the agent dumps with
+		// LeaveRunning=false, so the Job reports BackoffLimitExceeded on the
+		// success path. JobFailed therefore cannot veto a Ready PodSnapshot.
+		// A real helper crash (gms-saver) is caught by the agent, which fails
+		// the PodSnapshotContent, so it arrives as PodSnapshotFailed instead.
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
 		job.Status.Conditions = []batchv1.JobCondition{{
 			Type:    batchv1.JobFailed,
 			Status:  corev1.ConditionTrue,
-			Message: "gms-saver exited 1",
+			Message: "Job has reached the specified backoff limit",
 		}}
 		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionReady)
 
@@ -1117,8 +1121,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "gms-saver exited 1")
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
 	})
 
 	t.Run("PodSnapshot Failed transitions checkpoint to Failed", func(t *testing.T) {
@@ -1313,7 +1316,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		cond := meta.FindStatusCondition(updated.Status.Conditions, "JobCompleted")
 		require.NotNil(t, cond)
 		assert.Equal(t, "JobDeletedBeforeComplete", cond.Reason)
-		assert.Contains(t, updated.Status.Message, "before JobComplete was observed")
+		assert.Contains(t, updated.Status.Message, "before its terminal state was observed")
 	})
 
 	t.Run("deleted job with Failed snapshot transitions to Failed", func(t *testing.T) {
