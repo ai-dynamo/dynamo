@@ -536,6 +536,19 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        logprobs = request.get("logprobs")
+        top_logprobs = request.get("top_logprobs")
+        if (
+            logprobs is True
+            or (isinstance(logprobs, int) and not isinstance(logprobs, bool))
+            or top_logprobs not in (None, 0)
+        ):
+            raise HttpError(
+                400,
+                "Validation: `logprobs` and `top_logprobs` are not supported by the "
+                "vLLM chat processor (--dyn-chat-processor vllm).",
+            )
+
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
         # Validate cache-UUID modality support before vLLM downloads or
@@ -610,37 +623,6 @@ class VllmProcessor:
         nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
             "max_thinking_tokens"
         )
-        logprobs = request_for_sampling.logprobs
-        top_logprobs = request_for_sampling.top_logprobs
-        if logprobs is True:
-            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
-        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-            sampling_params.logprobs = logprobs
-        elif top_logprobs not in (None, 0):
-            sampling_params.logprobs = top_logprobs
-        # TODO: Support logprobs in the distributed vLLM chat processor by
-        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
-        #
-        # Until then, REJECT rather than warn-and-continue. Proceeding emits a
-        # response whose logprobs structure is empty, which the HTTP layer cannot
-        # deserialize ("invalid length 0, expected struct ChatChoiceLogprobs with
-        # 2 elements") -- so the client saw a 500 for a request the server simply
-        # does not implement, with no usable explanation.
-        #
-        # 400, NOT the 501 this API uses for other unimplemented fields
-        # (`previous_response_id`, `background`, `prompt`). Those are raised inside
-        # the Rust HTTP service; a status asserted by a Python engine is triaged by
-        # SanitizedError::for_backend_status (lib/llm/src/http/service/error.rs),
-        # where only 4xx is forwarded verbatim -- a 5xx has its body replaced with
-        # the generic internal-error message, so a 501 here reaches the client as an
-        # opaque 500 and the reason is lost. Verified live: 501 -> "Internal server
-        # error" with backend_status=501 buried in the log.
-        if sampling_params.logprobs is not None:
-            raise HttpError(
-                400,
-                "Validation: `logprobs` and `top_logprobs` are not supported by the "
-                "vLLM chat processor (--dyn-chat-processor vllm).",
-            )
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed

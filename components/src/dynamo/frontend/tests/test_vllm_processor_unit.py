@@ -1155,60 +1155,22 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
     vllm_processor_module,
     monkeypatch,
 ):
-    class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset()
-
+    preprocess_chat_request = AsyncMock()
     monkeypatch.setattr(
         vllm_processor_module,
         "preprocess_chat_request",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                request_for_sampling=RequestForSampling(
-                    max_completion_tokens=None,
-                    max_tokens=1,
-                    logprobs=True,
-                    top_logprobs=0,
-                    cache_salt=None,
-                    mm_processor_kwargs=None,
-                ),
-                tool_parser=None,
-                chat_template_kwargs={},
-                engine_prompt={"prompt": "Hello"},
-                prompt_token_ids=[1],
-                guided_decoding=None,
-            )
-        ),
-    )
-
-    class ProjectionObserved(Exception):
-        pass
-
-    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
-        # logprobs are rejected upstream of here; reaching this is the failure.
-        raise ProjectionObserved
-
-    input_processor = SimpleNamespace(
-        generation_config_fields={},
-        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
-        process_inputs=process_inputs,
-        # Real InputProcessor always carries this (vllm_config.model_config);
-        # _generator_inner forwards it to the reasoning parser.
-        model_config=None,
+        preprocess_chat_request,
     )
 
     processor = vllm_processor_module.VllmProcessor(
-        tokenizer=SimpleNamespace(eos_token_id=2),
-        input_processor=input_processor,
+        tokenizer=object(),
+        input_processor=object(),
         output_processor=object(),
         tool_parser_class=None,
         reasoning_parser_class=None,
         routed_engine=object(),
     )
 
-    # `logprobs=True` with `top_logprobs=0` projects to sampling_params.logprobs
-    # == 0, so a truthiness guard would let exactly this request through and it
-    # would fail later as an undeserializable empty logprobs struct (a 500). The
-    # guard tests `is not None`; this pins that distinction.
     with pytest.raises(HttpError) as excinfo:
         await anext(
             processor._generator_inner(
@@ -1223,6 +1185,7 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
 
     assert excinfo.value.code == 400
     assert "logprobs" in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
