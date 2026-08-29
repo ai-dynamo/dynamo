@@ -194,9 +194,12 @@ func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool
 	case dgdrRunCRDName, dgdrCandidateCRD:
 		return false
 	case dgdrCRDName:
-		crd.Spec.Versions = slices.DeleteFunc(crd.Spec.Versions, func(version apiextensionsv1.CustomResourceDefinitionVersion) bool {
-			return version.Name == "v1beta2"
-		})
+		crd.Spec.Versions = slices.DeleteFunc(
+			crd.Spec.Versions,
+			func(version apiextensionsv1.CustomResourceDefinitionVersion) bool {
+				return version.Name == "v1beta2"
+			},
+		)
 	}
 	return true
 }
