@@ -13,7 +13,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter.qwen3_vl import (
     Qwen3VLNativeAdapter,
-    _is_qwen3_vl_model,
+    _is_native_qwen_vlm,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
     VisionEncoderBackend,
@@ -33,7 +33,7 @@ def create_custom_encoder_adapter(
 
     if model_config is None:
         raise ValueError("CustomEncoder requires the resolved vLLM ModelConfig")
-    if _is_qwen3_vl_model(model_config):
+    if _is_native_qwen_vlm(model_config):
         return Qwen3VLNativeAdapter(model_config)
 
     if _is_multimodal_model(model_config):

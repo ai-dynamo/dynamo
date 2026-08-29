@@ -457,7 +457,7 @@ export function ArtifactBrowser() {
           {helmCharts.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}
-          <GroupHeader label="Rust crates published this release" cat="crate" />
+          <GroupHeader label="Dynamo Rust crates" cat="crate" />
           {publishedCrates.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}

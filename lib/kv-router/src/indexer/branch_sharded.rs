@@ -100,7 +100,7 @@ struct StoreRouteDecision {
     skip_backend: bool,
 }
 
-/// Branch-sharded wrapper over N [`AsyncShardHandle`] shard backends.
+/// Branch-sharded wrapper over N `AsyncShardHandle` shard backends.
 ///
 /// For the common in-process case use `BranchShardedIndexer<ThreadPoolIndexer<T>>`
 /// (constructed via [`BranchShardedIndexer::new`]).  For the multi-process

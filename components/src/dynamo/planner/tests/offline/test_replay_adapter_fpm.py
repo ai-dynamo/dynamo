@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before replay CLI imports.
+# ruff: noqa: E402
 
 """Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.replay",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig

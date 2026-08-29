@@ -325,6 +325,20 @@ impl fmt::Display for CacheOwnerId {
     }
 }
 
+impl FromStr for CacheOwnerId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (pool, slot) = value
+            .rsplit_once('/')
+            .ok_or(IdentityParseError::InvalidCacheOwner)?;
+        if slot.contains('/') {
+            return Err(IdentityParseError::InvalidCacheOwner);
+        }
+        Ok(Self::new(pool.parse()?, slot.parse()?))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityParseError {
     #[error("identity must use lowercase hexadecimal with the exact encoded width")]
@@ -333,6 +347,8 @@ pub enum IdentityParseError {
     InvalidIndexerDomain,
     #[error("pool ID must be `<indexer-domain-id>/<dc-id>`")]
     InvalidPool,
+    #[error("cache owner ID must be `<pool-id>/<stable-dp-slot-id>`")]
+    InvalidCacheOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -697,5 +713,21 @@ mod tests {
         assert_eq!(semantics.to_string(), "abababababababababababababababab");
         assert_eq!(routing.to_string(), "01010101010101010101010101010101");
         assert_eq!(DcId::new(1).to_string(), "0000000000000001");
+    }
+
+    #[test]
+    fn cache_owner_canonical_string_round_trips_at_configuration_boundary() {
+        let owner = CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([0xcd; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(7),
+            ),
+            StableDpSlotId::new([0xef; 16], IdentitySource::Explicit),
+        );
+        assert_eq!(owner.to_string().parse::<CacheOwnerId>().unwrap(), owner);
+        assert!("ab/7/ef".parse::<CacheOwnerId>().is_err());
     }
 }

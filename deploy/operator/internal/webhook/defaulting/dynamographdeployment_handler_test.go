@@ -24,7 +24,9 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	admissionv1 "k8s.io/api/admission/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
@@ -257,6 +259,67 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
+	t.Log("Build a DGD with omitted targets at every supported provider context")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			ProviderOverride: providerOverrideForDefaulting(`{"spec":{"template":{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}}}`),
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName:    "frontend",
+					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+				},
+				{
+					ComponentName:    "worker",
+					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`),
+					Multinode: &nvidiacomv1beta1.MultinodeSpec{
+						NodeCount: 2,
+						Leader: &nvidiacomv1beta1.MultinodeRoleSpec{
+							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+						},
+						Worker: &nvidiacomv1beta1.MultinodeRoleSpec{
+							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+						},
+					},
+				},
+			},
+		},
+	}
+	ctx := admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+	t.Log("Default the provider targets from workload pathway, scope, and component shape")
+	if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	t.Log("Verify each context received its stable provider target")
+	if got := dgd.Spec.ProviderOverride.Target; got != provideroverride.TargetPodCliqueSet {
+		t.Errorf("root target = %q, want %q", got, provideroverride.TargetPodCliqueSet)
+	}
+	if got := dgd.Spec.Components[0].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("single-node component target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+	multinode := dgd.Spec.Components[1]
+	if got := multinode.ProviderOverride.Target; got != provideroverride.TargetPodCliqueScalingGroupConfig {
+		t.Errorf("multinode component target = %q, want %q", got, provideroverride.TargetPodCliqueScalingGroupConfig)
+	}
+	if got := multinode.Multinode.Leader.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("leader target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+	if got := multinode.Multinode.Worker.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("worker target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+}
+
+func providerOverrideForDefaulting(value string) *nvidiacomv1beta1.ProviderOverride {
+	return &nvidiacomv1beta1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
 	}
 }
 

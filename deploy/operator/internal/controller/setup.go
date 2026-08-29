@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/scale"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -31,7 +30,6 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
 	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
@@ -92,7 +90,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
-		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
 		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
@@ -145,6 +142,9 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	return nil
 }
 
+// SetupDynamoCheckpoint always registers the reconciler so existing checkpoint finalizers can
+// converge when Checkpoint is disabled. CheckpointReconciler.SetupWithManager omits the external
+// PodSnapshot watch unless the resolved Checkpoint gate is enabled.
 func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 	if err := (&CheckpointReconciler{
 		Client:        mgr.GetClient(),
@@ -153,18 +153,6 @@ func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 		Recorder:      mgr.GetEventRecorder("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
-	}
-	return nil
-}
-
-func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 	return nil
 }
