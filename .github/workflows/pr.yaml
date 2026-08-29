@@ -137,6 +137,8 @@ jobs:
       - trtllm-local-dev-build
       - vllm-dev-build
       - vllm-test
+      - vllm-multimodal-test
+      - vllm-cpu-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
@@ -763,15 +765,54 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      platform: '["amd64"]'
+      run_cpu_only_tests: false
+      # Multimodal tests carry 46% of the measured single-GPU critical path.
+      # Run them on their own L4 below instead of serializing both resource pools.
+      gpu_test_markers: pre_merge and vllm and gpu_1 and not multimodal
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
-      # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      # 24 GiB is the per-test admission threshold; the scheduler packs tests
+      # against the runner's detected free-memory budget (19 GiB in recent CI).
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  vllm-multimodal-test:
+    name: vllm-runtime-multimodal
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multimodal Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      gpu_test_markers: pre_merge and vllm and gpu_1 and multimodal
+      gpu_test_timeout_minutes: 45
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  vllm-cpu-test:
+    name: vllm-runtime-cpu
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      run_gpu_tests: false
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -1980,6 +2021,8 @@ jobs:
       - operator
       - vllm-build
       - vllm-test
+      - vllm-multimodal-test
+      - vllm-cpu-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
