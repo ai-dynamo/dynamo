@@ -22,6 +22,10 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_vllm_placeholder:
+        description: 'Build and push the vLLM checkpoint placeholder image (restore target for Dynamo Snapshot). Requires build_vllm=true so the placeholder is built FROM this run''s vllm-runtime.'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -100,6 +104,39 @@ jobs:
       cuda_version: '["13.0"]'
       copy_timeout_minutes: 20
     secrets: inherit
+
+  # Checkpoint placeholder: the restore target image, built FROM the ACR
+  # vllm-runtime produced by this same run so the placeholder and the workload
+  # image share one tree (CRIU restores file-backed mappings by path).
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [init, vllm-copy-to-acr]
+    if: inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    outputs:
+      image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: $/.github/actions/build-deploy-component
+        with:
+          component: checkpoint-placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -197,7 +234,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
