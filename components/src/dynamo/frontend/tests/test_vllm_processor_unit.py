@@ -1495,29 +1495,23 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
-    async def test_backend_rejection_keeps_the_backend_status(
-        self, vllm_processor_module
-    ):
-        # A worker-side rejection crosses the Rust boundary as a plain ValueError
-        # whose text carries the real status. It must reach the client as that
-        # status with that message -- not as a generic 500 with both discarded.
+    async def test_backend_rejection_preserves_typed_error(self, vllm_processor_module):
         class _RejectingEngine(_FakeRoutedEngine):
             async def generate(self, preprocessed, **kwargs):
-                raise ValueError(
-                    'BackendInvalidArgument: {"message":"The min_p and logit_bias '
+                raise InvalidArgument(
+                    '{"message":"The min_p and logit_bias '
                     "sampling parameters are not yet supported with speculative "
                     'decoding.","code":400}'
                 )
 
         processor = _make_processor(vllm_processor_module, _RejectingEngine())
 
-        with pytest.raises(HttpError) as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             await _run_generate(processor, _base_preproc())
 
-        assert excinfo.value.code == 400
-        assert "min_p" in excinfo.value.message
-        # The serialized envelope must not leak to the client.
-        assert "BackendInvalidArgument" not in excinfo.value.message
+        payload = json.loads(str(excinfo.value))
+        assert payload["code"] == 400
+        assert "min_p" in payload["message"]
 
     @pytest.mark.asyncio
     async def test_genuine_internal_failure_is_still_internal(

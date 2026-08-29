@@ -11,13 +11,31 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
+
+fn routed_engine_invalid_argument_message<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a str> {
+    let error = error.downcast_ref::<DynamoError>()?;
+    matches!(
+        error.error_type(),
+        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+    )
+    .then(|| error.message())
+}
+
+pub fn routed_engine_error_to_pyerr(error: anyhow::Error) -> PyErr {
+    if let Some(message) = routed_engine_invalid_argument_message(error.as_ref()) {
+        return InvalidArgument::new_err(message.to_owned());
+    }
+    crate::to_pyerr(error)
+}
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
@@ -157,4 +175,28 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routed_engine_invalid_argument_classification_uses_outer_error_only() {
+        let invalid_argument = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("bad request")
+            .build();
+        assert_eq!(
+            routed_engine_invalid_argument_message(&invalid_argument),
+            Some("bad request")
+        );
+
+        let outer = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("worker unavailable")
+            .cause(invalid_argument)
+            .build();
+        assert_eq!(routed_engine_invalid_argument_message(&outer), None);
+    }
 }
