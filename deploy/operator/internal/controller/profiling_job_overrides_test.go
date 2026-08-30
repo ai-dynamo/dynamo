@@ -30,6 +30,7 @@ import (
 
 const (
 	profilerEntrypoint        = "python"
+	profilerOverrideImage     = "custom-profiler:v2"
 	outputCopierShell         = "/bin/sh"
 	outputCopierScriptStub    = "echo sidecar-script"
 	outputCopierOverrideImage = "internal-registry/kubectl:1.29"
@@ -766,13 +767,13 @@ func TestApplyProfilingJobOverrides_ContainerImage(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Image: "custom-profiler:v2"},
+					{Image: profilerOverrideImage},
 				},
 			},
 		},
 	})
-	if job.Spec.Template.Spec.Containers[0].Image != "custom-profiler:v2" {
-		t.Errorf("expected image=custom-profiler:v2, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	if job.Spec.Template.Spec.Containers[0].Image != profilerOverrideImage {
+		t.Errorf("expected image=%s, got %s", profilerOverrideImage, job.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 
@@ -1164,7 +1165,7 @@ func TestApplyProfilingJobOverrides_MergesByContainerNameNotIndex(t *testing.T) 
 				},
 				{
 					Name:  ContainerNameProfiler,
-					Image: "custom-profiler:v2",
+					Image: profilerOverrideImage,
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
 					},
@@ -1182,7 +1183,7 @@ func TestApplyProfilingJobOverrides_MergesByContainerNameNotIndex(t *testing.T) 
 				},
 				{
 					Name:  "",
-					Image: "custom-profiler:v2",
+					Image: profilerOverrideImage,
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
 					},
@@ -1210,8 +1211,8 @@ func TestApplyProfilingJobOverrides_MergesByContainerNameNotIndex(t *testing.T) 
 			if profiler == nil {
 				t.Fatal("profiler container not found")
 			}
-			if profiler.Image != "custom-profiler:v2" {
-				t.Errorf("profiler image: want custom-profiler:v2, got %s", profiler.Image)
+			if profiler.Image != profilerOverrideImage {
+				t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
 			}
 			if profiler.Resources.Limits.Cpu().Cmp(profilerCPU) != 0 {
 				t.Errorf("profiler CPU: want %s, got %v", profilerCPU.String(), profiler.Resources.Limits)
@@ -1236,7 +1237,7 @@ func TestApplyProfilingJobOverrides_UnnamedOverrideTargetsProfiler(t *testing.T)
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "", Image: "custom-profiler:v2"},
+					{Name: "", Image: profilerOverrideImage},
 				},
 			},
 		},
@@ -1247,8 +1248,8 @@ func TestApplyProfilingJobOverrides_UnnamedOverrideTargetsProfiler(t *testing.T)
 	if profiler == nil {
 		t.Fatal("profiler container not found")
 	}
-	if profiler.Image != "custom-profiler:v2" {
-		t.Errorf("profiler image: want custom-profiler:v2, got %s", profiler.Image)
+	if profiler.Image != profilerOverrideImage {
+		t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
 	}
 }
 
@@ -1261,7 +1262,7 @@ func TestApplyProfilingJobOverrides_UnknownNameDoesNotOverrideProfiler(t *testin
 				Containers: []corev1.Container{
 					{
 						Name:  "extra-tools",
-						Image: "custom-profiler:v2",
+						Image: profilerOverrideImage,
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
 						},
