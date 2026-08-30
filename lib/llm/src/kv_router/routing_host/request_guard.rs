@@ -275,8 +275,17 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
+    /// Record prefill start, but only for phases that actually run prefill.
+    ///
+    /// `prefill_start_time` is write-once. A decode-only request that reaches
+    /// dispatch with a tracker would otherwise stamp it here, making
+    /// `prefill_time_ms` describe decode time as though it were prefill time.
+    /// A decode that follows a prefill keeps the timestamp prefill recorded,
+    /// because the later write is a no-op.
     fn record_prefill_start(&self) {
-        if let Some(tracker) = &self.tracker {
+        if let Some(tracker) = &self.tracker
+            && tracker.phase() != RequestPhase::Decode
+        {
             tracker.record_prefill_start();
         }
     }
@@ -987,5 +996,79 @@ mod output_hash_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_start_tests {
+    use super::*;
+
+    fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
+        }
+        fn hist_vec(name: &str) -> prometheus::HistogramVec {
+            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
+                .unwrap()
+        }
+        Arc::new(RouterRequestMetrics {
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+        })
+    }
+
+    /// Drive the production dispatch-time call for a single phase.
+    async fn dispatch_once(phase: RequestPhase) -> Arc<RequestTracker> {
+        let tracker = Arc::new(RequestTracker::new());
+        let _permit = tracker.set_phase(phase).await;
+        RequestObservability::new(Some(tracker.clone()), test_metrics()).record_prefill_start();
+        tracker
+    }
+
+    #[tokio::test]
+    async fn prefill_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Prefill).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn aggregated_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Aggregated).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn decode_only_dispatch_does_not_record_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Decode).await;
+        assert!(tracker.prefill_wait_time_ms().is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_after_prefill_retains_the_prefill_timestamp() {
+        let tracker = Arc::new(RequestTracker::new());
+        let metrics = test_metrics();
+
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        RequestObservability::new(Some(tracker.clone()), metrics.clone()).record_prefill_start();
+        let recorded_by_prefill = tracker.prefill_wait_time_ms();
+        assert!(recorded_by_prefill.is_some());
+        drop(prefill_permit);
+
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start();
+        assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
     }
 }
