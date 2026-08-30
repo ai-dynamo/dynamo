@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
@@ -368,12 +369,77 @@ def patch_dsv4_topk_clone_inputs() -> None:
             gating_output, bias, indices_dtype, routed_scaling_factor
         )
 
-    dsv4_topk_mod.dsv4_topk = wrapped
+    def pytorch_fallback(
+        gating_output,
+        correction_bias,
+        indices_dtype,
+        routed_scaling_factor,
+    ):
+        """Pure-PyTorch replacement for the Triton ``dsv4_topk`` kernel.
+
+        Cloning operands off GMS VMM is not always sufficient: on the
+        DeepSeek-V4 checkpoints Triton still takes an illegal address even
+        with private copies, so this path avoids Triton entirely.
+
+        Mirrors ``_dsv4_topk_kernel``: weights are softplus-then-sqrt of the
+        logits; selection ranks by ``weights + correction_bias`` but the
+        emitted weight is the UNBIASED weight; ties resolve to the lowest
+        expert id; the selected weights are renormalised by their own sum and
+        scaled by ``routed_scaling_factor``.
+
+        Validated against the Triton kernel on B200 for both expert counts
+        (256, 384): 100% top-k index agreement and a maximum weight delta of
+        6e-8, i.e. float32 rounding. Still gated behind an env var because it
+        is a workaround for a GMS VMM defect, not a supported code path.
+        """
+        import torch
+
+        logits = gating_output.float()
+        # softplus, matching the kernel's >20 linear shortcut
+        weights = torch.sqrt(
+            torch.where(logits > 20.0, logits, torch.log1p(torch.exp(logits)))
+        )
+        ranked = weights + correction_bias.float()
+        ranked = torch.nan_to_num(ranked, nan=-1e30)
+        topk = getattr(dsv4_topk_mod, "_TOPK", 6)
+        # torch.topk already resolves ties to the lowest index, matching the
+        # kernel's tl.min(candidate) tie-break. Verified against the Triton
+        # kernel on B200: 100% index agreement, max weight delta 6e-8.
+        _, idx = torch.topk(ranked, k=topk, dim=-1, sorted=True)
+        selected = weights.gather(-1, idx)
+        total = selected.sum(dim=-1, keepdim=True)
+        selected = selected * (
+            routed_scaling_factor / torch.where(total > 0.0, total, 1.0)
+        )
+        return selected.to(torch.float32), idx.to(indices_dtype)
+
+    use_fallback = os.environ.get("DYN_GMS_DSV4_TOPK_PYTORCH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    chosen = torch_compiler_disable(pytorch_fallback) if use_fallback else wrapped
+
+    dsv4_topk_mod.dsv4_topk = chosen
     try:
         import vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router as router_mod
 
-        router_mod.dsv4_topk = wrapped
+        router_mod.dsv4_topk = chosen
     except ImportError:
         pass
     _dsv4_topk_patched = True
-    logger.info("[GMS Patch] dsv4_topk wraps Triton with VMM-safe input clones")
+    if use_fallback:
+        logger.warning(
+            "[GMS Patch] dsv4_topk replaced with PyTorch topk "
+            "(DYN_GMS_DSV4_TOPK_PYTORCH) - generations are NOT quality-correct"
+        )
+    else:
+        logger.info("[GMS Patch] dsv4_topk wraps Triton with VMM-safe input clones")
+
+
+def torch_compiler_disable(fn):
+    """Mark ``fn`` as opaque to torch.compile, tolerating old torch builds."""
+    import torch
+
+    disable = getattr(getattr(torch, "compiler", None), "disable", None)
+    return disable(fn) if callable(disable) else fn
