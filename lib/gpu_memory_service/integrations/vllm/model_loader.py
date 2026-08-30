@@ -666,6 +666,14 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
 
     Triton ``dsv4_topk`` loads ``correction_bias`` by pointer. CUDA VMM
     mappings are not Triton-loadable and illegal-address on B200.
+
+    Deliberately does NOT cover the DeepSeek-V4 MHC ``hc_*`` weights, even
+    though they are also TileLang-loaded. They are fp32 and there are six per
+    layer, so cloning them costs 129 MiB/rank on DSV4-Flash and 320 MiB/rank on
+    DSV4-Pro (~2.5 GiB across 8 ranks) of private per-engine copies -- which
+    defeats the point of sharing weights through GMS, and lands on the
+    read-only import critical path. It was measured and did not change the
+    illegal-address failure, so the cost buys nothing.
     """
     cloned: list[str] = []
     # vLLM aliases some of these across modules -- `e_score_correction_bias`

@@ -51,6 +51,7 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_dsv4_topk_clone_inputs,
+    patch_force_eager_breakable_cudagraph,
     patch_memory_snapshot,
 )
 from gpu_memory_service.integrations.vllm.upstream_workarounds import (
@@ -77,6 +78,17 @@ patch_dsv4_topk_clone_inputs()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
+
+# When kernel_warmup / capture_model is skipped, nothing has captured CUDA
+# graphs by the time the first real request arrives, so
+# BreakableCUDAGraphWrapper tries to capture inside that request and dies on
+# unpinned CPU->CUDA copies ("Cannot copy between CPU and CUDA tensors during
+# CUDA graph capture"). Forcing the wrapper eager avoids capture entirely.
+# Scratch-KV enables this implicitly; DYN_GMS_FORCE_EAGER_CUDAGRAPH exposes it
+# for the no-shadow read-only import path, which skips warmup for the same
+# reason but is not scratch-KV.
+if os.environ.get("DYN_GMS_FORCE_EAGER_CUDAGRAPH", "").lower() in ("1", "true", "yes"):
+    patch_force_eager_breakable_cudagraph()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
