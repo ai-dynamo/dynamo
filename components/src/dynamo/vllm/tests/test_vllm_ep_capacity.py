@@ -113,11 +113,26 @@ def _make_self(dp=2, tp=1, backend="ray", external_lb=False) -> SimpleNamespace:
     engine_client = SimpleNamespace(
         vllm_config=SimpleNamespace(parallel_config=parallel_config)
     )
-    return SimpleNamespace(engine_client=engine_client)
+    # Mirrors the real handler's single-flight state (BaseWorkerHandler.__init__).
+    return SimpleNamespace(
+        engine_client=engine_client,
+        _ep_capacity_inflight=None,
+        _ep_capacity_executor=None,
+    )
+
+
+def _shutdown(fake_self) -> None:
+    """Drop the dedicated executor a test may have caused the handler to create."""
+    if fake_self._ep_capacity_executor is not None:
+        fake_self._ep_capacity_executor.shutdown(wait=False, cancel_futures=True)
+        fake_self._ep_capacity_executor = None
 
 
 def _run(fake_self) -> dict:
-    return asyncio.run(BaseWorkerHandler.get_ep_capacity(fake_self, {}))
+    try:
+        return asyncio.run(BaseWorkerHandler.get_ep_capacity(fake_self, {}))
+    finally:
+        _shutdown(fake_self)
 
 
 def test_ray_backend_reports_per_node_gpu_capacity(monkeypatch):
@@ -231,6 +246,74 @@ def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
     assert r["tensor_parallel_size"] == 2
     assert r["total_gpus"] is None
     assert r["nodes"] is None
+
+
+def test_repeated_timeouts_do_not_pile_up_gcs_queries(monkeypatch):
+    """A degraded GCS must not strand one blocked thread per reconciler poll.
+
+    The timeout releases the caller but cannot interrupt the blocking call, so
+    without single-flight each poll would start another query and a slow GCS would
+    accumulate threads until the pool starved.
+    """
+    monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.02)
+    started: list[int] = []
+    _install_ray_stub(
+        monkeypatch,
+        nodes=[_node("n1", "10.0.0.1", 4.0)],
+        idle_by_node_id={"n1": {"GPU": 4.0}},
+        delay=0.5,
+        thread_log=started,
+    )
+    handler = _make_self(dp=2, tp=1, backend="ray")
+
+    async def _poll_repeatedly():
+        out = []
+        for _ in range(6):
+            out.append(await BaseWorkerHandler.get_ep_capacity(handler, {}))
+        return out
+
+    try:
+        results = asyncio.run(_poll_repeatedly())
+    finally:
+        _shutdown(handler)
+
+    assert all(r["status"] == "error" for r in results)
+    assert all("timed out" in r["message"].lower() for r in results)
+    # Six polls, one outstanding GCS query: later polls joined the in-flight
+    # snapshot instead of launching their own.
+    assert len(started) == 1, f"expected 1 in-flight query, got {len(started)}"
+    # And it never touched asyncio's shared default executor.
+    assert started[0] != threading.get_ident()
+
+
+def test_concurrent_callers_share_one_snapshot(monkeypatch):
+    nodes = [_node("n1", "10.0.0.1", 4.0)]
+    started: list[int] = []
+    _install_ray_stub(
+        monkeypatch,
+        nodes=nodes,
+        idle_by_node_id={"n1": {"GPU": 3.0}},
+        delay=0.05,
+        thread_log=started,
+    )
+    handler = _make_self(dp=2, tp=1, backend="ray")
+
+    async def _gather_four():
+        return await asyncio.gather(
+            *(BaseWorkerHandler.get_ep_capacity(handler, {}) for _ in range(4))
+        )
+
+    try:
+        results = asyncio.run(_gather_four())
+    finally:
+        _shutdown(handler)
+
+    assert all(r["status"] == "ok" for r in results)
+    assert all(
+        r["nodes"] == [{"total_gpus": 4.0, "available_gpus": 3.0}] for r in results
+    )
+    # One snapshot is three ray calls; four concurrent callers must not make twelve.
+    assert len(started) == 3, f"expected one snapshot (3 calls), got {len(started)}"
 
 
 def test_mp_backend_is_reported_and_skips_ray(monkeypatch):

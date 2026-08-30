@@ -15,6 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -126,6 +127,20 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
+
+
+def _discard_orphan_result(fut: "Future") -> None:
+    """Retrieve a timed-out snapshot's outcome so asyncio stays quiet about it.
+
+    When ``get_ep_capacity`` times out, its waiter goes away but the future keeps
+    running. If that future then fails, nothing ever retrieves the exception and
+    asyncio logs a spurious "exception was never retrieved" at GC time. Reading it
+    here clears that flag; a later caller awaiting the same future still sees it.
+    """
+    if not fut.cancelled():
+        fut.exception()
+
+
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
@@ -1114,6 +1129,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
+    # get_ep_capacity single-flight state; see the comment at its call site.
+    _ep_capacity_inflight: Optional[Future] = None
+    _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -1207,6 +1225,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # can mutate _coord_store at a time.
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
+        # Created on first Ray-backed get_ep_capacity call so workers that never
+        # serve elastic EP do not carry an idle thread.
+        self._ep_capacity_inflight = None
+        self._ep_capacity_executor = None
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -1568,6 +1590,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         ``parallel_config`` object once a scale completes, so a caller polling this
         endpoint observes the post-scale value.
 
+        The Ray reads are single-flight: callers that arrive while a snapshot is
+        already in progress join that one rather than starting another, so
+        overlapping polls observe the same GPU numbers and cost one GCS query.
+
         The response shape is backend-agnostic: ``data_parallel_size``,
         ``tensor_parallel_size``, ``data_parallel_backend`` and
         ``data_parallel_external_lb`` always come from the engine config. The GPU
@@ -1646,12 +1672,39 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # park this worker's event loop for the duration, stalling token generation
         # and every other control route -- and the reconciler polls this endpoint, so
         # a degraded GCS would do it repeatedly. Off-load to a thread and bound the
-        # wait. Note the timeout frees the caller, not the thread: asyncio cannot
-        # interrupt a blocking C call, so the orphan finishes on its own in the
-        # default executor.
+        # wait.
+        #
+        # The timeout frees the caller, not the thread: asyncio cannot interrupt a
+        # blocking C call, so a timed-out snapshot keeps running. Two things keep
+        # that from turning into unbounded thread growth under a degraded GCS, where
+        # every poll would otherwise strand another thread:
+        #
+        #   1. Single-flight -- a poll that finds a snapshot already in flight waits
+        #      on that one instead of starting another, capping outstanding GCS work
+        #      at one query no matter how often the endpoint is polled.
+        #   2. A dedicated single-worker executor -- stuck queries can never occupy
+        #      asyncio's shared default executor, so they cannot starve unrelated
+        #      to_thread work elsewhere in this process.
+        #
+        # Check-and-set below needs no lock: there is no await between the read and
+        # the assignment, and handlers run on one event loop thread.
+        inflight = self._ep_capacity_inflight
+        if inflight is None or inflight.done():
+            if self._ep_capacity_executor is None:
+                self._ep_capacity_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="ep-capacity"
+                )
+            inflight = asyncio.get_running_loop().run_in_executor(
+                self._ep_capacity_executor, _snapshot
+            )
+            inflight.add_done_callback(_discard_orphan_result)
+            self._ep_capacity_inflight = inflight
+
         try:
+            # shield: this caller timing out must not cancel the shared snapshot out
+            # from under any other caller awaiting the same one.
             snapshot = await asyncio.wait_for(
-                asyncio.to_thread(_snapshot), timeout=_EP_CAPACITY_RAY_TIMEOUT_S
+                asyncio.shield(inflight), timeout=_EP_CAPACITY_RAY_TIMEOUT_S
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -2865,6 +2918,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        if self._ep_capacity_executor is not None:
+            # wait=False on purpose: a snapshot stuck on an unresponsive GCS must
+            # not hold up worker shutdown, and the process is going away anyway.
+            self._ep_capacity_executor.shutdown(wait=False, cancel_futures=True)
+            self._ep_capacity_executor = None
+            self._ep_capacity_inflight = None
         if self._custom_encoder is not None:
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
