@@ -46,11 +46,11 @@ Start the Dynamo worker:
 
 ```bash
 dynamo-trtllm-sidecar \
-  --trtllm-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:50051 \
   --model-path <model>
 ```
 
-Use `TRTLLM_GRPC_ENDPOINT` instead of `--trtllm-endpoint` when the endpoint is
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
 ## Deploy on Kubernetes (quick start)

@@ -76,7 +76,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             interval_str, model_name
         )
         m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
-            interval_str, model_name
+            interval_str, model_name, namespace=self._runtime_namespace()
         )
         m.accept_length = self.collect_accept_length(interval_str)
 
@@ -142,7 +142,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
 
         interval_str = f"{int(duration_s)}s"
         hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
-            interval_str, model_name
+            interval_str, model_name, namespace=self._runtime_namespace()
         )
         accept_length = self.collect_accept_length(interval_str)
         self.metrics_state.kv_hit_rate = hit_rate

@@ -14,18 +14,15 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, metrics::RouterRequestMetrics,
     },
-    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{
-        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
-    },
+    session_affinity::{AffinityCoordinator, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -181,38 +178,19 @@ where
     )?;
 
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-            router, affinity, true,
-        )),
-        RouterMode::Random | RouterMode::RoundRobin => {
-            match model_manager.lora_filter_for(endpoint_id) {
-                Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                    router,
-                    lora_filter,
-                    model_manager.lora_load_estimator_for(endpoint_id),
-                    router_mode,
-                )),
-                None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                    router, affinity, false,
-                )),
-            }
-        }
-        RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => {
-            Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                router,
-                affinity,
-                router_mode.is_direct_routing(),
-            ))
-        }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new_with_coordinator(
-                router, chooser, affinity,
-            ))
+            Arc::new(RoutingHost::new_with_coordinator(router, chooser, affinity))
+        }
+        _ => {
+            let lora = model_manager
+                .lora_filter_for(endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+            Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
+                router, affinity, lora,
+            )?)
         }
     };
 
@@ -304,10 +282,9 @@ where
     )
     .await?;
 
-    // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
-    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // Eagerly register router request metrics so they appear as zeros before
+    // RoutingHost is constructed. The host repeats this idempotently so the
+    // standalone router path is covered as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {

@@ -78,7 +78,7 @@ fn fast_engine_args() -> MockEngineArgs {
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngine {
     let mut argv = vec![
         "dynamo-sglang-sidecar".to_string(),
-        "--sglang-endpoint".to_string(),
+        "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--grpc-connections".to_string(),
         "1".to_string(),
@@ -146,7 +146,7 @@ async fn collect_with_context(
 }
 
 #[tokio::test]
-async fn sidecar_discovers_and_streams_mocker_tokens_logprobs_and_usage() {
+async fn sidecar_streams_incremental_mocker_tokens_logprobs_and_usage() {
     let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     let config = engine.start(0).await.unwrap();

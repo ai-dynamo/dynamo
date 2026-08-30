@@ -87,7 +87,7 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        let endpoint = GrpcEndpoint::parse(&args.trtllm_endpoint, "--trtllm-endpoint")?;
+        let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let model = ConfiguredModel {
             source: args.model_path,

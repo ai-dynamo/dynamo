@@ -7,9 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use dynamo_kv_router::selector::WorkerSelector;
 
-use super::{
-    InnerPrefillRouter, PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter,
-};
+use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 impl<Sel> PrefillRouter<Sel>
@@ -40,56 +38,52 @@ where
             .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match &binding.router {
-            InnerPrefillRouter::KvRouter(router) => {
-                let outcome = router
-                    .chooser
-                    .find_best_match_details(
-                        None,
-                        token_ids,
-                        block_mm_infos,
-                        None,
-                        false,
-                        false,
-                        lora_name,
-                        cache_namespace,
-                        priority_jump,
-                        strict_priority,
-                        None,
-                        None,
-                        allowed_worker_ids,
-                        routing_constraints,
-                    )
-                    .await?;
-                match outcome {
-                    crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                        Ok(PrefillQueryOutcome::Routed {
-                            worker_id: worker.worker_id,
-                            dp_rank: Some(worker.dp_rank),
-                        })
-                    }
-                    crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                        Ok(PrefillQueryOutcome::QueueRejected { rejection })
-                    }
-                }
-            }
-            InnerPrefillRouter::SimpleRouter(router) => {
-                let worker_id = router
-                    .peek_next_worker()
-                    .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+        let router = &binding.router;
+        let Some(kv_router) = router.kv_router_if_enabled() else {
+            let worker_id = router
+                .peek_next_worker()
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            return Ok(PrefillQueryOutcome::Routed {
+                worker_id,
+                dp_rank: None,
+            });
+        };
+        let outcome = kv_router
+            .find_best_match_details(
+                None,
+                token_ids,
+                block_mm_infos,
+                None,
+                false,
+                false,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
                 Ok(PrefillQueryOutcome::Routed {
-                    worker_id,
-                    dp_rank: None,
+                    worker_id: worker.worker_id,
+                    dp_rank: Some(worker.dp_rank),
                 })
+            }
+            crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                Ok(PrefillQueryOutcome::QueueRejected { rejection })
             }
         }
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         if let Some(binding) = self.binding.load_full()
-            && let InnerPrefillRouter::KvRouter(router) = &binding.router
+            && let Some(kv_router) = binding.router.kv_router_if_enabled()
         {
-            router.chooser.register_workers(worker_ids);
+            kv_router.register_workers(worker_ids);
         }
     }
 }
@@ -119,10 +113,10 @@ mod tests {
     use super::*;
     use crate::{
         discovery::ModelManager,
+        kv_router::RoutingHost,
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
-        session_affinity::SessionAffinityPushRouter,
     };
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
@@ -241,7 +235,7 @@ mod tests {
         mode: RouterMode,
         dispatch: Arc<RecordingDispatch>,
     ) -> (
-        Arc<SessionAffinityPushRouter>,
+        Arc<RoutingHost>,
         Arc<PrefillRouter>,
         Vec<DistributedRuntime>,
         Vec<u64>,
@@ -299,7 +293,8 @@ mod tests {
         let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
             .await
             .unwrap();
-        let shared = Arc::new(SessionAffinityPushRouter::new(push_router, None, false).unwrap());
+        let shared =
+            Arc::new(RoutingHost::new_builtin_with_coordinator(push_router, None).unwrap());
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
@@ -308,7 +303,7 @@ mod tests {
                     component: component.to_string(),
                     name: endpoint_name.to_string(),
                 },
-                router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+                router: shared.clone(),
                 prefill_router_mode: mode,
             },
         )));

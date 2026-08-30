@@ -739,13 +739,26 @@ async def register_vllm_model(
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
+    state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
     enable_router_hint_support(
-        runtime_config, config.engine_args, worker_type, dp_range
+        runtime_config,
+        config.engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    tower_connector_lora_enabled = bool(
+        vllm_config.lora_config
+        and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
+    )
     if publish_engine_generate_capability(
-        runtime_config, model_input, model_type, worker_type
+        runtime_config,
+        model_input,
+        model_type,
+        worker_type,
+        tower_connector_lora_enabled,
     ):
         logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
@@ -778,7 +791,7 @@ async def register_vllm_model(
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
-    if state_agent_settings(config) is not None:
+    if state_agent_enabled:
         runtime_config.kv_event_source_mode = "state_agent_v2"
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
@@ -818,8 +831,7 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
+    # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )

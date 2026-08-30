@@ -6,11 +6,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessageContent,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -118,6 +120,115 @@ async fn streaming_text_baseline() {
         );
 
         assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
+    temp_env::async_with_vars(ENV, async {
+        const ERROR_MESSAGE: &str =
+            "ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing.";
+        let mut script = load_agent_fixture("text.sse").await.unwrap();
+        let finish_position = script
+            .iter()
+            .position(|chunk| {
+                chunk
+                    .inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.finish_reason.is_some())
+            })
+            .expect("text fixture has no finish-reason chunk");
+        script.truncate(finish_position);
+        let typed_error = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+            .message(ERROR_MESSAGE)
+            .build();
+        // The tool-enabled Python adapter path serializes the typed error into
+        // a generic error message before it reaches the HTTP frontend.
+        let error = DynamoError::msg(typed_error.to_string());
+        let svc = HarnessService::start_with_backend_error(script, error).await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is this?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+                    ]
+                }],
+                "tools": [{
+                    "type": "function",
+                    "name": "noop",
+                    "description": "No-op tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }],
+                "parallel_tool_calls": false,
+                "stream": true
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let events = parse_json_sse(&response.text().await.unwrap())
+            .await
+            .unwrap();
+        let text_done_position = event_position(&events, "response.output_text.done");
+        let part_done_position = event_position(&events, "response.content_part.done");
+        let item_done_position = event_position(&events, "response.output_item.done");
+        let failed_position = event_position(&events, "response.failed");
+        assert!(text_done_position < part_done_position);
+        assert!(part_done_position < item_done_position);
+        assert!(item_done_position < failed_position);
+
+        let completed_item = &events[item_done_position].data["item"];
+        let failed = &events[failed_position];
+        assert_eq!(completed_item["status"], "incomplete");
+        assert_eq!(failed.data["response"]["status"], "failed");
+        assert_eq!(failed.data["response"]["output"], json!([completed_item]));
+        assert_eq!(
+            failed.data["response"]["error"]["code"],
+            "invalid_prompt"
+        );
+        assert_eq!(
+            failed.data["response"]["error"]["message"],
+            ERROR_MESSAGE
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event != "response.completed")
+        );
+        assert_eq!(
+            svc.metrics.get_request_counter(
+                MODEL,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+        assert_eq!(
+            svc.metrics.get_request_counter(
+                MODEL,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            0
+        );
+
         svc.shutdown().await;
     })
     .await;

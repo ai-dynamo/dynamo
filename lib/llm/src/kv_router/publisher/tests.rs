@@ -574,9 +574,15 @@ mod test_event_processing {
     fn test_parse_mm_hash_from_extra_key() {
         assert_eq!(
             parse_mm_hash_from_extra_key(
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+                "0123456789abcdef000000000000000000000000000000000000000000000000"
             ),
             Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            None
         );
         assert_eq!(parse_mm_hash_from_extra_key("123"), None);
         assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
@@ -585,7 +591,7 @@ mod test_event_processing {
     #[test]
     fn test_extra_keys_to_block_mm_infos() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
             Some(vec![ExtraKeyItem::Hash(mm_hash.clone())]),
             None,
@@ -611,7 +617,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -643,7 +649,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_tuple_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -692,7 +698,7 @@ mod test_event_processing {
             medium: Some("GPU".to_string()),
             lora_name: None,
             extra_keys: Some(vec![Some(vec![
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
+                "0123456789abcdef000000000000000000000000000000000000000000000000".to_string(),
             ])]),
         })
         .unwrap();
@@ -726,7 +732,7 @@ mod test_event_processing {
         }
 
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let payload = rmps::to_vec(&MapBlockStoredEvent {
             event_type: "BlockStored",
             block_hashes: vec![10],

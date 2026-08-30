@@ -62,7 +62,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "8.0.0" }
+dynamo-parsers = { version = "8.1.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 

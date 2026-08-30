@@ -357,11 +357,13 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
-| `ROUTING` | `preferred_taint_multiplier()` | Optional cost multiplier from preferred routing constraints |
+| `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 
 The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A filter or scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
+A filter or scorer reads requested groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every optional group that it reads.
+
+`WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
 ## Link the Policy Into Dynamo
 

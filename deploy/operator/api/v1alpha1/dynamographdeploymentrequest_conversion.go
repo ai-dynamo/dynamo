@@ -32,7 +32,7 @@
 //   - v1alpha1-only spec fields are saved sparsely in annDGDRSpec.
 //   - v1beta1-only spec fields such as Hardware, Workload Concurrency/RequestRate,
 //     SLA E2ELatency, Overrides.DGD, hub-only ProfilingJob leaves, disabled Mocker,
-//     and SearchStrategy are saved sparsely in annDGDRSpec.
+//     KVRouter, and SearchStrategy are saved sparsely in annDGDRSpec.
 //
 // Status follows the same rules: common fields are converted from live source,
 // while alpha-only status and hub-only status such as ProfilingPhase,
@@ -392,6 +392,12 @@ func restoreDGDRHubOnlySpec(restored *v1beta1.DynamoGraphDeploymentRequestSpec, 
 			dst.Features.Mocker = &v1beta1.MockerSpec{Enabled: false}
 		}
 	}
+	if restored.Features != nil && restored.Features.KVRouter != nil {
+		if dst.Features == nil {
+			dst.Features = &v1beta1.FeaturesSpec{}
+		}
+		dst.Features.KVRouter = restored.Features.KVRouter.DeepCopy()
+	}
 	if restored.SearchStrategy != "" {
 		dst.SearchStrategy = restored.SearchStrategy
 	}
@@ -633,8 +639,19 @@ func saveDGDRHubOnlySpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, save *v1
 	if src.Overrides != nil {
 		saveDGDRHubOnlyOverrides(src.Overrides, save)
 	}
-	if src.Features != nil && src.Features.Mocker != nil && !src.Features.Mocker.Enabled {
-		save.Features = &v1beta1.FeaturesSpec{Mocker: &v1beta1.MockerSpec{Enabled: false}}
+	if src.Features != nil {
+		if src.Features.Mocker != nil && !src.Features.Mocker.Enabled {
+			if save.Features == nil {
+				save.Features = &v1beta1.FeaturesSpec{}
+			}
+			save.Features.Mocker = &v1beta1.MockerSpec{Enabled: false}
+		}
+		if src.Features.KVRouter != nil {
+			if save.Features == nil {
+				save.Features = &v1beta1.FeaturesSpec{}
+			}
+			save.Features.KVRouter = src.Features.KVRouter.DeepCopy()
+		}
 	}
 	save.SearchStrategy = src.SearchStrategy
 }

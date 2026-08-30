@@ -747,7 +747,7 @@ fn engine_with_server_info(
         ..Default::default()
     };
     VllmSidecarEngine::new(
-        GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
+        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
         DiscoveredModel::from_proto(model, server).expect("valid discovery"),
         mode,
         transport,
@@ -759,7 +759,7 @@ async fn engine_from_args(
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
     let argv = vec![
         "dynamo-vllm-sidecar".to_string(),
-        "--vllm-endpoint".to_string(),
+        "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
@@ -1365,7 +1365,7 @@ async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
     ] {
         let mut argv = vec![
             "dynamo-vllm-sidecar".to_string(),
-            "--vllm-endpoint".to_string(),
+            "--grpc-endpoint".to_string(),
             server.endpoint.clone(),
             "--component".to_string(),
             "custom".to_string(),
@@ -1389,7 +1389,7 @@ async fn pool_uses_each_configured_connection() {
         connections: NonZeroUsize::new(2).unwrap(),
         ..Default::default()
     };
-    let endpoint = GrpcEndpoint::parse(&server.endpoint, "--vllm-endpoint").unwrap();
+    let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
     let deadline = crate::client::startup_deadline(transport.startup_deadline).unwrap();
     let client = VllmClient::connect(&endpoint, transport, deadline)
         .await

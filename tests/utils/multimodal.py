@@ -16,6 +16,7 @@ from tests.serve.conftest import (
     MULTIMODAL_IMG_URL,
     MULTIMODAL_VIDEO_H264_URL,
     MULTIMODAL_VIDEO_H265_URL,
+    MULTIMODAL_VIDEO_URL,
     get_multimodal_test_image_bytes,
 )
 from tests.utils.engine_process import EngineConfig
@@ -359,14 +360,17 @@ def make_image_payload_b64(
     )
 
 
-def make_video_payload(expected_response: list[str]) -> ChatPayload:
+def make_video_payload(
+    expected_response: list[str], *, frontend_decoding: bool = False
+) -> ChatPayload:
     """Standard video description payload using the local test video."""
+    url = MULTIMODAL_VIDEO_URL if frontend_decoding else LOCAL_VIDEO_TEST_URI
     return chat_payload(
         [
             {"type": "text", "text": "Describe the video in detail"},
             {
                 "type": "video_url",
-                "video_url": {"url": LOCAL_VIDEO_TEST_URI},
+                "video_url": {"url": url},
             },
         ],
         repeat_count=1,

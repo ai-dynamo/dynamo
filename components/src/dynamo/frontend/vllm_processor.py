@@ -355,6 +355,7 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict | None, list, bool]:
         """Extract MM routing info and prepare mm_kwargs transfer.
 
@@ -381,10 +382,19 @@ class VllmProcessor:
             return None, cleanup_items, nixl_transferred
 
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-            )
+            if mm_processor_kwargs:
+                # vLLM rehashes supplied UUIDs when processor kwargs are
+                # present. Fall back to text-prefix routing so the router and
+                # worker cannot publish different cache keys.
+                logger.debug(
+                    "[mm-routing] Exact MM routing disabled because "
+                    "mm_processor_kwargs is non-empty"
+                )
+            else:
+                mm_routing_info = build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
             (
                 mm_hashes_list,
                 mm_placeholders_list,
@@ -393,11 +403,15 @@ class VllmProcessor:
             ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            # Forward hashes only when this frontend built the matching exact
+            # routing sequence. Their presence is the worker's request-time
+            # readiness signal; transfer-only metadata is deliberately separate.
+            if mm_routing_info is not None:
+                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                dynamo_preproc["extra_args"][
+                    "mm_hashes_by_modality"
+                ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_hashes_by_modality"
-            ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"][
                 "mm_placeholders_by_modality"
             ] = mm_placeholders_by_modality
@@ -687,7 +701,11 @@ class VllmProcessor:
                 mm_routing_info,
                 cleanup_items,
                 nixl_transferred,
-            ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+            ) = await self._prepare_mm_routing(
+                vllm_preproc,
+                dynamo_preproc,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+            )
 
             # Forward multimodal URLs so the backend handler can load the media.
             # Only skip when ALL features were transferred — a partial transfer

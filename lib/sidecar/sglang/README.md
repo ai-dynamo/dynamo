@@ -18,13 +18,13 @@ Build and run it directly from the Dynamo workspace:
 ```bash
 cargo build --release -p dynamo-sglang-sidecar
 ./target/release/dynamo-sglang-sidecar \
-    --sglang-endpoint http://127.0.0.1:30001
+    --grpc-endpoint http://127.0.0.1:30001
 ```
 
 There is no published image yet; the "Deploy on Kubernetes" section below builds
 a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
 
-Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
@@ -42,6 +42,7 @@ SGLang can load the Python entry point and supply the gRPC endpoint arguments:
 python3 -m sglang.launch_server \
     <args> \
     --grpc-port 30001 \
+    --incremental-streaming-output \
     --sidecar dynamo.sglang.sidecar
 ```
 

@@ -139,8 +139,21 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    # Frontend decoding fetches the VP9 fixture from the local
+                    # image server and samples four frames in the Rust decoder.
+                    "DYN_MM_ALLOW_INTERNAL": "1",
+                    "DYN_MM_VIDEO_NUM_FRAMES": "4",
                 },
-                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
+                tests=[
+                    MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED)),
+                    MmCase(
+                        suffix="frontend_decoding",
+                        payload=make_video_payload(
+                            MULTIMODAL_VIDEO_EXPECTED, frontend_decoding=True
+                        ),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
             # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder

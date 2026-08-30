@@ -7,6 +7,8 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
+use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+
 //
 // Hyperparameter Contraints
 //
@@ -590,25 +592,26 @@ pub fn validate_tool_choice(
 ) -> Result<(), anyhow::Error> {
     use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
-
-    match tool_choice {
-        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
-            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+    match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
+        Ok(()) => Ok(()),
+        Err(ToolChoiceError::EmptyTools) => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty")
         }
-        Some(ChatCompletionToolChoiceOption::Named(named)) => {
-            let tools = tools.unwrap_or(&[]);
-            if !tools.iter().any(|t| t.function.name == named.function.name) {
-                anyhow::bail!(
-                    "tool named \"{}\" in tool_choice is not present in tools",
-                    named.function.name
-                );
+        Err(ToolChoiceError::MissingTools) => match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                anyhow::bail!("tool_choice is \"required\" but tools is empty")
             }
+            Some(ChatCompletionToolChoiceOption::Named(named)) => anyhow::bail!(
+                "tool named \"{}\" in tool_choice is not present in tools",
+                named.function.name
+            ),
+            _ => Err(ToolChoiceError::MissingTools.into()),
+        },
+        Err(ToolChoiceError::ToolNotFound(name)) => {
+            anyhow::bail!("tool named \"{name}\" in tool_choice is not present in tools")
         }
-        _ => {}
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
 
 /// Validates reasoning effort parameter

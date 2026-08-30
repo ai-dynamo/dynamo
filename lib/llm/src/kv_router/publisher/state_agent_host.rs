@@ -583,6 +583,7 @@ async fn reconcile_owner(
             slot: KvStateAgentSlotConfig {
                 cache_owner_id: owner,
                 global_dp_rank: intent.worker.dp_rank,
+                router_hint_source: intent.router_hint_source.clone(),
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
@@ -704,7 +705,7 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
@@ -756,7 +757,40 @@ mod tests {
             raw_zmq_endpoint: format!("tcp://127.0.0.1:{}", 20_000 + worker.dp_rank),
             raw_topic: "kv-events-residency-v1".to_string(),
             image_token_id: None,
+            router_hint_source: None,
         }
+    }
+
+    #[test]
+    fn router_hint_metadata_does_not_change_stable_slot_identity() {
+        let host = instance("kv_state_agent", 1);
+        let owner = owner(4);
+        let original = intent(
+            &host,
+            instance("producer", 2),
+            owner,
+            WorkerWithDpRank::new(17, 3),
+            71,
+        );
+        let slot = HostedSlot {
+            intent_incarnation: None,
+            producer_instance: None,
+            lifecycle: SlotLifecycle::Detached,
+            agent: None,
+            global_dp_rank: original.worker.dp_rank,
+            kv_state_endpoint: original.kv_state_endpoint.clone(),
+            indexer_domain_id: original.indexer_domain_id,
+            kv_block_size: original.kv_block_size,
+            ingress_protocol: original.ingress_protocol,
+        };
+        let mut upgraded = original.clone();
+        upgraded.router_hint_source = Some(RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+        });
+
+        assert!(slot.matches(&original));
+        assert!(slot.matches(&upgraded));
     }
 
     fn added(
