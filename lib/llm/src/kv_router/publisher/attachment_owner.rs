@@ -184,6 +184,7 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
     Ok(())
 }
 
+/// Resolve the single live V2 state-agent host for this component's namespace.
 async fn discover_single_host(
     component: &dynamo_runtime::component::Component,
 ) -> Result<KvStateHostAdvertisement> {
@@ -197,6 +198,7 @@ async fn discover_single_host(
     .await
 }
 
+/// Startup wait for host discovery from the env knob; invalid values warn and use the default.
 fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> Duration {
     match get_env(HOST_DISCOVERY_TIMEOUT_ENV) {
         None => DEFAULT_HOST_DISCOVERY_TIMEOUT,
@@ -249,7 +251,10 @@ async fn await_single_host(
     // Cancelled on every exit path; without this the discovery watch task
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
-    let expiry = tokio::time::Instant::now() + timeout;
+    // A timeout too large for the clock is effectively unbounded, not a panic.
+    let expiry = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(u32::MAX.into()));
     // The bound covers the whole wait: watch setup and every re-list, not
     // just the idle gaps between events.
     let wait = async {
@@ -276,10 +281,12 @@ async fn await_single_host(
     }
 }
 
+/// Shared so the zero-timeout path stays byte-identical to the legacy error message.
 fn exactly_one_host_error(found: usize) -> anyhow::Error {
     anyhow::anyhow!("state-agent mode requires exactly one live V2 host, found {found}")
 }
 
+/// The one discovery query the snapshot and the watch must share.
 fn host_query(namespace: &str) -> DiscoveryQuery {
     DiscoveryQuery::EventSources(EventSourceQuery::topic(
         namespace,
@@ -288,6 +295,7 @@ fn host_query(namespace: &str) -> DiscoveryQuery {
     ))
 }
 
+/// One authoritative snapshot: `None` while no host is advertised, an error on more than one.
 async fn list_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
@@ -745,7 +753,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             register_host(register.as_ref(), 41, &host()).await;
         });
-        let found = await_single_host(discovery.as_ref(), "ns", Duration::from_secs(5))
+        // u64::MAX also proves an expiry too large for the clock waits
+        // instead of panicking.
+        let found = await_single_host(discovery.as_ref(), "ns", Duration::from_secs(u64::MAX))
             .await
             .unwrap();
         assert_eq!(found.host_instance, host().host_instance);
