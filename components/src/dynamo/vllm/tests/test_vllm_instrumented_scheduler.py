@@ -17,6 +17,7 @@ import random
 import threading
 import uuid
 from collections import deque
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -3339,8 +3340,10 @@ def test_zero_request_decode_injection_is_skipped_immediately():
 
     assert output is None
     assert stub._bench_current_point is None
+    # The fake-injection path stamps the KV seed regime before skipping.
+    expected_point = replace(point, sample_reasons=["kvwarm_fake_fallback"])
     assert stub._bench_skipped_points == [
-        SkippedBenchmarkPoint(point=point, reason="decode_injection_failed")
+        SkippedBenchmarkPoint(point=expected_point, reason="decode_injection_failed")
     ]
     # The admission step is injected one token short of the coordinate.
     stub._bench_inject_fake_decode.assert_called_once_with([15, 15, 15])

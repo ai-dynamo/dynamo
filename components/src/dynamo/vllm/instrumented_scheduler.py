@@ -4097,8 +4097,11 @@ class InstrumentedScheduler(AsyncScheduler):
         if not self._kvwarm_flag_on():
             reason = "flag_off"
         else:
-            parallel = getattr(self.vllm_config, "parallel_config", None)
-            model = getattr(self.vllm_config, "model_config", None)
+            # Lightweight test schedulers may not carry vllm_config at all;
+            # treat that as "cannot prove eligibility" rather than crashing.
+            vllm_config = getattr(self, "vllm_config", None)
+            parallel = getattr(vllm_config, "parallel_config", None)
+            model = getattr(vllm_config, "model_config", None)
             hf = getattr(model, "hf_config", None)
             hf_text = getattr(model, "hf_text_config", hf)
             has_experts = any(
@@ -4114,7 +4117,11 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             ep_enabled = bool(getattr(parallel, "enable_expert_parallel", False))
             prefix_on = bool(
-                getattr(self.cache_config, "enable_prefix_caching", False)
+                getattr(
+                    getattr(self, "cache_config", None),
+                    "enable_prefix_caching",
+                    False,
+                )
             )
             if not has_experts:
                 reason = "dense_model_content_insensitive"
