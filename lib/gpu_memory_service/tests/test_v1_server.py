@@ -29,6 +29,7 @@ from gpu_memory_service.v1.protocol import (
     send_message,
 )
 from gpu_memory_service.v1.server import rpc as rpc_module
+from gpu_memory_service.v1.server.allocations import GMSAllocationManager
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
@@ -160,16 +161,17 @@ def test_client_waits_for_server_startup_and_deadlines_absent_socket(
 
 
 @pytest.mark.timeout(10)
-def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch, serve) -> None:
+def test_rw_close_admits_next_writer_before_handle_release(
+    tmp_path, monkeypatch, serve
+) -> None:
     path = str(tmp_path / "gms.sock")
     vmm = FakeVMM(granularity=64)
-    serve(path, vmm)
+    manager = serve(path, vmm)
     writer = _GMSClientSession(path, RequestedLockType.RW)
     writer.allocate("ephemeral", 64)
 
     release_started = threading.Event()
     release_allowed = threading.Event()
-    close_returned = threading.Event()
     original_release = vmm.release
 
     def blocked_release(handle: int) -> None:
@@ -177,21 +179,43 @@ def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch, serve) -> None:
         assert release_allowed.wait(5)
         original_release(handle)
 
-    def close_writer() -> None:
-        writer.close()
-        close_returned.set()
+    writer_waiting = threading.Event()
+    can_grant_rw = manager._sessions._can_grant_rw
+
+    def observe_blocked_writer() -> bool:
+        granted = can_grant_rw()
+        if not granted:
+            writer_waiting.set()
+        return granted
 
     monkeypatch.setattr(vmm, "release", blocked_release)
-    close_thread = threading.Thread(target=close_writer, daemon=True)
-    close_thread.start()
+    monkeypatch.setattr(manager._sessions, "_can_grant_rw", observe_blocked_writer)
+    replacement_result, replacement_connected, replacement_thread = _connect_in_thread(
+        path, RequestedLockType.RW
+    )
+    assert writer_waiting.wait(5)
 
+    writer.close()
+
+    # The replacement is admitted while the departed epoch's handle release is
+    # still blocked, and it can never collide with a stale allocation ID.
     assert release_started.wait(5)
-    assert not close_returned.is_set()
+    assert replacement_connected.wait(5)
+    assert not release_allowed.is_set()
+    assert manager._allocations.reclaim_snapshot() != (0, 0)
+    assert manager.allocation_snapshot() == ()
+    replacement = replacement_result.pop()
+    with pytest.raises(RuntimeError, match="unknown allocation ID"):
+        replacement.export("ephemeral")
+    replacement.allocate("ephemeral", 64)
+
     release_allowed.set()
-    assert close_returned.wait(5)
-    close_thread.join(timeout=5)
-    assert not close_thread.is_alive()
+    assert manager.drain_reclamation(5)
+    replacement.close()
+    assert manager.drain_reclamation(5)
     assert not vmm.server_handles
+    replacement_thread.join(timeout=5)
+    assert not replacement_thread.is_alive()
 
 
 @pytest.mark.timeout(10)
@@ -279,3 +303,35 @@ def test_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
     ):
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+@pytest.mark.timeout(10)
+def test_repeated_epoch_clears_share_one_reclaimer_thread() -> None:
+    vmm = FakeVMM(granularity=64)
+    allocations = GMSAllocationManager(vmm, 0)
+    release_allowed = threading.Event()
+    original_release = vmm.release
+    reclaimers: set[str] = set()
+
+    def blocked_release(handle: int) -> None:
+        reclaimers.add(threading.current_thread().name)
+        assert release_allowed.wait(5)
+        original_release(handle)
+
+    vmm.release = blocked_release
+    for epoch in range(4):
+        allocations.allocate(f"epoch-{epoch}", 64)
+        assert allocations.clear() == 1
+    # Every epoch is unlinked while its handles are still queued behind one
+    # blocked release, so repeated failovers cannot pile up reclaimer threads.
+    assert allocations.reclaim_snapshot() == (3, 1)
+
+    release_allowed.set()
+    assert allocations.drain(5)
+    assert reclaimers == {"gms-v1-reclaim-0"}
+    assert not vmm.server_handles
+
+    allocations.shutdown()
+    allocations.allocate("after-shutdown", 64)
+    assert allocations.clear() == 1
+    assert not vmm.server_handles

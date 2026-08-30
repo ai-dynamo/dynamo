@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 from gpu_memory_service.common.vmm import VMMDevice
@@ -15,10 +16,17 @@ from gpu_memory_service.common.vmm import VMMDevice
 logger = logging.getLogger(__name__)
 
 _ALLOCATION_RETRY_INTERVAL = 0.5
+_RECLAIM_SHUTDOWN_TIMEOUT = 30.0
 
 
 class GMSAllocationManager:
-    """Own retained device allocation handles by opaque allocation ID."""
+    """Own retained device allocation handles by opaque allocation ID.
+
+    Clearing an epoch unlinks every allocation ID synchronously but releases the
+    physical handles on one background thread: release is proportional to the
+    departed owner's GPU footprint, and the caller clears while holding lock
+    admission for the next writer.
+    """
 
     def __init__(self, vmm: VMMDevice, device: int):
         self._vmm = vmm
@@ -29,6 +37,13 @@ class GMSAllocationManager:
             raise ValueError("allocation granularity must be positive")
         self._allocations: dict[str, int] = {}
         self._lock = threading.Lock()
+        # Reclamation has its own lock because allocate() holds _lock across its
+        # OOM retry sleeps, and those retries depend on the reclaimer to progress.
+        self._reclaim = threading.Condition()
+        self._pending: deque[int] = deque()
+        self._releasing = 0
+        self._reclaimer: threading.Thread | None = None
+        self._stopped = False
 
     def allocate(
         self,
@@ -75,13 +90,89 @@ class GMSAllocationManager:
             del self._allocations[allocation_id]
 
     def clear(self) -> int:
+        """Unlink every allocation ID now; release the handles in the background."""
         with self._lock:
-            allocation_ids = tuple(self._allocations)
-            for allocation_id in allocation_ids:
-                handle = self._allocations[allocation_id]
-                self._vmm.release(handle)
-                del self._allocations[allocation_id]
-            return len(allocation_ids)
+            handles = tuple(self._allocations.values())
+            self._allocations.clear()
+            # Enqueued under _lock so an unlinked handle is never invisible to
+            # both allocation_snapshot() and reclaim_snapshot() at once.
+            queued = self._enqueue_release(handles)
+        if not queued:
+            for handle in handles:
+                self._release(handle)
+        return len(handles)
+
+    def drain(self, timeout: float | None = None) -> bool:
+        """Wait until every queued handle release has completed."""
+        with self._reclaim:
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while self._pending or self._releasing:
+                wait = None if deadline is None else deadline - time.monotonic()
+                if wait is not None and wait <= 0:
+                    return False
+                self._reclaim.wait(wait)
+            return True
+
+    def shutdown(self) -> None:
+        """Drain pending releases and retire the background reclaimer."""
+        if not self.drain(_RECLAIM_SHUTDOWN_TIMEOUT):
+            # The reclaimer is a daemon thread and context teardown frees the
+            # device anyway, so a stalled driver must not hang server close.
+            logger.warning("GPU allocation reclamation did not drain before shutdown")
+        with self._reclaim:
+            self._stopped = True
+            reclaimer = self._reclaimer
+            self._reclaimer = None
+            self._reclaim.notify_all()
+        if reclaimer is not None:
+            reclaimer.join(timeout=_RECLAIM_SHUTDOWN_TIMEOUT)
+
+    def reclaim_snapshot(self) -> tuple[int, int]:
+        """Return the queued and in-flight background handle release counts."""
+        with self._reclaim:
+            return len(self._pending), self._releasing
+
+    def _enqueue_release(self, handles: tuple[int, ...]) -> bool:
+        """Queue handles for background release; False once shut down."""
+        if not handles:
+            return True
+        with self._reclaim:
+            if self._stopped:
+                return False
+            self._pending.extend(handles)
+            if self._reclaimer is None:
+                self._reclaimer = threading.Thread(
+                    target=self._reclaim_forever,
+                    name=f"gms-v1-reclaim-{self._device}",
+                    daemon=True,
+                )
+                self._reclaimer.start()
+            self._reclaim.notify_all()
+            return True
+
+    def _reclaim_forever(self) -> None:
+        while True:
+            with self._reclaim:
+                while not self._pending and not self._stopped:
+                    self._reclaim.wait()
+                if not self._pending:
+                    return
+                handle = self._pending.popleft()
+                self._releasing += 1
+            try:
+                # Released outside every lock: cuMemRelease is slow and must not
+                # serialize against allocate() or block a waiting writer.
+                self._release(handle)
+            finally:
+                with self._reclaim:
+                    self._releasing -= 1
+                    self._reclaim.notify_all()
+
+    def _release(self, handle: int) -> None:
+        try:
+            self._vmm.release(handle)
+        except Exception:
+            logger.exception("Failed to release GPU allocation handle %d", handle)
 
     def _get(self, allocation_id: str) -> int:
         if not allocation_id:

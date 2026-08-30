@@ -32,6 +32,7 @@ _SERVING = "serving"
 _CHECKPOINT_READY = "checkpoint_ready"
 _WEIGHTS_DOMAIN = "weights"
 _KV_CACHE_DOMAIN = "kv_cache"
+_RECLAIM_DRAIN_TIMEOUT = 5.0
 
 
 class _CheckpointDomainManager(Protocol):
@@ -43,6 +44,9 @@ class _CheckpointDomainManager(Protocol):
         ...
 
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
+        ...
+
+    def drain_reclamation(self, timeout: float | None = None) -> bool:
         ...
 
 
@@ -113,6 +117,12 @@ class GMSCheckpointLifecycle:
             raise RuntimeError("weights must contain committed allocations")
         if kv_allocations:
             raise RuntimeError("kv_cache must be empty before checkpoint")
+        # Unlinked KV handles are released asynchronously; a checkpoint must not
+        # capture a reclaimer mid-release or the physical memory it still owns.
+        if not kv_cache.drain_reclamation(_RECLAIM_DRAIN_TIMEOUT):
+            raise RuntimeError(
+                "kv_cache reclamation did not complete before checkpoint"
+            )
 
         self._generation += 1
         self._token = str(uuid4())
