@@ -727,6 +727,7 @@ fn discover_kv_event_sources(
             kv_event_hosts.len()
         )));
     }
+    validate_configured_kv_event_hosts(kv_event_hosts, grpc_endpoint)?;
 
     let default_connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
     let mut sources = Vec::with_capacity(dp_size as usize);
@@ -758,6 +759,23 @@ fn discover_kv_event_sources(
         "discovered SGLang ZMQ KV-event sources"
     );
     Ok(sources)
+}
+
+/// Require configured rank mappings to name explicit, reachable publisher hosts.
+fn validate_configured_kv_event_hosts(
+    kv_event_hosts: &[String],
+    grpc_endpoint: &GrpcEndpoint,
+) -> Result<(), DynamoError> {
+    for host in kv_event_hosts {
+        let bare_host = host.trim().trim_matches(&['[', ']'][..]);
+        if bare_host.is_empty() || matches!(bare_host, "*" | "0.0.0.0" | "::") {
+            return Err(client::protocol_error(format!(
+                "--kv-event-hosts entries must be explicit reachable hosts, got `{host}`"
+            )));
+        }
+        kv_event_connect_host(host, grpc_endpoint)?;
+    }
+    Ok(())
 }
 
 fn kv_event_connect_host(
@@ -1060,5 +1078,42 @@ mod tests {
         assert_eq!(sources[4].endpoint, "tcp://node1:5561");
         assert_eq!(sources[4].dp_rank, 4);
         assert_eq!(sources.len(), 8);
+    }
+
+    #[test]
+    fn rejects_non_explicit_configured_kv_event_hosts() {
+        let discovery = discovery(json!({
+            "page_size": 64,
+            "dp_size": 2,
+            "enable_dp_attention": true,
+            "nnodes": 2,
+            "kv_events": {
+                "publisher": "zmq",
+                "endpoint_host": "*",
+                "endpoint_port_base": 5557,
+                "topic": "kv-events",
+                "block_size": 64,
+                "dp_size": 2
+            }
+        }));
+        let config = build_engine_config(
+            &discovery,
+            DisaggregationMode::Prefill,
+            Some("node0".into()),
+            Some(7200),
+        )
+        .unwrap();
+        let endpoint = GrpcEndpoint::parse("http://node0:50051", "test").unwrap();
+
+        for invalid in ["*", "0.0.0.0", "::", " "] {
+            let hosts = [invalid.to_string(), "node1".to_string()];
+            let error =
+                discover_kv_event_sources(&discovery, &config, &endpoint, &hosts).unwrap_err();
+
+            assert!(
+                error.to_string().contains("explicit reachable hosts"),
+                "unexpected error for {invalid:?}: {error}"
+            );
+        }
     }
 }
