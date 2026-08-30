@@ -30,9 +30,7 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{
-    extract_http_like_error, py_exception_to_backend_error, py_exception_to_error_type,
-};
+use super::errors::{extract_http_like_error, py_exception_to_dynamo_error};
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
 /// Add bindings from this crate to the provided module
@@ -384,14 +382,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
         error.display(py);
 
-        if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
-            return DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
-                .message(message)
-                .build();
-        }
-
-        if let Some((error_type, message)) = py_exception_to_error_type(py, &error) {
+        if let Some((error_type, message)) = py_exception_to_dynamo_error(py, &error) {
             return DynamoError::builder()
                 .error_type(error_type)
                 .message(message)

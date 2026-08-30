@@ -182,3 +182,19 @@ pub fn py_exception_to_error_type(py: Python<'_>, err: &PyErr) -> Option<(ErrorT
     }
     None
 }
+
+/// Classify a Python exception, preferring the specific typed mapping over the
+/// broad [`py_exception_to_backend_error`] fallback.
+///
+/// The precedence is the whole point and is easy to get wrong at a call site.
+/// `WorkerOverloaded` subclasses `DynamoException`, so the bare-`DynamoException`
+/// fallback inside `py_exception_to_backend_error` matches it and reports
+/// `Backend(Unknown)`, leaving [`py_exception_to_error_type`] unreachable. Both
+/// conversion paths call this instead of ordering the two checks themselves.
+pub fn py_exception_to_dynamo_error(py: Python<'_>, err: &PyErr) -> Option<(ErrorType, String)> {
+    if let Some(typed) = py_exception_to_error_type(py, err) {
+        return Some(typed);
+    }
+    py_exception_to_backend_error(py, err)
+        .map(|(backend, message)| (ErrorType::Backend(backend), message))
+}

@@ -42,9 +42,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{
-    extract_http_like_error, py_exception_to_backend_error, py_exception_to_error_type,
-};
+use crate::errors::{extract_http_like_error, py_exception_to_dynamo_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1639,11 +1637,8 @@ where
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     let (error_type, message) = Python::with_gil(|py| {
-        if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
-            return (ErrorType::Backend(backend), message);
-        }
-        if let Some(typed) = py_exception_to_error_type(py, &err) {
-            return typed;
+        if let Some(classified) = py_exception_to_dynamo_error(py, &err) {
+            return classified;
         }
         // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
         // frontend can read the status code instead of defaulting to 500.
