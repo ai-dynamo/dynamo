@@ -28,8 +28,6 @@ spec:
       envs:
         - name: HF_HOME
           value: /opt/models
-        - name: DYN_STORE_KV
-          value: "mem"
         - name: DYN_REQUEST_PLANE
           value: "tcp"
         - name: DYN_TCP_MAX_MESSAGE_SIZE
@@ -58,8 +56,6 @@ spec:
                 - SYS_RESOURCE
                 - NET_RAW
           env:
-            - name: DYN_STORE_KV
-              value: "mem"
             - name: DYN_REQUEST_PLANE
               value: "tcp"
             - name: DYN_TCP_MAX_MESSAGE_SIZE
@@ -133,8 +129,6 @@ spec:
                 - SYS_RESOURCE
                 - NET_RAW
           env:
-            - name: DYN_STORE_KV
-              value: "mem"
             - name: DYN_REQUEST_PLANE
               value: "tcp"
             - name: DYN_TCP_MAX_MESSAGE_SIZE

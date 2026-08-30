@@ -68,8 +68,6 @@ spec:
             value: Qwen/Qwen3-0.6B
           - name: MODEL_PATH
             value: Qwen/Qwen3-0.6B
-          - name: DYN_STORE_KV
-            value: mem
           envFrom:
           - secretRef:
               name: hf-token-secret
