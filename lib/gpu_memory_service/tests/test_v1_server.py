@@ -349,10 +349,14 @@ def test_epoch_clear_releases_inline_when_the_reclaimer_cannot_start(
     vmm = FakeVMM(granularity=64)
     allocations = GMSAllocationManager(vmm, 0)
 
-    def exhausted() -> threading.Thread:
+    def exhausted(self: threading.Thread) -> None:
         raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(allocations, "_start_reclaimer", exhausted)
+    # Thread exhaustion is injected at threading.Thread.start rather than at any
+    # helper of ours, so this control fails on behaviour against any revision
+    # instead of on the absence of a helper. monkeypatch restores it even if an
+    # assertion below raises, so a failure here cannot poison later tests.
+    monkeypatch.setattr(threading.Thread, "start", exhausted)
     allocations.allocate("epoch-0", 64)
     assert allocations.clear() == 1
     # A reclaimer that cannot start must not strand the epoch's handles behind a
