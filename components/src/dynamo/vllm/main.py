@@ -146,7 +146,15 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
     Falls back to `config.model` whenever vLLM did not pull (HF id, local path,
     or older vLLM without `model_weights`).
+
+    `DYN_REGISTER_MODEL_PATH` overrides the registration source outright: some
+    models (e.g. Kimi-K3, `model_type: kimi_k3`) need a frontend-only metadata
+    alias because the Rust tiktoken tokenizer rejects the raw config while the
+    workers must keep loading the real model path.
     """
+    registration_path = os.getenv("DYN_REGISTER_MODEL_PATH")
+    if registration_path:
+        return registration_path
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
