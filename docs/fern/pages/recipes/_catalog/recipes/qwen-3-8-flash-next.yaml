@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen-3-8-flash-next
+title: Qwen3.8-Flash-Next
+page: pages/recipes/model-recipes/qwen-3-8-flash-next.mdx
+provider: qwen
+model:
+  name: Qwen3.8-Flash-Next
+  hf_id: Inferact/Qwen3.8-Flash-Next-NVFP4
+  precision: NVFP4 weights
+status: experimental
+targets:
+  - id: vllm-agg-b200-agentic
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic/deploy.yaml
+    expected_performance:
+      available: true
+      metrics:
+        system_output_throughput: 1830
+        per_gpu_output_throughput: 457.4
+        user_output_throughput_p50: 102.8
+        ttft_p50_ms: 329
+        itl_p50_ms: 9.7
+        prefix_cache_hit_pct: 67.9
+        concurrency: 24
+  - id: vllm-agg-b200-agentic-8gpu
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-8gpu/deploy.yaml
+    expected_performance:
+      available: true
+      metrics:
+        system_output_throughput: 2474
+        per_gpu_output_throughput: 309.3
+        user_output_throughput_p50: 127.6
+        ttft_p50_ms: 339
+        itl_p50_ms: 7.8
+        prefix_cache_hit_pct: 73.1
+        concurrency: 24
+  - id: vllm-disagg-b200-agentic
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+      - disaggregated-prefill-decode
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic/deploy.yaml
+    expected_performance:
+      available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+  - Uses upstream vllm/vllm-openai:qwen38-flash-next image (not a dynamo-built
+    image); ai-dynamo is pip-installed at pod startup
+  - Disaggregated benchmark incomplete (stability issue with hostIPC + cuda_ipc)

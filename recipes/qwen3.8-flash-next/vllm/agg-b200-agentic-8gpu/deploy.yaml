@@ -1,0 +1,236 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.8-Flash-Next on vLLM via Dynamo, aggregated, B200 (TP=4), agentic workload
+# (64K ISL / 400 OSL, 90% prefix reuse).
+#
+# Model: 125B total params (176B incl. 51B N-gram embedding), 6B active per token.
+# Architecture: GDN (Gated DeltaNet) + QSA (Qwen Sparse Attention) hybrid MoE.
+# Multimodal: text + image.  Native context: 262,144 tokens.
+#
+# Checkpoint: Inferact/Qwen3.8-Flash-Next-NVFP4 — Inferact quantized NVFP4 weights
+# with per-layer embeddings in NVFP4 too.  ~130 GB VRAM minimum (TP4 = ~33 GB/GPU).
+#
+# Image: vllm/vllm-openai:qwen38-flash-next — model-specific vLLM build with GDN/QSA
+# kernels.  ai-dynamo is pip-installed at pod startup.
+#
+# Key model-specific requirements:
+#   - VLLM_PLE_CPU_OFFLOAD=1: offloads the 51B N-gram embedding table to host RAM
+#     (requires >= 51 GB host memory per worker).
+#   - --enable-expert-parallel: improves MoE throughput on TP4.
+#   - --speculative-config mtp/3: built-in Multi-Token Prediction (3 draft tokens).
+#   - --no-disable-hybrid-kv-cache-manager: required for multimodal (GDN + attention layers).
+#   - VLLM_SSM_CONV_STATE_LAYOUT=DS: GDN state layout, must match across workers.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen38fn-agg-b200-agentic-8gpu
+  labels:
+    app.kubernetes.io/name: qwen38fn-agg-b200-agentic-8gpu-8gpu
+    app.kubernetes.io/part-of: qwen3.8-flash-next
+    engine: vllm
+    hardware: b200
+    mode: agg
+spec:
+  backendFramework: vllm
+  env:
+    - name: HF_HOME
+      value: /model-cache
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: TRANSFORMERS_OFFLINE
+      value: "1"
+    - name: HOME
+      value: /tmp
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: VLLM_PLE_CPU_OFFLOAD
+      value: "1"
+    - name: VLLM_SSM_CONV_STATE_LAYOUT
+      value: DS
+    - name: FLASHINFER_DISABLE_VERSION_CHECK
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "1"
+    - name: NCCL_DEBUG
+      value: WARN
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: PYTHONUNBUFFERED
+      value: "1"
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: "1.4.2"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: vllm/vllm-openai:qwen38-flash-next
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  pip install --no-cache-dir ai-dynamo==1.4.2
+                  exec python3 -m dynamo.frontend \
+                    --router-mode kv \
+                    --router-kv-events \
+                    --kv-cache-block-size 64 \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000
+              ports:
+                - name: http
+                  containerPort: 8000
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+                readOnly: true
+            - name: runtime-tmp
+              emptyDir: {}
+    - name: VllmWorker
+      type: worker
+      replicas: 2
+      runtimeVersionOverride: "1.4.2"
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: vllm/vllm-openai:qwen38-flash-next
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  pip install --no-cache-dir ai-dynamo==1.4.2
+                  ulimit -l unlimited
+                  SPEC_CFG='{"method":"mtp","num_speculative_tokens":3}'
+                  KV_EVT='{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
+                  exec python3 -m dynamo.vllm \
+                    --model Inferact/Qwen3.8-Flash-Next-NVFP4 \
+                    --served-model-name Inferact/Qwen3.8-Flash-Next-NVFP4 \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --enable-expert-parallel \
+                    --speculative-config "${SPEC_CFG}" \
+                    --max-model-len 262144 \
+                    --max-num-seqs 256 \
+                    --gpu-memory-utilization 0.90 \
+                    --no-enable-flashinfer-autotune \
+                    --enable-prefix-caching \
+                    --no-disable-hybrid-kv-cache-manager \
+                    --dyn-reasoning-parser qwen3 \
+                    --dyn-tool-call-parser qwen3_coder \
+                    --enable-multimodal \
+                    --kv-events-config "${KV_EVT}"
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: 750Gi
+                  ephemeral-storage: 20Gi
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: ["IPC_LOCK", "SYS_RESOURCE"]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: VLLM_PLE_CPU_OFFLOAD
+                  value: "1"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: FLASHINFER_DISABLE_VERSION_CHECK
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_DEBUG
+                  value: WARN
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: runtime-tmp
+                  mountPath: /tmp
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+                readOnly: true
+            - name: runtime-tmp
+              emptyDir: {}
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
