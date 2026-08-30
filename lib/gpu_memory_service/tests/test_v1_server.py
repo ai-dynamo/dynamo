@@ -311,10 +311,10 @@ def test_repeated_epoch_clears_share_one_reclaimer_thread() -> None:
     allocations = GMSAllocationManager(vmm, 0)
     release_allowed = threading.Event()
     original_release = vmm.release
-    reclaimers: set[str] = set()
+    reclaimers: set[threading.Thread] = set()
 
     def blocked_release(handle: int) -> None:
-        reclaimers.add(threading.current_thread().name)
+        reclaimers.add(threading.current_thread())
         assert release_allowed.wait(5)
         original_release(handle)
 
@@ -322,16 +322,22 @@ def test_repeated_epoch_clears_share_one_reclaimer_thread() -> None:
     for epoch in range(4):
         allocations.allocate(f"epoch-{epoch}", 64)
         assert allocations.clear() == 1
-    # Every epoch is unlinked while its handles are still queued behind one
-    # blocked release, so repeated failovers cannot pile up reclaimer threads.
-    assert allocations.reclaim_snapshot() == (3, 1)
+    # Every epoch is unlinked while its handles are still behind one blocked
+    # release, so no release can have completed: whether the reclaimer has been
+    # scheduled yet only moves a handle from queued to in-flight.
+    queued, releasing = allocations.reclaim_snapshot()
+    assert queued + releasing == 4
 
     release_allowed.set()
     assert allocations.drain(5)
-    assert reclaimers == {"gms-v1-reclaim-0"}
+    # Repeated failovers must not pile up reclaimer threads: every release ran
+    # on the same thread, the one named for this device.
+    assert len(reclaimers) == 1
+    assert reclaimers.pop().name == "gms-v1-reclaim-0"
     assert not vmm.server_handles
 
     allocations.shutdown()
     allocations.allocate("after-shutdown", 64)
     assert allocations.clear() == 1
     assert not vmm.server_handles
+
