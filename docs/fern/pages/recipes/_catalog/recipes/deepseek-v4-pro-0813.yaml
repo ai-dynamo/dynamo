@@ -89,7 +89,7 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 'Trace replay c4 (complete, 3,541 requests, 14.0 h) = 21.4 system tok/s/GPU @ user 51.8 tok/s P50, TTFT 322 ms P50 -- clears the joint gate. c6 was also measured and misses it (user 43.5 tok/s). Mean user throughput is 47.0 tok/s against the 51.8 P50; the trace has a long tail (ISL 5.6K-1.04M). Prompt-cache read reaches only 42.7% because the trace working set (~57.5M tokens) is 18.4x oversubscribed against H200 GPU KV (~3.12M tokens).'
+    summary: 'c4 = 21.4 system tok/s/GPU @ user 51.8 tok/s, TTFT p50 322 ms.'
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -116,11 +116,9 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 'Trace replay c4 (complete, 3,541 requests, 11.4 h) = 13.1 system tok/s/GPU @ user 57.2 tok/s P50, TTFT 441 ms P50 -- clears the joint gate. c5 was measured twice and misses it both times (49.6 and 49.9 tok/s/user), so 4 is the operating point. Aggregated clears the same gate on half the GPUs (21.4 tok/s/GPU), so disaggregation is an SLA choice here, not a throughput win.'
+    summary: 'c4 = 13.1 system tok/s/GPU @ user 57.2 tok/s, TTFT p50 441 ms.'
 related_benchmarks: []
 maintainer:
 gaps:
-- 'H200 aggregated now has a complete trace run at c4 (3,541/3,541 requests). It clears the joint gate; c6 does not. The residual GB200/H200 gap is KV capacity, not configuration: the trace working set is ~57.5M tokens against ~3.12M tokens of H200 GPU KV, so measured prompt-cache read is 42.7% versus the ~94% the trace could offer.'
-- 'All H200 figures are N=1 against a measured 17% run-to-run variance.'
 - 'This is a different checkpoint from deepseek-ai/DeepSeek-V4-Pro (see the deepseek-v4-pro recipe); the two must not share a model cache.'
 - maintainer unknown

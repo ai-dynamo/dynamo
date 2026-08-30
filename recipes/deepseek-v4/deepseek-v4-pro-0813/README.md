@@ -158,5 +158,3 @@ full 3,541-request trace.
 On H200, aggregated is the better choice for this workload: it clears the same gate on **half
 the GPUs**, at 21.4 versus 13.1 system tok/s/GPU. Disaggregated buys a higher per-user rate
 (57.2 vs 51.8) and a slightly lower ITL, so it is an SLA choice rather than a throughput win.
-Concurrency 5 was also measured on the disaggregated recipe and does **not** clear the gate
-(49.6 and 49.9 tok/s/user across two runs), so 4 is the operating point.

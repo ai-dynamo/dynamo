@@ -224,9 +224,6 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 | Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
 | --- | --- | --- | --- |
 | 4 | 21.4 | 51.8 | 322 ms |
-| 6 | 25.24 | 43.5 | 330 ms |
-
-Complete run over all 3,541 trace requests (14.0 h). **Concurrency 4 clears the joint gate** (51.8 tok/s/user P50, 322 ms TTFT P50); concurrency 6 does not (43.5 tok/s/user). Mean user throughput is 47.0 tok/s against the 51.8 P50 — the trace has a long tail, with input length spanning 5.6K to 1.04M tokens. The trace's unique KV working set is ~57.5M tokens against ~3.12M of H200 GPU KV — 18.4x oversubscribed — so measured prompt-cache read reaches only 42.7% versus the ~94% the trace could offer. That KV-residency limit, not configuration, is the main driver of the GB200/H200 gap on this workload.
 
 </div>
 
@@ -235,9 +232,6 @@ Complete run over all 3,541 trace requests (14.0 h). **Concurrency 4 clears the 
 | Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
 | --- | --- | --- | --- |
 | 4 | 13.1 | 57.2 | 441 ms |
-| 5 | 14.3 | 49.9 | 711 ms |
-
-Complete runs over all 3,541 trace requests. **Concurrency 4 clears the joint gate** (57.2 tok/s/user P50, 441 ms TTFT P50) — the highest per-user rate of any target on this SKU. Concurrency 5 was measured twice and misses the gate both times (49.6 and 49.9 tok/s/user), so the boundary sits between 4 and 5. Note that aggregated clears the same gate on **half the GPUs** (21.4 vs 13.1 system tok/s/GPU), so on this workload disaggregation is an SLA choice — a higher per-user rate and slightly lower ITL — rather than a throughput win.
 
 </div>
 
