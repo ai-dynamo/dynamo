@@ -133,22 +133,35 @@ class GMSAllocationManager:
             return len(self._pending), self._releasing
 
     def _enqueue_release(self, handles: tuple[int, ...]) -> bool:
-        """Queue handles for background release; False once shut down."""
+        """Queue handles for background release; False once shut down or unstartable."""
         if not handles:
             return True
         with self._reclaim:
             if self._stopped:
                 return False
-            self._pending.extend(handles)
             if self._reclaimer is None:
-                self._reclaimer = threading.Thread(
-                    target=self._reclaim_forever,
-                    name=f"gms-v1-reclaim-{self._device}",
-                    daemon=True,
-                )
-                self._reclaimer.start()
+                try:
+                    # Published only once start() has succeeded: a dead thread in
+                    # _reclaimer would strand every later handle in _pending.
+                    self._reclaimer = self._start_reclaimer()
+                except RuntimeError:
+                    # Thread exhaustion. Leave _reclaimer unset so the next clear
+                    # retries, and make the caller release inline: a slow clear
+                    # beats leaking the departed owner's GPU memory forever.
+                    logger.exception("Cannot start the GPU allocation reclaimer")
+                    return False
+            self._pending.extend(handles)
             self._reclaim.notify_all()
             return True
+
+    def _start_reclaimer(self) -> threading.Thread:
+        reclaimer = threading.Thread(
+            target=self._reclaim_forever,
+            name=f"gms-v1-reclaim-{self._device}",
+            daemon=True,
+        )
+        reclaimer.start()
+        return reclaimer
 
     def _reclaim_forever(self) -> None:
         while True:

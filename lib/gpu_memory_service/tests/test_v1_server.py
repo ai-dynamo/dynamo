@@ -341,3 +341,29 @@ def test_repeated_epoch_clears_share_one_reclaimer_thread() -> None:
     assert allocations.clear() == 1
     assert not vmm.server_handles
 
+
+@pytest.mark.timeout(10)
+def test_epoch_clear_releases_inline_when_the_reclaimer_cannot_start(
+    monkeypatch,
+) -> None:
+    vmm = FakeVMM(granularity=64)
+    allocations = GMSAllocationManager(vmm, 0)
+
+    def exhausted() -> threading.Thread:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(allocations, "_start_reclaimer", exhausted)
+    allocations.allocate("epoch-0", 64)
+    assert allocations.clear() == 1
+    # A reclaimer that cannot start must not strand the epoch's handles behind a
+    # thread that will never run them.
+    assert not vmm.server_handles
+    assert allocations.reclaim_snapshot() == (0, 0)
+    assert allocations.drain(5)
+
+    monkeypatch.undo()
+    allocations.allocate("epoch-1", 64)
+    assert allocations.clear() == 1
+    assert allocations.drain(5)
+    assert not vmm.server_handles
+    allocations.shutdown()
