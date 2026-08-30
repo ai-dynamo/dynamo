@@ -92,7 +92,7 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
   Timeout in seconds for KVBM leader and worker initialization. Raise it for large multi-node deployments that take longer to come up.
 </ParamField>
 
-<ParamField path="DYN_KVBM_LEADER_ZMQ_HOST" type="string" default="unset">
+<ParamField path="DYN_KVBM_LEADER_ZMQ_HOST" type="string" default="127.0.0.1">
   ZMQ host for the KVBM leader.
 </ParamField>
 
@@ -100,7 +100,7 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
   ZMQ publish port for the KVBM leader. The TRT-LLM integration derives its port from this value.
 </ParamField>
 
-<ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="string" default="unset">
+<ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="integer" default="56002">
   ZMQ acknowledgment port for the KVBM leader.
 </ParamField>
 
@@ -132,7 +132,7 @@ Enable individual NixL transfer backends with the `DYN_KVBM_NIXL_BACKEND_<backen
   Enable the KVBM metrics endpoint.
 </ParamField>
 
-<ParamField path="DYN_KVBM_METRICS_PORT" type="integer" default="unset">
+<ParamField path="DYN_KVBM_METRICS_PORT" type="integer" default="6880">
   Port for the KVBM metrics endpoint.
 </ParamField>
 
