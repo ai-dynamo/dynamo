@@ -168,13 +168,34 @@ def cumem_map(va: int, size: int, handle: int) -> None:
     cuda_check_result(result, "cuMemMap")
 
 
+def _ro_maps_readwrite() -> bool:
+    """True when RO sessions should map READWRITE (diagnostic override)."""
+    return os.environ.get("DYN_GMS_RO_MAP_READWRITE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def cumem_set_access(va: int, size: int, device: int, access: GrantedLockType) -> None:
     access_desc = cuda.CUmemAccessDesc()
     access_desc.location.type = cuda.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
     access_desc.location.id = device
+    read_only = access == GrantedLockType.RO
+    if read_only and _ro_maps_readwrite():
+        # Diagnostic escape hatch: map an RO session's pages READWRITE.
+        # PROT_READ is a hardware protection, so a kernel that touches those
+        # pages in a way the driver treats as a write - including some
+        # read-modify-write and wide vectorised access patterns - faults with
+        # cudaErrorIllegalAddress rather than a clean permission error. This
+        # isolates that flag from the rest of the read-only path; the lock
+        # still prevents concurrent writers, so it is safe for a single
+        # reader, but it removes the guarantee that a buggy reader cannot
+        # corrupt weights other engines are sharing.
+        read_only = False
     access_desc.flags = (
         cuda.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READ
-        if access == GrantedLockType.RO
+        if read_only
         else cuda.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
     )
     (result,) = cuda.cuMemSetAccess(va, size, [access_desc], 1)
