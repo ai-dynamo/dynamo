@@ -231,7 +231,7 @@ Planner can read these traffic signals from either the public `Frontend` or a po
 | Request count | `dynamo_frontend_requests_started_total` | `dynamo_component_router_requests_started_total` |
 | TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
 | ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
-| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
+| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_router_request_duration_seconds` |
 | Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
 | Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
 | KV hit rate | `dynamo_component_router_kv_hit_rate` | `dynamo_component_router_kv_hit_rate` |
