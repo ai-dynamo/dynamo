@@ -173,18 +173,21 @@ class VideoLoader:
         unsupported-codec error, which can name the codec because the probe
         already ran here.
 
-        Request ``media_io_kwargs`` do not apply on the NVDEC path: it
-        implements uniform ``num_frames`` sampling only, so ``fps`` and any
-        backend-specific keys are ignored for H.264/H.265. Only vLLM's video
-        backend owns the full ``media_io_kwargs`` contract, so it is reached
-        for royalty-free codecs, or for every clip when
-        ``DYN_DISABLE_NVDEC=1``.
+        The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
+        frames come back -- ``num_frames`` and ``fps`` -- because it samples
+        uniformly just as vLLM does. Backend-specific keys (``video_backend``,
+        ``seek_mode``, ...) name decoders NVDEC is not and are ignored for
+        H.264/H.265. Only vLLM's video backend owns the full
+        ``media_io_kwargs`` contract, so it is reached for royalty-free codecs,
+        or for every clip when ``DYN_DISABLE_NVDEC=1``.
         """
         codec = probe_video_codec(content)
         if should_use_nvdec(codec):
             try:
                 return await asyncio.to_thread(
-                    decode_video_nvdec, content, self._num_frames
+                    decode_video_nvdec,
+                    content,
+                    **self._extract_nvdec_args(media_io),
                 )
             except Exception as exc:  # noqa: BLE001 - fall back to software decode
                 logger.warning(
@@ -198,6 +201,23 @@ class VideoLoader:
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
+
+    def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
+        num_frames = getattr(media_io, "num_frames", self._num_frames)
+        if not isinstance(num_frames, int) or num_frames < 1:
+            num_frames = self._num_frames
+
+        fps = (getattr(media_io, "kwargs", None) or {}).get("fps", -1)
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring non-numeric video media_io fps: %r", fps)
+            fps = -1.0
+
+        return {
+            "num_frames": num_frames,
+            "fps": fps,
+        }
 
     async def load_video(
         self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None

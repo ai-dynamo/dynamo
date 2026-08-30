@@ -214,7 +214,9 @@ async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
     monkeypatch.setattr(
-        video_loader_module, "decode_video_nvdec", lambda b, n: (frames, meta)
+        video_loader_module,
+        "decode_video_nvdec",
+        lambda content, **kwargs: (frames, meta),
     )
     media_io = _RecordingMediaIO(frames)
 

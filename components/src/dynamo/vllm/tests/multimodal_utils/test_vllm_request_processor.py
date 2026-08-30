@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
@@ -170,6 +171,64 @@ async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
         expected_frames,
         atol=16,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_io_kwargs,expected_num_frames,expected_fps",
+    [
+        # A bare cap: the request's count reaches the decoder, not the
+        # loader's startup default of 32.
+        ({"num_frames": 4}, 4, -1.0),
+        # fps instead: vLLM's merge_kwargs drops num_frames when only fps is
+        # given, so the cap stays at the default and fps rides along to be
+        # applied against the clip's duration.
+        ({"fps": 1}, 32, 1.0),
+    ],
+)
+async def test_worker_video_media_io_kwargs_control_nvdec_decode(
+    monkeypatch, video_io_kwargs, expected_num_frames, expected_fps
+):
+    """Request-level video kwargs reach the NVDEC decoder too.
+
+    Sibling of ``test_worker_video_media_io_kwargs_control_vllm_decode``: same
+    request shape, but routed to hardware decode, which used to sample the
+    loader's startup default and ignore the request entirely. NVDEC needs a
+    GPU, so the decode is stubbed -- what is asserted is the sampling request
+    handed to it. How it resolves those two caps against the clip is covered in
+    ``test_nvdec_decoder.py``.
+    """
+    frames = np.zeros((8, 16, 16, 3), dtype=np.uint8)
+    video_uri = "data:video/mp4;base64," + base64.b64encode(
+        encode_to_video_bytes(frames, fps=4, output_format="mp4")
+    ).decode("ascii")
+
+    # Route to NVDEC regardless of what the fixture encoder produced: it does
+    # not let the test pick H.264, and codec probing has its own unit tests.
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda data: "h264")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda codec: True)
+    requested = {}
+
+    def _decode(content, num_frames, fps):
+        requested.update(num_frames=num_frames, fps=fps)
+        return frames[:1], {"frames_indices": [0]}
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _decode)
+
+    processor = _processor(video_loader=VideoLoader())
+    await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"video_url": [{"Url": video_uri}]},
+            "media_io_kwargs": {"video": video_io_kwargs},
+        },
+        "real-nvdec-video-request",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert requested == {"num_frames": expected_num_frames, "fps": expected_fps}
 
 
 @pytest.mark.asyncio
