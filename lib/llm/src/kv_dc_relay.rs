@@ -9,6 +9,11 @@ mod host;
 mod identity;
 mod load;
 mod pool_registry;
+mod publication_codec;
+mod publication_format;
+mod publication_hub;
+mod publication_source;
+mod publication_stream;
 mod resolution;
 mod topology;
 
@@ -30,6 +35,9 @@ pub use identity::{
     ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
 };
 pub use load::PoolLoadSnapshot;
+pub use publication_codec::{PublicationFrame, PublicationFrameKind};
+pub use publication_source::{PublicationError, PublicationErrorKind, RelayPublicationSource};
+pub use publication_stream::PoolPublicationStream;
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };
