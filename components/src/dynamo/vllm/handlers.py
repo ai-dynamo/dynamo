@@ -3722,6 +3722,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             kv_protocol.prefill_request_kv_transfer_params(),
             preserve_router_hint=True,
         )
+        # Remote prefill builds one shared prompt KV handoff; decode owns fan-out.
+        sampling_params.n = 1
+        if hasattr(sampling_params, "best_of"):
+            sampling_params.best_of = 1
+
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
