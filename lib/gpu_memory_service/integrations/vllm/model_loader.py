@@ -727,12 +727,40 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
             cloned.append(name)
     # FusedTopkBiasRouter stores e_score_correction_bias as a plain tensor
     # alias of Parameter.data. Replacing _parameters does not update it.
+    #
+    # The alias is captured in the router's constructor, which runs while the
+    # model is still on the meta device, so it can still be a meta tensor after
+    # materialization repointed the real parameter. Skipping meta here would
+    # leave the router holding a meta tensor and fail the first forward with
+    # "Tensor on device meta is not on the expected device cuda:N" - reported
+    # far downstream, since the router runs inside the MoE. Re-resolve the alias
+    # against the materialized parameter of the same name instead.
+    materialized = {
+        name: tensor
+        for name, tensor in list(model.named_parameters())
+        + list(model.named_buffers())
+        if torch.is_tensor(tensor) and not tensor.is_meta and tensor.is_cuda
+    }
     for mod_name, module in model.named_modules():
         for attr in ("e_score_correction_bias", "_hash_indices_table"):
             if not hasattr(module, attr):
                 continue
             t = getattr(module, attr)
-            if not torch.is_tensor(t) or t.is_meta or not t.is_cuda:
+            if not torch.is_tensor(t):
+                continue
+            if t.is_meta:
+                qualified = f"{mod_name}.{attr}" if mod_name else attr
+                real = materialized.get(qualified)
+                if real is None:
+                    logger.warning(
+                        "[GMS] Read mode: %s is still on meta after "
+                        "materialization and has no materialized parameter to "
+                        "resolve against; the first forward would fail on it",
+                        qualified,
+                    )
+                    continue
+                t = real
+            elif not t.is_cuda:
                 continue
             off = _off_gms(t)
             if hasattr(module, "_parameters") and attr in module._parameters:
@@ -749,6 +777,29 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
             "[GMS] Read mode: cloned %d Triton-incompatible params off GMS: %s",
             len(cloned),
             cloned[:8],
+        )
+
+    # Fail closed on any tensor still on meta. A leaked meta tensor does not
+    # fault where it lives: it surfaces as "Tensor on device meta is not on the
+    # expected device cuda:N" from whatever kernel first touches it, which for
+    # the router alias above is deep inside the MoE, several stages after the
+    # real defect. Name the offenders at load time instead.
+    stranded = [
+        name
+        for name, tensor in list(model.named_parameters())
+        + list(model.named_buffers())
+        if torch.is_tensor(tensor) and tensor.is_meta
+    ]
+    for mod_name, module in model.named_modules():
+        for attr in ("e_score_correction_bias", "_hash_indices_table"):
+            t = getattr(module, attr, None)
+            if torch.is_tensor(t) and t.is_meta:
+                stranded.append(f"{mod_name}.{attr}" if mod_name else attr)
+    if stranded:
+        raise RuntimeError(
+            f"[GMS] Read mode: {len(stranded)} tensor(s) are still on the meta "
+            f"device after materialization: {stranded[:10]}. They would fail "
+            "the first forward with a device mismatch."
         )
 
 
