@@ -439,6 +439,10 @@ pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
 struct DefaultScoringContext {
     min_active_prefill_tokens: usize,
     has_tier_overlap_blocks: bool,
+    /// Mean decode-side load across eligible workers, used as the reference
+    /// point for `score_load_gamma`. Zero whenever the shaping is inactive, in
+    /// which case `worker_logit` never reads it.
+    mean_pool_load: f64,
 }
 
 pub(super) struct DefaultWorkerPicker {
@@ -559,7 +563,29 @@ impl DefaultScoringContext {
         request: &SchedulingRequest,
         eligibility: RoutingEligibility<'_>,
         weights: LogitWeights,
+        kv_router_config: &KvRouterConfig,
     ) -> Self {
+        // Only the convex branch of the load shaping needs a pool reference
+        // point, so skip the extra pass in every other configuration.
+        let mean_pool_load = if kv_router_config.score_enabled
+            && kv_router_config.score_load_gamma != 1.0
+        {
+            let mut total = 0.0;
+            let mut count = 0usize;
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let load = request.worker_load_for(worker);
+                total += load.potential_decode_blocks() as f64
+                    + kv_router_config.decode_active_request_weight * load.active_requests as f64;
+                count += 1;
+            });
+            if count == 0 {
+                0.0
+            } else {
+                total / count as f64
+            }
+        } else {
+            0.0
+        };
         let min_active_prefill_tokens =
             if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
                 let mut minimum = usize::MAX;
@@ -576,6 +602,7 @@ impl DefaultScoringContext {
         Self {
             min_active_prefill_tokens,
             has_tier_overlap_blocks,
+            mean_pool_load,
         }
     }
 
@@ -639,10 +666,42 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
+        let stock_overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
+        // How much of this request's prompt the worker already holds. The stock
+        // credit is linear in the absolute overlap; expressing it as a fraction
+        // of the request lets `score_overlap_gamma` bend that response curve and
+        // `score_min_overlap_frac` drop matches too thin to be worth chasing.
+        let overlap_frac = if context.request_blocks == 0 {
+            0.0
+        } else {
+            (effective_overlap_blocks / context.request_blocks as f64).clamp(0.0, 1.0)
+        };
+        // `overlap_frac^gamma * request_blocks` from the contract equals
+        // `overlap_frac^(gamma-1)` times the linear credit, so shaping the stock
+        // credit multiplicatively reproduces it while keeping the host, disk and
+        // shared tiers on the same curve. At the neutral knobs the factor is
+        // exactly 1.0 and this reduces to the stock credit bit for bit.
+        let overlap_credit_blocks = if kv_router_config.score_enabled {
+            if overlap_frac < kv_router_config.score_min_overlap_frac {
+                0.0
+            } else {
+                let shape = if kv_router_config.score_overlap_gamma == 1.0 {
+                    1.0
+                } else if overlap_frac > 0.0 {
+                    overlap_frac.powf(kv_router_config.score_overlap_gamma - 1.0)
+                } else {
+                    // `0^negative` is infinite; a zero-overlap worker earns
+                    // nothing under any gamma, so pin the shaped credit to zero.
+                    0.0
+                };
+                kv_router_config.score_overlap_weight * shape * stock_overlap_credit_blocks
+            }
+        } else {
+            stock_overlap_credit_blocks
+        };
         let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
@@ -678,7 +737,32 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 
         let adjusted_prefill_blocks = (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        // Charge the decode-side backlog convexly relative to the pool average so
+        // a worker that is already hotter than its peers pays more than its
+        // linear share.
+        let load_scale = if kv_router_config.score_enabled {
+            let load_term = decode_cost_blocks + active_request_cost_blocks;
+            let shape = if kv_router_config.score_load_gamma == 1.0
+                || default_context.mean_pool_load <= 0.0
+                || load_term <= 0.0
+            {
+                1.0
+            } else {
+                (load_term / default_context.mean_pool_load)
+                    .powf(kv_router_config.score_load_gamma - 1.0)
+            };
+            kv_router_config.score_load_weight * shape
+        } else {
+            1.0
+        };
+        // A unit scale is the stock case (shaping off, or neutral knobs). Keep
+        // the original summation order there so the result is bit-identical
+        // rather than merely close: float addition is not associative.
+        let logit = if load_scale == 1.0 {
+            prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks
+        } else {
+            prefill_cost_blocks + load_scale * (decode_cost_blocks + active_request_cost_blocks)
+        };
 
         // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
         // spawns without the caller's request span, so the logging layer cannot attach
@@ -781,8 +865,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Option<(WorkerWithDpRank, f64)> {
-    let default_context =
-        DefaultScoringContext::new(workers, request, eligibility, input.context.weights);
+    let default_context = DefaultScoringContext::new(
+        workers,
+        request,
+        eligibility,
+        input.context.weights,
+        scorer.kv_router_config,
+    );
     if let Some(worker) = eligibility.pinned_worker() {
         let row = default_row(input, default_context, worker, None);
         return Some((
@@ -1010,8 +1099,13 @@ mod tests {
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
         let input = MaterializedSelectionInput::new(request, block_size, weights);
-        let default_context =
-            DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
+        let default_context = DefaultScoringContext::new(
+            &workers,
+            request,
+            request.eligibility(),
+            weights,
+            &selector.kv_router_config,
+        );
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
                 &input.context,
@@ -1049,8 +1143,14 @@ mod tests {
             shared_cache_multiplier: 0.0,
         };
 
-        let default_context =
-            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let config = KvRouterConfig::default();
+        let default_context = DefaultScoringContext::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            weights,
+            &config,
+        );
         assert_eq!(default_context.min_active_prefill_tokens, 7);
 
         let weights_without_decay = LogitWeights {
@@ -1063,6 +1163,7 @@ mod tests {
                 &request,
                 request.eligibility(),
                 weights_without_decay,
+                &config,
             )
             .min_active_prefill_tokens,
             0
@@ -2218,8 +2319,13 @@ mod tests {
             shared_cache_multiplier: 1.0,
         };
         let input = MaterializedSelectionInput::new(&request, 16, weights);
-        let default_context =
-            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let default_context = DefaultScoringContext::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            weights,
+            &KvRouterConfig::default(),
+        );
         let custom_row = input.row(worker, None, WorkerInputs::CACHE);
         let default_row = default_row(&input, default_context, worker, None);
 
@@ -2791,6 +2897,249 @@ mod tests {
                 .worker_id,
             0
         );
+    }
+
+    /// A request with partial device overlap and decode backlog, enough for
+    /// both the overlap credit and the load term to be non-trivial.
+    fn score_request() -> SchedulingRequest {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        // 512 tokens at block_size 64 = 8 request blocks; 2 blocks overlap = 0.25.
+        let mut request = base_request(512);
+        request.overlap.effective_overlap_blocks.insert(worker, 2.0);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(worker, 2 * 64);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 40,
+                active_requests: 3,
+                ..Default::default()
+            },
+        );
+        request
+    }
+
+    fn score_weights() -> LogitWeights {
+        LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        }
+    }
+
+    fn score_logit(config: KvRouterConfig) -> f64 {
+        let selector = DefaultWorkerSelector::new(Some(config), "test");
+        worker_logit(
+            &selector,
+            &score_request(),
+            WorkerWithDpRank::from_worker_id(0),
+            64,
+            score_weights(),
+        )
+    }
+
+    /// The whole shaping is multiplicative around 1.0, so the neutral knob set
+    /// must land on the stock logit exactly — not merely close.
+    #[test]
+    fn score_neutral_values_are_identical_to_stock() {
+        let neutral = KvRouterConfig {
+            score_enabled: true,
+            score_overlap_weight: 1.0,
+            score_overlap_gamma: 1.0,
+            score_load_weight: 1.0,
+            score_load_gamma: 1.0,
+            score_min_overlap_frac: 0.0,
+            decode_active_request_weight: 2.0,
+            ..Default::default()
+        };
+        let stock = KvRouterConfig {
+            score_enabled: false,
+            ..neutral.clone()
+        };
+
+        assert_eq!(score_logit(neutral), score_logit(stock));
+    }
+
+    /// The A/B mechanism probe replays every claim with `score_enabled=false`,
+    /// so disabled shaping must not perturb a single selection.
+    #[test]
+    fn score_disabled_is_identical_to_stock() {
+        let workers = sita_workers(8, 1_000);
+        let disabled = KvRouterConfig {
+            score_enabled: false,
+            // Non-default score knobs must stay inert while disabled.
+            score_overlap_weight: 3.5,
+            score_overlap_gamma: 0.5,
+            score_load_weight: 0.25,
+            score_load_gamma: 2.0,
+            score_min_overlap_frac: 0.4,
+            ..Default::default()
+        };
+        let stock = KvRouterConfig::default();
+
+        for isl in [64, 256, 1_024, 4_096, 16_384] {
+            let mut request = base_request(isl);
+            for worker_id in 0..8 {
+                let worker = WorkerWithDpRank::from_worker_id(worker_id);
+                request.worker_loads.insert(
+                    worker,
+                    crate::sequences::WorkerLoadProjection {
+                        active_decode_blocks: (worker_id as usize) * 37,
+                        active_prefill_tokens: (worker_id as usize) * 11,
+                        active_requests: worker_id as usize,
+                        ..Default::default()
+                    },
+                );
+                request
+                    .overlap
+                    .effective_cached_tokens
+                    .insert(worker, (worker_id as usize) * 64);
+                request
+                    .overlap
+                    .effective_overlap_blocks
+                    .insert(worker, worker_id as f64);
+            }
+
+            for temperature in [0.0, 0.7] {
+                let select = |config: &KvRouterConfig| {
+                    let selector = DefaultWorkerSelector::new_seeded(
+                        Some(KvRouterConfig {
+                            router_temperature: temperature,
+                            ..config.clone()
+                        }),
+                        "test",
+                        7,
+                    );
+                    (0..32)
+                        .map(|_| {
+                            selector
+                                .select_worker(WorkerSelectionInput::configured(
+                                    &workers,
+                                    &request,
+                                    request.eligibility(),
+                                    64,
+                                ))
+                                .unwrap()
+                                .worker
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                assert_eq!(
+                    select(&disabled),
+                    select(&stock),
+                    "score_enabled=false changed selection at isl={isl} temperature={temperature}"
+                );
+            }
+        }
+    }
+
+    /// A prefix match thinner than the cutoff earns nothing, which raises the
+    /// logit to the no-credit baseline.
+    #[test]
+    fn score_min_overlap_frac_drops_thin_matches() {
+        let base = KvRouterConfig {
+            score_enabled: true,
+            ..Default::default()
+        };
+        // The fixture overlaps 2 of 8 request blocks.
+        let below_cutoff = score_logit(KvRouterConfig {
+            score_min_overlap_frac: 0.2,
+            ..base.clone()
+        });
+        let above_cutoff = score_logit(KvRouterConfig {
+            score_min_overlap_frac: 0.3,
+            ..base.clone()
+        });
+        let no_credit = score_logit(KvRouterConfig {
+            score_overlap_weight: 0.25,
+            score_min_overlap_frac: 0.5,
+            ..base.clone()
+        });
+
+        // 0.25 >= 0.2 keeps the credit and matches the unshaped logit.
+        assert_eq!(below_cutoff, score_logit(base));
+        // 0.25 < 0.3 suppresses it, so the request pays full prefill.
+        assert!(
+            above_cutoff > below_cutoff,
+            "cutting overlap credit must raise the cost: {above_cutoff} vs {below_cutoff}"
+        );
+        // Once suppressed, the credit weight no longer matters.
+        assert_eq!(above_cutoff, no_credit);
+    }
+
+    /// The fixture's overlap fraction is below 1.0, so raising the exponent
+    /// shrinks the credit and raising load gamma above 1.0 charges a
+    /// hotter-than-average worker more.
+    #[test]
+    fn score_gammas_are_monotone() {
+        let base = KvRouterConfig {
+            score_enabled: true,
+            ..Default::default()
+        };
+        let overlap_logit = |gamma: f64| {
+            score_logit(KvRouterConfig {
+                score_overlap_gamma: gamma,
+                ..base.clone()
+            })
+        };
+
+        // overlap_frac = 0.25 < 1, so frac^gamma decreases as gamma grows,
+        // shrinking the credit and increasing the cost.
+        let costs: Vec<f64> = [0.5, 1.0, 1.5, 2.0].into_iter().map(overlap_logit).collect();
+        for pair in costs.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "overlap cost must rise with gamma: {pair:?}"
+            );
+        }
+
+        // Load shaping needs a pool where this worker is above the mean, so
+        // score the busy worker against an idle peer.
+        let workers = sita_workers(2, 1_000);
+        let mut request = base_request(512);
+        request.worker_loads.insert(
+            WorkerWithDpRank::from_worker_id(0),
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 200,
+                ..Default::default()
+            },
+        );
+        let load_cost = |gamma: f64| {
+            let config = KvRouterConfig {
+                score_load_gamma: gamma,
+                ..base.clone()
+            };
+            let weights = score_weights();
+            let input = MaterializedSelectionInput::new(&request, 64, weights);
+            let default_context = DefaultScoringContext::new(
+                &workers,
+                &request,
+                request.eligibility(),
+                weights,
+                &config,
+            );
+            let worker = WorkerWithDpRank::from_worker_id(0);
+            DefaultWorkerScorer::new(config, "test").worker_logit(
+                &input.context,
+                default_context,
+                &default_row(&input, default_context, worker, None),
+                "test",
+            )
+        };
+
+        // Worker 0 carries 200 blocks against a pool mean of 100, so the
+        // load/mean ratio is 2.0 and convexity must charge it more.
+        let load_costs: Vec<f64> = [1.0, 1.25, 1.5, 2.0].into_iter().map(load_cost).collect();
+        for pair in load_costs.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "an above-average worker must be charged more as load gamma rises: {pair:?}"
+            );
+        }
     }
 
     /// The A/B mechanism probe compares `sita_enabled=false` against stock, so
