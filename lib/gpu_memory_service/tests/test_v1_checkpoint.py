@@ -18,7 +18,7 @@ if not HAS_GMS:
 
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.v1 import cli
+from gpu_memory_service.v1 import checkpoint, cli
 from gpu_memory_service.v1.checkpoint import GMSCheckpointClient, GMSCheckpointLifecycle
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import PrepareCheckpointRequest
@@ -211,6 +211,33 @@ def test_prepare_rejects_committed_or_active_kv(v1_owner) -> None:
 
     with pytest.raises(RuntimeError, match="kv_cache must not be committed"):
         control.prepare()
+
+
+@pytest.mark.timeout(10)
+def test_prepare_requires_weights_reclamation_to_complete(
+    v1_owner, monkeypatch
+) -> None:
+    monkeypatch.setattr(checkpoint, "_RECLAIM_DRAIN_TIMEOUT", 0.05)
+    v1_owner.publish_weights()
+    release_allowed = threading.Event()
+    original_release = v1_owner.vmm.release
+
+    def blocked_release(handle: int) -> None:
+        assert release_allowed.wait(5)
+        original_release(handle)
+
+    monkeypatch.setattr(v1_owner.vmm, "release", blocked_release)
+    # Republishing unlinks the previous weights epoch, whose handles are still
+    # being released in the background when the controller asks to checkpoint.
+    v1_owner.publish_weights()
+    control = v1_owner.control()
+    with pytest.raises(RuntimeError, match="weights reclamation did not complete"):
+        control.prepare()
+    assert control.state().state == "serving"
+
+    release_allowed.set()
+    assert v1_owner.managers["weights"].drain_reclamation(5)
+    assert control.prepare().state == "checkpoint_ready"
 
 
 @pytest.mark.timeout(10)
