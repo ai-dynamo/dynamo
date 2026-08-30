@@ -23,9 +23,10 @@ class GMSAllocationManager:
     """Own retained device allocation handles by opaque allocation ID.
 
     Clearing an epoch unlinks every allocation ID synchronously but releases the
-    physical handles on one background thread: release is proportional to the
-    departed owner's GPU footprint, and the caller clears while holding lock
-    admission for the next writer.
+    physical handles on one background thread. Release blocks on the driver
+    tearing down the departed owner's context, which is unbounded and varies by
+    more than an order of magnitude on identical inputs, and the caller clears
+    while holding lock admission for the next writer.
     """
 
     def __init__(self, vmm: VMMDevice, device: int):
