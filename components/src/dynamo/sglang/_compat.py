@@ -41,7 +41,7 @@ def _warn_require_reasoning_unsupported() -> None:
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.17 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -82,15 +82,20 @@ def ensure_sglang_tensor_image_size() -> None:
 
 
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
-    """Apply a post-resolution SGLang configuration update.
+    """Apply a post-resolution, pre-publish SGLang configuration update.
 
-    SGLang 0.5.17 makes ``ServerArgs`` unconditionally read-only after
-    resolution. Both supported CUDA releases expose ``ServerArgs.override`` as
-    the audited mutation API, so Dynamo must use it instead of assigning fields.
-    The separately pinned XPU image still uses SGLang 0.5.11, which predates
-    that API; preserve its legacy assignment behavior until its engine pin is
-    upgraded.
+    SGLang 0.5.18 replaced ``ServerArgs.override`` with
+    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
+    of the instance must observe. SGLang 0.5.17 exposes the former API. The
+    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
+    preserve its legacy assignment behavior until its engine pin is upgraded.
     """
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
     override = getattr(server_args, "override", None)
     if callable(override):
         override(source, **fields)

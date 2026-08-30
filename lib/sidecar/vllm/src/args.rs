@@ -11,8 +11,4 @@ use dynamo_sidecar_common::SidecarArgs;
 pub(crate) struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
-
-    /// vLLM gRPC endpoint as host:port or an http:// URL.
-    #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
-    pub vllm_endpoint: String,
 }

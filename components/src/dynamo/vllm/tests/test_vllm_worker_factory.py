@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -40,6 +40,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "embedding_frontend_tokenization": False,
         # Pin to the real Config default: an auto-created Mock attribute is
         # truthy, which enables the GMS shadow-mode path and imports the
         # optional gpu_memory_service package (absent in some test images).
@@ -1158,3 +1159,72 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedding_frontend_tokenization", "expected_model_input"),
+    [(False, ModelInput.Text), (True, ModelInput.Tokens)],
+)
+async def test_embedding_worker_registration_and_cleanup(
+    embedding_frontend_tokenization: bool,
+    expected_model_input: ModelInput,
+) -> None:
+    cleanup_order: list[str] = []
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "embedding-worker-id"
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda: cleanup_order.append("client")
+    engine_cleanup_resource = Mock()
+    engine_cleanup_resource.cleanup.side_effect = lambda: cleanup_order.append(
+        "resource"
+    )
+    setup_vllm_engine = Mock(
+        return_value=(
+            engine_client,
+            Mock(),
+            Mock(),
+            engine_cleanup_resource,
+            Mock(),
+        )
+    )
+    register_vllm_model = AsyncMock(return_value=None)
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: cleanup_order.append("handler")
+    config = _make_config(
+        embedding_worker=True,
+        embedding_frontend_tokenization=embedding_frontend_tokenization,
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        model="test-model",
+    )
+    shutdown_event = asyncio.Event()
+    shutdown_endpoints: list = []
+
+    with patch(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+        return_value=handler,
+    ):
+        await factory._create_embedding_worker(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+        )
+
+    register_vllm_model.assert_awaited_once()
+    assert register_vllm_model.await_args.args[0] == expected_model_input
+    assert cleanup_order == ["handler", "client", "resource"]
+    assert shutdown_endpoints == [endpoint]

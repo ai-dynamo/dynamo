@@ -175,6 +175,15 @@ service.
 
     <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
+  <ParamField path="kvRouter" type="KVRouterSpec">
+    Configures KV-cache-aware routing for the generated deployment. When enabled, DGDR sets
+    `DYN_ROUTER_MODE=kv` on the generated Frontend.
+  </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean">
+      Enables KV-cache-aware routing.
+    </ParamField>
+  </Indent>
   <ParamField path="mocker" type="MockerSpec">
     Configures the simulated (mocker) backend for testing without GPUs.
   </ParamField>
@@ -186,7 +195,10 @@ service.
 </Indent>
 
 <Note>
-  DGDR does not currently expose a `features.kvRouter` field. To configure router mode or KV-aware routing, use a direct DGD, a tuned recipe, or `overrides.dgd` (see [Generated DGD overrides](#generated-dgd-overrides)).
+  `spec.overrides.dgd` takes precedence over `features.kvRouter`. A DGD override can replace
+  `DYN_ROUTER_MODE` on the Frontend container or provide an explicit `--router-mode` argument. The
+  command-line flag takes precedence over the environment variable when both are present. See
+  [Generated DGD overrides](#generated-dgd-overrides).
 </Note>
 
 ### Overrides

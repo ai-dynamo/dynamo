@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers import ToolParser
 
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -936,7 +937,7 @@ class TestReasoningParserMetadata:
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
-            def __init__(self, tokenizer, *, chat_template_kwargs):
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
                 self.tokenizer = tokenizer
                 self.chat_template_kwargs = chat_template_kwargs
 
@@ -961,7 +962,7 @@ class TestReasoningParserMetadata:
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
-            def __init__(self, tokenizer, *, chat_template_kwargs):
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
                 self.tokenizer = tokenizer
                 self.chat_template_kwargs = chat_template_kwargs
 
@@ -1191,6 +1192,9 @@ async def test_generator_preserves_zero_top_logprobs(
         generation_config_fields={},
         renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
         process_inputs=process_inputs,
+        # Real InputProcessor always carries this (vllm_config.model_config);
+        # _generator_inner forwards it to the reasoning parser.
+        model_config=None,
     )
 
     processor = vllm_processor_module.VllmProcessor(
@@ -1230,7 +1234,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
     class FakeReasoningParser:
         engine_based_streaming = False
 
-        def __init__(self, tokenizer, *, chat_template_kwargs):
+        def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
             self.tokenizer = tokenizer
             self.chat_template_kwargs = chat_template_kwargs
             self.adjusted_prompt_token_ids = None
@@ -1296,6 +1300,9 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         generation_config_fields={},
         renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
         process_inputs=process_inputs,
+        # Real InputProcessor always carries this (vllm_config.model_config);
+        # _generator_inner forwards it to the reasoning parser.
+        model_config=None,
     )
     processor = vllm_processor_module.VllmProcessor(
         tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
@@ -1377,6 +1384,68 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         "finish_reason": "stop",
         "logprobs": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_generator_inner_forwards_reasoning_parser_and_model_config(
+    vllm_processor_module,
+    monkeypatch,
+):
+    """The processor must hand its own parser AND model config to preprocessing.
+
+    Every other reasoning-parser test calls preprocess_chat_request or
+    _prepare_request directly with an explicit reasoning_parser_class, so all of
+    them keep passing if the production call in _generator_inner stops forwarding
+    them. This is the boundary check that does not: it reads the arguments off the
+    real call site. Deleting either wiring line makes exactly this test fail.
+
+    model_config is checked alongside because it is equally load-bearing and
+    equally invisible: without it the shipped Cohere parsers return the request
+    untouched and adjust_request() is a silent no-op.
+    """
+
+    class _SentinelReasoningParser:
+        """Identity is the whole point -- this is never instantiated."""
+
+    class _StopAfterPreprocess(Exception):
+        """Ends the generator at the boundary under test."""
+
+    sentinel_model_config = SimpleNamespace(architecture="SentinelForCausalLM")
+    captured: dict = {}
+
+    async def spy_preprocess_chat_request(request, **kwargs):
+        captured.update(kwargs)
+        raise _StopAfterPreprocess
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        spy_preprocess_chat_request,
+    )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2),
+        input_processor=SimpleNamespace(
+            renderer=object(), model_config=sentinel_model_config
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=_SentinelReasoningParser,
+        routed_engine=object(),
+    )
+
+    with pytest.raises(_StopAfterPreprocess):
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }
+            )
+        )
+
+    assert captured.get("reasoning_parser_class") is _SentinelReasoningParser
+    assert captured.get("model_config") is sentinel_model_config
 
 
 def _make_processor(module, routed_engine):
@@ -1706,6 +1775,338 @@ class TestPreprocessRawRequestControls:
             default_thinking_mode="disabled",
         )
         assert "thinking_mode" not in result.chat_template_kwargs
+
+
+class _FakeStructuralTagReasoningParser:
+    """A reasoning parser that rewrites the caller's constraint.
+
+    Mirrors a real text-grammar parser converting response_format into the
+    structural tag its model actually speaks.
+    """
+
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+        del tokenizer, chat_template_kwargs
+        self._model_config = model_config
+
+    def adjust_request(self, request):
+        request.skip_special_tokens = False
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag='{"format": "reasoning"}'
+        )
+        return request
+
+
+class _FakePassthroughReasoningParser(_FakeStructuralTagReasoningParser):
+    def adjust_request(self, request):
+        return request
+
+
+class _ModelConfigGatedReasoningParser(_FakeStructuralTagReasoningParser):
+    """Rewrites the constraint only when it was given a model_config.
+
+    This is the shipped Cohere parsers' actual contract:
+    BaseCohereCommandReasoningParser.adjust_request reads
+    ``self._model_config.architecture`` and returns the request untouched when the
+    config is absent. A fake that ignores model_config cannot tell a working call
+    from a no-op, which is how the missing kwarg went unnoticed.
+    """
+
+    def adjust_request(self, request):
+        if self._model_config is None:
+            return request
+        return super().adjust_request(request)
+
+
+class TestReasoningParserGuidanceForwarding:
+    """A reasoning parser's guidance must be recomputed and forwarded.
+
+    Regression: parser_guided_decoding was gated on `tool_parser is not None`, and
+    build_tool_call_guided_decoding returns early when there is no tool-call
+    guidance to build. A reasoning parser that rewrote the caller's constraint
+    therefore never surfaced: the request carried the adjusted constraint while the
+    engine received the pre-adjustment copy captured before _prepare_request ran.
+    """
+
+    @staticmethod
+    def _request(**overrides):
+        """A fresh request each call, so no test can perturb another's input."""
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_object"},
+            **overrides,
+        }
+
+    @staticmethod
+    def _renderer():
+        return SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(None, {"prompt_token_ids": [1]})
+            )
+        )
+
+    async def _preprocess(self, tokenizer, *, request=None, **kwargs):
+        kwargs.setdefault("tool_parser_class", None)
+        return await prepost_module.preprocess_chat_request(
+            request if request is not None else self._request(),
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_without_a_tool_parser(self, tokenizer):
+        """The whole point: no tool parser anywhere in the request."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+        # The pre-adjustment copy must not win.
+        assert result.guided_decoding != {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_passthrough_parser_keeps_the_caller_constraint(self, tokenizer):
+        """adjust_request that changes nothing must not disturb the caller."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_thinking_disabled_does_not_recompute(self, tokenizer):
+        """The gate is off, so no parser runs and nothing may be recomputed.
+
+        Recomputing here would forward a constraint from a parser that the
+        postprocessor will not build.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(chat_template_kwargs={"enable_thinking": False}),
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.request_for_sampling.skip_special_tokens is not False
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_with_a_tool_parser_also_active(self, tokenizer):
+        """Attribution is measured, so a tool parser being present is irrelevant.
+
+        Both parsers run against the same request inside _prepare_request. The
+        snapshot taken between them shows the tool parser left the guidance alone
+        and the reasoning parser rewrote it, so the rewrite is attributable and
+        wins -- exactly as it does with no tool parser at all.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakePassthroughToolParser,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_tool_parser_rewrite_still_loses_to_the_caller(self, tokenizer):
+        """The other half: tool-path precedence is deliberately unchanged.
+
+        Same measurement, opposite attribution -- the tool parser moved the
+        guidance and the reasoning parser did not -- so the caller's explicit
+        constraint still wins, as pinned by
+        test_assistant_guidance_takes_precedence_over_auto_tool_guidance and the
+        response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_model_config_reaches_the_parser(self, tokenizer):
+        """A parser that needs model_config must actually receive it.
+
+        Without it the shipped Cohere parsers return the request untouched, which
+        made the whole adjust_request() call a no-op for the only parser in vLLM
+        that overrides it.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
+            model_config=SimpleNamespace(architecture="CohereForCausalLM"),
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_without_model_config_the_gated_parser_is_a_no_op(self, tokenizer):
+        """The negative control: same parser, no config, caller's constraint stands.
+
+        This is the behaviour the PR shipped before model_config was threaded
+        through -- kept so the pair documents the difference.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+
+class _PassthroughStreamingToolParser(ToolParser):
+    """A tool parser that finds no tool call and passes the raw delta through.
+
+    Subclasses the real ToolParser so every attribute the postprocessor touches
+    exists, and returns the unstripped `delta_text` the way a real parser does.
+    """
+
+    def extract_tool_calls_streaming(self, **kwargs):
+        return prepost_module.DeltaMessage(content=kwargs["delta_text"])
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
+
+
+class _InactiveReasoningParser:
+    """A configured reasoning parser that never becomes active on a request.
+
+    `enable_thinking=False` and `response_reasoning_ended=True` both leave
+    StreamingPostProcessor.reasoning_parser None, so this is only ever passed as a
+    class -- constructing it is the bug this fake exists to catch.
+    """
+
+    def __init__(self, tokenizer, *, chat_template_kwargs):
+        raise AssertionError("must not be constructed for an inactive request")
+
+
+class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
+    """A tool parser that owns two of the tokenizer's special tokens."""
+
+    tool_call_start_token = "<|im_start|>"
+    tool_call_end_token = "<|im_end|>"
+
+
+class TestControlMarkerStrip:
+    """Unconsumed special tokens must not reach the client.
+
+    A text-grammar reasoning parser can only split the stream if the model's
+    content-kind markers survive detokenisation, which is why
+    ParserEngine.adjust_request forces skip_special_tokens=False. Nothing then
+    removes the markers the parser did not consume, so terminal ones leak into
+    visible content -- the report was content = "<|end_message|>408<|end_message|>",
+    a special token on that model's tokenizer. These use `<|im_end|>`, which is
+    the equivalent on Qwen3-0.6B.
+    """
+
+    @staticmethod
+    def _post(
+        tokenizer,
+        *,
+        tool_parser=None,
+        reasoning_parser_class=None,
+        response_reasoning_ended=None,
+        chat_template_kwargs=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request.pop("tools", None)
+        request, _, _, _, _ = _prepare_request(
+            request, tokenizer=tokenizer, tool_parser_class=None
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=tool_parser,
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs=chat_template_kwargs or {},
+            response_reasoning_ended=response_reasoning_ended,
+            stream_response=True,
+        )
+
+    @staticmethod
+    def _content(post, text):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        return choice["delta"].get("content")
+
+    def test_reported_leak_is_removed(self, tokenizer):
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
+
+    def test_non_special_literal_of_the_same_shape_survives(self, tokenizer):
+        """Looking like a control token is not proof of being one.
+
+        `<|not_a_real_special_token|>` is absent from all_special_tokens and
+        encodes to ordinary token IDs, so it is generated text and must reach the
+        client intact.
+        """
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        literal = "The literal is <|not_a_real_special_token|>."
+        assert self._content(post, literal) == literal
+
+    def test_parser_owned_markers_are_preserved(self, tokenizer):
+        """A marker the parser owns is wire format, consumed downstream."""
+        post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser(tokenizer))
+        assert (
+            post._strip_control_markers("<|im_start|>{}<|im_end|>")
+            == "<|im_start|>{}<|im_end|>"
+        )
+        # A special token it does not own is still removed.
+        assert post._strip_control_markers("<|endoftext|>x") == "x"
+
+    def test_no_parser_configured_is_passthrough(self, tokenizer):
+        """Only a *configured* parser forces skip_special_tokens off."""
+        post = self._post(tokenizer)
+        assert post.tool_parser is None and post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408") == "<|im_end|>408"
+
+    @pytest.mark.parametrize(
+        "inactive_kwargs",
+        [
+            {"response_reasoning_ended": True},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ],
+        ids=["reasoning-already-ended", "thinking-disabled"],
+    )
+    def test_configured_but_inactive_reasoning_parser_still_strips(
+        self, tokenizer, inactive_kwargs
+    ):
+        """The CONFIGURED parser forces skip_special_tokens off, not the instance.
+
+        preprocessor.rs::parser_requires_special_tokens keys the
+        skip_special_tokens=false default off the deployment's configured
+        reasoning_parser NAME; it never sees this request's enable_thinking or
+        response_reasoning_ended. But this class leaves self.reasoning_parser None on
+        exactly those requests, so gating the strip on the instance made it a no-op
+        precisely where markers still arrive undecoded.
+        """
+        post = self._post(
+            tokenizer,
+            reasoning_parser_class=_InactiveReasoningParser,
+            **inactive_kwargs,
+        )
+        assert post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
 
 
 class TestToolCallGuidedDecoding:
@@ -2539,3 +2940,316 @@ class TestThinkingControlParity:  # FRONTEND.10
             tool_parser_class=None,
         )
         assert kwargs == case.expected
+
+
+class _AccountingReasoningParser:
+    """Emits reasoning until a chunk contains "</think>", then visible content."""
+
+    engine_based_streaming = False
+
+    def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+        self.tokenizer = tokenizer
+        self.chat_template_kwargs = chat_template_kwargs or {}
+        self.model_config = model_config
+
+    def is_reasoning_end(self, prompt_token_ids):
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        return None
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        if "</think>" in delta_text:
+            return prepost_module.DeltaMessage(content=delta_text.split("</think>")[-1])
+        return prepost_module.DeltaMessage(reasoning=delta_text)
+
+    def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+        return False
+
+    def extract_reasoning(self, text, request=None):
+        if "</think>" in text:
+            reasoning, _, content = text.partition("</think>")
+            return reasoning, content
+        return text, ""
+
+    def count_reasoning_tokens(self, token_ids):
+        """Everything up to and including the end marker counts as reasoning.
+
+        The production code delegates to this, so the fake has to provide it --
+        a fake that omits it inherits ReasoningParser's base, which returns 0.
+        """
+        end = self.tokenizer.encode("</think>", add_special_tokens=False)
+        end_id = end[-1] if end else None
+        count = 0
+        for tid in token_ids:
+            count += 1
+            if tid == end_id:
+                break
+        return count
+
+
+class _PassthroughToolParser:
+    """Finds no tool calls; returns the text as content.
+
+    The buffered non-streaming path only needs `tool_parser is not None` to engage,
+    so this keeps the reasoning-accounting test focused on reasoning.
+    """
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        self.tokenizer = tokenizer
+
+    def extract_tool_calls(self, text, request=None):
+        return SimpleNamespace(tools_called=False, tool_calls=[], content=text)
+
+
+class TestReasoningTokenAccounting:
+    """Reasoning-token usage on the Python chat-processor path (NVBug 6678449b).
+
+    dynamo #12181 added this only to the Rust OpenAIPreprocessor, which
+    `--dyn-chat-processor vllm` bypasses, so `reasoning_tokens` was absent from usage
+    entirely (the worker's _build_completion_usage emits no completion_tokens_details).
+
+    The count is accumulated where the reasoning parser CLASSIFIES output, NOT where
+    the response is projected. The two regression tests below both reported 0 when it
+    was derived from the emitted choices.
+    """
+
+    @staticmethod
+    def _post(tokenizer, *, include_reasoning=True, stream_response=True, tools=False):
+        request = SimpleNamespace(
+            include_reasoning=include_reasoning,
+            tool_choice="auto" if tools else "none",
+            model_fields=frozenset(),
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=_PassthroughToolParser(tokenizer) if tools else None,
+            reasoning_parser_class=_AccountingReasoningParser,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+
+    @staticmethod
+    def _out(text, token_ids, finish_reason=None, index=0):
+        return SimpleNamespace(
+            index=index,
+            text=text,
+            token_ids=token_ids,
+            finish_reason=finish_reason,
+            logprobs=None,
+        )
+
+    @staticmethod
+    def _annotator(*posts):
+        from dynamo.frontend.vllm_processor import _ReasoningUsageAnnotator
+
+        return _ReasoningUsageAnnotator({i: p for i, p in enumerate(posts)})
+
+    # -- streaming classification ------------------------------------------
+
+    def test_streaming_counts_reasoning_only_not_the_answer(self, tokenizer):
+        """Real parser, real ids: the visible answer must not be counted."""
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning = tokenizer.encode("<think>abc</think>", add_special_tokens=False)
+        answer = tokenizer.encode("the answer", add_special_tokens=False)
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(reasoning + answer)
+
+        post = self._qwen3_post(tokenizer)
+        for tid in reasoning + answer:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native
+        assert 0 < native < len(reasoning + answer)
+
+    # -- P1 #1: account before the include_reasoning projection ------------
+
+    def test_hidden_reasoning_is_counted_when_include_reasoning_false(self, tokenizer):
+        """include_reasoning=false suppresses the reasoning DELTA, not the tokens.
+
+        Observing emitted choices saw no reasoning_content here and reported 0 for a
+        response that really did spend tokens reasoning.
+        """
+        post = self._post(tokenizer, include_reasoning=False)
+        choice = post.process_output(self._out("hidden", [1, 2, 3]))
+
+        # The projection still hides it -- that part is intended...
+        assert choice is None or "reasoning_content" not in (choice.get("delta") or {})
+        # ...but the tokens are accounted anyway.
+        assert post.reasoning_token_total == 3
+        annotated = self._annotator(post).annotate({"completion_tokens": 10})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 3
+
+    # -- P1 #2: survive non-streaming tool buffering ------------------------
+
+    def test_non_streaming_tool_buffering_preserves_count(self, tokenizer):
+        """The non-streaming tool path emits nothing per chunk and releases on the
+        terminal delta, where chunk_tokens is 0. Per-chunk observation of emitted
+        choices therefore saw only zeros and reported 0.
+        """
+        post = self._post(tokenizer, stream_response=False, tools=True)
+        for chunk in ("think a", "think b", "think c"):
+            assert post.process_output(self._out(chunk, [1, 2])) is None
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+
+        assert post.reasoning_token_total > 0
+        annotated = self._annotator(post).annotate({"completion_tokens": 20})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] > 0
+
+    def test_non_streaming_buffering_counts_even_when_suppressed(self, tokenizer):
+        """Both projections at once: buffered AND include_reasoning=false."""
+        post = self._post(
+            tokenizer, stream_response=False, tools=True, include_reasoning=False
+        )
+        post.process_output(self._out("thinking hard", [1, 2]))
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+        assert post.reasoning_token_total > 0
+
+    def test_no_reasoning_parser_counts_nothing(self, tokenizer):
+        """Without a reasoning parser there is nothing to delegate to -> 0.
+
+        Note the counterpart is NOT true: with a parser, plain content is not
+        automatically zero. Qwen3's parser counts an unopened span as reasoning
+        (the model is trained to reason first), so delegating means inheriting
+        that contract -- which is the point, since it is what vLLM itself
+        reports.
+        """
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        for tid in tokenizer.encode("just an answer", add_special_tokens=False):
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == 0
+
+    # -- the parser's OWN counter, not a re-derivation -----------------------
+
+    @staticmethod
+    def _qwen3_post(tokenizer):
+        from vllm.reasoning import ReasoningParserManager
+
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+
+    def test_count_matches_the_parser_for_split_marker_tokens(self, tokenizer):
+        """`<think>`, `abc`, `<`, `x` -- the parser counts 3.
+
+        A per-chunk classifier that adds len(delta_token_ids) whenever the chunk
+        carried reasoning reported 2 here. Delegating to the parser's own
+        count_reasoning_tokens is what makes this exact.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        ids = [
+            i
+            for piece in ("<think>", "abc", "<", "x")
+            for i in tokenizer.encode(piece, add_special_tokens=False)
+        ]
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        assert native == 3, f"fixture drift: parser now counts {native}"
+
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 3
+
+    def test_count_survives_non_injective_detokenisation(self, tokenizer):
+        """Generated id 77150 decodes to '１０', which RE-ENCODES to two tokens.
+
+        Counting by re-encoding the decoded reasoning text therefore reported 2
+        for a single generated token. The ledger keeps the original ids, so the
+        parser sees exactly what was generated.
+        """
+        think = tokenizer.encode("<think>", add_special_tokens=False)
+        ids = think + [77150]
+        assert (
+            len(tokenizer.encode(tokenizer.decode([77150]), add_special_tokens=False))
+            == 2
+        ), "fixture drift: 77150 no longer re-encodes to 2 tokens"
+
+        from vllm.reasoning import ReasoningParserManager
+
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 1
+
+    # -- annotation ---------------------------------------------------------
+
+    def test_total_sums_across_choices(self, tokenizer):
+        a, b = self._post(tokenizer), self._post(tokenizer)
+        a.process_output(self._out("x", [1, 2]))
+        b.process_output(self._out("y", [3, 4, 5]))
+        assert self._annotator(a, b).total == 5
+
+    def test_annotate_fills_when_absent_and_does_not_mutate_input(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens": 100}
+        out = self._annotator(post).annotate(usage)
+        assert out["completion_tokens_details"]["reasoning_tokens"] == 2
+        assert "completion_tokens_details" not in usage
+
+    def test_annotate_preserves_a_positive_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 7}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 7
+
+    def test_annotate_replaces_a_zero_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 0}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+    @pytest.mark.parametrize("backend", [-1, -100, None, "7"])
+    def test_annotate_replaces_a_non_positive_backend_value(self, tokenizer, backend):
+        """Only a POSITIVE backend count is authoritative.
+
+        -1 is truthy, so a plain falsiness check preserved it and reported a
+        negative reasoning_tokens to the client.
+        """
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
