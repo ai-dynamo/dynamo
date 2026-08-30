@@ -384,6 +384,14 @@ class GMSServerMemoryManager:
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
         return tuple(sorted(self._allocation_sizes.items()))
 
+    def drain_reclamation(self, timeout: float | None = None) -> bool:
+        """Wait until background release of cleared epochs has completed."""
+        return self._allocations.drain(timeout)
+
+    def shutdown(self) -> None:
+        """Retire the background reclaimer after draining pending releases."""
+        self._allocations.shutdown()
+
     def _clear_allocations(self) -> int:
         cleared = self._allocations.clear()
         self._allocation_sizes.clear()
@@ -542,4 +550,5 @@ class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
 
     def server_close(self) -> None:
         super().server_close()
+        self.manager.shutdown()
         Path(self.path).unlink(missing_ok=True)

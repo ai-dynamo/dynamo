@@ -25,7 +25,7 @@ from gpu_memory_service.v1.client.parameter_storage import (
 from gpu_memory_service.v1.device import get_socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
 logger = logging.getLogger(__name__)
 _WEIGHTS = "weights"
@@ -222,16 +222,27 @@ class TorchMempoolMemoryClient:
         try:
             self._state = "RESUMING"
             wake_t0 = monotonic()
-            self._kv_cache.connect(RequestedLockType.RW)
-            self._kv_cache.reallocate_all_handles()
-            self._kv_cache.remap_all_vas()
-            self._weights.connect(RequestedLockType.RO)
-            self._weights.remap_all_vas()
+            phases: list[tuple[str, float]] = []
+
+            def phase(name: str, step: Callable[[], object]) -> None:
+                started_at = monotonic()
+                step()
+                phases.append((name, monotonic() - started_at))
+
+            phase("kv_connect", lambda: self._kv_cache.connect(RequestedLockType.RW))
+            phase("kv_reallocate", self._kv_cache.reallocate_all_handles)
+            phase("kv_remap", self._kv_cache.remap_all_vas)
+            phase(
+                "weights_connect",
+                lambda: self._weights.connect(RequestedLockType.RO),
+            )
+            phase("weights_remap", self._weights.remap_all_vas)
             self._state = "RUNNING"
             logger.info(
-                "GMS V1 wake complete device=%d total_elapsed=%.3fs",
+                "GMS V1 wake complete device=%d total_elapsed=%.3fs %s",
                 self._device,
                 monotonic() - wake_t0,
+                " ".join(f"{name}={elapsed:.3f}s" for name, elapsed in phases),
             )
         except Exception:  # noqa: BLE001
             common_utils.fail(

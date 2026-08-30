@@ -18,7 +18,7 @@ if not HAS_GMS:
 
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.v1 import cli
+from gpu_memory_service.v1 import checkpoint, cli
 from gpu_memory_service.v1.checkpoint import GMSCheckpointClient, GMSCheckpointLifecycle
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import PrepareCheckpointRequest
@@ -211,6 +211,72 @@ def test_prepare_rejects_committed_or_active_kv(v1_owner) -> None:
 
     with pytest.raises(RuntimeError, match="kv_cache must not be committed"):
         control.prepare()
+
+
+@pytest.mark.timeout(10)
+def test_prepare_requires_weights_reclamation_to_complete(
+    v1_owner, monkeypatch
+) -> None:
+    monkeypatch.setattr(checkpoint, "_RECLAIM_DRAIN_TIMEOUT", 0.05)
+    v1_owner.publish_weights()
+    release_allowed = threading.Event()
+    original_release = v1_owner.vmm.release
+
+    def blocked_release(handle: int) -> None:
+        assert release_allowed.wait(5)
+        original_release(handle)
+
+    monkeypatch.setattr(v1_owner.vmm, "release", blocked_release)
+    # Republishing unlinks the previous weights epoch, whose handles are still
+    # being released in the background when the controller asks to checkpoint.
+    v1_owner.publish_weights()
+    control = v1_owner.control()
+    with pytest.raises(RuntimeError, match="weights reclamation did not complete"):
+        control.prepare()
+    assert control.state().state == "serving"
+
+    release_allowed.set()
+    assert v1_owner.managers["weights"].drain_reclamation(5)
+    assert control.prepare().state == "checkpoint_ready"
+
+
+@pytest.mark.timeout(10)
+def test_prepare_bounds_both_domain_drains_by_one_budget(v1_owner, monkeypatch) -> None:
+    budget = 1.0
+    weights_cost = 0.6
+    monkeypatch.setattr(checkpoint, "_RECLAIM_DRAIN_TIMEOUT", budget)
+    v1_owner.publish_weights()
+    granted: dict[str, float] = {}
+
+    def weights_drain(timeout: float | None = None) -> bool:
+        granted["weights"] = timeout
+        time.sleep(min(timeout, weights_cost))
+        return timeout >= weights_cost
+
+    def kv_drain(timeout: float | None = None) -> bool:
+        granted["kv_cache"] = timeout
+        # A domain that never finishes reclaiming burns whatever it was given.
+        time.sleep(timeout)
+        return False
+
+    monkeypatch.setattr(
+        v1_owner.managers["weights"], "drain_reclamation", weights_drain
+    )
+    monkeypatch.setattr(v1_owner.managers["kv_cache"], "drain_reclamation", kv_drain)
+    control = v1_owner.control()
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="kv_cache reclamation did not complete"):
+        control.prepare()
+    elapsed = time.monotonic() - started
+
+    # One budget spans both domains: the stalled domain only gets what the slow
+    # one left behind, so the fence costs the control client one timeout rather
+    # than one per domain, and it still names the domain that is still holding
+    # memory.
+    assert granted["weights"] <= budget
+    assert granted["kv_cache"] <= budget - weights_cost + 0.1
+    assert elapsed < budget * 1.3
+    assert control.state().state == "serving"
 
 
 @pytest.mark.timeout(10)

@@ -9,6 +9,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from collections.abc import Mapping
 from typing import Protocol
 from uuid import uuid4
@@ -32,6 +33,7 @@ _SERVING = "serving"
 _CHECKPOINT_READY = "checkpoint_ready"
 _WEIGHTS_DOMAIN = "weights"
 _KV_CACHE_DOMAIN = "kv_cache"
+_RECLAIM_DRAIN_TIMEOUT = 5.0
 
 
 class _CheckpointDomainManager(Protocol):
@@ -43,6 +45,9 @@ class _CheckpointDomainManager(Protocol):
         ...
 
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
+        ...
+
+    def drain_reclamation(self, timeout: float | None = None) -> bool:
         ...
 
 
@@ -113,6 +118,22 @@ class GMSCheckpointLifecycle:
             raise RuntimeError("weights must contain committed allocations")
         if kv_allocations:
             raise RuntimeError("kv_cache must be empty before checkpoint")
+        # Unlinked handles are released asynchronously in both domains; a
+        # checkpoint must not capture a reclaimer mid-release or the physical
+        # memory it still owns. One deadline spans both drains: this runs under
+        # the admission condition, so a drain that runs long stalls admission
+        # for up to the timeout, and a per-domain timeout would let that stall
+        # grow with the number of domains until the control client gave up on
+        # the socket instead of reporting which domain is still reclaiming.
+        # Refusing the checkpoint is the safe outcome, a brief stall is the
+        # price.
+        deadline = time.monotonic() + _RECLAIM_DRAIN_TIMEOUT
+        for name, manager in ((_WEIGHTS_DOMAIN, weights), (_KV_CACHE_DOMAIN, kv_cache)):
+            remaining = max(deadline - time.monotonic(), 0.0)
+            if not manager.drain_reclamation(remaining):
+                raise RuntimeError(
+                    f"{name} reclamation did not complete before checkpoint"
+                )
 
         self._generation += 1
         self._token = str(uuid4())
