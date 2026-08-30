@@ -319,6 +319,14 @@ def patch_force_eager_breakable_cudagraph() -> None:
 
 _dsv4_topk_patched = False
 
+# Diagnostic: synchronise on entry to dsv4_topk so an async fault raised by the
+# upstream router GEMM is attributed there instead of to the first add here.
+_DSV4_TOPK_PROBE = os.environ.get("DYN_GMS_DSV4_TOPK_PROBE", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 def patch_dsv4_topk_clone_inputs() -> None:
     """Keep Triton ``dsv4_topk``; clone operands off GMS VMM first.
@@ -395,6 +403,27 @@ def patch_dsv4_topk_clone_inputs() -> None:
         import torch
 
         logits = gating_output.float()
+        if _DSV4_TOPK_PROBE:
+            # gating_output is the router GEMM's output, produced from a large
+            # router weight that stays on the GMS mapping. The adds below are
+            # the first synchronising ops after that GEMM, so an async fault in
+            # it would be reported here rather than at its own launch. Sync on
+            # entry to attribute the fault to the caller instead.
+            try:
+                torch.cuda.synchronize()
+                logger.warning(
+                    "[GMS Probe] dsv4_topk entry clean: gating_output=%s "
+                    "correction_bias=%s",
+                    tuple(gating_output.shape),
+                    tuple(correction_bias.shape),
+                )
+            except Exception:
+                logger.exception(
+                    "[GMS Probe] CUDA context ALREADY POISONED on dsv4_topk "
+                    "entry - the fault is upstream of the router, in whatever "
+                    "produced gating_output"
+                )
+                raise
         # softplus, matching the kernel's >20 linear shortcut
         weights = torch.sqrt(
             torch.where(logits > 20.0, logits, torch.log1p(torch.exp(logits)))
@@ -443,3 +472,253 @@ def torch_compiler_disable(fn):
 
     disable = getattr(getattr(torch, "compiler", None), "disable", None)
     return disable(fn) if callable(disable) else fn
+
+
+_dsv4_layer_probe_patched = False
+
+
+def patch_dsv4_layer_probe() -> None:
+    """Bisect which DSv4 stage first poisons the CUDA context.
+
+    The K-cache gather was long blamed for the first-prefill
+    cudaErrorIllegalAddress, but synchronising on entry to it faults before its
+    kernel is even launched, so the context is already bad when attention's
+    prefill path is reached. CUDA reports an async fault at the next
+    synchronising call, not at the launch that caused it, so the visible
+    traceback is the first sync downstream of the real culprit.
+
+    This wraps the DSv4 decoder layer and its attention entry point with
+    synchronising checkpoints and reports the last one that passed, which names
+    the stage containing the faulting launch. Diagnostic only - it serialises
+    every layer. Enable with DYN_GMS_DSV4_LAYER_PROBE.
+    """
+    global _dsv4_layer_probe_patched
+
+    if _dsv4_layer_probe_patched:
+        return
+
+    if os.environ.get("DYN_GMS_DSV4_LAYER_PROBE", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    try:
+        import torch
+        import vllm.models.deepseek_v4.attention as attn_mod
+        import vllm.models.deepseek_v4.nvidia.model as model_mod
+    except ImportError:
+        return
+
+    state = {"n": 0, "dead": False, "last": "<none>"}
+
+    def checkpoint(label: str) -> None:
+        """Report the first checkpoint that finds the context already faulted."""
+        if state["dead"]:
+            return
+        try:
+            torch.cuda.synchronize()
+            state["n"] += 1
+            state["last"] = label
+        except Exception as exc:
+            state["dead"] = True
+            logger.error(
+                "[GMS Probe] FIRST BAD CHECKPOINT: %s | last clean: %s "
+                "(%d clean checkpoints). The faulting launch is between those "
+                "two points. %s",
+                label,
+                state["last"],
+                state["n"],
+                exc,
+            )
+
+    def wrap(owner, attr: str, label: str) -> None:
+        target = getattr(owner, attr, None)
+        if target is None:
+            return
+        original = target.__call__ if not callable(target) else target
+
+        def probed(*args, **kwargs):
+            checkpoint(f"{label} ENTRY")
+            out = original(*args, **kwargs)
+            checkpoint(f"{label} EXIT")
+            return out
+
+        setattr(owner, attr, probed)
+
+    # Attention entry: brackets the whole MLA path including the gather.
+    for cls_name in ("DeepseekV4Attention", "DeepseekV4Indexer"):
+        cls = getattr(attn_mod, cls_name, None)
+        if cls is not None and hasattr(cls, "forward"):
+            wrap(cls, "forward", f"attention.{cls_name}.forward")
+    # Sub-stages inside attention, to separate the input GEMMs (which read the
+    # large RO-mapped projection weights on aux streams) from the MLA kernels.
+    attn_cls = getattr(attn_mod, "DeepseekV4Attention", None)
+    if attn_cls is not None:
+        for meth in (
+            "_run_parallel_input_projections",
+            "_fused_wqa_wkv_gemm",
+            "_prepare_and_attn_fn",
+            "attention_impl",
+        ):
+            if hasattr(attn_cls, meth):
+                wrap(attn_cls, meth, f"attention.{meth}")
+    # Decoder layer: brackets attention vs FFN/MoE within one layer.
+    for cls_name in ("DeepseekV4DecoderLayer", "DeepseekV4MoE"):
+        cls = getattr(model_mod, cls_name, None)
+        if cls is not None and hasattr(cls, "forward"):
+            wrap(cls, "forward", f"model.{cls_name}.forward")
+
+    _dsv4_layer_probe_patched = True
+    logger.info("[GMS Patch] DSv4 layer probe enabled (DYN_GMS_DSV4_LAYER_PROBE)")
+
+
+_dsv4_gather_checked = False
+
+
+def patch_dsv4_gather_k_cache_check() -> None:
+    """Validate the DSv4 K-cache gather's indices before it dereferences them.
+
+    ``dequantize_and_gather_k_cache`` faults with cudaErrorIllegalAddress on the
+    first prefill under GMS, identically in the CuTeDSL and Triton kernels. Both
+    compute
+    ``k_cache + block_table[req, pos // block_size] * k_cache.stride(0)``
+    with no bounds check, so a single out-of-range block id produces a wild
+    address in whichever kernel runs. Two kernels failing the same way points at
+    the operands rather than at either kernel.
+
+    This check reports whether the operands are already invalid on entry, which
+    distinguishes "the gather is broken" from "something upstream corrupted the
+    block table or the sequence lengths". It syncs and copies to host, so it is
+    diagnostic only - enable it with DYN_GMS_DSV4_GATHER_CHECK.
+    """
+    global _dsv4_gather_checked
+
+    if _dsv4_gather_checked:
+        return
+
+    if os.environ.get("DYN_GMS_DSV4_GATHER_CHECK", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    try:
+        import vllm.models.deepseek_v4.common.ops.cache_utils as cache_utils_mod
+    except ImportError:
+        return
+
+    original = cache_utils_mod.dequantize_and_gather_k_cache
+
+    def checked(out, k_cache, seq_lens, gather_lens, block_table, block_size, offset, *a, **k):
+        import torch
+
+        torch.cuda.synchronize()
+        num_blocks = k_cache.shape[0]
+        bt = block_table.to("cpu", non_blocking=False)
+        sl = seq_lens.to("cpu", non_blocking=False)
+        gl = None if gather_lens is None else gather_lens.to("cpu", non_blocking=False)
+
+        problems = []
+        if bt.numel():
+            if int(bt.max()) >= num_blocks:
+                problems.append(
+                    f"block_table.max={int(bt.max())} >= k_cache.shape[0]={num_blocks}"
+                )
+            if int(bt.min()) < 0:
+                problems.append(f"block_table.min={int(bt.min())} < 0")
+        if sl.numel():
+            if int(sl.min()) < 0:
+                problems.append(f"seq_lens.min={int(sl.min())} < 0")
+            # Each request reads ceil(seq_len / block_size) entries of its row.
+            need = (sl.to(torch.int64) + block_size - 1) // max(block_size, 1)
+            if int(need.max()) > block_table.shape[-1]:
+                problems.append(
+                    f"needs {int(need.max())} block_table cols but row width is "
+                    f"{block_table.shape[-1]} (seq_lens.max={int(sl.max())}, "
+                    f"block_size={block_size})"
+                )
+            span = int(sl.max()) + int(offset)
+            if span > out.shape[1]:
+                problems.append(
+                    f"writes up to {span} tokens but out.shape[1]={out.shape[1]}"
+                )
+
+        logger.warning(
+            "[GMS Check] gather: out=%s k_cache=%s(num_blocks=%d, stride0=%d) "
+            "block_table=%s seq_lens[min=%s,max=%s] gather_lens=%s block_size=%d "
+            "offset=%d -> %s",
+            tuple(out.shape),
+            tuple(k_cache.shape),
+            num_blocks,
+            k_cache.stride(0),
+            tuple(block_table.shape),
+            int(sl.min()) if sl.numel() else "n/a",
+            int(sl.max()) if sl.numel() else "n/a",
+            "none" if gl is None else f"[min={int(gl.min())},max={int(gl.max())}]",
+            block_size,
+            offset,
+            "; ".join(problems) if problems else "operands in range",
+        )
+        return original(out, k_cache, seq_lens, gather_lens, block_table, block_size, offset, *a, **k)
+
+    cache_utils_mod.dequantize_and_gather_k_cache = checked
+    try:
+        import vllm.models.deepseek_v4.nvidia.flashmla as flashmla_mod
+
+        flashmla_mod.dequantize_and_gather_k_cache = checked
+    except ImportError:
+        pass
+    _dsv4_gather_checked = True
+    logger.info(
+        "[GMS Patch] dequantize_and_gather_k_cache bounds check enabled "
+        "(DYN_GMS_DSV4_GATHER_CHECK)"
+    )
+
+
+_dsv4_gather_triton_patched = False
+
+
+def patch_dsv4_gather_k_cache_triton() -> None:
+    """Route the DSv4 K-cache gather to Triton instead of CuTeDSL.
+
+    ``dequantize_and_gather_k_cache`` picks the CuTeDSL kernel whenever the
+    ``cutlass`` package is importable. That kernel is compiled against fake
+    tensors carrying hard alignment contracts (``assumed_align=32`` and a
+    stride divisibility of 32 on the K cache, 16 on the output) and copies
+    through ``cpasync`` 128-bit loads. Under GMS those contracts do not hold
+    and the kernel faults with cudaErrorIllegalAddress on the first prefill,
+    identically from kernel warmup's ``_dummy_run`` and from the first real
+    request.
+
+    The Triton implementation in the same module computes the same gather
+    without the alignment contract, so select it by making the module-local
+    ``has_cutedsl`` report False. vLLM imports that name into ``cache_utils``
+    at module scope, so it must be rebound there rather than in
+    ``vllm.utils.import_utils``.
+    """
+    global _dsv4_gather_triton_patched
+
+    if _dsv4_gather_triton_patched:
+        return
+
+    if os.environ.get("DYN_GMS_DSV4_GATHER_TRITON", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    try:
+        import vllm.models.deepseek_v4.common.ops.cache_utils as cache_utils_mod
+    except ImportError:
+        return
+
+    cache_utils_mod.has_cutedsl = lambda: False
+    _dsv4_gather_triton_patched = True
+    logger.info(
+        "[GMS Patch] dequantize_and_gather_k_cache forced to Triton "
+        "(DYN_GMS_DSV4_GATHER_TRITON)"
+    )

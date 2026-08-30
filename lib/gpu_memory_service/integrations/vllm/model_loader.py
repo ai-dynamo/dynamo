@@ -414,6 +414,12 @@ def _load_write_mode(
     rebound_bytes = rebind_nonparameter_tensors(
         gms_client, model, retain_gms_tensors=retained_gms_tensors
     )
+    # The writer's own weights become read-only VMM at publish
+    # (publish_gms_write: commit -> connect(RO) -> remap_all_vas), so the
+    # router bias it reads by pointer is subject to the same VMM defect the
+    # reader hits. rebind_nonparameter_tensors only covers buffers and tensor
+    # attributes, so run the same clone pass the read path runs.
+    _clone_triton_incompatible_params_off_gms(model)
     _store_pending_gms_write(gms_client, stats, rebound_bytes, retained_gms_tensors)
 
     logger.info(
@@ -741,27 +747,33 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
         + list(model.named_buffers())
         if torch.is_tensor(tensor) and not tensor.is_meta and tensor.is_cuda
     }
+    skipped: list[str] = []
     for mod_name, module in model.named_modules():
         for attr in ("e_score_correction_bias", "_hash_indices_table"):
             if not hasattr(module, attr):
                 continue
             t = getattr(module, attr)
             if not torch.is_tensor(t):
+                skipped.append(
+                    f"{mod_name}.{attr}=<{type(t).__name__}>" if mod_name else attr
+                )
                 continue
-            if t.is_meta:
+            if not t.is_cuda:
+                # Either still on meta, or on CPU. Both are stale aliases of a
+                # parameter that materialization has already repointed, so
+                # resolve them against the live tensor of the same name.
                 qualified = f"{mod_name}.{attr}" if mod_name else attr
                 real = materialized.get(qualified)
                 if real is None:
                     logger.warning(
-                        "[GMS] Read mode: %s is still on meta after "
-                        "materialization and has no materialized parameter to "
+                        "[GMS] Read mode: %s is on %s after materialization "
+                        "and has no materialized tensor of that name to "
                         "resolve against; the first forward would fail on it",
                         qualified,
+                        t.device,
                     )
                     continue
                 t = real
-            elif not t.is_cuda:
-                continue
             off = _off_gms(t)
             if hasattr(module, "_parameters") and attr in module._parameters:
                 module._parameters[attr] = torch.nn.Parameter(
@@ -772,6 +784,12 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
             else:
                 setattr(module, attr, off)
             cloned.append(f"{mod_name}.{attr}" if mod_name else attr)
+    if skipped:
+        logger.warning(
+            "[GMS] Read mode: %d router alias attr(s) were not tensors: %s",
+            len(skipped),
+            skipped[:10],
+        )
     if cloned:
         logger.info(
             "[GMS] Read mode: cloned %d Triton-incompatible params off GMS: %s",
