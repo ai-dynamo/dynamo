@@ -106,8 +106,8 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
 
 @pytest.mark.asyncio
-async def test_worker_video_media_io_kwargs_control_real_vllm_decode():
-    """Request-level video kwargs reach vLLM's real CPU media decoder.
+async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
+    """Request-level video kwargs reach vLLM's media decoder.
 
     The fixture is VP9, which is not in HW_ROUTED_CODECS, so should_use_nvdec is
     False and the clip goes to vLLM -- the path that owns the media_io_kwargs
@@ -127,6 +127,17 @@ async def test_worker_video_media_io_kwargs_control_real_vllm_decode():
     processor = _processor(
         video_loader=VideoLoader(),
     )
+
+    # Imported here, not at module scope: the file must stay collectable where
+    # vLLM is absent (pre-commit runs the test-collection hooks on the host).
+    from vllm.multimodal.media import VideoMediaIO
+
+    # VideoMediaIO.load_bytes' OpenCV backend was removed from the vLLM runtime image in #11836
+    def _fake_load_bytes(self, data):
+        indices = np.linspace(0, len(frames) - 1, self.num_frames).astype(int)
+        return frames[indices], {"frames_indices": indices.tolist()}
+
+    monkeypatch.setattr(VideoMediaIO, "load_bytes", _fake_load_bytes)
 
     prepared = await _prepare_prompt(
         processor,
