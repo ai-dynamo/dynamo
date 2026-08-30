@@ -223,25 +223,59 @@ def patch_kv_cache_pool_scope() -> None:
     try:
         import torch
         from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
-        from vllm.v1.worker.gpu import model_runner as gpu_model_runner
-
-        original_init_kv_cache = gpu_model_runner.init_kv_cache
-    except (ImportError, AttributeError) as exc:
+    except ImportError as exc:
         logger.debug("[GMS Patch] init_kv_cache pool-scope not available: %s", exc)
         return
 
-    def patched_init_kv_cache(*args, **kwargs):
-        # Installed only in shadow mode, so always scope to the pool. init_kv_cache
-        # allocates on the worker's current device.
-        assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
-        device = torch.device("cuda", torch.cuda.current_device())
-        with gms_use_mem_pool("kv_cache", device):
-            return original_init_kv_cache(*args, **kwargs)
+    def _pool_wrap(fn, *, name: str):
+        def wrapped(*args, **kwargs):
+            assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
+            device = torch.device("cuda", torch.cuda.current_device())
+            logger.info("[GMS Patch] %s under scratch mem-pool device=%s", name, device)
+            with gms_use_mem_pool("kv_cache", device):
+                return fn(*args, **kwargs)
 
-    gpu_model_runner.init_kv_cache = patched_init_kv_cache
+        return wrapped
+
+    patched_any = False
+    # vLLM 0.27 V2 runner: actual torch.zeros live in attn_utils._allocate_kv_cache.
+    # Patching model_runner.init_kv_cache is not enough if that name is a stale
+    # import or the runner calls attn_utils directly.
+    for mod_name, attr in (
+        ("vllm.v1.worker.gpu.attn_utils", "_allocate_kv_cache"),
+        ("vllm.v1.worker.gpu.attn_utils", "init_kv_cache"),
+        ("vllm.v1.worker.gpu.model_runner", "init_kv_cache"),
+        ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner"),
+    ):
+        try:
+            mod = importlib.import_module(mod_name)
+            target = getattr(mod, attr)
+        except (ImportError, AttributeError):
+            continue
+        if attr == "GPUModelRunner":
+            original = getattr(target, "_allocate_kv_cache_tensors", None)
+            if original is None:
+                continue
+            target._allocate_kv_cache_tensors = _pool_wrap(
+                original, name=f"{mod_name}._allocate_kv_cache_tensors"
+            )
+            uniform = getattr(target, "allocate_uniform_kv_caches", None)
+            if callable(uniform):
+                target.allocate_uniform_kv_caches = _pool_wrap(
+                    uniform, name=f"{mod_name}.allocate_uniform_kv_caches"
+                )
+            patched_any = True
+            continue
+        setattr(mod, attr, _pool_wrap(target, name=f"{mod_name}.{attr}"))
+        patched_any = True
+
+    if not patched_any:
+        logger.debug("[GMS Patch] no KV allocation entry points found to wrap")
+        return
+
     _kv_cache_pool_scope_patched = True
     logger.info(
-        "[GMS Patch] Scoped scratch mem-pool to init_kv_cache (KV tensors only)"
+        "[GMS Patch] Scoped scratch mem-pool to KV tensor allocation (KV tensors only)"
     )
 
 
@@ -256,4 +290,90 @@ def apply_scratch_kv_patches() -> None:
     patch_register_kv_caches()
     patch_request_memory()
     patch_kv_cache_pool_scope()
+    # Do not force eager BreakableCUDAGraphWrapper: graphs are captured
+    # on scratch VAs at init and survive wake_up remap.
     logger.info("[GMS Patch] applied")
+
+
+def patch_force_eager_breakable_cudagraph() -> None:
+    """Disable on-the-fly breakable CUDA-graph capture.
+
+    Scratch-init skips capture_model(), so the first real request would
+    otherwise capture inside BreakableCUDAGraphWrapper and crash on
+    unpinned CPU/CUDA copies. Eager is enough to prove GMS failover;
+    capture can be re-enabled after wake with real KV.
+    """
+    try:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    except ImportError:
+        logger.debug("[GMS Patch] BreakableCUDAGraphWrapper not available")
+        return
+
+    def eager_call(self, *args, **kwargs):
+        return self.runnable(*args, **kwargs)
+
+    BreakableCUDAGraphWrapper.__call__ = eager_call
+    logger.info("[GMS Patch] Forced eager BreakableCUDAGraphWrapper.__call__")
+
+
+_dsv4_topk_patched = False
+
+
+def patch_dsv4_topk_clone_inputs() -> None:
+    """Keep Triton ``dsv4_topk``; clone operands off GMS VMM first.
+
+    Triton cannot load CUDA VMM pointers for ``correction_bias`` (IMA on
+    B200). A PyTorch sequential-max fallback with per-call
+    ``cuda.synchronize`` is what made GLM-5.2 TEP8 prefill sit at
+    ~3200–6400 tok/s vs V1 ~16–26k. Clone into the default allocator and
+    run the original kernel. Also patch ``fused_topk_bias_router.dsv4_topk``
+    because that module does ``from dsv4_topk import dsv4_topk``.
+    """
+    global _dsv4_topk_patched
+    if _dsv4_topk_patched:
+        return
+    try:
+        import vllm.model_executor.layers.fused_moe.router.dsv4_topk as dsv4_topk_mod
+    except ImportError:
+        logger.debug("[GMS Patch] dsv4_topk not available")
+        return
+
+    orig = dsv4_topk_mod.dsv4_topk
+
+    def wrapped(
+        gating_output,
+        correction_bias,
+        indices_dtype,
+        routed_scaling_factor,
+    ):
+        if (
+            gating_output is None
+            or correction_bias is None
+            or getattr(gating_output, "is_meta", False)
+            or getattr(correction_bias, "is_meta", False)
+        ):
+            return orig(
+                gating_output,
+                correction_bias,
+                indices_dtype,
+                routed_scaling_factor,
+            )
+        # gating_output is an activation (not a GMS VMM weight). Cloning
+        # it every MoE layer of an 8192-token prefill is a full extra
+        # copy of the router logits; soak stays at one 8192-token step
+        # per ~1.28s (6400 tok/s). Only correction_bias is a GMS param
+        # that Triton cannot load from VMM.
+        bias = correction_bias.detach().contiguous().clone()
+        return orig(
+            gating_output, bias, indices_dtype, routed_scaling_factor
+        )
+
+    dsv4_topk_mod.dsv4_topk = wrapped
+    try:
+        import vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router as router_mod
+
+        router_mod.dsv4_topk = wrapped
+    except ImportError:
+        pass
+    _dsv4_topk_patched = True
+    logger.info("[GMS Patch] dsv4_topk wraps Triton with VMM-safe input clones")

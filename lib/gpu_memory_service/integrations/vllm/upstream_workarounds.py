@@ -202,6 +202,46 @@ def patch_moe_wna16_marlin_gemm_fake_impl() -> None:
 
     _moe_wna16_fake_patched = True
     logger.info("[GMS vLLM Workaround] Patched moe_wna16_marlin_gemm fake impl")
+    _patch_moe_c_void_fake_impls()
+
+
+_moe_c_void_fake_patched = False
+
+
+def _patch_moe_c_void_fake_impls() -> None:
+    """Register fake impls for in-place _moe_C ops that vLLM traces on meta."""
+    global _moe_c_void_fake_patched
+    if _moe_c_void_fake_patched:
+        return
+    try:
+        import torch
+        import vllm._custom_ops  # noqa: F401
+        from torch.library import register_fake
+    except ImportError:
+        return
+    if not hasattr(torch.ops, "_moe_C"):
+        return
+
+    def _void(*_args, **_kwargs):
+        return None
+
+    for op_name in (
+        "topk_softplus_sqrt",
+        "topk_softmax",
+        "topk_sigmoid",
+    ):
+        if not hasattr(torch.ops._moe_C, op_name):
+            continue
+        try:
+            register_fake(f"_moe_C::{op_name}", allow_override=True)(_void)
+            logger.info("[GMS vLLM Workaround] Patched %s fake impl", op_name)
+        except Exception:
+            logger.debug(
+                "[GMS vLLM Workaround] Could not patch %s fake impl",
+                op_name,
+                exc_info=True,
+            )
+    _moe_c_void_fake_patched = True
 
 
 @contextmanager
@@ -212,6 +252,25 @@ def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
         import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
     except ImportError:
         logger.debug("[GMS vLLM Workaround] vLLM FusedMoE layer not available")
+        yield
+        return
+
+    target_module = None
+    attr_name = "determine_expert_map"
+    if hasattr(fused_moe_layer, attr_name):
+        target_module = fused_moe_layer
+    else:
+        try:
+            import vllm.model_executor.layers.fused_moe.expert_map_manager as expert_map_manager
+        except ImportError:
+            expert_map_manager = None
+        if expert_map_manager is not None and hasattr(expert_map_manager, attr_name):
+            target_module = expert_map_manager
+
+    if target_module is None:
+        logger.debug(
+            "[GMS vLLM Workaround] determine_expert_map not found; skipping FusedMoE patch"
+        )
         yield
         return
 
@@ -228,12 +287,15 @@ def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
                 with torch.device("cpu"):
                     return _fused_moe_original_determine_expert_map(*args, **kwargs)
 
-            _fused_moe_layer_module = fused_moe_layer
-            _fused_moe_original_determine_expert_map = (
-                fused_moe_layer.determine_expert_map
-            )
+            _fused_moe_layer_module = target_module
+            _fused_moe_original_determine_expert_map = getattr(target_module, attr_name)
             _fused_moe_determine_expert_map_wrapper = determine_expert_map_on_cpu
-            fused_moe_layer.determine_expert_map = determine_expert_map_on_cpu
+            setattr(target_module, attr_name, determine_expert_map_on_cpu)
+            logger.info(
+                "[GMS vLLM Workaround] Patching %s.%s onto CPU during meta init",
+                target_module.__name__,
+                attr_name,
+            )
 
         _fused_moe_patch_depth += 1
 
@@ -245,11 +307,13 @@ def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
             if _fused_moe_patch_depth == 0:
                 if (
                     _fused_moe_layer_module is not None
-                    and _fused_moe_layer_module.determine_expert_map
+                    and getattr(_fused_moe_layer_module, attr_name, None)
                     is _fused_moe_determine_expert_map_wrapper
                 ):
-                    _fused_moe_layer_module.determine_expert_map = (
-                        _fused_moe_original_determine_expert_map
+                    setattr(
+                        _fused_moe_layer_module,
+                        attr_name,
+                        _fused_moe_original_determine_expert_map,
                     )
                 _fused_moe_layer_module = None
                 _fused_moe_original_determine_expert_map = None
