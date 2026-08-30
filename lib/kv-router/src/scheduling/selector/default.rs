@@ -300,16 +300,39 @@ fn sita_borrow_idle_short_band(
 /// those workers. That shows up as inter-token latency on the requests that
 /// already have the worst end-to-end latency, which is what wrecks the tail.
 ///
-/// So a zero-overlap request keeps out of band 0 — the short band's isolation is
-/// still what earns the mean-TTFT win — but may use the whole rest of the pool.
+/// So a zero-overlap request always gets the whole non-short pool, and it may
+/// additionally reach band 0 while band 0 is idle.
+///
+/// That last part matters because the short band is systematically the *least*
+/// contended slice of the pool: its requests are short in output as well as
+/// input, so they retire quickly and leave decode capacity free on their
+/// workers. Meanwhile the uncached long requests — the ones with multi-thousand
+/// token contexts and the longest decodes — are packed onto the remaining
+/// workers, where their inter-token latency (not their time-to-first-token)
+/// sets end-to-end tail latency.
+///
+/// `sita_borrow_idle_short_band` already lends band 0 out, but it applies one
+/// idleness bar to every borrower, and at useful spill thresholds that bar is
+/// so strict it effectively never clears. A request with no cached prefix is the
+/// cheapest possible borrower: it has no affinity to any worker, so lending it a
+/// band-0 worker costs the short band only the load it brings, never a lost
+/// cache hit. It therefore gets a proportionally larger idleness allowance. As
+/// with every other spill rule here `sita_spill_threshold` sets the dial, and at
+/// 1.0 band 0 is never lent out and this reduces to plain confinement.
 fn sita_widen_uncached_long_band(
     band: usize,
     slices: &[SitaSlice; 3],
     worker_count: usize,
     best_cached_tokens: usize,
+    loads: &[f64],
+    spill_threshold: f64,
 ) -> SitaSlice {
     if band == 0 || best_cached_tokens > 0 {
         return slices[band];
+    }
+    let idle_allowance = (1.0 - spill_threshold) * 2.0;
+    if sita_band_occupancy(loads, slices[0]) < idle_allowance {
+        return (0, worker_count);
     }
     (slices[0].1, worker_count)
 }
@@ -375,8 +398,14 @@ fn sita_worker_id_bounds<C: WorkerConfigLike>(
     );
     // A request with no cache to return to gains nothing from confinement, so
     // prefer the widest of the two candidate slices.
-    let widened =
-        sita_widen_uncached_long_band(band, &slices, worker_ids.len(), best_cached_tokens);
+    let widened = sita_widen_uncached_long_band(
+        band,
+        &slices,
+        worker_ids.len(),
+        best_cached_tokens,
+        &loads,
+        kv_router_config.sita_spill_threshold,
+    );
     let (start, end) = if widened.1 - widened.0 > spilled.1 - spilled.0 {
         widened
     } else {
@@ -2360,24 +2389,52 @@ mod tests {
 
     /// Band confinement is paid for by cache affinity, so a request with no
     /// overlap anywhere gets the whole pool above band 0 instead of its own
-    /// narrow slice — but band 0 stays reserved for short requests.
+    /// narrow slice — but band 0 stays reserved while short requests are using it.
     #[test]
     fn sita_uncached_long_request_widens_beyond_its_band() {
         // share=0.5 over 8 workers: band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
         let slices = sita_band_slices(8, 0.5, 3);
         assert_eq!(slices, [(0, 4), (4, 6), (6, 8)]);
 
+        // Band 0 as busy as the rest of the pool, so it is not lendable.
+        let even = [1.0; 8];
+        let widen = |band, cached, loads: &[f64]| {
+            sita_widen_uncached_long_band(band, &slices, 8, cached, loads, 0.85)
+        };
+
         // A cached request stays inside its own band.
-        assert_eq!(sita_widen_uncached_long_band(2, &slices, 8, 64), (6, 8));
-        assert_eq!(sita_widen_uncached_long_band(1, &slices, 8, 64), (4, 6));
+        assert_eq!(widen(2, 64, &even), (6, 8));
+        assert_eq!(widen(1, 64, &even), (4, 6));
 
         // With no cached prefix, bands 1 and 2 open up to every non-short worker.
-        assert_eq!(sita_widen_uncached_long_band(2, &slices, 8, 0), (4, 8));
-        assert_eq!(sita_widen_uncached_long_band(1, &slices, 8, 0), (4, 8));
+        assert_eq!(widen(2, 0, &even), (4, 8));
+        assert_eq!(widen(1, 0, &even), (4, 8));
 
         // Band 0 is never widened: short requests keep their reservation, and a
         // zero-overlap short request must not escape into the long workers.
-        assert_eq!(sita_widen_uncached_long_band(0, &slices, 8, 0), (0, 4));
+        assert_eq!(widen(0, 0, &even), (0, 4));
+    }
+
+    /// An uncached long request has no affinity to lose, so it is the cheapest
+    /// possible borrower of band 0 — but only while band 0 is genuinely idle,
+    /// and never when spilling is switched off.
+    #[test]
+    fn sita_uncached_long_request_borrows_band_0_only_while_it_is_idle() {
+        let slices = sita_band_slices(8, 0.5, 3);
+        let widen = |loads: &[f64], spill| {
+            sita_widen_uncached_long_band(2, &slices, 8, 0, loads, spill)
+        };
+
+        // Band 0 idle (occupancy 0.02 < 2 * (1 - 0.85) = 0.30): lend it out.
+        let idle = [0.02, 0.02, 0.02, 0.02, 1.0, 1.0, 1.0, 1.0];
+        assert_eq!(widen(&idle, 0.85), (0, 8));
+
+        // Band 0 carrying its share of the pool: reservation holds.
+        let busy = [1.0; 8];
+        assert_eq!(widen(&busy, 0.85), (4, 8));
+
+        // Spilling off means band 0 is never lent, however idle it is.
+        assert_eq!(widen(&idle, 1.0), (4, 8));
     }
 
     /// End-to-end through the selector: the same long request lands outside its
