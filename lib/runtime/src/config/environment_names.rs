@@ -689,6 +689,18 @@ pub mod model {
         /// Set to "1", "true", "on", or "yes" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
+
+    /// OCI registry (CNCF ModelPack) configuration
+    pub mod oci {
+        /// Path to the `llmman` binary used to report where an `oci://`
+        /// reference was pulled to. Defaults to `llmman`, looked up on `PATH`.
+        pub const DYN_LLMMAN_BIN: &str = "DYN_LLMMAN_BIN";
+
+        /// Address of the `llmman serve` daemon `oci://` references are pulled
+        /// through, as `[scheme://]host[:port]`. Same variable llmman's own
+        /// clients read; defaults to `127.0.0.1:17434`.
+        pub const LLMMAN_HOST: &str = "LLMMAN_HOST";
+    }
 }
 
 /// KV Router configuration environment variables

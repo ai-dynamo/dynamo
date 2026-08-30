@@ -13,6 +13,7 @@ use modelexpress_common::download as mx;
 use dynamo_runtime::config::environment_names::model as env_model;
 
 mod huggingface;
+pub mod oci;
 
 pub(crate) use huggingface::{
     HfRepoSpec, cached_hf_snapshot, download_hf_snapshot, finalize_hf_snapshot, huggingface_cache,

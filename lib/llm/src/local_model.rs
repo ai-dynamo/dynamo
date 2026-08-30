@@ -510,7 +510,23 @@ impl LocalModel {
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
+    ///
+    /// A reference carrying the `oci://` scheme is instead pulled from an OCI
+    /// registry as a CNCF ModelPack artifact (see [`super::hub::oci`]). Every
+    /// other reference shape — a Hugging Face repo id above all — is left to
+    /// the Hugging Face path unchanged. `ignore_weights` has no effect on an
+    /// `oci://` reference: a ModelPack image is pulled as a whole, so there is
+    /// no cheaper config-only fetch to ask for.
     pub async fn fetch(remote_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
+        if super::hub::oci::is_oci_ref(remote_name) {
+            if ignore_weights {
+                tracing::debug!(
+                    "ignore_weights has no effect for the OCI reference '{remote_name}': \
+                     a ModelPack image is pulled whole"
+                );
+            }
+            return super::hub::oci::from_oci(remote_name).await;
+        }
         super::hub::from_hf(remote_name, ignore_weights).await
     }
 
