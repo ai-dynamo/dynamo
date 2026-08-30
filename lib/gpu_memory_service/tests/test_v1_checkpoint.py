@@ -241,6 +241,45 @@ def test_prepare_requires_weights_reclamation_to_complete(
 
 
 @pytest.mark.timeout(10)
+def test_prepare_bounds_both_domain_drains_by_one_budget(v1_owner, monkeypatch) -> None:
+    budget = 1.0
+    weights_cost = 0.6
+    monkeypatch.setattr(checkpoint, "_RECLAIM_DRAIN_TIMEOUT", budget)
+    v1_owner.publish_weights()
+    granted: dict[str, float] = {}
+
+    def weights_drain(timeout: float | None = None) -> bool:
+        granted["weights"] = timeout
+        time.sleep(min(timeout, weights_cost))
+        return timeout >= weights_cost
+
+    def kv_drain(timeout: float | None = None) -> bool:
+        granted["kv_cache"] = timeout
+        # A domain that never finishes reclaiming burns whatever it was given.
+        time.sleep(timeout)
+        return False
+
+    monkeypatch.setattr(
+        v1_owner.managers["weights"], "drain_reclamation", weights_drain
+    )
+    monkeypatch.setattr(v1_owner.managers["kv_cache"], "drain_reclamation", kv_drain)
+    control = v1_owner.control()
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="kv_cache reclamation did not complete"):
+        control.prepare()
+    elapsed = time.monotonic() - started
+
+    # One budget spans both domains: the stalled domain only gets what the slow
+    # one left behind, so the fence costs the control client one timeout rather
+    # than one per domain, and it still names the domain that is still holding
+    # memory.
+    assert granted["weights"] <= budget
+    assert granted["kv_cache"] <= budget - weights_cost + 0.1
+    assert elapsed < budget * 1.3
+    assert control.state().state == "serving"
+
+
+@pytest.mark.timeout(10)
 def test_prepare_rejects_writer_reservation(v1_owner, monkeypatch) -> None:
     v1_owner.publish_weights()
     weights = v1_owner.managers["weights"]

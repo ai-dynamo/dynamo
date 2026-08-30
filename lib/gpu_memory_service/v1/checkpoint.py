@@ -9,6 +9,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from collections.abc import Mapping
 from typing import Protocol
 from uuid import uuid4
@@ -119,11 +120,17 @@ class GMSCheckpointLifecycle:
             raise RuntimeError("kv_cache must be empty before checkpoint")
         # Unlinked handles are released asynchronously in both domains; a
         # checkpoint must not capture a reclaimer mid-release or the physical
-        # memory it still owns. This runs under the admission condition, so a
-        # drain that runs long stalls admission for up to the timeout: refusing
-        # the checkpoint is the safe outcome, a brief stall is the price.
+        # memory it still owns. One deadline spans both drains: this runs under
+        # the admission condition, so a drain that runs long stalls admission
+        # for up to the timeout, and a per-domain timeout would let that stall
+        # grow with the number of domains until the control client gave up on
+        # the socket instead of reporting which domain is still reclaiming.
+        # Refusing the checkpoint is the safe outcome, a brief stall is the
+        # price.
+        deadline = time.monotonic() + _RECLAIM_DRAIN_TIMEOUT
         for name, manager in ((_WEIGHTS_DOMAIN, weights), (_KV_CACHE_DOMAIN, kv_cache)):
-            if not manager.drain_reclamation(_RECLAIM_DRAIN_TIMEOUT):
+            remaining = max(deadline - time.monotonic(), 0.0)
+            if not manager.drain_reclamation(remaining):
                 raise RuntimeError(
                     f"{name} reclamation did not complete before checkpoint"
                 )
