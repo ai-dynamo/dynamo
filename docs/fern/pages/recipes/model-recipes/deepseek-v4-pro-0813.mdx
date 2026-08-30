@@ -232,7 +232,12 @@ Complete run over all 3,541 trace requests (14.0 h). **Concurrency 4 clears the 
 
 <div data-sku="h200" data-variant="disagg">
 
-Not yet run on the shared trace. On a synthetic 64K / 400 / 90%-reuse profile the SLA crossing sits near concurrency 6, at 18.3–19.9 system tok/s/GPU and user output ~50 tok/s. Expect the same KV-oversubscription penalty as the aggregated H200 target when run on the trace.
+| Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
+| --- | --- | --- | --- |
+| 4 | 13.1 | 57.2 | 441 ms |
+| 5 | 14.3 | 49.9 | 711 ms |
+
+Complete runs over all 3,541 trace requests. **Concurrency 4 clears the joint gate** (57.2 tok/s/user P50, 441 ms TTFT P50) — the highest per-user rate of any target on this SKU. Concurrency 5 was measured twice and misses the gate both times (49.6 and 49.9 tok/s/user), so the boundary sits between 4 and 5. Note that aggregated clears the same gate on **half the GPUs** (21.4 vs 13.1 system tok/s/GPU), so on this workload disaggregation is an SLA choice — a higher per-user rate and slightly lower ITL — rather than a throughput win.
 
 </div>
 
@@ -243,7 +248,7 @@ Not yet run on the shared trace. On a synthetic 64K / 400 / 90%-reuse profile th
 | `agg-gb200-agentic` | 8x GB200 | Aggregated | 1,048,576 | Trace-validated |
 | `disagg-gb200-agentic` | 16x GB200 | 1P1D | 1,048,576 | Trace-validated |
 | `agg-h200-agentic` | 8x H200 | Aggregated | 1,048,576 | Trace-validated |
-| `disagg-h200-agentic` | 16x H200 | 1P1D | 1,048,576 | Synthetic only |
+| `disagg-h200-agentic` | 16x H200 | 1P1D | 1,048,576 | Trace-validated |
 
 ## Notes
 

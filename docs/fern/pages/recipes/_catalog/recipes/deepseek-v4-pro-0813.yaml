@@ -106,8 +106,8 @@ targets:
   - kv-aware-routing
   - prefix-caching
   workload:
-    type: synthetic
-    traffic: '64K ISL / 400 OSL, 90% prefix reuse; 1P1D (TP8 + EP per worker), NIXL KV transfer'
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D (TP8 + EP per worker), NIXL KV transfer'
     sla: user output >= 50 tok/s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-h200-agentic/deploy.yaml
@@ -116,12 +116,11 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 'Synthetic 64K/400/90%-reuse: SLA crossing near c6 = 18.25-19.9 system tok/s/GPU @ user ~50. Not yet run on the shared trace; expect the same KV-oversubscription penalty as the aggregated H200 target.'
+    summary: 'Trace replay c4 (complete, 3,541 requests, 11.4 h) = 13.1 system tok/s/GPU @ user 57.2 tok/s P50, TTFT 441 ms P50 -- clears the joint gate. c5 was measured twice and misses it both times (49.6 and 49.9 tok/s/user), so 4 is the operating point. Aggregated clears the same gate on half the GPUs (21.4 tok/s/GPU), so disaggregation is an SLA choice here, not a throughput win.'
 related_benchmarks: []
 maintainer:
 gaps:
 - 'H200 aggregated now has a complete trace run at c4 (3,541/3,541 requests). It clears the joint gate; c6 does not. The residual GB200/H200 gap is KV capacity, not configuration: the trace working set is ~57.5M tokens against ~3.12M tokens of H200 GPU KV, so measured prompt-cache read is 42.7% versus the ~94% the trace could offer.'
-- H200 disaggregated has synthetic numbers only; a complete trace run is still outstanding.
 - 'All H200 figures are N=1 against a measured 17% run-to-run variance.'
 - 'This is a different checkpoint from deepseek-ai/DeepSeek-V4-Pro (see the deepseek-v4-pro recipe); the two must not share a model cache.'
 - maintainer unknown
