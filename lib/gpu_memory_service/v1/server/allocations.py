@@ -94,8 +94,14 @@ class GMSAllocationManager:
         with self._lock:
             handles = tuple(self._allocations.values())
             self._allocations.clear()
-            # Enqueued under _lock so an unlinked handle is never invisible to
-            # both allocation_snapshot() and reclaim_snapshot() at once.
+            # Enqueued under _lock so that on the queued path a handle moves
+            # from allocation_snapshot() into reclaim_snapshot() without ever
+            # being invisible to both. The inline fallback below cannot hold
+            # that: it releases outside every lock, so both snapshots read
+            # empty while the driver still owns the handles. Safe because the
+            # only reader that must not miss them is the checkpoint fence,
+            # which is also gated on writer_reserved (checkpoint.py
+            # _require_quiesced) and that stays set across _clear_epoch().
             queued = self._enqueue_release(handles)
         if not queued:
             for handle in handles:
