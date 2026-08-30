@@ -143,6 +143,16 @@ fn is_default_sita_spill_threshold(value: &f64) -> bool {
     *value == default_sita_spill_threshold()
 }
 
+/// Neutral value for every `score_*` multiplier and exponent. At 1.0 the
+/// shaped overlap credit and load term collapse to the stock expressions.
+const fn default_score_unit() -> f64 {
+    1.0
+}
+
+fn is_default_score_unit(value: &f64) -> bool {
+    *value == default_score_unit()
+}
+
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be a finite, non-negative number";
 
@@ -692,6 +702,12 @@ struct KvRouterConfigSerde {
     sita_osl_weight: f64,
     sita_small_band_share: f64,
     sita_spill_threshold: f64,
+    score_enabled: bool,
+    score_overlap_weight: f64,
+    score_overlap_gamma: f64,
+    score_load_weight: f64,
+    score_load_gamma: f64,
+    score_min_overlap_frac: f64,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -745,6 +761,12 @@ impl Default for KvRouterConfigSerde {
             sita_osl_weight: config.sita_osl_weight,
             sita_small_band_share: config.sita_small_band_share,
             sita_spill_threshold: config.sita_spill_threshold,
+            score_enabled: config.score_enabled,
+            score_overlap_weight: config.score_overlap_weight,
+            score_overlap_gamma: config.score_overlap_gamma,
+            score_load_weight: config.score_load_weight,
+            score_load_gamma: config.score_load_gamma,
+            score_min_overlap_frac: config.score_min_overlap_frac,
         }
     }
 }
@@ -983,6 +1005,52 @@ pub struct KvRouterConfig {
         skip_serializing_if = "is_default_sita_spill_threshold"
     )]
     pub sita_spill_threshold: f64,
+
+    /// Enable shaping of the default worker score. When false, `worker_logit`
+    /// is byte-identical to stock behavior. When true, the overlap credit and
+    /// the load term are reshaped by the `score_*` knobs below; the neutral
+    /// setting (all weights and gammas 1.0, `score_min_overlap_frac` 0.0)
+    /// reproduces the stock logit exactly.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub score_enabled: bool,
+
+    /// Multiplier on the shaped prefix-overlap credit. Above 1.0 the router
+    /// chases cache locality harder; below 1.0 it prefers load balance.
+    #[serde(
+        default = "default_score_unit",
+        skip_serializing_if = "is_default_score_unit"
+    )]
+    pub score_overlap_weight: f64,
+
+    /// Exponent applied to the overlap fraction before crediting it. Values
+    /// above 1.0 concentrate credit on near-full prefix hits; values below 1.0
+    /// spread credit toward partial hits.
+    #[serde(
+        default = "default_score_unit",
+        skip_serializing_if = "is_default_score_unit"
+    )]
+    pub score_overlap_gamma: f64,
+
+    /// Multiplier on the decode-side load term.
+    #[serde(
+        default = "default_score_unit",
+        skip_serializing_if = "is_default_score_unit"
+    )]
+    pub score_load_weight: f64,
+
+    /// Convexity of the load term relative to the mean pool load. Above 1.0 a
+    /// worker that is already busier than the pool average is charged
+    /// superlinearly, which pushes work off hot spots.
+    #[serde(
+        default = "default_score_unit",
+        skip_serializing_if = "is_default_score_unit"
+    )]
+    pub score_load_gamma: f64,
+
+    /// Minimum overlap fraction required before any overlap credit is granted.
+    /// Suppresses thin prefix matches that are not worth the locality pull.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub score_min_overlap_frac: f64,
 }
 
 fn default_conditional_disagg_eff_isl_threshold() -> usize {
@@ -1050,6 +1118,12 @@ impl Default for KvRouterConfig {
             sita_osl_weight: default_sita_osl_weight(),
             sita_small_band_share: default_sita_small_band_share(),
             sita_spill_threshold: default_sita_spill_threshold(),
+            score_enabled: false,
+            score_overlap_weight: default_score_unit(),
+            score_overlap_gamma: default_score_unit(),
+            score_load_weight: default_score_unit(),
+            score_load_gamma: default_score_unit(),
+            score_min_overlap_frac: 0.0,
         }
     }
 }
@@ -1122,6 +1196,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             sita_osl_weight: compat.sita_osl_weight,
             sita_small_band_share: compat.sita_small_band_share,
             sita_spill_threshold: compat.sita_spill_threshold,
+            score_enabled: compat.score_enabled,
+            score_overlap_weight: compat.score_overlap_weight,
+            score_overlap_gamma: compat.score_overlap_gamma,
+            score_load_weight: compat.score_load_weight,
+            score_load_gamma: compat.score_load_gamma,
+            score_min_overlap_frac: compat.score_min_overlap_frac,
         };
         config.validate()?;
         Ok(config)
@@ -1150,6 +1230,25 @@ fn validate_sita_config(config: &KvRouterConfig) -> Result<(), String> {
     if !config.sita_osl_weight.is_finite() {
         return Err("sita_osl_weight must be finite".to_string());
     }
+    Ok(())
+}
+
+fn validate_score_config(config: &KvRouterConfig) -> Result<(), String> {
+    validate_range(
+        "score_overlap_weight",
+        config.score_overlap_weight,
+        0.25,
+        4.0,
+    )?;
+    validate_range("score_overlap_gamma", config.score_overlap_gamma, 0.5, 2.0)?;
+    validate_range("score_load_weight", config.score_load_weight, 0.25, 4.0)?;
+    validate_range("score_load_gamma", config.score_load_gamma, 1.0, 2.0)?;
+    validate_range(
+        "score_min_overlap_frac",
+        config.score_min_overlap_frac,
+        0.0,
+        0.5,
+    )?;
     Ok(())
 }
 
@@ -1504,6 +1603,7 @@ impl KvRouterConfig {
             validate_min("conditional_disagg_decode_busy_threshold", value, 0.0)?;
         }
         validate_sita_config(self)?;
+        validate_score_config(self)?;
         validate_kv_router_config(self)
     }
 
@@ -2638,6 +2738,86 @@ models:
         assert_eq!(enabled.sita_osl_weight, 0.5);
         assert_eq!(enabled.sita_small_band_share, 0.375);
         assert_eq!(enabled.sita_spill_threshold, 0.9);
+    }
+
+    #[test]
+    fn score_defaults_are_neutral_and_round_trip_through_json() {
+        let config = KvRouterConfig::default();
+        assert!(!config.score_enabled);
+        assert_eq!(config.score_overlap_weight, 1.0);
+        assert_eq!(config.score_overlap_gamma, 1.0);
+        assert_eq!(config.score_load_weight, 1.0);
+        assert_eq!(config.score_load_gamma, 1.0);
+        assert_eq!(config.score_min_overlap_frac, 0.0);
+
+        // Defaults must stay out of the serialized MDC so older frontends can
+        // still read it. Match on the full field names: the substring `score_`
+        // also appears inside the long-standing `overlap_score_credit`.
+        let serialized = serde_json::to_string(&config).unwrap();
+        for field in [
+            "score_enabled",
+            "score_overlap_weight",
+            "score_overlap_gamma",
+            "score_load_weight",
+            "score_load_gamma",
+            "score_min_overlap_frac",
+        ] {
+            assert!(!serialized.contains(field), "{field} in {serialized}");
+        }
+        assert!(
+            !serde_json::from_str::<KvRouterConfig>("{}")
+                .unwrap()
+                .score_enabled
+        );
+
+        let enabled: KvRouterConfig = serde_json::from_str(
+            r#"{"score_enabled": true, "score_overlap_weight": 2.5,
+                "score_overlap_gamma": 0.75, "score_load_weight": 0.5,
+                "score_load_gamma": 1.4, "score_min_overlap_frac": 0.2}"#,
+        )
+        .unwrap();
+        assert!(enabled.score_enabled);
+        assert_eq!(enabled.score_overlap_weight, 2.5);
+        assert_eq!(enabled.score_overlap_gamma, 0.75);
+        assert_eq!(enabled.score_load_weight, 0.5);
+        assert_eq!(enabled.score_load_gamma, 1.4);
+        assert_eq!(enabled.score_min_overlap_frac, 0.2);
+    }
+
+    #[test]
+    fn score_validation_rejects_out_of_range_knobs() {
+        let score = |overrides: fn(&mut KvRouterConfig)| {
+            let mut config = KvRouterConfig {
+                score_enabled: true,
+                ..Default::default()
+            };
+            overrides(&mut config);
+            config.validate()
+        };
+
+        // Weights in [0.25, 4.0].
+        assert!(score(|config| config.score_overlap_weight = 0.24).is_err());
+        assert!(score(|config| config.score_overlap_weight = 4.01).is_err());
+        assert!(score(|config| config.score_overlap_weight = 0.25).is_ok());
+        assert!(score(|config| config.score_overlap_weight = 4.0).is_ok());
+        assert!(score(|config| config.score_load_weight = 0.24).is_err());
+        assert!(score(|config| config.score_load_weight = 4.01).is_err());
+
+        // Overlap gamma in [0.5, 2.0], load gamma in [1.0, 2.0].
+        assert!(score(|config| config.score_overlap_gamma = 0.49).is_err());
+        assert!(score(|config| config.score_overlap_gamma = 2.01).is_err());
+        assert!(score(|config| config.score_overlap_gamma = 0.5).is_ok());
+        assert!(score(|config| config.score_load_gamma = 0.99).is_err());
+        assert!(score(|config| config.score_load_gamma = 2.01).is_err());
+        assert!(score(|config| config.score_load_gamma = 1.0).is_ok());
+
+        // Cutoff fraction in [0.0, 0.5].
+        assert!(score(|config| config.score_min_overlap_frac = -0.01).is_err());
+        assert!(score(|config| config.score_min_overlap_frac = 0.51).is_err());
+        assert!(score(|config| config.score_min_overlap_frac = 0.5).is_ok());
+
+        // Invalid knobs are rejected through the JSON path too.
+        assert!(serde_json::from_str::<KvRouterConfig>(r#"{"score_load_gamma": 0.5}"#).is_err());
     }
 
     #[test]
