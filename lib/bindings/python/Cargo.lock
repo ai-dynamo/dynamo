@@ -1698,7 +1698,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
- "url",
 ]
 
 [[package]]
