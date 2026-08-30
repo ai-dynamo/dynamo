@@ -1030,7 +1030,6 @@ mod prefill_start_tests {
         })
     }
 
-    /// Drive the production dispatch-time call for a single phase.
     async fn dispatch_once(phase: RequestPhase) -> Arc<RequestTracker> {
         let tracker = Arc::new(RequestTracker::new());
         let _permit = tracker.set_phase(phase).await;
@@ -1056,6 +1055,11 @@ mod prefill_start_tests {
         assert!(tracker.prefill_wait_time_ms().is_none());
     }
 
+    /// Pins `RequestTracker`'s first-write-wins contract, which this fix relies on:
+    /// the decode leg still reaches dispatch and must neither clear nor overwrite the
+    /// timestamp prefill already recorded. Unlike the decode-only case, this passes
+    /// against the previous implementation too — it guards the `OnceLock` semantics
+    /// rather than the phase check.
     #[tokio::test]
     async fn decode_after_prefill_retains_the_prefill_timestamp() {
         let tracker = Arc::new(RequestTracker::new());
