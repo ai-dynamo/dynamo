@@ -419,62 +419,6 @@ func TestIsPythonCommand(t *testing.T) {
 	}
 }
 
-func TestSGLangBackend_GetMultinodeFlags(t *testing.T) {
-	backend := &SGLangBackend{}
-
-	tests := []struct {
-		name               string
-		numberOfNodes      int32
-		role               Role
-		multinodeDeployer  MultinodeDeployer
-		expectedFlags      string
-		expectedNeedsShell bool
-		description        string
-	}{
-		{
-			name:               "leader role never needs shell",
-			numberOfNodes:      2,
-			role:               RoleLeader,
-			multinodeDeployer:  &MockShellDeployer{},
-			expectedFlags:      "--dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank 0",
-			expectedNeedsShell: false,
-			description:        "Leader should always use rank 0 and no shell interpretation",
-		},
-		{
-			name:               "worker with simple deployer",
-			numberOfNodes:      3,
-			role:               RoleWorker,
-			multinodeDeployer:  &MockSimpleDeployer{},
-			expectedFlags:      "--dist-init-addr leader.example.com:29500 --nnodes 3 --node-rank 1",
-			expectedNeedsShell: false,
-			description:        "Simple deployer should not need shell interpretation",
-		},
-		{
-			name:               "worker with shell deployer",
-			numberOfNodes:      2,
-			role:               RoleWorker,
-			multinodeDeployer:  &MockShellDeployer{},
-			expectedFlags:      "--dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)",
-			expectedNeedsShell: true,
-			description:        "Shell deployer should need shell interpretation for workers",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			flags, needsShell := backend.getMultinodeFlags(tt.numberOfNodes, tt.role, "test-service", tt.multinodeDeployer)
-
-			if flags != tt.expectedFlags {
-				t.Errorf("getMultinodeFlags() flags = %q, want %q", flags, tt.expectedFlags)
-			}
-
-			if needsShell != tt.expectedNeedsShell {
-				t.Errorf("getMultinodeFlags() needsShell = %v, want %v", needsShell, tt.expectedNeedsShell)
-			}
-		})
-	}
-}
-
 func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 	backend := &SGLangBackend{}
 

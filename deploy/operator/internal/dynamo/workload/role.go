@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package render contains the primitives used while materializing component
-// configuration into Kubernetes workloads.
-package render
+// Package workload contains shared rendering vocabulary for materialized
+// Kubernetes workloads.
+package workload
 
 // Role identifies the workload role currently being rendered.
 type Role string

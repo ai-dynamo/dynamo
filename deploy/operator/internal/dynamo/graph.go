@@ -37,7 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/workload"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -1238,14 +1238,14 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1beta1.DynamoGraphDeployment,
 // Define Role enum for leader/worker/main
 // Use this type everywhere instead of string for role
 
-type Role = render.Role
+type Role = workload.Role
 
 const (
-	RoleLeader     = render.RoleLeader
-	RoleWorker     = render.RoleWorker
-	RoleMain       = render.RoleMain
-	RoleCheckpoint = render.RoleCheckpoint
-	RoleGMS        = render.RoleGMS
+	RoleLeader     = workload.RoleLeader
+	RoleWorker     = workload.RoleWorker
+	RoleMain       = workload.RoleMain
+	RoleCheckpoint = workload.RoleCheckpoint
+	RoleGMS        = workload.RoleGMS
 )
 
 // ServiceRole describes one PodClique (PCLQ) to be materialised for a

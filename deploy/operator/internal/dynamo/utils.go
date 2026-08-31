@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -42,7 +42,7 @@ import (
 // Simple args (flags, paths) pass through unchanged; args containing special characters
 // (JSON, env vars, spaces, quotes) are wrapped in double quotes with inner escaping.
 func shellQuoteForBashC(s string) string {
-	return render.ShellQuote(s)
+	return mutation.ShellQuote(s)
 }
 
 // shellSafeToken matches tokens that are literal to the shell in every context
@@ -69,11 +69,11 @@ func shellQuotePOSIX(s string) string {
 // as a single token "flag=value" or "flag value" embedded inside a shell
 // string). It is used to make flag injection idempotent.
 func containerHasArg(container *corev1.Container, flag, value string) bool {
-	return render.ContainerHasArg(container, flag, value)
+	return mutation.ContainerHasArg(container, flag, value)
 }
 
 func containerCommandLineHasArg(container *corev1.Container, flag, value string) bool {
-	return render.ContainerCommandLineHasArg(container, flag, value)
+	return mutation.ContainerCommandLineHasArg(container, flag, value)
 }
 
 func hasArg(args []string, flag, value string) bool {
