@@ -1,0 +1,15 @@
+--- a/vllm/models/deepseek_v4/nvidia/flashmla.py
++++ b/vllm/models/deepseek_v4/nvidia/flashmla.py
+@@ -322,6 +322,12 @@
+             query_end = (
+                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+             )
++            # vLLM PR #49961 / issue #49922: a fully cached request enters
++            # prefill with query_len == 0. The empty chunk builds a degenerate
++            # TMA descriptor (gmem_address=0) and FlashMLA sparse_prefill_fwd
++            # asserts. Skip the chunk; it has no tokens to process.
++            if query_start == query_end:
++                continue
+ 
+             combined_indices, combined_lens = combine_topk_swa_indices(
+                 topk_indices[query_start:query_end],

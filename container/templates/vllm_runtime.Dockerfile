@@ -246,6 +246,23 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" %}
+# Apply vLLM hotfixes to the installed package tree. A failed patch must fail
+# the build: without set -e a for-loop only reports the last iteration status,
+# so a silently unpatched image could ship. The greps assert the patched text
+# is actually present and that no rejects were produced.
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
+    set -eu && \
+    SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    for p in /tmp/vllm_patches/*.patch; do \
+        echo "applying $(basename "$p")"; \
+        patch --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
+    done && \
+    grep -q 'local_max != local_max' "${SITE_PACKAGES}/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py" && \
+    grep -q 'if query_start == query_end' "${SITE_PACKAGES}/vllm/models/deepseek_v4/nvidia/flashmla.py" && \
+    ! find "${SITE_PACKAGES}" -name '*.rej' | grep -q .
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
