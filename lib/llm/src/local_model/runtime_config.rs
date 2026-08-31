@@ -19,6 +19,9 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
+use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
+
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
 pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
@@ -545,6 +548,28 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if let Some(parser) = config
+        .tool_call_parser
+        .as_deref()
+        .filter(|parser| !parser.is_empty())
+    {
+        let mut supported = get_available_tool_parsers();
+        // Unified parser names live outside the v1 registry; normalize the union
+        // for a stable error message.
+        supported.extend_from_slice(unified_family_names());
+        supported.sort_unstable();
+        supported.dedup();
+        if !supported.contains(&parser) {
+            return Err(validation_error(
+                "unsupported_tool_call_parser",
+                format!(
+                    "tool_call_parser '{parser}' is not supported; available parsers: {}",
+                    supported.join(", ")
+                ),
+            ));
+        }
+    }
+
     if let Some(domain) = &config.kv_transfer_domain
         && !config.topology_domains.contains_key(domain)
     {
@@ -710,6 +735,8 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
@@ -1234,5 +1261,26 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn test_validate_config_checks_tool_call_parser() {
+        let validate = |parser: &str| {
+            ModelRuntimeConfig {
+                tool_call_parser: Some(parser.to_string()),
+                ..Default::default()
+            }
+            .validate_config()
+        };
+
+        // Every v2 or unified parser must remain valid at registration.
+        for &parser in V2_FAMILIES.iter().chain(unified_family_names()) {
+            assert!(validate(parser).is_ok(), "{parser} must be supported");
+        }
+        assert!(validate("").is_ok());
+
+        let error = validate("not_registered").unwrap_err();
+        assert!(error.contains("not_registered"));
+        assert!(error.contains("muse_glimmer"));
     }
 }

@@ -29,7 +29,7 @@ if HAS_VLLM:
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-    from dynamo.frontend.prepost import StreamingPostProcessor
+    from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
 else:
     # Fake some types so that `pre-commit` passes
     class CompletionOutput:
@@ -2076,3 +2076,122 @@ def test_streaming_parallel_tool_calls_no_think(
     assert finish_reasons == [
         "tool_calls"
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-parser adjust_request wiring
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def recording_reasoning_parser():
+    """A reasoning-parser class plus the per-test list of instances it created.
+
+    Returns ``(cls, instances)``. The list is owned by the fixture rather than
+    living on the class, so each test starts clean without depending on a shared
+    registry being cleared (see .ai/pytest-guidelines.md, "Hermetic Testing").
+    """
+    instances = []
+
+    class _RecordingReasoningParser:
+        """Stands in for a parser whose adjust_request mutates the request.
+
+        Real example: a parser that splits thinking from the answer on text markers
+        needs skip_special_tokens=False so those markers survive detokenisation.
+        """
+
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.called = False
+            instances.append(self)
+
+        def adjust_request(self, request):
+            self.called = True
+            request.skip_special_tokens = False
+            return request
+
+    return _RecordingReasoningParser, instances
+
+
+def _prep(tokenizer, *, reasoning_parser_class=None, chat_template_kwargs=None):
+    request = ChatCompletionRequest.model_construct(
+        messages=[{"role": "user", "content": "hi"}],
+        model="test",
+        tools=None,
+        tool_choice=None,
+        chat_template=None,
+        chat_template_kwargs=chat_template_kwargs,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        documents=None,
+        reasoning_effort=None,
+        skip_special_tokens=True,
+    )
+    return _prepare_request(
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+        reasoning_parser_class=reasoning_parser_class,
+    )
+
+
+class TestReasoningParserAdjustRequest:
+    """The reasoning parser's adjust_request must run during request preparation.
+
+    Without it the reasoning channel only works when the *client* sends
+    skip_special_tokens=false, which ordinary OpenAI-compatible clients do not.
+    """
+
+    def test_adjust_request_is_called(self, tokenizer, recording_reasoning_parser):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=parser_cls)
+        assert len(instances) == 1
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_not_called_when_thinking_disabled(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """Gating must match StreamingPostProcessor: no parser => no adjustment.
+
+        If the sampling params were adjusted for a parser that then does not exist,
+        the model's control markers reach the client as visible text.
+        """
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        assert instances == []
+        assert req.skip_special_tokens is True
+
+    def test_enable_thinking_true_still_calls(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_no_parser_class_leaves_request_untouched(self, tokenizer):
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=None)
+        assert req.skip_special_tokens is True
+
+    def test_default_adjust_request_is_a_no_op(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """ReasoningParser.adjust_request returns the request unchanged by default,
+        so parsers that do not need the override are unaffected."""
+        parser_cls, _ = recording_reasoning_parser
+
+        class _PassThrough(parser_cls):
+            def adjust_request(self, request):
+                self.called = True
+                return request
+
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=_PassThrough)
+        assert req.skip_special_tokens is True
