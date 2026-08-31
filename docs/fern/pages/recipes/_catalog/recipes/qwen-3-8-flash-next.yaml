@@ -67,6 +67,34 @@ targets:
         itl_p50_ms: 7.8
         prefix_cache_hit_pct: 73.1
         concurrency: 24
+  - id: vllm-agg-b200-agentic-12gpu
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 12
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-12gpu/deploy.yaml
+    expected_performance:
+      available: true
+      metrics:
+        system_output_throughput: 2857
+        per_gpu_output_throughput: 238.1
+        user_output_throughput_p50: 144.5
+        ttft_p50_ms: 325
+        itl_p50_ms: 6.9
+        prefix_cache_hit_pct: 74.5
+        concurrency: 24
   - id: vllm-disagg-b200-agentic
     recommended: false
     hardware:
@@ -95,6 +123,35 @@ targets:
         ttft_p50_ms: 452
         itl_p50_ms: 7.5
         prefix_cache_hit_pct: 73.4
+        concurrency: 24
+  - id: vllm-disagg-b200-agentic-2p1d
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 12
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+      - disaggregated-prefill-decode
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic-2p1d/deploy.yaml
+    expected_performance:
+      available: true
+      metrics:
+        system_output_throughput: 2735
+        per_gpu_output_throughput: 227.9
+        user_output_throughput_p50: 133.4
+        ttft_p50_ms: 407
+        itl_p50_ms: 7.5
+        prefix_cache_hit_pct: 77.2
         concurrency: 24
 related_benchmarks: []
 maintainer: null

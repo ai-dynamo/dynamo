@@ -124,6 +124,9 @@ kubectl apply -f vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 # 8-GPU aggregated (2 workers × TP4)
 kubectl apply -f vllm/agg-b200-agentic-8gpu/deploy.yaml -n ${NAMESPACE}
 
+# 12-GPU aggregated (3 workers × TP4)
+kubectl apply -f vllm/agg-b200-agentic-12gpu/deploy.yaml -n ${NAMESPACE}
+
 # 8-GPU disaggregated (1P1D, InfiniBand RDMA)
 kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
