@@ -22,6 +22,7 @@ spec:
     - name: Frontend
       type: frontend
       replicas: 1
+      minAvailable: 1
       podTemplate:
         spec:
           containers:
@@ -36,15 +37,30 @@ spec:
                 - round-robin
                 - --http-port
                 - "8000"
+              env:
+                - name: HF_HOME
+                  value: /model-store/huggingface
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-store
               workingDir: /workspace
               resources:
                 requests:
                   cpu: "1"
                 limits:
                   cpu: "2"
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
     - name: VllmDecodeWorker
       type: worker
       replicas: 1
+      minAvailable: 1
+      scalingAdapter: {}
       podTemplate:
         spec:
           containers:
@@ -66,13 +82,13 @@ spec:
                 - --no-enable-log-requests
               env:
                 - name: HF_HOME
-                  value: /opt/models
+                  value: /model-store/huggingface
               envFrom:
                 - secretRef:
                     name: hf-token-secret
               volumeMounts:
                 - name: model-cache
-                  mountPath: /opt/models
+                  mountPath: /model-store
               workingDir: /workspace/examples/backends/vllm
               resources:
                 requests:

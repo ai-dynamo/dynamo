@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Template variables are intentionally required. Render this file with the
+# documented envsubst command; do not apply it directly.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qwen3-0-6b-batch-planner-scaling-adapter
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups:
+      - nvidia.com
+    resources:
+      - dynamographdeploymentscalingadapters
+    resourceNames:
+      - qwen3-0-6b-batch-vllmdecodeworker
+    verbs:
+      - get
+  - apiGroups:
+      - nvidia.com
+    resources:
+      - dynamographdeploymentscalingadapters/scale
+    resourceNames:
+      - qwen3-0-6b-batch-vllmdecodeworker
+    verbs:
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qwen3-0-6b-batch-planner-scaling-adapter
+  namespace: ${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: planner-serviceaccount
+    namespace: ${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qwen3-0-6b-batch-planner-scaling-adapter
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen3-0-6b-batch-planner-config
+  namespace: ${NAMESPACE}
+data:
+  planner.yaml: |
+    environment: kubernetes
+    namespace: ${NAMESPACE}-qwen3-0-6b-batch
+    backend: vllm
+    mode: agg
+    model_name: Qwen/Qwen3-0.6B
+    optimization_target: throughput
+    pre_deployment_sweeping_mode: none
+    enable_throughput_scaling: false
+    enable_load_scaling: true
+    load_adjustment_interval_seconds: 5
+    throughput_adjustment_interval_seconds: 60
+    min_endpoint: 0
+    max_gpu_budget: 1
+    metric_reporting_prometheus_port: 0
+    live_dashboard_port: 0
+    report_interval_hours: null
+    scheduling:
+      scale_interval_seconds: 5
+      tick_max_duration_seconds: 20
+    batch_scheduling:
+      enabled: true
+      gateway:
+        base_url: http://batch-gateway-apiserver:8000
+        tenant: planner-poc-baseline
+        request_timeout_seconds: 5
+        page_size: 100
+        max_pages: 100
+      metrics:
+        frontend_metrics_url: http://qwen3-0-6b-batch-frontend:8000/metrics
+        dispatcher_metrics_url: http://async-dispatch-llm-d-async-metrics:9090/metrics
+        online_match_labels:
+          endpoint: chat_completions
+          model: Qwen/Qwen3-0.6B
+          request_type: stream
+        request_timeout_seconds: 5
+      redis:
+        control_key: llm-d-async:drain-limit:dynamo-batch
+        connect_timeout_seconds: 2
+        socket_timeout_seconds: 2
+      pool:
+        pool_id: dynamo-batch
+        work_class: gsm8k-qwen3-0.6b-chat-v1
+        safe_rps_per_ready_replica: 15
+        cold_start_margin_seconds: 30
+        finalization_margin_seconds: 5
+        max_observation_age_seconds: 15
+        drain_lease_duration_seconds: 60
+        min_replicas: 0
+        max_replicas: 1
+        scale_from_zero_replicas: 1
+        max_batch_admission_rps: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: async-dispatch-llm-d-async-metrics
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/instance: async-dispatch
+    app.kubernetes.io/name: llm-d-async
+spec:
+  selector:
+    app.kubernetes.io/instance: async-dispatch
+    app.kubernetes.io/name: llm-d-async
+  ports:
+    - name: metrics
+      port: 9090
+      protocol: TCP
+      targetPort: metrics
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-0-6b-batch-planner
+  namespace: ${NAMESPACE}
+spec:
+  components:
+    - name: Planner
+      type: planner
+      replicas: 1
+      podTemplate:
+        spec:
+          terminationGracePeriodSeconds: 30
+          containers:
+            - name: main
+              image: ${PLANNER_IMAGE}
+              imagePullPolicy: Always
+              command:
+                - python3
+                - -m
+                - dynamo.planner
+              args:
+                - --config
+                - /etc/dynamo/planner/planner.yaml
+              env:
+                - name: DYN_NAMESPACE
+                  value: ${NAMESPACE}-qwen3-0-6b-batch
+                - name: DYN_PARENT_DGD_K8S_NAME
+                  value: qwen3-0-6b-batch
+                - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                  value: ${NAMESPACE}
+                - name: DYN_PLANNER_BATCH_REDIS_URL
+                  value: redis://batch-gateway-valkey:6379/0
+              volumeMounts:
+                - name: planner-config
+                  mountPath: /etc/dynamo/planner
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+          volumes:
+            - name: planner-config
+              configMap:
+                name: qwen3-0-6b-batch-planner-config

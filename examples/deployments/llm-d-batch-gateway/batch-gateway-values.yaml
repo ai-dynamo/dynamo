@@ -15,6 +15,14 @@
 
 global:
   secretName: batch-gateway-secrets
+  # The API server and processor share the filesystem-backed batch store.
+  # Match the chart images' non-root group so both pods can write the same PVC.
+  podSecurityContext:
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   dbClient:
     type: redis
   fileClient:
