@@ -310,7 +310,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// Two things an engine can produce here:
     /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
     ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
-    ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
+    ///    via [`EngineMetrics::add_typed_callback`](crate::metrics::EngineMetrics::add_typed_callback)
     ///    on `ctx.metrics`. Side-effect only.
     /// 2. Declare `dp_ranks` in [`MetricsBindings`] to opt into the
     ///    per-rank `dynamo_component_*` gauges + KV router signal. The

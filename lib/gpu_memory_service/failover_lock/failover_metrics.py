@@ -35,9 +35,8 @@ class FailoverMetrics:
         persist_dir: str,
     ) -> None:
         # Dedicated registry, independent of any engine multiproc registry.
-        from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+        from prometheus_client import CollectorRegistry, Counter, Gauge
 
-        self._generate_latest = generate_latest
         self._registry = CollectorRegistry()
         # Guards the multi-step updates below (flipping the 1-hot gauge is
         # several set() calls; persist is read-then-write) so a concurrent
@@ -189,12 +188,21 @@ class FailoverMetrics:
             self._persist()
 
     # -- scrape bridge ------------------------------------------------------ #
-    def _collect(self) -> str:
+    def _collect(self) -> list:
+        """Hand the registry over as a typed structure.
+
+        Callbacks return families rather than exposition text, so the runtime
+        renders once for both ``/metrics`` and OTLP instead of parsing text
+        back into structure. Imported lazily, as ``prometheus_client`` is:
+        this module is only reachable with a Dynamo endpoint in hand.
+        """
+        from dynamo.common.utils.prometheus import get_prometheus_typed
+
         with self._lock:
-            return self._generate_latest(self._registry).decode("utf-8")
+            return get_prometheus_typed(self._registry)
 
     def register(self, endpoint) -> None:
-        endpoint.metrics.register_prometheus_expfmt_callback(self._collect)
+        endpoint.metrics.register_prometheus_typed_callback(self._collect)
         logger.info(
             "[Shadow] registered failover metrics (engine=%s, persist=%s)",
             self._engine_id,

@@ -1443,23 +1443,31 @@ mod test_metricsregistry_prefixes {
         let component = namespace.component("comp_expfmt_ep_only").unwrap();
         let endpoint = component.endpoint("ep_expfmt_ep_only");
 
-        let metric_line = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0\n";
-        let callback: PrometheusExpositionFormatCallback =
-            Arc::new(move || Ok(metric_line.to_string()));
+        let callback: PrometheusTypedCallback = Arc::new(move || {
+            let mut family = prometheus::proto::MetricFamily::new();
+            family.set_name("dynamo_component_active_decode_blocks".to_string());
+            family.set_field_type(prometheus::proto::MetricType::GAUGE);
+            let mut metric = prometheus::proto::Metric::new();
+            let mut label = prometheus::proto::LabelPair::new();
+            label.set_name("dp_rank".to_string());
+            label.set_value("0".to_string());
+            metric.set_label(vec![label]);
+            metric.set_gauge(prometheus::proto::Gauge::new());
+            family.mut_metric().push(metric);
+            Ok(vec![family])
+        });
 
-        endpoint
-            .get_metrics_registry()
-            .add_expfmt_callback(callback);
+        endpoint.get_metrics_registry().add_typed_callback(callback);
 
         let output = drt.metrics().prometheus_expfmt().unwrap();
-        let occurrences = output
-            .lines()
-            .filter(|line| line == &metric_line.trim_end_matches('\n'))
-            .count();
+        // The registry tree is traversed once, so a callback registered on the
+        // endpoint must not be collected again via its parents.
+        let expected = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0";
+        let occurrences = output.lines().filter(|line| *line == expected).count();
 
         assert_eq!(
             occurrences, 1,
-            "endpoint-registered exposition callback should appear once, got {} occurrences\n\n{}",
+            "endpoint-registered typed callback should appear once, got {} occurrences\n\n{}",
             occurrences, output
         );
     }
