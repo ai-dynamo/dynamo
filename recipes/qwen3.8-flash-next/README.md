@@ -239,6 +239,7 @@ Benchmarked on B200, AIPerf trace-replay with 64K agentic trace (15% subset, 3,5
 | Aggregated (15% subset) | B200 | 1 (TP4)  | 4  | 24 | 1,830  | 457.4 | 102.8 | 329 | 9.7 | 67.9% |
 | Aggregated (15% subset) | B200 | 2 (TP4×2) | 8  | 24 | 2,474  | 309.3 | 127.6 | 339 | 7.8 | 73.1% |
 | Disaggregated (15% subset) | B200 | 1P+1D (TP4×2) | 8  | 24 | 2,641  | 330.2 | 132.8 | 452 | 7.5 | 73.4% |
+| Disaggregated 2P1D (15% subset) | B200 | 2P+1D (TP4×3) | 12 | 24 | 2,735  | 227.9 | 133.4 | 407 | 7.5 | 77.2% |
 
 > **Note:** The 8-GPU aggregated recipe uses 2 workers (2×TP4) on a single node. Per-GPU throughput is lower (309 vs 458 tok/s/GPU) because the ultra-sparse model (6B active) is already compute-light — adding more workers improves aggregate throughput (+35%) and prefix cache hit rate (+5pp) but doesn't scale linearly due to shared memory bandwidth. ITL improves from 9.7 to 7.8 ms with more GPU resources per request.
 >
