@@ -41,6 +41,7 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.snapshot import snapshot_server_arg_overrides
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 try:
@@ -132,6 +133,25 @@ def test_override_server_args_supports_legacy_xpu_pin():
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+@pytest.mark.parametrize("gms_v1", [True, False])
+def test_snapshot_overrides_always_disable_forward_pass_metrics(monkeypatch, gms_v1):
+    """FPM must be off for every snapshot engine, GMS V1 included.
+
+    A snapshot engine is built before the Dynamo endpoint exists, so init_llm
+    refuses to adopt a restored engine that has FPM enabled.
+    """
+    if gms_v1:
+        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    else:
+        monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+
+    overrides = snapshot_server_arg_overrides()
+
+    assert overrides["enable_forward_pass_metrics"] is False
+    # memory_saver is the V0-only weight-release path; V1 manages weights itself.
+    assert ("enable_memory_saver" in overrides) is not gms_v1
 
 
 @pytest.fixture(autouse=True)
