@@ -148,26 +148,6 @@
       "from_tag": "v0.5.18-cu130-runtime",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
-    },
-    {
-      "baseline_digest": "sha256:b8e64fb16b8b8b10f6ff41eb1370ac2b010d618f434915259375fdbf457fbdc5",
-      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
-      "baseline_sbom": "ubuntu@b8e64fb1-amd64.cdx.json",
-      "baseline_tag": "noble-20260730.1",
-      "from_digest": "sha256:b8e64fb16b8b8b10f6ff41eb1370ac2b010d618f434915259375fdbf457fbdc5",
-      "from_image": "nvcr.io/nvidia/base/ubuntu",
-      "from_tag": "noble-20260730.1",
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:b8e64fb16b8b8b10f6ff41eb1370ac2b010d618f434915259375fdbf457fbdc5",
-      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
-      "baseline_sbom": "ubuntu@b8e64fb1-arm64.cdx.json",
-      "baseline_tag": "noble-20260730.1",
-      "from_digest": "sha256:b8e64fb16b8b8b10f6ff41eb1370ac2b010d618f434915259375fdbf457fbdc5",
-      "from_image": "nvcr.io/nvidia/base/ubuntu",
-      "from_tag": "noble-20260730.1",
-      "platform": "linux/arm64"
     }
   ],
   "entry_schema": {
@@ -182,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-31T18:52:25+00:00",
+  "generated_at": "2026-08-25T02:02:28+00:00",
   "schema_version": 2
 }

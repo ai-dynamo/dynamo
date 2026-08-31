@@ -13,7 +13,7 @@
 # runtime image. Keep this tag synchronized with the captured Ubuntu SBOM in
 # container/compliance/base_sboms/manifest.json; refresh that baseline before
 # advancing the image tag.
-ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20260730.1
+ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
 
 # ---- common builder ---------------------------------------------------------
 FROM ${BASE_IMAGE} AS builder-base
@@ -226,7 +226,7 @@ RUN python3 -m compliance.generators \
         --rust-licenses-dir /tmp/rust-licenses \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
-        --subtract-sbom /src/container/compliance/base_sboms/ubuntu@b8e64fb1-${TARGETARCH}.cdx.json \
+        --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \
