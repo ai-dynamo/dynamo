@@ -10,6 +10,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	vllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/vllm"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
@@ -1328,8 +1329,8 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 
 			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 
-			if got := containerHasArg(container, "--load-format", "gms"); got != tt.wantLoadFormat {
-				t.Errorf("containerHasArg(--load-format gms) = %v, want %v; args=%v", got, tt.wantLoadFormat, container.Args)
+			if got := mutation.ContainerHasArg(container, "--load-format", "gms"); got != tt.wantLoadFormat {
+				t.Errorf("mutation.ContainerHasArg(--load-format gms) = %v, want %v; args=%v", got, tt.wantLoadFormat, container.Args)
 			}
 
 			count := 0
@@ -1364,7 +1365,7 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 
 	require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 
-	if containerHasArg(container, "--load-format", "gms") {
+	if mutation.ContainerHasArg(container, "--load-format", "gms") {
 		t.Errorf("--load-format gms must not be injected when inter-pod GMS is disabled")
 	}
 	for _, e := range container.Env {

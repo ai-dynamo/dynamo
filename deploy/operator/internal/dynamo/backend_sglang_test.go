@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -411,9 +412,9 @@ func TestIsPythonCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.cmd, func(t *testing.T) {
-			result := isPythonCommand(tt.cmd)
+			result := mutation.IsPythonCommand(tt.cmd)
 			if result != tt.expected {
-				t.Errorf("isPythonCommand(%q) = %v, want %v", tt.cmd, result, tt.expected)
+				t.Errorf("mutation.IsPythonCommand(%q) = %v, want %v", tt.cmd, result, tt.expected)
 			}
 		})
 	}
