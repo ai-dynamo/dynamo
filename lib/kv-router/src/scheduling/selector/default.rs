@@ -609,7 +609,7 @@ impl WorkerPicker for DefaultWorkerPicker {
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
-    fn retains_eligible_affinity_target(&self) -> bool {
+    fn uses_exclusive_affinity_target(&self) -> bool {
         true
     }
 

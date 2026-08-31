@@ -201,21 +201,23 @@ where
             mut affinity,
             ..
         } = plan;
+        let selected_target = route_target(selection.worker);
         let guard = match self
             .track_planned_selection(&request, &mut selection, cleanup)
             .await
         {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        let selected_target = route_target(selection.worker);
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = affinity.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };

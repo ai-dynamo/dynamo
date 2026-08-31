@@ -29,7 +29,9 @@ use crate::protocols::common::extensions::SessionAffinityId;
 mod stream;
 mod target;
 
-pub(crate) use target::{ADVISORY_DECODE_TARGET_CONTEXT_KEY, explicit_target_for_routing};
+#[cfg(test)]
+pub(crate) use target::ADVISORY_DECODE_TARGET_CONTEXT_KEY;
+pub(crate) use target::explicit_target_for_routing;
 pub use target::{affinity_id, explicit_target};
 use target::{validate_bound_target, validate_dispatch_target};
 
@@ -42,10 +44,15 @@ pub(super) struct AffinityVersion {
 }
 
 pub(super) fn initial_affinity_sequence(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
+    let Some(sequence) = now
+        .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
-        .unwrap_or(1)
+    else {
+        tracing::warn!("system clock predates the session-affinity sequence epoch");
+        return 1;
+    };
+    sequence
 }
 
 enum AffinityEntry {
@@ -633,12 +640,18 @@ impl AffinityAcquire {
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
-                if mode == SessionAffinityMode::Soft && target != dispatched_target {
-                    return Ok(stream::track(
-                        stream,
-                        lease,
-                        Some((target, dispatched_target)),
-                    ));
+                if mode == SessionAffinityMode::Soft {
+                    let rebound_target = match target.dp_rank {
+                        None => AffinityTarget::worker(dispatched_target.worker_id),
+                        Some(_) => dispatched_target.dp_rank.map_or(target, |dp_rank| {
+                            AffinityTarget::new(dispatched_target.worker_id, Some(dp_rank))
+                        }),
+                    };
+                    if target != rebound_target {
+                        return Ok(stream::track(stream, lease, Some((target, rebound_target))));
+                    }
+                    lease.publish(target);
+                    return Ok(lease.into_stream(stream));
                 }
                 if let Err(error) = validate_dispatch_target("session", target, dispatched_target) {
                     lease.invalidate();
@@ -819,12 +832,21 @@ impl AffinityLease {
                     if *revision == self.revision && *version == self.version
             )
         });
-        if removed.is_some() {
-            self.active = false;
-            inner.entry_count.fetch_sub(1, Ordering::Relaxed);
-        } else {
-            drop(inner);
-            self.release();
+        match removed {
+            Some((_, AffinityEntry::Bound { target, .. })) => {
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    worker_id = target.worker_id,
+                    dp_rank = ?target.dp_rank,
+                    "invalidated current session affinity binding"
+                );
+                self.active = false;
+                inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+            }
+            Some((_, AffinityEntry::Initializing { .. })) => {
+                unreachable!("bound lease removed an initializing entry")
+            }
+            None => self.release(),
         }
     }
 }

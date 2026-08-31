@@ -335,9 +335,10 @@ pub struct ScheduleRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
-    /// A session-affinity preference resolved by the request host.
+    /// A session-affinity target resolved by the request host.
     ///
-    /// Unlike `pinned_worker`, this target does not constrain eligibility.
+    /// The default selector treats an eligible target as exclusive. Custom policies receive the
+    /// target as advisory context and may select another eligible worker.
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -367,6 +368,8 @@ pub struct SchedulingRequest {
     pub expected_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
+    /// Affinity target with the same default-versus-custom policy semantics as
+    /// [`ScheduleRequest::affinity_target`].
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,

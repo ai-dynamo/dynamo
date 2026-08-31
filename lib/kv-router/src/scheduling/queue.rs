@@ -1008,7 +1008,6 @@ impl<
         request: &mut SchedulingRequest,
         decay_now: Instant,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        let workers = self.workers_with_configs.borrow();
         let overloaded_worker_ids = self
             .overloaded_worker_provider
             .as_ref()
@@ -1017,41 +1016,19 @@ impl<
             .available_worker_provider
             .as_ref()
             .and_then(|provider| provider());
-        let affinity_target = request.affinity_target.filter(|target| {
-            if !self.selector.retains_eligible_affinity_target() {
-                return false;
-            }
-            let eligibility = request
-                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
-                .with_available_workers(available_worker_ids.as_deref());
-            eligibility.affinity_target_is_eligible(&workers, *target)
-        });
-        request.worker_loads = match affinity_target {
-            Some(target) => {
-                let config = workers
-                    .get(&target.worker_id)
-                    .expect("eligible affinity worker must have a config");
-                let start = config.data_parallel_start_rank();
-                let end = start + config.data_parallel_size();
-                let dp_ranks = target.dp_rank.map_or(start..end, |rank| rank..rank + 1);
-                self.slots.project_affinity_worker_loads(
-                    request.token_seq.as_deref(),
-                    target.worker_id,
-                    dp_ranks,
-                    decay_now,
-                )
-            }
-            None => self
-                .slots
-                .project_worker_loads(request.token_seq.as_deref(), decay_now),
-        };
-
-        let eligibility = request
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+        let mut eligibility = request
             .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
             .with_available_workers(available_worker_ids.as_deref());
-        let eligibility = affinity_target
-            .map(|target| eligibility.with_affinity_target(target))
-            .unwrap_or(eligibility);
+        let workers = self.workers_with_configs.borrow();
+        if self.selector.uses_exclusive_affinity_target()
+            && let Some(target) = request.affinity_target
+            && eligibility.affinity_target_is_eligible(&workers, target)
+        {
+            eligibility = eligibility.with_affinity_target(target);
+        }
         self.selector
             .select_worker(WorkerSelectionInput::configured(
                 &workers,

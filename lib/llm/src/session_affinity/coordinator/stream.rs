@@ -66,15 +66,18 @@ impl Stream for AffinityTrackedStream {
             }
             Poll::Ready(None) => {
                 let context = self.stream.context();
-                if !self.failed
-                    && !context.is_stopped()
-                    && !context.is_killed()
-                    && let Some((expected, target)) = self.rebind.take()
-                    && let Some(mut lease) = self.lease.take()
-                {
-                    lease.rebind(expected, target);
+                let rebind = self.rebind.take();
+                if let Some(mut lease) = self.lease.take() {
+                    if !self.failed
+                        && !context.is_stopped()
+                        && !context.is_killed()
+                        && let Some((expected, target)) = rebind
+                    {
+                        lease.rebind(expected, target);
+                    }
+                    // Release explicitly so a successful rebind publishes its new version.
+                    lease.release();
                 }
-                drop(self.lease.take());
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,

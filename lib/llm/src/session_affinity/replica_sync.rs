@@ -33,7 +33,9 @@ pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
+    #[serde(default)]
     pub sequence: u64,
+    /// Stable wire name for the writer ID used to order concurrent replica updates.
     pub router_id: u64,
 }
 
@@ -90,12 +92,19 @@ impl ReplicaUpdateApplier {
             worker_id: update.worker_id,
             dp_rank: update.dp_rank,
         };
+        // Revision-zero publishers predate versioned updates; normalize their writer as well as
+        // their sequence so any versioned update wins deterministically.
+        let writer_id = if update.sequence == 0 {
+            0
+        } else {
+            update.router_id
+        };
         let outcome = coordinator.apply_replica_update(
             update.session_id,
             target,
             AffinityVersion {
                 sequence: update.sequence,
-                writer_id: update.router_id,
+                writer_id,
             },
         );
         drop(coordinator);
@@ -324,6 +333,33 @@ mod tests {
         assert!(should_use_direct_sync(EventTransportKind::Zmq, true));
         assert!(!should_use_direct_sync(EventTransportKind::Zmq, false));
         assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
+    }
+
+    #[test]
+    fn legacy_update_without_sequence_decodes_as_unversioned() {
+        #[derive(serde::Serialize)]
+        struct LegacyUpdate<'a> {
+            session_id: &'a str,
+            worker_id: u64,
+            dp_rank: Option<u32>,
+            router_id: u64,
+        }
+
+        let codec = Codec::default();
+        let payload = codec
+            .encode_payload(&LegacyUpdate {
+                session_id: "legacy",
+                worker_id: 7,
+                dp_rank: Some(2),
+                router_id: 11,
+            })
+            .unwrap();
+        let update = codec
+            .decode_payload::<SessionAffinityUpdate>(&payload)
+            .unwrap();
+
+        assert_eq!(update.sequence, 0);
+        assert_eq!(update.router_id, 11);
     }
 
     #[tokio::test]

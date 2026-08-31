@@ -24,6 +24,13 @@ pub enum WorkerEligibilityError {
         end: DpRank,
     },
 
+    #[error("worker {worker_id} dp_rank {requested} does not match affinity dp_rank {affinity}")]
+    AffinityRankMismatch {
+        worker_id: WorkerId,
+        requested: DpRank,
+        affinity: DpRank,
+    },
+
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
@@ -94,9 +101,17 @@ impl<'a> RoutingEligibility<'a> {
     pub fn caller_allows_worker_id(&self, worker_id: WorkerId) -> bool {
         self.allowed_worker_ids
             .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
-            && self
-                .affinity_target
-                .is_none_or(|target| target.worker_id == worker_id)
+    }
+
+    #[inline]
+    fn matches_affinity_target(&self, worker_id: WorkerId) -> bool {
+        self.affinity_target
+            .is_none_or(|target| target.worker_id == worker_id)
+    }
+
+    #[inline]
+    fn matches_worker_id_constraints(&self, worker_id: WorkerId) -> bool {
+        self.caller_allows_worker_id(worker_id) && self.matches_affinity_target(worker_id)
     }
 
     #[inline]
@@ -107,7 +122,7 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.caller_allows_worker_id(worker_id)
+        self.matches_worker_id_constraints(worker_id)
             && self.is_worker_available(worker_id)
             && !self.is_worker_overloaded(worker_id)
     }
@@ -118,7 +133,7 @@ impl<'a> RoutingEligibility<'a> {
         worker_id: WorkerId,
         config: &C,
     ) -> bool {
-        self.caller_allows_worker_id(worker_id)
+        self.matches_worker_id_constraints(worker_id)
             && self.is_worker_available(worker_id)
             && self
                 .routing_constraints
@@ -178,14 +193,18 @@ impl<'a> RoutingEligibility<'a> {
                 worker_id: worker.worker_id,
             });
         }
+        if !self.matches_affinity_target(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
         if let Some(dp_rank) = self.affinity_target.and_then(|target| target.dp_rank)
             && dp_rank != worker.dp_rank
         {
-            return Err(WorkerEligibilityError::DpRankUnavailable {
+            return Err(WorkerEligibilityError::AffinityRankMismatch {
                 worker_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
-                start: dp_rank,
-                end: dp_rank.saturating_add(1),
+                requested: worker.dp_rank,
+                affinity: dp_rank,
             });
         }
 
@@ -289,7 +308,7 @@ impl<'a> RoutingEligibility<'a> {
             return Ok(());
         };
 
-        if self.caller_allows_worker_id(pinned_worker.worker_id) {
+        if self.matches_worker_id_constraints(pinned_worker.worker_id) {
             return Ok(());
         }
 
@@ -480,6 +499,25 @@ mod tests {
                 dp_rank: 5,
                 start: 2,
                 end: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_reports_affinity_rank_mismatch() {
+        let workers = workers();
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_affinity_target(WorkerAffinityTarget::new(7, Some(3)));
+
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 4));
+
+        assert_eq!(
+            result.err(),
+            Some(WorkerEligibilityError::AffinityRankMismatch {
+                worker_id: 7,
+                requested: 4,
+                affinity: 3,
             })
         );
     }

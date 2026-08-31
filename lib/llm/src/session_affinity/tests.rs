@@ -164,7 +164,7 @@ fn replica_sequence_epoch_advances_across_restarts() {
     let first = initial_affinity_sequence(UNIX_EPOCH + Duration::from_secs(10));
     let restarted = initial_affinity_sequence(UNIX_EPOCH + Duration::from_secs(11));
 
-    assert!(restarted > first + 100_000_000);
+    assert_eq!(restarted - first, 1_000_000_000);
 }
 
 #[test]
@@ -681,6 +681,42 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
         Some(worker_binding)
     );
     drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn soft_worker_only_binding_stays_worker_scoped_after_ranked_dispatch() {
+    let coordinator = coordinator();
+    let worker_binding = target(7, None);
+    bind(&coordinator, worker_binding).await;
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = continuation
+        .into_stream(target(7, Some(3)), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(worker_binding)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn soft_ranked_binding_is_not_widened_by_worker_only_dispatch() {
+    let coordinator = coordinator();
+    let ranked_binding = target(7, Some(2));
+    bind(&coordinator, ranked_binding).await;
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = continuation
+        .into_stream(target(8, None), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(ranked_binding)
+    );
 }
 
 #[tokio::test(start_paused = true)]

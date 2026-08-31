@@ -178,8 +178,8 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session-affinity target resolved by the request host.
     ///
-    /// This is a preference, not an eligibility constraint. It may be absent
-    /// from the candidate set when the target is unavailable or filtered out.
+    /// The default selector treats an eligible target as exclusive. Custom policies receive it as
+    /// advisory context; it may be absent from their candidate set when unavailable or filtered.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.request.affinity_target
     }
@@ -589,7 +589,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
-    fn retains_eligible_affinity_target(&self) -> bool {
+    fn uses_exclusive_affinity_target(&self) -> bool {
         matches!(&self.state, WorkerSelectionPolicyState::Default(_))
     }
 
@@ -643,8 +643,8 @@ mod tests {
     use super::*;
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
-    fn retains_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
-        selector.retains_eligible_affinity_target()
+    fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
+        selector.uses_exclusive_affinity_target()
     }
 
     #[test]
@@ -672,7 +672,7 @@ mod tests {
             ))
             .unwrap();
         let policy = WorkerSelectionPolicy::default(config, "test");
-        assert!(retains_affinity(&policy));
+        assert!(uses_exclusive_affinity(&policy));
         let actual = policy
             .select_worker(WorkerSelectionInput::configured(
                 &workers,
@@ -1016,7 +1016,6 @@ mod tests {
             }
         }
 
-        let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let workers = HashMap::from([
             (0, TaintedWorkerConfig::default()),
@@ -1030,7 +1029,7 @@ mod tests {
             Vec::new(),
             Box::new(AffinityPicker),
         );
-        assert!(!retains_affinity(&policy));
+        assert!(!uses_exclusive_affinity(&policy));
 
         let selected = policy
             .select_worker(WorkerSelectionInput::configured(
@@ -1041,7 +1040,6 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
-        assert_ne!(selected.worker, worker0);
     }
 
     #[test]

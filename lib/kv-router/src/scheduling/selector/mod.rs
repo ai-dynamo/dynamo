@@ -32,8 +32,11 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
-    /// Whether an eligible affinity target is selected before considering other workers.
-    fn retains_eligible_affinity_target(&self) -> bool {
+    /// Whether an eligible affinity target exclusively constrains worker selection.
+    ///
+    /// The default selector uses exclusive affinity. Custom policies receive affinity as
+    /// advisory context and may choose another eligible worker.
+    fn uses_exclusive_affinity_target(&self) -> bool {
         false
     }
 

@@ -215,21 +215,71 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
     let inner = PushRouter::from_client(client, RouterMode::Direct)
         .await
         .unwrap();
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
     let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
         inner,
         load_context,
-        None,
+        Some(affinity),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
 
-    let error = host.generate(Context::new(request())).await.unwrap_err();
+    let error = host
+        .generate(affinity_request("direct-unbound", None))
+        .await
+        .unwrap_err();
     assert!(match_error_chain(
         error.as_ref(),
         &[ErrorType::InvalidArgument],
         &[]
     ));
 
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-direct-soft-affinity".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let load_context = test_load_context(&client).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::Direct,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+        inner,
+        load_context,
+        Some(affinity.clone()),
+        crate::session_affinity::SessionAffinityMode::Soft,
+    )
+    .unwrap();
+    let session_id = SessionAffinityId::new("direct-soft-bound");
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+
+    let mut stream = host
+        .generate(affinity_request("direct-soft-bound", None))
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
     drop(host);
     runtime.shutdown();
 }
@@ -1292,19 +1342,13 @@ async fn request_constraints_preserve_worker_only_affinity() {
 }
 
 #[tokio::test]
-async fn stale_affinity_rank_rebinds_once() {
+async fn stale_affinity_rank_recovers_within_request() {
     let (router, runtime) = router(Some(Duration::from_secs(10))).await;
     let session_id = SessionAffinityId::new("stale-affinity-rank");
     bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
     let mut request = Context::new(request());
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
-    assert!(
-        router
-            .select_with_affinity(&request, RequestPhase::Aggregated, false)
-            .await
-            .is_err()
-    );
     let (selection, operation) = router
         .select_with_affinity(&request, RequestPhase::Aggregated, false)
         .await
@@ -1319,7 +1363,7 @@ async fn stale_affinity_rank_rebinds_once() {
 }
 
 #[tokio::test]
-async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escaping_pins() {
+async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_pins() {
     let mut constrained_worker = ModelRuntimeConfig::default();
     constrained_worker.taints.insert("retry-pool".to_string());
     let workers = HashMap::from([
@@ -1363,29 +1407,16 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
             ),
         );
     let mut retry_request = Context::new(retry_input);
-    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
-    assert!(
-        router
-            .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
-            .await
-            .is_err()
-    );
-    assert!(
-        router
-            .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        router
-            .affinity
-            .as_ref()
-            .unwrap()
-            .query_target(&session_id, None)
-            .unwrap(),
-        Some(original_target)
-    );
+    let (selection, operation) = router
+        .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+        .await
+        .unwrap();
+    assert_eq!(selection.worker.worker_id, 8);
+    assert!(matches!(operation, Some(AffinityAcquire::Initialize(_))));
+    router.kv_router().free(retry_request.id()).await.unwrap();
+    drop(operation);
 
     let mut exhausted_input = request();
     exhausted_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 10]));

@@ -156,10 +156,12 @@ impl RoutingInstances {
         }
     }
 
+    /// Return discovered instance IDs in sorted, deduplicated order.
     pub(crate) fn discovered_ids(&self) -> &[u64] {
         &self.discovered_ids
     }
 
+    /// Return routable instance IDs in sorted, deduplicated order.
     pub(crate) fn routable_ids(&self) -> &[u64] {
         &self.routable_ids
     }
@@ -169,6 +171,7 @@ impl RoutingInstances {
             .then(|| Arc::clone(&self.routable_id_set))
     }
 
+    /// Return non-overloaded routable IDs in sorted, deduplicated order.
     pub(crate) fn free_ids(&self) -> &[u64] {
         &self.free_ids
     }

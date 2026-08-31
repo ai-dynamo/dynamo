@@ -171,19 +171,20 @@ where
         target_constraint: Option<AffinityTarget>,
         affinity_target: Option<AffinityTarget>,
     ) -> Result<HostedSelection, Error> {
-        let preferred_worker = match affinity_target {
+        let preferred_worker = || match affinity_target {
             Some(target) => self.inner.with_selectable_worker_ids(|ids| {
                 ids.binary_search(&target.worker_id)
-                    .ok()
-                    .map(|_| target.worker_id)
-            })?,
-            None => None,
+                    .is_ok()
+                    .then_some(target.worker_id)
+            }),
+            None => Ok(None),
         };
         match &self.policy {
             RoutingPolicy::Kv(_) => unreachable!("hosted selection called for KV routing"),
             RoutingPolicy::Direct => {
-                let target = target_constraint
-                    .ok_or_else(|| anyhow::anyhow!("Direct routing requires an exact target"))?;
+                let target = target_constraint.ok_or_else(|| {
+                    invalid_argument("Direct routing requires an exact affinity or request target")
+                })?;
                 Ok(HostedSelection {
                     initial_worker: target.worker_id,
                     target_constraint: Some(target),
@@ -194,6 +195,7 @@ where
                 })
             }
             RoutingPolicy::Builtin(selector) => {
+                let preferred_worker = preferred_worker()?;
                 if selector
                     .required_worker_inputs()
                     .contains(WorkerInputs::OCCUPANCY)
@@ -248,6 +250,7 @@ where
                 }
             }
             RoutingPolicy::DeviceAwareWeighted => {
+                let preferred_worker = preferred_worker()?;
                 let selection = self.inner.select_device_aware_and_reserve(
                     request.content(),
                     target_constraint
@@ -319,6 +322,7 @@ where
             self.select_with_session_affinity(&request, phase, is_query_only, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
+                    SessionAffinityMode::Soft if is_direct => target,
                     SessionAffinityMode::Soft => None,
                 });
                 let affinity_target = match (explicit, self.session_affinity_mode) {
@@ -337,19 +341,17 @@ where
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
-        let soft_affinity_target = (self.session_affinity_mode == SessionAffinityMode::Soft)
-            .then(|| operation.as_ref().and_then(AffinityAcquire::target))
-            .flatten();
+        let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
+            operation.as_ref().and_then(AffinityAcquire::target)
+        } else {
+            None
+        };
         let target_for_worker = |worker_id| {
             AffinityTarget::new(
                 worker_id,
-                soft_affinity_target
-                    .filter(|target| target.worker_id == worker_id)
-                    .and_then(|target| target.dp_rank),
+                soft_affinity_target.and_then(|target| target.dp_rank),
             )
         };
-        let expected_target =
-            target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
@@ -447,6 +449,8 @@ where
         let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
+                let expected_target =
+                    target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && !self.affinity_target_is_valid(expected_target)
                     && let Some(operation) = operation.take()

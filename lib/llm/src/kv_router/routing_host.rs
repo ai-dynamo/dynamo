@@ -503,7 +503,7 @@ where
         };
         let workers = kv_router.workers_with_configs.borrow();
         let Some(config) = workers.get(&target.worker_id) else {
-            return true;
+            return false;
         };
         let Some(dp_rank) = target.dp_rank else {
             return true;
@@ -511,6 +511,18 @@ where
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
         (start..end).contains(&dp_rank)
+    }
+
+    fn affinity_target_requires_rebind(
+        &self,
+        request: &PreprocessedRequest,
+        target: AffinityTarget,
+    ) -> bool {
+        request
+            .migration_state
+            .as_ref()
+            .is_some_and(|state| state.excluded_worker_ids().contains(&target.worker_id))
+            || !self.affinity_target_is_valid(target)
     }
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
@@ -544,13 +556,19 @@ where
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(error)
+            Err(_error)
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && explicit.is_none()
-                    && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
+                    && target.is_some_and(|target| {
+                        self.affinity_target_requires_rebind(request.content(), target)
+                    }) =>
             {
                 operation.invalidate();
-                Err(error)
+                let retry = affinity
+                    .acquire_with_context(&session_id, None, request_context.as_ref())
+                    .await?;
+                let selection = select(retry.target()).await?;
+                Ok((selection, Some(retry)))
             }
             Err(error) => Err(error),
         }

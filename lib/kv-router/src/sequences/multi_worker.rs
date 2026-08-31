@@ -32,8 +32,7 @@ use super::single::{
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
-    ActiveSequenceEvent, ActiveSequenceEventData, DpRank, PrefillLoadHint, WorkerId,
-    WorkerWithDpRank,
+    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -1065,21 +1064,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
 
         result
-    }
-
-    pub fn project_affinity_worker_loads(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        worker_id: WorkerId,
-        dp_ranks: std::ops::Range<DpRank>,
-        decay_now: Instant,
-    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
-        self.prompt_registry.project_affinity_worker_loads(
-            token_sequence,
-            worker_id,
-            dp_ranks,
-            decay_now,
-        )
     }
 
     /// Query all workers for their current number of active blocks.

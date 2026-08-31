@@ -1317,9 +1317,6 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
-    if frontend_config.session_affinity_ttl_secs.is_some() {
-        effective.session_affinity_ttl_secs = frontend_config.session_affinity_ttl_secs;
-    }
     effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }

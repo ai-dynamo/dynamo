@@ -38,7 +38,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::{AffinityCoordinator, AffinityTarget, SessionAffinityMode},
+    session_affinity::{AffinityTarget, SessionAffinityMode},
 };
 
 mod activation;
@@ -975,7 +975,6 @@ mod tests {
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
             16,
-            None,
             None,
             None,
             None,
