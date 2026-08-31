@@ -76,7 +76,7 @@ Deployments for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpo
 
 <div data-sku="gb300" data-variant="disagg">
 
-- The NVIDIA DRA driver installed cluster-wide, so the recipe's `ComputeDomain` can allocate an MNNVL channel to each worker.
+- The NVIDIA DRA driver installed cluster-wide, so the recipe's `ComputeDomain` can allocate an MNNVL channel to each worker. Both variants use Dynamic Resource Allocation; the `aws-roce` variant also declares a `resource.k8s.io/v1` `ResourceClaimTemplate` and so needs Kubernetes 1.34 or later.
 
 </div>
 

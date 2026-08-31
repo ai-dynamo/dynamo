@@ -7,7 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
 [`perf.yaml`](perf.yaml) — covers both Inkling vLLM GB300 DGDs. The benchmark is
-identical across variants; only `ENDPOINT` and `CONCURRENCY` change.
+identical across variants; `ENDPOINT` and `CONCURRENCY` select the target, and
+the `podAffinity` selector needs the same target when both DGDs are deployed.
 
 The Job waits for the target model on the DGD frontend, runs a short warmup,
 replays the configured trace at one `CONCURRENCY` value, and writes raw
@@ -22,6 +23,11 @@ Edit the `env` block in [`perf.yaml`](perf.yaml):
 | --- | --- | --- |
 | GB300 aggregated agentic | `inkling-vllm-gb300-agg-agentic-frontend:8000` | `20` |
 | GB300 disaggregated agentic | `inkling-vllm-gb300-disagg-agentic-frontend:8000` | `16` |
+
+If both DGDs are deployed in the same namespace, also trim the
+`nvidia.com/dynamo-graph-deployment-name` values under `affinity.podAffinity` to
+the target alone. The selector accepts either frontend, so the Job can otherwise
+land beside the one it is not measuring and add a network hop.
 
 If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay

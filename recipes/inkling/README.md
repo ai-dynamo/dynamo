@@ -113,11 +113,14 @@ export DEPLOY=vllm/agg-gb300-agentic/deploy.yaml
 kubectl apply -f ${DEPLOY} -n ${NAMESPACE}
 ```
 
-The disaggregated profiles need the ComputeDomain controller (DRA) installed
-cluster-wide. `deploy-generic.yaml` moves KV over MNNVL `cuda_ipc`;
-`deploy-aws-roce.yaml` adds a RoCE device claim on clusters exposing the
-`roce.networking.k8s.aws` device class. To compose a different fabric, apply the
-overlay instead: `kubectl apply -k vllm/disagg-gb300-agentic/kustomize/overlays/generic`.
+Both disaggregated profiles use Dynamic Resource Allocation, so they need the
+NVIDIA DRA driver (for `ComputeDomain`) installed cluster-wide and a cluster that
+serves the DRA APIs. `deploy-aws-roce.yaml` additionally declares a
+`resource.k8s.io/v1` `ResourceClaimTemplate`, which requires **Kubernetes 1.34 or
+later**, and a cluster exposing the `roce.networking.k8s.aws` device class;
+`deploy-generic.yaml` moves KV over MNNVL `cuda_ipc` instead. To compose a
+different fabric, apply the overlay instead:
+`kubectl apply -k vllm/disagg-gb300-agentic/kustomize/overlays/generic`.
 
 To benchmark a deployment, see [`perf/README.md`](perf/README.md).
 
@@ -283,6 +286,8 @@ To tear down the deployment and free cluster resources:
 ```bash
 # Stop the port-forward if it is still running
 pkill -f "kubectl port-forward svc/tml-inkling-sglang-agg-frontend" 2>/dev/null || true
+pkill -f "kubectl port-forward svc/inkling-vllm-gb300-agg-agentic-frontend" 2>/dev/null || true
+pkill -f "kubectl port-forward svc/inkling-vllm-gb300-disagg-agentic-frontend" 2>/dev/null || true
 
 # Delete the deployment (stops all pods) -- whichever profile you deployed
 kubectl delete dynamographdeployment tml-inkling-sglang-agg -n ${NAMESPACE} 2>/dev/null || true

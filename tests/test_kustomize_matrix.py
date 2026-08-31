@@ -868,6 +868,17 @@ def test_sort_options_default_and_opt_in():
             {"order": "legacy", "legacySortOptions": {"orderFirst": "Secret"}},
             "must be a list of kinds",
         ),
+        # An empty (or all-null) mapping would render `legacySortOptions:` with no
+        # children, which parses back as null -- not an empty mapping -- and lets
+        # Kustomize fall back to its own hardcoded legacy ordering.
+        (
+            {"order": "legacy", "legacySortOptions": {}},
+            "must set orderFirst or orderLast",
+        ),
+        (
+            {"order": "legacy", "legacySortOptions": {"orderFirst": None}},
+            "must set orderFirst or orderLast",
+        ),
     ],
 )
 def test_sort_options_rejects_invalid_input(raw, message):

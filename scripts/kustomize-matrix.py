@@ -773,7 +773,7 @@ def parse_sort_options(raw: Any) -> str:
             raise ValueError(
                 f"unsupported legacySortOptions key: {min(unknown_legacy)}"
             )
-        lines.append("  legacySortOptions:")
+        legacy_lines: list[str] = []
         for key in ("orderFirst", "orderLast"):
             kinds = legacy.get(key)
             if kinds is None:
@@ -782,7 +782,18 @@ def parse_sort_options(raw: Any) -> str:
                 isinstance(kind, str) for kind in kinds
             ):
                 raise ValueError(f"legacySortOptions.{key} must be a list of kinds")
-            lines.append(f"    {key}: {json.dumps(kinds)}")
+            legacy_lines.append(f"    {key}: {json.dumps(kinds)}")
+        # Emitting the key with no children renders `legacySortOptions:`, which
+        # parses back as null rather than an empty mapping, and Kustomize then
+        # applies its own hardcoded legacy ordering. Reject instead: omitting the
+        # key entirely is the way to ask for the default ordering.
+        if not legacy_lines:
+            raise ValueError(
+                "sortOptions.legacySortOptions must set orderFirst or orderLast; "
+                "omit the key to keep Kustomize's default legacy ordering"
+            )
+        lines.append("  legacySortOptions:")
+        lines.extend(legacy_lines)
     return "\n".join(lines)
 
 
