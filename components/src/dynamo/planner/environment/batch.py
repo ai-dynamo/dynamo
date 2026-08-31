@@ -11,6 +11,7 @@ HTTP, OpenMetrics, Prometheus, and Redis clients.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import logging
 import math
@@ -23,6 +24,7 @@ from urllib.parse import quote
 import aiohttp
 from dynamo.planner.core.types import (
     BatchDispatcherFeedback,
+    BatchDrainLimitDecision,
     BatchJobDemand,
     BatchSchedulingObservation,
     PoolTrafficDemand,
@@ -34,13 +36,18 @@ __all__ = [
     "BatchJobSource",
     "BatchResolver",
     "BatchSchedulingCollector",
+    "DISPATCH_RATE_LIMIT_API_VERSION",
     "DispatcherFeedbackSource",
+    "DrainLimitActuator",
     "LlmdAsyncPrometheusSource",
     "LlmdAsyncOpenMetricsSource",
     "OpenMetricsOnlineTrafficSource",
     "OnlineTrafficSource",
     "PrometheusQueryClient",
+    "RedisLeasedDrainLimitActuator",
 ]
+
+DISPATCH_RATE_LIMIT_API_VERSION = "llm-d.ai/v1alpha1"
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,7 @@ _KNOWN_BATCH_STATUSES = frozenset(
 _TERMINAL_BATCH_STATUSES = frozenset({"completed", "failed", "expired", "cancelled"})
 _PLANNER_REQUEST_COUNT_METADATA_KEY = "planner_request_count"
 _MAX_SIGNED_INT64 = (1 << 63) - 1
+_MAX_UNIX_MILLIS = (1 << 63) - 1
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _GO_DURATION_COMPONENT = re.compile(
     r"(?P<value>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))" r"(?P<unit>ns|us|µs|μs|ms|s|m|h)"
@@ -99,10 +107,39 @@ class DispatcherFeedbackSource(Protocol):
     ) -> list[BatchDispatcherFeedback]: ...
 
 
+class DrainLimitActuator(Protocol):
+    """Apply one leased batch-admission decision."""
+
+    async def apply_drain_limit(self, decision: BatchDrainLimitDecision) -> None: ...
+
+
 class PrometheusQueryClient(Protocol):
     """Subset of a Prometheus client used by the dispatcher source."""
 
     def custom_query(self, query: str) -> object: ...
+
+
+class _AsyncRedisPipeline(Protocol):
+    def hset(self, key: str, *, mapping: Mapping[str, str]) -> _AsyncRedisPipeline: ...
+
+    def pexpireat(self, key: str, when: int) -> _AsyncRedisPipeline: ...
+
+    async def execute(self) -> Sequence[object]: ...
+
+    async def __aenter__(self) -> _AsyncRedisPipeline: ...
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        traceback: Optional[object],
+    ) -> Optional[bool]: ...
+
+
+class _AsyncRedisClient(Protocol):
+    def pipeline(self, *, transaction: bool = True) -> _AsyncRedisPipeline: ...
+
+    async def aclose(self) -> None: ...
 
 
 BatchResolver = Callable[[Mapping[str, Any]], str]
@@ -757,6 +794,89 @@ class LlmdAsyncPrometheusSource:
         return _parse_prometheus_scalar(payload, query=query)
 
 
+class RedisLeasedDrainLimitActuator:
+    """Atomically publish llm-d Async leased drain limits to Redis."""
+
+    def __init__(
+        self,
+        *,
+        client: _AsyncRedisClient,
+        control_key_resolver: Callable[[str], str],
+        clock: Callable[[], float] = time.time,
+        owns_client: bool = False,
+    ) -> None:
+        self._client = client
+        self._control_key_resolver = control_key_resolver
+        self._clock = clock
+        self._owns_client = owns_client
+
+    @classmethod
+    def from_url(
+        cls,
+        redis_url: str,
+        *,
+        control_key_resolver: Callable[[str], str],
+        clock: Callable[[], float] = time.time,
+        **redis_options: object,
+    ) -> RedisLeasedDrainLimitActuator:
+        """Create an actuator while keeping ``redis`` an optional dependency."""
+
+        if not isinstance(redis_url, str) or not redis_url:
+            raise ValueError("redis_url must be non-empty")
+        redis_asyncio = importlib.import_module("redis.asyncio")
+        client = redis_asyncio.from_url(redis_url, **redis_options)
+        return cls(
+            client=client,
+            control_key_resolver=control_key_resolver,
+            clock=clock,
+            owns_client=True,
+        )
+
+    async def apply_drain_limit(self, decision: BatchDrainLimitDecision) -> None:
+        now_s = _require_finite_non_negative("current time", self._clock())
+        _validate_drain_decision(decision, now_s=now_s)
+
+        valid_until_unix_ms = math.floor(decision.valid_until_s * 1000.0)
+        now_unix_ms = math.floor(now_s * 1000.0)
+        if valid_until_unix_ms <= now_unix_ms:
+            raise ValueError(
+                "drain-limit lease must expire after the current millisecond"
+            )
+        if valid_until_unix_ms > _MAX_UNIX_MILLIS:
+            raise ValueError(
+                "drain-limit lease exceeds the Redis/llm-d timestamp range"
+            )
+
+        control_key = self._control_key_resolver(decision.pool_id)
+        if not isinstance(control_key, str) or not control_key:
+            raise ValueError("control_key_resolver must return a non-empty string")
+
+        fields = {
+            "api_version": DISPATCH_RATE_LIMIT_API_VERSION,
+            "pool_id": decision.pool_id,
+            "max_admission_rps": format(decision.max_admission_rps, ".17g"),
+            "valid_until_unix_ms": str(valid_until_unix_ms),
+            "decision_id": decision.decision_id,
+        }
+        async with self._client.pipeline(transaction=True) as pipeline:
+            pipeline.hset(control_key, mapping=fields)
+            pipeline.pexpireat(control_key, valid_until_unix_ms)
+            results = await pipeline.execute()
+
+        if len(results) != 2:
+            raise RuntimeError(
+                f"Redis transaction returned {len(results)} results; expected 2"
+            )
+        if not results[1]:
+            raise RuntimeError("Redis did not apply the drain-limit key expiry")
+
+    async def aclose(self) -> None:
+        """Close the Redis client only when it was created by ``from_url``."""
+
+        if self._owns_client:
+            await self._client.aclose()
+
+
 OpenMetricsSamples = dict[str, list[tuple[Mapping[str, str], float]]]
 
 
@@ -1177,3 +1297,22 @@ def _validate_dispatcher_feedback(
         if item.pool_id in seen_pools:
             raise ValueError(f"duplicate dispatcher pool {item.pool_id!r}")
         seen_pools.add(item.pool_id)
+
+
+def _validate_drain_decision(
+    decision: BatchDrainLimitDecision, *, now_s: float
+) -> None:
+    if not isinstance(decision, BatchDrainLimitDecision):
+        raise TypeError("decision must be a BatchDrainLimitDecision")
+    if not isinstance(decision.pool_id, str) or not decision.pool_id:
+        raise ValueError("drain-limit pool_id must be non-empty")
+    if not isinstance(decision.decision_id, str) or not decision.decision_id:
+        raise ValueError("drain-limit decision_id must be non-empty")
+    _require_finite_non_negative(
+        "drain-limit max_admission_rps", decision.max_admission_rps
+    )
+    valid_until_s = _require_finite_non_negative(
+        "drain-limit valid_until_s", decision.valid_until_s
+    )
+    if valid_until_s <= now_s:
+        raise ValueError("drain-limit lease has expired")
