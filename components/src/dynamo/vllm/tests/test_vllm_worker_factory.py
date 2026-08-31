@@ -1070,6 +1070,11 @@ class TestPrefillRegistrationContract:
 
 
 @pytest.mark.asyncio
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core
 async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

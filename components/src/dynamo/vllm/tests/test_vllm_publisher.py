@@ -89,6 +89,11 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["component_gauges"] is component_gauges
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core
 def test_factory_initializes_every_data_parallel_logger(monkeypatch):
     loggers = [Mock(spec=DynamoStatLoggerPublisher) for _ in range(2)]
     monkeypatch.setattr(
@@ -111,6 +116,11 @@ def test_factory_initializes_every_data_parallel_logger(monkeypatch):
         logger.init_publish.assert_called_once_with()
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core
 def test_initial_publish_uses_configured_gpu_block_count():
     logger = DynamoStatLoggerPublisher.__new__(DynamoStatLoggerPublisher)
     logger.inner = Mock()
