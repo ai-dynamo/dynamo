@@ -98,7 +98,11 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
-		if !storageEnsured {
+		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
+
+		// Explicit references use standalone Snapshot storage. Only automatic
+		// capture still needs Dynamo's legacy checkpoint PVC during this MR train.
+		if !hasCheckpointRef && !storageEnsured {
 			if err := checkpoint.EnsureStoragePVC(ctx, r.Client, dgd.Namespace, r.config.Checkpoint.Storage); err != nil {
 				logger.Error(err, "Failed to ensure checkpoint storage PVC", "component", componentName)
 				return dgdCheckpointsResult{}, fmt.Errorf("failed to ensure checkpoint storage PVC for component %s: %w", componentName, err)
@@ -112,14 +116,13 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 
+		workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
+		if err != nil {
+			return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+		}
+
 		var info *checkpoint.CheckpointInfo
-		var err error
-		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 		if !hasCheckpointRef {
-			workerHash, hashErr := checkpointWorkerHashForComponent(dgd, componentName)
-			if hashErr != nil {
-				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, hashErr)
-			}
 			checkpointID := checkpoint.DGDCheckpointID(
 				dgd.Namespace,
 				dgd.Name,
@@ -130,7 +133,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, &refConfig)
+			info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.Client, dgd.Namespace, &refConfig)
 			if apierrors.IsNotFound(err) {
 				info = nil
 				err = nil
@@ -142,7 +145,13 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				}
 			}
 		} else {
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, alphaCheckpointConfig)
+			info, err = checkpoint.ResolvePodSnapshotForService(
+				ctx,
+				r.Client,
+				dgd.Namespace,
+				alphaCheckpointConfig,
+				workerHash,
+			)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -156,7 +165,13 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
-		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+		serviceGMS := dynamo.GetGPUMemoryService(component)
+		if info.NativeSnapshot != nil {
+			err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
+		} else {
+			err = gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, serviceGMS)
+		}
+		if err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to apply checkpoint gpuMemoryService config for component %s: %w", componentName, err)
 		}
 		result.Infos[componentName] = info

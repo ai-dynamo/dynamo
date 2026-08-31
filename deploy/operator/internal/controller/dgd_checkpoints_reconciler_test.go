@@ -35,6 +35,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,6 +60,39 @@ func newTestDGDCheckpointsReconciler(
 		reconciler.RuntimeConfig,
 		reconciler.DockerSecretRetriever,
 	)
+}
+
+func dgdTestPodSnapshot(name string, workerHash string, ready bool) *snapshotv1alpha1.PodSnapshot {
+	snapshot := &snapshotv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			UID:       types.UID("snapshot-uid"),
+			Annotations: map[string]string{
+				commonconsts.SnapshotCompatibilityVersionAnnotation: commonconsts.SnapshotCompatibilityVersion,
+				commonconsts.SnapshotWorkerHashAnnotation:           workerHash,
+				commonconsts.SnapshotGMSModeAnnotation:              commonconsts.SnapshotGMSModeDisabled,
+			},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{
+				PodRef: snapshotv1alpha1.PodReference{
+					Name:       "capture-worker",
+					Containers: []string{"main"},
+				},
+			},
+		},
+	}
+	if ready {
+		snapshot.Status = snapshotv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: ptr.To("content-a"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+				Status: metav1.ConditionTrue,
+			}},
+		}
+	}
+	return snapshot
 }
 
 func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T) {
@@ -920,53 +954,10 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
-func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
-	t.Log("Build a DGD referencing a checkpoint that is not ready")
+func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhilePodSnapshotIsNotReady(t *testing.T) {
+	t.Log("Build a DGD referencing a PodSnapshot that is not Ready")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  "main",
-							Image: "keep-existing:latest",
-						}},
-					},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -976,6 +967,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
@@ -988,8 +980,25 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	require.NotEmpty(t, workerHash)
+	referenced := dgdTestPodSnapshot(ref, workerHash, false)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
 
-	t.Log("Reconcile the not-ready checkpoint reference")
+	t.Log("Reconcile the not-Ready native reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -997,7 +1006,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
-	t.Log("Verify the reference remains pending without creating an automatic checkpoint")
+	t.Log("Verify the reference remains pending without creating a legacy checkpoint")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -1008,9 +1017,9 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 	if !info.Exists {
 		t.Fatalf("expected referenced checkpoint to exist")
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
-	}
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
+	assert.Empty(t, info.Hash)
 	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
@@ -1019,51 +1028,13 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 	if err := reconciler.List(ctx, checkpoints, client.InNamespace("default")); err != nil {
 		t.Fatalf("failed to list checkpoints: %v", err)
 	}
-	if len(checkpoints.Items) != 1 {
-		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
-	}
-	if checkpoints.Items[0].Name != friendlyCheckpointName {
-		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
-	}
+	assert.Empty(t, checkpoints.Items)
 }
 
-func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.T) {
-	t.Log("Build a DGD referencing a ready checkpoint")
+func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyPodSnapshot(t *testing.T) {
+	t.Log("Build a DGD referencing a Ready compatible PodSnapshot")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1085,8 +1056,34 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	require.NotEmpty(t, workerHash)
+	referenced := dgdTestPodSnapshot(ref, workerHash, true)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{
+			Storage: configv1alpha1.CheckpointStorageConfiguration{
+				Type: configv1alpha1.CheckpointStorageTypePVC,
+				PVC: configv1alpha1.CheckpointPVCConfig{
+					PVCName: "legacy-storage",
+					Create:  true,
+					Size:    "1Gi",
+				},
+			},
+		}},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
 
-	t.Log("Reconcile the ready checkpoint reference")
+	t.Log("Reconcile the Ready PodSnapshot reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -1094,7 +1091,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
-	t.Log("Verify ready checkpoint information and status are projected")
+	t.Log("Verify native artifact information and status are projected without legacy IDs")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -1105,57 +1102,28 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 	if !info.Exists {
 		t.Fatalf("expected referenced checkpoint to exist")
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
-	}
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, "content-a", info.NativeSnapshot.BoundContentName)
+	assert.Empty(t, info.Hash)
 	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 	if !checkpointStatuses["worker"].Ready {
 		t.Fatalf("expected checkpoint status to be ready")
 	}
+	assert.Empty(t, checkpointStatuses["worker"].CheckpointID)
+	assert.Empty(t, checkpointStatuses["worker"].IdentityHash)
+
+	t.Log("Verify explicit native restore does not create Dynamo legacy storage")
+	pvc := &corev1.PersistentVolumeClaim{}
+	err = reconciler.Get(ctx, types.NamespacedName{Name: "legacy-storage", Namespace: "default"}, pvc)
+	assert.True(t, apierrors.IsNotFound(err), "expected no legacy PVC, got %v", err)
 }
 
 func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
-	t.Log("Build a checkpoint reference with component-level GMS clients")
+	t.Log("Build a native GMS snapshot reference with component-level clients")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{Checkpoint: true},
-		},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1168,6 +1136,10 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "gms-loader", Image: "loader:latest"}}},
+						MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "worker:latest"},
+					},
 					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 						Enabled:               true,
 						Mode:                  v1alpha1.GMSModeIntraPod,
@@ -1182,6 +1154,21 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	referenced := dgdTestPodSnapshot(ref, workerHash, true)
+	referenced.Annotations[commonconsts.SnapshotGMSModeAnnotation] = string(v1alpha1.GMSModeIntraPod)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{Checkpoint: true},
+		},
+	}
 
 	t.Log("Reconcile the referenced GMS checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
@@ -1201,40 +1188,9 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testing.T) {
-	t.Log("Build a GMS component referencing a non-GMS checkpoint")
+	t.Log("Build a GMS component referencing a snapshot captured without GMS")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	require.NoError(t, err)
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1243,9 +1199,14 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "gms-loader", Image: "loader:latest"}}},
+						MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "worker:latest"},
+					},
 					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 						Enabled:               true,
 						Mode:                  v1alpha1.GMSModeIntraPod,
@@ -1260,49 +1221,36 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	referenced := dgdTestPodSnapshot(ref, workerHash, true)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
 
 	t.Log("Reconcile the incompatible checkpoint reference")
 	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 
 	t.Log("Verify the incompatibility is returned with checkpoint context")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
+	assert.Contains(t, err.Error(), "gpuMemoryService topology for PodSnapshot")
+	assert.Contains(t, err.Error(), "snapshot enabled=false, workload enabled=true")
 	assert.Contains(t, err.Error(), friendlyCheckpointName)
 }
 
 func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
-	t.Log("Build checkpoint storage configuration that creates a PVC")
+	t.Log("Build automatic capture storage configuration that creates a PVC")
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	ctx := context.Background()
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
 
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{
 			Checkpoint: configv1alpha1.CheckpointConfiguration{
 				Storage: configv1alpha1.CheckpointStorageConfiguration{
@@ -1322,20 +1270,23 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
-	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "worker:latest",
+					}},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-						Enabled:       true,
-						Mode:          v1alpha1.CheckpointModeAuto,
-						CheckpointRef: &ref,
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
 					},
 				},
 			},

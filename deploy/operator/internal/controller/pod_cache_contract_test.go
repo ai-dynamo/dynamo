@@ -9,6 +9,7 @@ import (
 	"context"
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -78,9 +79,14 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodFailed,
-			Conditions: []corev1.PodCondition{{
-				Type: corev1.PodReady, Status: corev1.ConditionTrue,
-			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionFalse,
+					Reason: podcontract.RestoreReasonFailed,
+				},
+			},
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name: ContainerNameProfiler,
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
@@ -88,7 +94,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 				}},
 			}},
 			InitContainerStatuses: []corev1.ContainerStatus{{
-				Name: gms.ServerContainerName, RestartCount: 1,
+				Name: gms.ServerContainerName,
 			}},
 		},
 	})
@@ -103,8 +109,8 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			"Snapshot restore targets must be excluded from failover cascade")
 	})
 
-	t.Run("GMS Pod replacement", func(t *testing.T) {
-		assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
+	t.Run("restore Pod replacement", func(t *testing.T) {
+		assert.True(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 	})
 
 	t.Run("checkpoint and snapshot", func(t *testing.T) {

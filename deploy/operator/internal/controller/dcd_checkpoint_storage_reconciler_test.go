@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -53,6 +55,8 @@ func TestDCDCheckpointStorageReconciler(t *testing.T) {
 		name              string
 		gate              features.Gates
 		checkpointEnabled bool
+		checkpointRef     bool
+		legacyRef         bool
 		wantPVC           bool
 	}{
 		{
@@ -69,6 +73,20 @@ func TestDCDCheckpointStorageReconciler(t *testing.T) {
 			name: "does nothing when the component has no enabled checkpoint",
 			gate: features.Gates{Checkpoint: true},
 		},
+		{
+			name:              "does not create legacy storage for a native PodSnapshot reference",
+			gate:              features.Gates{Checkpoint: true},
+			checkpointEnabled: true,
+			checkpointRef:     true,
+		},
+		{
+			name:              "creates storage for a staged automatic legacy reference",
+			gate:              features.Gates{Checkpoint: true},
+			checkpointEnabled: true,
+			checkpointRef:     true,
+			legacyRef:         true,
+			wantPVC:           true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -81,6 +99,14 @@ func TestDCDCheckpointStorageReconciler(t *testing.T) {
 			if tt.checkpointEnabled {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}
+			if tt.checkpointRef {
+				dcd.Spec.Experimental.Checkpoint.CheckpointRef = ptr.To("worker-snapshot")
+			}
+			if tt.legacyRef {
+				dcd.Annotations = map[string]string{
+					consts.CheckpointSourceKindAnnotation: consts.CheckpointSourceKindLegacy,
 				}
 			}
 

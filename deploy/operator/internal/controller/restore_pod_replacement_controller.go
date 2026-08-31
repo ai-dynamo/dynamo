@@ -14,6 +14,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,10 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-// gmsPodReplacementReconciler replaces Pods that cannot safely recover after
-// their native GMS sidecar restarts. The current eligibility policy is limited
-// to owned Snapshot restore-target Pods.
-type gmsPodReplacementReconciler struct {
+// restorePodReplacementReconciler replaces owned restore Pods after a terminal
+// restore failure or a native GMS sidecar restart that cannot recover in place.
+type restorePodReplacementReconciler struct {
 	client.Client
 	config        *configv1alpha1.OperatorConfiguration
 	runtimeConfig *commoncontroller.RuntimeConfig
@@ -35,16 +35,16 @@ type gmsPodReplacementReconciler struct {
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 
-func (r *gmsPodReplacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *restorePodReplacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get GMS Pod replacement candidate %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("get restore Pod replacement candidate %s: %w", req.NamespacedName, err)
 	}
 
-	if !pod.DeletionTimestamp.IsZero() || !isGMSPodReplacementEligible(&pod) {
+	if !pod.DeletionTimestamp.IsZero() || !isRestorePodReplacementEligible(&pod) {
 		return ctrl.Result{}, nil
 	}
 
@@ -54,24 +54,32 @@ func (r *gmsPodReplacementReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("delete GMS Pod replacement candidate %s/%s: %w", pod.Namespace, pod.Name, err)
+		return ctrl.Result{}, fmt.Errorf("delete restore Pod replacement candidate %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *gmsPodReplacementReconciler) setupWithManager(mgr ctrl.Manager) error {
+func (r *restorePodReplacementReconciler) setupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("gms-pod-replacement").
-		For(&corev1.Pod{}, builder.WithPredicates(gmsPodReplacementPredicate())).
+		Named("restore-pod-replacement").
+		For(&corev1.Pod{}, builder.WithPredicates(restorePodReplacementPredicate())).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.config, r.runtimeConfig)).
 		Complete(r)
 }
 
-func isGMSPodReplacementEligible(pod *corev1.Pod) bool {
-	return pod != nil &&
-		pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue &&
-		metav1.GetControllerOf(pod) != nil &&
+func isRestorePodReplacementEligible(pod *corev1.Pod) bool {
+	if pod == nil || metav1.GetControllerOf(pod) == nil || !isRestoreTargetPod(pod) {
+		return false
+	}
+	outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
+	return outcome == podcontract.RestoreOutcomeFailed ||
+		outcome == podcontract.RestoreOutcomePartiallySucceeded ||
 		hasRestartedNativeGMSServer(pod)
+}
+
+func isRestoreTargetPod(pod *corev1.Pod) bool {
+	return pod.Annotations[podcontract.RestoreFromAnnotation] != "" ||
+		pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue
 }
 
 func hasRestartedNativeGMSServer(pod *corev1.Pod) bool {
@@ -98,11 +106,11 @@ func hasRestartedNativeGMSServer(pod *corev1.Pod) bool {
 	return false
 }
 
-func gmsPodReplacementPredicate() predicate.Predicate {
+func restorePodReplacementPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			pod, ok := e.Object.(*corev1.Pod)
-			return ok && pod.DeletionTimestamp.IsZero() && isGMSPodReplacementEligible(pod)
+			return ok && pod.DeletionTimestamp.IsZero() && isRestorePodReplacementEligible(pod)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
@@ -110,8 +118,8 @@ func gmsPodReplacementPredicate() predicate.Predicate {
 			if !oldOK || !newOK || !newPod.DeletionTimestamp.IsZero() {
 				return false
 			}
-			return isGMSPodReplacementEligible(newPod) &&
-				(!isGMSPodReplacementEligible(oldPod) || oldPod.UID != newPod.UID)
+			return isRestorePodReplacementEligible(newPod) &&
+				(!isRestorePodReplacementEligible(oldPod) || oldPod.UID != newPod.UID)
 		},
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return false },

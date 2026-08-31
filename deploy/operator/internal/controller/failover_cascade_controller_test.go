@@ -353,8 +353,8 @@ func TestFailoverCascade_SnapshotRestoreTargetCannotDeleteSibling(t *testing.T) 
 	oldPod.Status.Phase = corev1.PodRunning
 	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: pod}))
 
-	t.Log("Verify native GMS replacement does not admit the Pod before its sidecar restarts")
-	assert.False(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
+	t.Log("Verify restore Pod replacement does not admit the Pod before its sidecar restarts")
+	assert.False(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 
 	t.Log("Reconcile defensively and verify neither the trigger nor sibling is cascade-deleted")
 	r, c := newCascadeReconciler(pod, sibling)
@@ -366,8 +366,8 @@ func TestFailoverCascade_SnapshotRestoreTargetCannotDeleteSibling(t *testing.T) 
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
 
-	t.Log("Verify native GMS replacement independently admits the same Pod after its sidecar restarts")
+	t.Log("Verify restore Pod replacement independently admits the same Pod after its sidecar restarts")
 	pod.Status.InitContainerStatuses[0].RestartCount = 1
 	assert.Equal(t, commonconsts.KubeLabelValueTrue, pod.Labels[snapshotprotocol.RestoreTargetLabel])
-	assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
+	assert.True(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 }

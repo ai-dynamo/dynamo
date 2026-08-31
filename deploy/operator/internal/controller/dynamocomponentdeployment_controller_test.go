@@ -35,6 +35,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -1779,6 +1780,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	if err := appsv1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
 	}
+	if err := snapshotv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add Snapshot v1alpha1 to scheme: %v", err)
+	}
 
 	snapshotAgentDaemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1812,7 +1816,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	}
 
 	makeDCD := func(checkpointRef string) *v1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
@@ -1842,6 +1846,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				},
 			},
 		})
+		if dcd.Annotations == nil {
+			dcd.Annotations = map[string]string{}
+		}
+		dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
+		return dcd
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
@@ -1859,6 +1868,53 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
+
+	t.Run("direct checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
+		t.Log("Given a direct DCD reference and a Ready compatible PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then native identity is pinned for admission without legacy artifact metadata")
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot, podTemplateSpec.Annotations[commonconsts.CheckpointSourceKindAnnotation])
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Equal(t, "content-a", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateContentAnnotation])
+		assert.Empty(t, podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
+
+	t.Run("native wait policy remains an admission candidate", func(t *testing.T) {
+		t.Log("Given a WaitForCheckpoint DCD and a Ready compatible PodSnapshot with no legacy checkpoint")
+		dcd := makeDCD("worker-snapshot")
+		dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered after the startup gate opens")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then restore remains on native admission without resolving or injecting legacy storage")
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.KubeLabelValueTrue, podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot, podTemplateSpec.Annotations[commonconsts.CheckpointSourceKindAnnotation])
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Empty(t, podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
 
 	t.Run("ready checkpoint in immediate mode adds restore candidate metadata", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}

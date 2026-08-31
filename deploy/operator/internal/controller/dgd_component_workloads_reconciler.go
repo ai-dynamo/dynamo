@@ -204,6 +204,15 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
+	// Preserve the resolver's API-kind decision on the generated DCD so its
+	// controller never probes two resource kinds by the same reference name.
+	if dcd.Annotations == nil {
+		dcd.Annotations = map[string]string{}
+	}
+	if err := checkpoint.ApplyCheckpointSourceMetadata(dcd.Annotations, checkpointInfo); err != nil {
+		return err
+	}
+
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
 		return nil
