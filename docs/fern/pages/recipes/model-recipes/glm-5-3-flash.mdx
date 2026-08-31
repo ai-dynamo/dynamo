@@ -42,6 +42,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash,
 <span><b>Parallelism</b> TP8 prefill / TP8 decode</span>
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Speculation</b> MTP7 on prefill and decode</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
 <span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
@@ -66,7 +67,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash,
 <div data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available: 4x on one ARM64 node for aggregated, or 8x across two ARM64 nodes for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- The NVIDIA DRA driver with ComputeDomain support installed. The disaggregated target requires a ComputeDomain spanning the full NVL72 rack.
+- The NVIDIA DRA driver with ComputeDomain support installed. Both GB200 targets require a ComputeDomain spanning the full NVL72 rack.
 - Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image.
 - A ReadWriteMany PVC named `model-cache`, populated with the checkpoint in the standard Hugging Face cache layout.
 
@@ -86,6 +87,7 @@ Create the namespace and token secret:
 ```bash
 export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
+kubectl label namespace ${NAMESPACE} kai.scheduler/enabled=true
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
   -n ${NAMESPACE}
@@ -97,7 +99,15 @@ Edit namespace, node selectors, tolerations, storage, image tags, and resource c
 
 ## Deploy
 
-All four targets read the checkpoint from the `model-cache` PVC with `HF_HUB_OFFLINE=1`. Populate the PVC before deploying, then apply the manifest for your target.
+All four targets read the checkpoint from the `model-cache` PVC with `HF_HUB_OFFLINE=1`. Create and populate the PVC with the recipe's [storage manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/model-cache/model-cache.yaml) and [model-download job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/model-cache/model-download.yaml):
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3-flash/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+Then apply the manifest for your target.
 
 <div data-sku="h200" data-variant="agg">
 

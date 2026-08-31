@@ -147,6 +147,7 @@ spec:
                     --no-enable-flashinfer-autotune \
                     --skip-mm-profiling \
                     --moe-backend deep_gemm \
+                    --max-model-len 1048576 \
                     --attention-backend FLASHMLA_SPARSE \
                     --max-num-seqs 32 \
                     --max-num-batched-tokens 8192 \
@@ -154,6 +155,7 @@ spec:
                     --gpu-memory-utilization 0.80 \
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
+                    --no-disable-hybrid-kv-cache-manager \
                     --speculative-config '{"method":"mtp","num_speculative_tokens":7}'
               env:
                 - name: HF_HOME

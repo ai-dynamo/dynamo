@@ -147,6 +147,7 @@ spec:
                     --moe-backend deep_gemm \
                     --attention-backend FLASHMLA_SPARSE \
                     --max-num-seqs 16 \
+                    --max-model-len 1048576 \
                     --max-num-batched-tokens 8192 \
                     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE", "max_cudagraph_capture_size": 8192, "cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024, 1536, 2048, 2560, 3072, 4096, 6144, 8192]}' \
                     --gpu-memory-utilization 0.80 \
@@ -325,6 +326,7 @@ spec:
                     --attention-backend FLASHMLA_SPARSE \
                     --max-num-seqs 128 \
                     --max-num-batched-tokens 2048 \
+                    --max-model-len 1048576 \
                     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE", "max_cudagraph_capture_size": 2048}' \
                     --gpu-memory-utilization 0.85 \
                     --dyn-tool-call-parser glm47 \

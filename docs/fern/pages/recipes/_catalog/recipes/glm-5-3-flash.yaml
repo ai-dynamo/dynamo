@@ -12,7 +12,7 @@ model:
 status: experimental
 targets:
 - id: vllm-agg-gb200
-  recommended: false
+  recommended: true
   hardware:
     gpu: GB200
     count: 4
@@ -28,7 +28,7 @@ targets:
   - mnnvl
   workload:
     type: agentic
-    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
   deploy:
     asset: recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml
   expected_performance:
@@ -51,13 +51,13 @@ targets:
   - mnnvl
   workload:
     type: agentic
-    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
   deploy:
     asset: recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml
   expected_performance:
     available: false
 - id: vllm-agg-h200
-  recommended: true
+  recommended: false
   hardware:
     gpu: H200
     count: 8
@@ -74,7 +74,7 @@ targets:
   - flashmla-sparse
   workload:
     type: agentic
-    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
   deploy:
     asset: recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml
   expected_performance:
@@ -100,7 +100,7 @@ targets:
   - flashmla-sparse
   workload:
     type: agentic
-    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
   deploy:
     asset: recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml
   expected_performance:
@@ -108,4 +108,4 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- Model performance numbers are not published. Recipe may not be the most performant configuration.
+- Performance numbers are not published.

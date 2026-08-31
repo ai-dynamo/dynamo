@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # GLM-5.3-Flash Recipes
 
-Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash).
+Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash), a mixture-of-experts model with 320B total parameters, 18B active parameters, hybrid sparse and linear attention, and Manifold-Constrained Hyper-Connections (mHC).
 
 ## Configurations
 
@@ -21,7 +21,7 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 | **Parallelism**          | TP4                           | TP4 prefill / TP4 decode                    | TP8                         | TP8 prefill / TP8 decode                |
 | **Routing**              | KV-aware                      | KV-aware                                    | Round-robin                 | KV-aware                                |
 | **Speculative decoding** | None                          | None                                        | MTP7                        | MTP7 on prefill and decode              |
-| **Context length**       | 128,000                       | 128,000                                     | 1,048,576                   | 1,048,576                               |
+| **Context length**       | Up to 1,048,576               | Up to 1,048,576                             | Up to 1,048,576             | Up to 1,048,576                         |
 | **KV transfer**          | N/A                           | NIXL/UCX over TCP (MNNVL upgrade: see below) | N/A                         | NIXL with GPU buffers and RDMA resources |
 
 
@@ -78,14 +78,15 @@ kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 
 ## Limitations
 
-- GB200 disagg KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The image's UCX
-  build does not support MNNVL IPC, so `^cuda_ipc` is required to prevent a C-level crash at
-  `uct_cuda_ipc_ep_get_zcopy`. To enable MNNVL NVLink KV transfer, rebuild the image on
-  `nvcr.io/nvidia/ai-dynamo/vllm-runtime` base and switch to
-  `UCX_TLS: cuda_copy,cuda_ipc,tcp` + `UCX_CUDA_IPC_ENABLE_MNNVL: "y"`.
-- A cudnn workaround (`torch.backends.cudnn.enabled = False` via `sitecustomize.py`) is required
-  in both agg and disagg recipes to prevent a segfault in GLM `_kpool_*` kernels during MM encoder
-  profiling on GB200. This workaround does not affect image inference.
-- `VLLM_SSM_CONV_STATE_LAYOUT=DS` and `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
+- **GB200 disaggregated:** KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The
+  image's UCX build does not support MNNVL IPC, so `^cuda_ipc` prevents a C-level crash at
+  `uct_cuda_ipc_ep_get_zcopy`. To enable MNNVL NVLink KV transfer, rebuild the image on the
+  `nvcr.io/nvidia/ai-dynamo/vllm-runtime` base and set `UCX_TLS: cuda_copy,cuda_ipc,tcp` and
+  `UCX_CUDA_IPC_ENABLE_MNNVL: "y"`.
+- **All targets:** A cuDNN workaround (`torch.backends.cudnn.enabled = False` via `sitecustomize.py`)
+  prevents a segfault in GLM `_kpool_*` kernels during multimodal encoder profiling. This workaround
+  does not affect image inference.
+- **Both disaggregated targets:** `VLLM_SSM_CONV_STATE_LAYOUT=DS` and
+  `VLLM_KV_CACHE_LAYOUT=HND` must match on both prefill and
   decode workers; mismatching these produces silent garbage output.
-- `n>1` requests are not supported with the disaggregated recipe.
+- **Both disaggregated targets:** `n>1` requests are not supported.
