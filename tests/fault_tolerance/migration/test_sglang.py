@@ -41,19 +41,8 @@ AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 64
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
-SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S = 300
-# Covers the existing 240s request-completion wait plus bounded coordination
-# waits.
-SGLANG_MIGRATION_BEHAVIOR_ALLOWANCE_S = 360
-SGLANG_MIGRATION_CLEANUP_ALLOWANCE_S = 60
-# Workers start concurrently, so only one worker-startup allowance contributes
-# to the whole-test deadline.
-SGLANG_MIGRATION_TEST_TIMEOUT_S = (
-    SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S
-    + SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S
-    + SGLANG_MIGRATION_BEHAVIOR_ALLOWANCE_S
-    + SGLANG_MIGRATION_CLEANUP_ALLOWANCE_S
-)
+# Last-resort ceiling; individual operations have their own bounded waits.
+SGLANG_MIGRATION_TEST_TIMEOUT_S = 780
 
 
 @contextmanager
@@ -382,7 +371,6 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            timeout=SGLANG_MIGRATION_WORKER_STARTUP_TIMEOUT_S,
             # Every worker retains a complete per-test log. Avoid interleaving
             # verbose engine output when several GPU tests run concurrently.
             display_output=False,
