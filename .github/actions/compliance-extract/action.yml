@@ -20,6 +20,10 @@ inputs:
   target:
     description: 'Target docker stage (runtime, frontend, planner)'
     required: true
+  dockerfile:
+    description: 'Existing Dockerfile with compliance_artifact support. Empty renders the standard framework Dockerfile.'
+    required: false
+    default: ''
   platform:
     description: 'Single platform string, e.g. linux/amd64'
     required: true
@@ -96,6 +100,7 @@ runs:
   steps:
     - name: Render Dockerfile
       id: render
+      if: ${{ inputs.dockerfile == '' }}
       shell: bash
       run: |
         RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
@@ -116,6 +121,21 @@ runs:
         # hardcode that path here.
         python3 container/render.py ${RENDER_ARGS} --output-short-filename
         echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
+
+    - name: Select Dockerfile
+      id: dockerfile
+      shell: bash
+      env:
+        INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
+        RENDERED_DOCKERFILE: ${{ steps.render.outputs.rendered }}
+      run: |
+        set -euo pipefail
+        dockerfile="${INPUT_DOCKERFILE:-${RENDERED_DOCKERFILE}}"
+        if [[ -z "${dockerfile}" || "${dockerfile}" == -* || ! -f "${dockerfile}" ]]; then
+          echo "::error::Compliance Dockerfile is invalid or missing: ${dockerfile:-<empty>}"
+          exit 1
+        fi
+        echo "path=${dockerfile}" >> "${GITHUB_OUTPUT}"
 
     # Unified compliance tree — flat NOTICES-<Eco>.txt + osrb-deps.csv +
     # osrb.cdx.json. FROM scratch stage; export bounded by these files' size
@@ -184,7 +204,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f ${{ steps.dockerfile.outputs.path }} \
             $SECRET_ARGS \
             .
 
@@ -395,7 +415,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/sources \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f ${{ steps.dockerfile.outputs.path }} \
             $SECRET_ARGS \
             .
 

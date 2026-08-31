@@ -16,7 +16,7 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> unified sidecar image build plus unit and integration tests
+#   sidecar  -> unified sidecar image build, publish, and compliance checks
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -287,7 +287,21 @@ planner:
   - '!**/*.rst'
 
 sidecar:
+  # Direct inputs copied by lib/sidecar/Dockerfile. Keep shared lib/** changes
+  # on the existing Rust path until sidecar E2E coverage is introduced.
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - '.cargo/**'
   - 'lib/sidecar/**'
+  - 'examples/router/custom-policy-example/**'
+  - 'deploy/inference-gateway/ext-proc/**'
+  - 'container/compliance/**'
+  - '.github/actions/docker-login/**'
+  - '.github/actions/docker-remote-build/**'
+  - '.github/actions/init-dynamo-builder/**'
+  - '.github/actions/builder-refresher/**'
+  - '.github/actions/compliance-extract/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - '!**/*.md'
   - '!**/*.rst'

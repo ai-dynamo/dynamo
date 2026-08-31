@@ -132,7 +132,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
-      - sidecar-ci
+      - sidecar-build
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -342,13 +342,21 @@ jobs:
 # Sidecar
 # ============================================================================
 
-  sidecar-ci:
+  sidecar-build:
     name: dynamo-sidecar
     needs: changed-files
     if: needs.changed-files.outputs.sidecar == 'true'
-    uses: ./.github/workflows/shared-build-sidecar.yml
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      artifact_retention_days: '7'
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1950,7 +1958,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
-      - sidecar-ci
+      - sidecar-build
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr

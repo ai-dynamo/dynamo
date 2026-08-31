@@ -6,11 +6,13 @@
 # engine continues to run in a separate container.
 #
 # Build from the repository root:
-#   docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.3.0 .
+#   docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:dev .
 
 # Use NVIDIA's public, signed, multi-architecture Ubuntu base for both build
 # and runtime stages. The sidecars are CPU-only and need no framework or CUDA
-# runtime image.
+# runtime image. Keep this tag synchronized with the captured Ubuntu SBOM in
+# container/compliance/base_sboms/manifest.json; refresh that baseline before
+# advancing the image tag.
 ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
 
 # ---- common builder ---------------------------------------------------------
@@ -36,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libprotobuf-dev \
         perl \
         pkg-config \
+        python3 \
+        python3-yaml \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +51,11 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.96.1
 
-RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+RUN ARCH_ALT=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64) echo "x86_64" ;; \
+        arm64) echo "aarch64" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
+    esac) && \
     RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
     wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
@@ -65,6 +73,7 @@ COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY container/compliance/ container/compliance/
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -110,8 +119,42 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
 
-# ---- runtime ----------------------------------------------------------------
-FROM ${BASE_IMAGE} AS runtime
+# ---- compliance inventory ----------------------------------------------------
+FROM builder-base AS compliance-inventory
+
+ARG TARGETARCH
+
+# Standalone binaries have no wheel-embedded SBOM. Derive the exact normal
+# dependency closure of the three shipped executables from Cargo metadata and
+# harvest their registry license files for the common compliance generator.
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64) echo "x86_64-unknown-linux-gnu" ;; \
+        arm64) echo "aarch64-unknown-linux-gnu" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
+    esac) \
+    && python3 container/compliance/generate_rust_binary_sbom.py \
+        --manifest-path Cargo.toml \
+        --target "${RUSTARCH}" \
+        --package dynamo-vllm-sidecar \
+        --package dynamo-sglang-sidecar \
+        --package dynamo-trtllm-sidecar \
+        --output /out/sidecar.cyclonedx.json \
+    && mkdir -p /out/rust-licenses \
+    && for src in /usr/local/cargo/registry/src/*; do \
+        [ -d "${src}" ] || continue; \
+        find "${src}" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r crate; do \
+            dest="/out/rust-licenses/$(basename "${crate}")"; \
+            for license in "${crate}"/LICENSE* "${crate}"/LICENCE* "${crate}"/COPYING* "${crate}"/NOTICE* "${crate}"/UNLICENSE*; do \
+                [ -e "${license}" ] || continue; \
+                mkdir -p "${dest}" && cp "${license}" "${dest}/"; \
+            done; \
+        done; \
+    done
+
+# ---- runtime base ------------------------------------------------------------
+FROM ${BASE_IMAGE} AS runtime-base
 
 # ca-certificates supports tokenizer downloads and TLS connections to Dynamo
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
@@ -138,3 +181,44 @@ EXPOSE 9090
 
 ENTRYPOINT ["/usr/local/bin/dynamo-sidecar"]
 CMD ["--help"]
+
+# ---- compliance --------------------------------------------------------------
+FROM builder-base AS licenses
+
+ARG TARGETARCH
+
+USER root
+RUN mkdir -p /legal /tmp/runtime-root \
+    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms
+
+# Scan the filesystem that actually ships, rather than the build-tool packages
+# present in this helper stage. The Rust SBOM contains only dependencies linked
+# into the three sidecar executables.
+COPY --from=runtime-base / /tmp/runtime-root/
+COPY --from=compliance-inventory /out/sidecar.cyclonedx.json \
+    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms/sidecar.cyclonedx.json
+COPY --from=compliance-inventory /out/rust-licenses /tmp/rust-licenses
+
+ENV PYTHONPATH=/src/container
+RUN python3 -m compliance.generators \
+        --ecosystem rust,dpkg \
+        --site-packages /tmp/sidecar-site \
+        --dpkg-root /tmp/runtime-root \
+        --rust-licenses-dir /tmp/rust-licenses \
+        --output-dir /legal \
+        --policy /src/container/compliance/policy/licenses.toml \
+        --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --verbose \
+    && python3 -m compliance.policy.validate \
+        --policy /src/container/compliance/policy/licenses.toml \
+        --input /legal/osrb-deps.csv
+
+FROM scratch AS compliance_artifact
+COPY --from=licenses /legal/ /
+
+# ---- shipped runtime ---------------------------------------------------------
+FROM runtime-base AS runtime
+
+# The same policy-gated NOTICES and CycloneDX/OSRB inventory uploaded by CI are
+# included in the image for downstream consumers.
+COPY --from=licenses /legal /legal
