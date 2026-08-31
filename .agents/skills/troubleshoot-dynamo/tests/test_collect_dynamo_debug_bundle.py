@@ -40,6 +40,21 @@ class DebugBundleTest(unittest.TestCase):
         self.assertIn('"monkey":"banana"', output)
         self.assertEqual(output.count("<redacted>"), 3)
 
+    def test_redact_decodes_json_keys_and_preserves_escaped_values(self) -> None:
+        source = r'{"api\u005fkey":"secr\"et","author":"ali\"ce"}'
+
+        output = bundle.redact(source)
+
+        self.assertEqual(
+            output,
+            r'{"api\u005fkey":"<redacted>","author":"ali\"ce"}',
+        )
+
+    def test_redact_handles_long_unterminated_json_string(self) -> None:
+        source = '{"api_key":"' + (r"\!" * 50_000)
+
+        self.assertEqual(bundle.redact(source), source)
+
     def test_pod_discovery_files_do_not_persist_pod_specs(self) -> None:
         result = {
             "cmd": ["kubectl", "get", "pod", "worker-0", "-o", "json"],

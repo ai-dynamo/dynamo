@@ -28,9 +28,6 @@ RETURNCODE_TIMED_OUT = 124  # subprocess timeout
 # bearer tokens, passwords). Scrub them before anything is written to disk so
 # common credentials are not persisted verbatim in the bundle.
 _PLAIN_KV_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*)(\s*[:=]\s*)(\S+)")
-_JSON_STRING_KV_RE = re.compile(
-    r'(?P<prefix>"(?P<key>(?:\\.|[^"])*)"\s*:\s*)' r'"(?P<value>(?:\\.|[^"])*)"'
-)
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]+)")
 _HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{8,}\b")
 
@@ -68,21 +65,77 @@ def is_secret_key(key: str) -> bool:
     return False
 
 
+def json_string_end(text: str, opening_quote: int) -> int | None:
+    """Return a JSON string's closing quote without regex backtracking."""
+    cursor = opening_quote + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+        elif text[cursor] == '"':
+            return cursor
+        else:
+            cursor += 1
+    return None
+
+
+def redact_json_string_values(text: str) -> str:
+    """Redact sensitive JSON string values embedded in arbitrary text."""
+    cursor = 0
+    unchanged_start = 0
+    chunks: list[str] = []
+    while cursor < len(text):
+        key_start = text.find('"', cursor)
+        if key_start == -1:
+            break
+        key_end = json_string_end(text, key_start)
+        if key_end is None:
+            break
+
+        separator = key_end + 1
+        while separator < len(text) and text[separator].isspace():
+            separator += 1
+        if separator >= len(text) or text[separator] != ":":
+            cursor = key_end + 1
+            continue
+
+        value_start = separator + 1
+        while value_start < len(text) and text[value_start].isspace():
+            value_start += 1
+        if value_start >= len(text) or text[value_start] != '"':
+            cursor = key_end + 1
+            continue
+
+        value_end = json_string_end(text, value_start)
+        if value_end is None:
+            break
+
+        raw_key = text[key_start : key_end + 1]
+        try:
+            key = json.loads(raw_key)
+        except json.JSONDecodeError:
+            key = text[key_start + 1 : key_end]
+        if isinstance(key, str) and is_secret_key(key):
+            chunks.append(text[unchanged_start : value_start + 1])
+            chunks.append("<redacted>")
+            unchanged_start = value_end
+        cursor = value_end + 1
+
+    if not chunks:
+        return text
+    chunks.append(text[unchanged_start:])
+    return "".join(chunks)
+
+
 def redact(text: str) -> str:
     if not text:
         return text
-
-    def redact_json_value(match: re.Match[str]) -> str:
-        if not is_secret_key(match.group("key")):
-            return match.group(0)
-        return f'{match.group("prefix")}"<redacted>"'
 
     def redact_plain_value(match: re.Match[str]) -> str:
         if not is_secret_key(match.group(1)):
             return match.group(0)
         return f"{match.group(1)}{match.group(2)}<redacted>"
 
-    text = _JSON_STRING_KV_RE.sub(redact_json_value, text)
+    text = redact_json_string_values(text)
     text = _PLAIN_KV_RE.sub(redact_plain_value, text)
     text = _BEARER_RE.sub(lambda m: f"{m.group(1)}<redacted>", text)
     text = _HF_TOKEN_RE.sub("<redacted-hf-token>", text)
