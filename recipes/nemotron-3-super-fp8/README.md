@@ -143,6 +143,7 @@ These recipes target Dynamo v1.0.0. To run on v0.9.1 containers, the following c
 - Change `--dyn-reasoning-parser` from `nemotron_nano` to `deepseek_r1` (nemotron_nano reasoning parser is broken in 0.9.1)
 - `enable_thinking: false` will **not work** with `deepseek_r1` parser (response content goes to `reasoning_content`, `content` is null)
 - `--mamba-cache-mode align` is still needed (0.9.1 ships vLLM 0.14.1, also affected by [vllm#34865](https://github.com/vllm-project/vllm/issues/34865))
+- **Add** `--connector none` to worker args (required in 0.9.1 to disable nixl KV connector; rejected in 1.0)
 
 ### TensorRT-LLM (`tensorrtllm-runtime:0.9.1`)
 - Change image tags from `:1.1.1` to `:0.9.1`

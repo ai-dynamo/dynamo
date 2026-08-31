@@ -67,7 +67,7 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
                 source = (
                     f"DYN_CONNECTOR environment variable ('{os.environ['DYN_CONNECTOR']}')"
                     if "DYN_CONNECTOR" in os.environ
-                    else f"shared runtime default ('{self.connector[0]}')"
+                    else f"--connector flag ('{self.connector[0]}')"
                 )
                 logging.warning(
                     f"TRT-LLM does not support connector '{self.connector[0]}' (set via {source}). "
