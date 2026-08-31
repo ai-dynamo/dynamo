@@ -323,27 +323,20 @@ func (r *dcdWorkloadRenderer) applyDiscoveryLabels(role dynamo.Role, podAnnotati
 	podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-// applyNVLinkTopologyCapability keeps the follower's NVLink-partition affinity only on
-// clusters that can satisfy it.
+// applyNVLinkTopologyCapability conditionally applies NVLink-partition pod affinity to followers.
 //
-// Synthesis stamps a *required* pod affinity on nvidia.com/gpu.clique so the follower
-// can only land in the leader's NVLink partition -- without it the scheduler may place
-// the follower in a different partition, where it joins the ComputeDomain and reports
-// healthy but has no NVLink route to the leader, so the EP collective fails only when it
-// runs and an apparently successful scale serves wrong or failing inference.
+// By default, synthesis requires followers to land on the leader's `nvidia.com/gpu.clique`.
+// This guarantees NVLink connectivity and prevents silent runtime failures where the
+// follower appears healthy but cannot communicate with the leader.
 //
-// That label is stamped by the DRA driver on GB200-class nodes. Where it is absent the
-// required term can never be satisfied, so the follower would sit Pending forever with
-// nothing explaining why -- and admission enables this path from the vLLM flags alone, so
-// the user gets no signal that GB200 was required. Keep the term where it can be honoured
-// and drop it where it cannot, letting the follower schedule normally.
+// However, this label is only stamped on specific hardware (like GB200s). If the leader
+// lands on a node without this label, the follower's affinity can never be satisfied,
+// causing it to hang in a Pending state indefinitely.
 //
-// The question is about the *leader's* node, not the cluster. A pod affinity on
-// nvidia.com/gpu.clique matches by comparing that label between the candidate node and a
-// node already running a leader pod, so an unrelated GB200 node elsewhere in a mixed
-// cluster does not make the term satisfiable: if the leader landed on an unlabeled node,
-// nothing can ever match it. Asking "does any node carry the label" would answer yes and
-// strand the follower.
+// To prevent this, we drop the affinity requirement if the *leader's* node lacks the
+// label, allowing the follower to schedule normally. (Note: We must check the leader's
+// node specifically, as the presence of an unrelated GB200 elsewhere in a mixed cluster
+// will not satisfy the affinity.)
 func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 	ctx context.Context,
 	role dynamo.Role,
