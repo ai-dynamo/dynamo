@@ -7,9 +7,11 @@ Test Execution Times (Last Run: 2026-08-28):
 - test_request_cancellation_vllm_decode_cancel: ~130s (gpu_2)
 - test_request_cancellation_vllm_prefill_cancel: ~108s [nats] / ~123s [tcp] (gpu_2)
 
-test_request_cancellation_vllm_prefill_cancel is pre_merge: it is the only
-regression test for DYN-4143, where a disconnect during remote prefill left the
-decode leg undispatched and its staged KV blocks pinned. It adds ~231s to the
+test_request_cancellation_vllm_prefill_cancel is the regression test for
+DYN-4143, where a disconnect during remote prefill left the decode leg
+undispatched and its staged KV blocks pinned. It was temporarily promoted to
+pre_merge to validate that fix on CI (run 33223555776, both parametrizations
+green) and then returned to nightly. Promoting it costs ~231s in the
 `pre_merge and vllm and gpu_2` job (~18m30s -> ~22m20s against a 60m cap).
 """
 
@@ -490,7 +492,7 @@ def test_request_cancellation_vllm_decode_cancel(
 
 
 @pytest.mark.timeout(660)  # 3x average (~219s)
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.gpu_2
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
