@@ -15,7 +15,7 @@ from typing import Any, Dict, Generator, Optional
 
 import yaml
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
