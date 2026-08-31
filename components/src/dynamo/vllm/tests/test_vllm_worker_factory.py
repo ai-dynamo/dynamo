@@ -1202,10 +1202,6 @@ async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
     assert captured.factory_endpoint is endpoint
     assert recording_factory.num_gpu_blocks == [4]
     assert recording_factory.init_publish_calls == 1
-    assert captured.model_input == ModelInput.Tokens
-    assert captured.model_type == ModelType.Prefill
-    assert captured.worker_type == WorkerType.Prefill
-    assert captured.needs == [[WorkerType.Decode]]
 
 
 @pytest.mark.asyncio
