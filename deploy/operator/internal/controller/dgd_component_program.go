@@ -89,7 +89,7 @@ func (p *componentProgram) Reconcile(
 		return programResult, err
 	}
 	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
-	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
+	checkpoints, err := p.sharedResources.ReconcileWithStatus(ctx, req.DGD, &programResult.Status)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}
@@ -117,9 +117,10 @@ func (p *componentProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, err := p.workloads.Reconcile(
+	result, err := p.workloads.ReconcileWithStatus(
 		ctx,
 		req.DGD,
+		&programResult.Status,
 		restart.State,
 		checkpoints.Infos,
 	)
@@ -179,7 +180,7 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 	triggerRollingUpdate := false
 	if !rollingUpdateInProgress {
 		var err error
-		triggerRollingUpdate, err = p.rollout.shouldTriggerRollingUpdate(dgd)
+		triggerRollingUpdate, err = p.rollout.shouldTriggerRollingUpdateWithStatus(dgd, status)
 		if err != nil {
 			logger.Error(err, "Failed to check rolling update trigger")
 			return failWorkloadProgram(reasonRollingUpdateFailed, err)
@@ -210,10 +211,10 @@ func (p *componentProgram) recordRollingUpdateTransition(
 			corev1.EventTypeNormal,
 			"RollingUpdateStarted",
 			"Starting rolling update to worker hash %s",
-			activeWorkerHashForDCDGeneration(dgd, desired),
+			activeWorkerHashForDCDGenerationWithStatus(dgd, &result.Status, desired),
 		)
 	case current == nvidiacomv1beta1.RollingUpdatePhaseCompleted && previous != current:
-		currentHashes := currentWorkerHashes(dgd)
+		currentHashes := currentWorkerHashesWithStatus(dgd, &result.Status)
 		workerHash := currentHashes.v2
 		if workerHash == "" {
 			workerHash = currentHashes.v1

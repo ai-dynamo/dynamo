@@ -503,7 +503,7 @@ func TestWorkerHashStatusBackfillsFromV2Annotation(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &programStatus))
 
-	assert.Equal(t, desiredV2, dgd.Status.CurrentWorkerHash)
+	assert.Empty(t, dgd.Status.CurrentWorkerHash)
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	assert.Equal(t, desiredV2, programStatus.CurrentWorkerHash)
 	require.NoError(t, err)

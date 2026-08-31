@@ -383,12 +383,10 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		},
 	}
 	previous := dgd.DeepCopy().Status
-	expectedDGDStatus := previous
-	expectedDGDStatus.CurrentWorkerHash = currentWorkerHash
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify the failed shared reconciliation preserves the explicit worker hash in both status objects")
+	t.Log("Verify the failed shared reconciliation preserves the worker hash only in program status")
 	require.ErrorContains(t, err, "RBAC manager not initialized")
 	assert.Equal(t, previous.Components, result.Status.Components)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
@@ -397,7 +395,7 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
-	assert.Equal(t, expectedDGDStatus, dgd.Status)
+	assert.Equal(t, previous, dgd.Status)
 }
 
 func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *testing.T) {

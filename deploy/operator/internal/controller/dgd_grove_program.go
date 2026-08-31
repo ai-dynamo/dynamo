@@ -107,7 +107,7 @@ func (p *groveProgram) Reconcile(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
+	checkpoints, err := p.sharedResources.ReconcileWithStatus(ctx, req.DGD, &programResult.Status)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}

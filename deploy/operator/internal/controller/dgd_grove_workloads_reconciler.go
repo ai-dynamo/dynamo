@@ -78,7 +78,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransitionWithStatus(dgd, status)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
