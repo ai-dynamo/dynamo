@@ -64,6 +64,54 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
 }
 
 
+class _ReasoningUsageAnnotator:
+    """Report reasoning-token usage on the PYTHON chat-processor path.
+
+    NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
+    (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
+    which bypasses that code entirely -- and the worker's _build_completion_usage()
+    emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
+    (not null) from usage.
+
+    The count is NOT derived here. Each StreamingPostProcessor accumulates
+    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
+    class only sums those totals and annotates usage. Deriving it here -- from the
+    choices this path emits -- is what reported zero whenever the response projection
+    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
+    tool path's terminal-delta buffering).
+
+    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
+    both reasoning and visible content counts entirely as reasoning. The non-streaming
+    tool path has no per-chunk classification, so it counts the parsed reasoning text
+    exactly; that is more precise than the Rust rather than divergent from it.
+    A positive backend-supplied count stays authoritative.
+    """
+
+    __slots__ = ("_post_processors",)
+
+    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
+        self._post_processors = post_processors
+
+    @property
+    def total(self) -> int:
+        return sum(
+            post.reasoning_token_total for post in self._post_processors.values()
+        )
+
+    def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
+        annotated = dict(usage)
+        details = dict(annotated.get("completion_tokens_details") or {})
+        # Only a POSITIVE backend count is authoritative. Missing, zero and
+        # negative all fall back to our own tally -- a negative would otherwise
+        # survive, since -1 is truthy.
+        backend = details.get("reasoning_tokens")
+        if not isinstance(backend, int) or backend <= 0:
+            details["reasoning_tokens"] = self.total
+        annotated["completion_tokens_details"] = details
+        return annotated
+
+
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     if raw_reason is None:
         return None
@@ -851,6 +899,10 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        # Per-request reasoning-token usage (NVBug 6678449b); see
+        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
+        # The counts live on the post-processors, which are per-request too.
+        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
         _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
         _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
@@ -975,7 +1027,7 @@ class VllmProcessor:
                         "object": "chat.completion.chunk",
                     }
                     if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = usage
+                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
                 metrics = {
