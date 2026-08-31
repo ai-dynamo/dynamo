@@ -257,7 +257,10 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
 ```
 
-Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and [Logging](observability.md) for the Grafana Loki + Alloy logging stack.
+Then uncomment the `prometheusEndpoint` line in the Dynamo install command. With the Prometheus
+Operator CRDs present, the Dynamo platform chart creates the component `PodMonitor` resources. See
+[Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and
+[Logging](observability.md) for the Grafana Loki and Alloy logging stack.
 
 ### Shared Storage for Model Caching
 

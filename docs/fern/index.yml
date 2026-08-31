@@ -88,6 +88,8 @@ navigation:
         contents:
         - page: Install Dynamo
           path: pages/kubernetes/installation/install-dynamo.md
+        - page: Observability
+          path: pages/kubernetes/installation/observability.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
         - page: Gateway API Inference Extension
