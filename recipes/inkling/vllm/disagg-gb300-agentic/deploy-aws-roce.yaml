@@ -153,7 +153,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-766bf8924e93152f2287162697080b69ad65115c-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-d5bc5814213ffd862783ad01bfee1ddcc3f5f3e4-vllm-runtime
           imagePullPolicy: Always
           name: main
           ports:
@@ -292,7 +292,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-766bf8924e93152f2287162697080b69ad65115c-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-d5bc5814213ffd862783ad01bfee1ddcc3f5f3e4-vllm-runtime
           imagePullPolicy: Always
           name: main
           ports:
@@ -372,7 +372,7 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-766bf8924e93152f2287162697080b69ad65115c-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-d5bc5814213ffd862783ad01bfee1ddcc3f5f3e4-vllm-runtime
           imagePullPolicy: Always
           name: main
           ports:
