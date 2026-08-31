@@ -2940,3 +2940,316 @@ class TestThinkingControlParity:  # FRONTEND.10
             tool_parser_class=None,
         )
         assert kwargs == case.expected
+
+
+class _AccountingReasoningParser:
+    """Emits reasoning until a chunk contains "</think>", then visible content."""
+
+    engine_based_streaming = False
+
+    def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+        self.tokenizer = tokenizer
+        self.chat_template_kwargs = chat_template_kwargs or {}
+        self.model_config = model_config
+
+    def is_reasoning_end(self, prompt_token_ids):
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        return None
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        if "</think>" in delta_text:
+            return prepost_module.DeltaMessage(content=delta_text.split("</think>")[-1])
+        return prepost_module.DeltaMessage(reasoning=delta_text)
+
+    def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+        return False
+
+    def extract_reasoning(self, text, request=None):
+        if "</think>" in text:
+            reasoning, _, content = text.partition("</think>")
+            return reasoning, content
+        return text, ""
+
+    def count_reasoning_tokens(self, token_ids):
+        """Everything up to and including the end marker counts as reasoning.
+
+        The production code delegates to this, so the fake has to provide it --
+        a fake that omits it inherits ReasoningParser's base, which returns 0.
+        """
+        end = self.tokenizer.encode("</think>", add_special_tokens=False)
+        end_id = end[-1] if end else None
+        count = 0
+        for tid in token_ids:
+            count += 1
+            if tid == end_id:
+                break
+        return count
+
+
+class _PassthroughToolParser:
+    """Finds no tool calls; returns the text as content.
+
+    The buffered non-streaming path only needs `tool_parser is not None` to engage,
+    so this keeps the reasoning-accounting test focused on reasoning.
+    """
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        self.tokenizer = tokenizer
+
+    def extract_tool_calls(self, text, request=None):
+        return SimpleNamespace(tools_called=False, tool_calls=[], content=text)
+
+
+class TestReasoningTokenAccounting:
+    """Reasoning-token usage on the Python chat-processor path (NVBug 6678449b).
+
+    dynamo #12181 added this only to the Rust OpenAIPreprocessor, which
+    `--dyn-chat-processor vllm` bypasses, so `reasoning_tokens` was absent from usage
+    entirely (the worker's _build_completion_usage emits no completion_tokens_details).
+
+    The count is accumulated where the reasoning parser CLASSIFIES output, NOT where
+    the response is projected. The two regression tests below both reported 0 when it
+    was derived from the emitted choices.
+    """
+
+    @staticmethod
+    def _post(tokenizer, *, include_reasoning=True, stream_response=True, tools=False):
+        request = SimpleNamespace(
+            include_reasoning=include_reasoning,
+            tool_choice="auto" if tools else "none",
+            model_fields=frozenset(),
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=_PassthroughToolParser(tokenizer) if tools else None,
+            reasoning_parser_class=_AccountingReasoningParser,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+
+    @staticmethod
+    def _out(text, token_ids, finish_reason=None, index=0):
+        return SimpleNamespace(
+            index=index,
+            text=text,
+            token_ids=token_ids,
+            finish_reason=finish_reason,
+            logprobs=None,
+        )
+
+    @staticmethod
+    def _annotator(*posts):
+        from dynamo.frontend.vllm_processor import _ReasoningUsageAnnotator
+
+        return _ReasoningUsageAnnotator({i: p for i, p in enumerate(posts)})
+
+    # -- streaming classification ------------------------------------------
+
+    def test_streaming_counts_reasoning_only_not_the_answer(self, tokenizer):
+        """Real parser, real ids: the visible answer must not be counted."""
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning = tokenizer.encode("<think>abc</think>", add_special_tokens=False)
+        answer = tokenizer.encode("the answer", add_special_tokens=False)
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(reasoning + answer)
+
+        post = self._qwen3_post(tokenizer)
+        for tid in reasoning + answer:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native
+        assert 0 < native < len(reasoning + answer)
+
+    # -- P1 #1: account before the include_reasoning projection ------------
+
+    def test_hidden_reasoning_is_counted_when_include_reasoning_false(self, tokenizer):
+        """include_reasoning=false suppresses the reasoning DELTA, not the tokens.
+
+        Observing emitted choices saw no reasoning_content here and reported 0 for a
+        response that really did spend tokens reasoning.
+        """
+        post = self._post(tokenizer, include_reasoning=False)
+        choice = post.process_output(self._out("hidden", [1, 2, 3]))
+
+        # The projection still hides it -- that part is intended...
+        assert choice is None or "reasoning_content" not in (choice.get("delta") or {})
+        # ...but the tokens are accounted anyway.
+        assert post.reasoning_token_total == 3
+        annotated = self._annotator(post).annotate({"completion_tokens": 10})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 3
+
+    # -- P1 #2: survive non-streaming tool buffering ------------------------
+
+    def test_non_streaming_tool_buffering_preserves_count(self, tokenizer):
+        """The non-streaming tool path emits nothing per chunk and releases on the
+        terminal delta, where chunk_tokens is 0. Per-chunk observation of emitted
+        choices therefore saw only zeros and reported 0.
+        """
+        post = self._post(tokenizer, stream_response=False, tools=True)
+        for chunk in ("think a", "think b", "think c"):
+            assert post.process_output(self._out(chunk, [1, 2])) is None
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+
+        assert post.reasoning_token_total > 0
+        annotated = self._annotator(post).annotate({"completion_tokens": 20})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] > 0
+
+    def test_non_streaming_buffering_counts_even_when_suppressed(self, tokenizer):
+        """Both projections at once: buffered AND include_reasoning=false."""
+        post = self._post(
+            tokenizer, stream_response=False, tools=True, include_reasoning=False
+        )
+        post.process_output(self._out("thinking hard", [1, 2]))
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+        assert post.reasoning_token_total > 0
+
+    def test_no_reasoning_parser_counts_nothing(self, tokenizer):
+        """Without a reasoning parser there is nothing to delegate to -> 0.
+
+        Note the counterpart is NOT true: with a parser, plain content is not
+        automatically zero. Qwen3's parser counts an unopened span as reasoning
+        (the model is trained to reason first), so delegating means inheriting
+        that contract -- which is the point, since it is what vLLM itself
+        reports.
+        """
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        for tid in tokenizer.encode("just an answer", add_special_tokens=False):
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == 0
+
+    # -- the parser's OWN counter, not a re-derivation -----------------------
+
+    @staticmethod
+    def _qwen3_post(tokenizer):
+        from vllm.reasoning import ReasoningParserManager
+
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+
+    def test_count_matches_the_parser_for_split_marker_tokens(self, tokenizer):
+        """`<think>`, `abc`, `<`, `x` -- the parser counts 3.
+
+        A per-chunk classifier that adds len(delta_token_ids) whenever the chunk
+        carried reasoning reported 2 here. Delegating to the parser's own
+        count_reasoning_tokens is what makes this exact.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        ids = [
+            i
+            for piece in ("<think>", "abc", "<", "x")
+            for i in tokenizer.encode(piece, add_special_tokens=False)
+        ]
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        assert native == 3, f"fixture drift: parser now counts {native}"
+
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 3
+
+    def test_count_survives_non_injective_detokenisation(self, tokenizer):
+        """Generated id 77150 decodes to '１０', which RE-ENCODES to two tokens.
+
+        Counting by re-encoding the decoded reasoning text therefore reported 2
+        for a single generated token. The ledger keeps the original ids, so the
+        parser sees exactly what was generated.
+        """
+        think = tokenizer.encode("<think>", add_special_tokens=False)
+        ids = think + [77150]
+        assert (
+            len(tokenizer.encode(tokenizer.decode([77150]), add_special_tokens=False))
+            == 2
+        ), "fixture drift: 77150 no longer re-encodes to 2 tokens"
+
+        from vllm.reasoning import ReasoningParserManager
+
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 1
+
+    # -- annotation ---------------------------------------------------------
+
+    def test_total_sums_across_choices(self, tokenizer):
+        a, b = self._post(tokenizer), self._post(tokenizer)
+        a.process_output(self._out("x", [1, 2]))
+        b.process_output(self._out("y", [3, 4, 5]))
+        assert self._annotator(a, b).total == 5
+
+    def test_annotate_fills_when_absent_and_does_not_mutate_input(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens": 100}
+        out = self._annotator(post).annotate(usage)
+        assert out["completion_tokens_details"]["reasoning_tokens"] == 2
+        assert "completion_tokens_details" not in usage
+
+    def test_annotate_preserves_a_positive_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 7}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 7
+
+    def test_annotate_replaces_a_zero_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 0}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+    @pytest.mark.parametrize("backend", [-1, -100, None, "7"])
+    def test_annotate_replaces_a_non_positive_backend_value(self, tokenizer, backend):
+        """Only a POSITIVE backend count is authoritative.
+
+        -1 is truthy, so a plain falsiness check preserved it and reported a
+        negative reasoning_tokens to the client.
+        """
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2

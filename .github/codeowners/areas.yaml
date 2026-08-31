@@ -365,6 +365,8 @@ areas:
   - .agents/
   - .ai/
   - .claude/
+  - .github/codeowners/areas.yaml
+  - .github/codeowners/external_contributors.yaml
   - AGENTS.md
   - ATTRIBUTIONS-Go.md
   - ATTRIBUTIONS-Python.md
