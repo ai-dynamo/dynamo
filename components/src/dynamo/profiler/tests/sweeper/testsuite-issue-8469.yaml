@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: https://github.com/ai-dynamo/dynamo/issues/8469
+
+tests:
+  - case: gpt-oss-120b-trtllm-agg
+    hardware: gb200-sxm-4gpu
+
+  - case: gpt-oss-120b-trtllm-disagg
+    hardware: gb200-sxm-5gpu
+
+  - case: qwen3-235b-fp8-trtllm-agg
+    hardware: h200-sxm-16gpu
+
+  - case: qwen3-235b-fp8-trtllm-disagg
+    hardware: h200-sxm-16gpu
+
+  - case: qwen3-32b-fp8-trtllm-agg
+    hardware: h200-sxm-2gpu
+
+  - case: qwen3-32b-fp8-trtllm-disagg
+    hardware: h200-sxm-8gpu
+
+  - case: qwen3-32b-vllm-agg
+    hardware: h200-sxm-16gpu
+
+  - case: qwen3-32b-vllm-disagg
+    hardware: h200-sxm-16gpu

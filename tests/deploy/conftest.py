@@ -110,6 +110,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="",
         help="Secret containing the profiler's HF_TOKEN value.",
     )
+    parser.addoption(
+        "--sweeper-suite",
+        type=Path,
+        default=None,
+        help="Sweeper comparison suite whose DGDs should be validated.",
+    )
+    parser.addoption(
+        "--sweeper-output-dir",
+        type=Path,
+        default=None,
+        help="Generated DGD root; defaults to the suite's checked-in generated directory.",
+    )
+    parser.addoption(
+        "--sweeper-variants",
+        default="profiler-v1beta1,sweeper-aic,recipe",
+        help="Comma-separated generated or recipe DGD variants to validate.",
+    )
 
 
 @dataclass(frozen=True)

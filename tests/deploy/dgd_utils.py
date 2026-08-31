@@ -403,7 +403,24 @@ class ServiceSpec:
         for i, arg in enumerate(args):
             if arg in ["--model", "--model-path"]:
                 if i + 1 < len(args) and not args[i + 1].startswith("-"):
-                    return args[i + 1]
+                    value = args[i + 1]
+                    match = re.fullmatch(
+                        r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                        value,
+                    )
+                    if match is None:
+                        return value
+                    variable = match.group(1) or match.group(2)
+                    container = self._get_main_container_for_args()
+                    envs = list(self.envs)
+                    if container is not None:
+                        envs.extend(container.get("env", []))
+                    for env in envs:
+                        if env.get("name") == variable and isinstance(
+                            env.get("value"), str
+                        ):
+                            return env["value"]
+                    return value
         return None
 
     @model.setter
