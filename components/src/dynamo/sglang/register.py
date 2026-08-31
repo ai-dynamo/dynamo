@@ -15,7 +15,10 @@ from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
-from dynamo.common.utils.media_decoder import enable_frontend_video_decoding
+from dynamo.common.utils.media_decoder import (
+    build_frontend_image_decoder_options,
+    enable_frontend_video_decoding,
+)
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -98,7 +101,7 @@ def _build_media_decoder_and_fetcher():
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
     """
     media_decoder = MediaDecoder()
-    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    media_decoder.enable_image(build_frontend_image_decoder_options())
     enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()
