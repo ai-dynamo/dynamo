@@ -7,6 +7,49 @@ use dynamo_backend_common::DynamoError;
 
 use crate::invalid_argument;
 
+/// Validated plaintext HTTP endpoint derived from a sidecar's gRPC host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpEndpoint {
+    endpoint: url::Url,
+}
+
+impl HttpEndpoint {
+    /// Reuse the host from a validated gRPC endpoint with a discovered HTTP port.
+    pub fn from_grpc(grpc_endpoint: &GrpcEndpoint, port: u16) -> Result<Self, DynamoError> {
+        if port == 0 {
+            return Err(invalid_argument("HTTP endpoint port must not be zero"));
+        }
+        let mut endpoint = url::Url::parse(grpc_endpoint.as_str()).map_err(|error| {
+            invalid_argument(format!(
+                "could not derive HTTP endpoint from `{grpc_endpoint}`: {error}"
+            ))
+        })?;
+        endpoint.set_port(Some(port)).map_err(|()| {
+            invalid_argument(format!(
+                "could not set HTTP port {port} on `{grpc_endpoint}`"
+            ))
+        })?;
+        Ok(Self { endpoint })
+    }
+
+    /// Return this endpoint with `path`, preserving its validated authority.
+    pub fn with_path(&self, path: &str) -> url::Url {
+        let mut endpoint = self.endpoint.clone();
+        endpoint.set_path(path);
+        endpoint
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.endpoint.as_str()
+    }
+}
+
+impl fmt::Display for HttpEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Validated plaintext gRPC endpoint containing only a scheme and authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrpcEndpoint {
@@ -88,7 +131,7 @@ impl fmt::Display for GrpcEndpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::GrpcEndpoint;
+    use super::{GrpcEndpoint, HttpEndpoint};
 
     const ARGUMENT: &str = "--test-endpoint";
 
@@ -133,5 +176,21 @@ mod tests {
         ] {
             assert!(GrpcEndpoint::parse(endpoint, ARGUMENT).is_err());
         }
+    }
+
+    #[test]
+    fn derives_http_endpoint_from_grpc_host() {
+        let grpc = GrpcEndpoint::parse("http://server:30001", ARGUMENT).unwrap();
+        let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
+        assert_eq!(http.as_str(), "http://server:30000/");
+        assert_eq!(
+            http.with_path("/generate").as_str(),
+            "http://server:30000/generate"
+        );
+
+        let grpc = GrpcEndpoint::parse("http://[2001:db8::1]:30001", ARGUMENT).unwrap();
+        let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
+        assert_eq!(http.as_str(), "http://[2001:db8::1]:30000/");
+        assert!(HttpEndpoint::from_grpc(&grpc, 0).is_err());
     }
 }

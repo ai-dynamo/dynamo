@@ -14,7 +14,9 @@ use dynamo_kv_router::{
     indexer::{
         KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
     },
-    protocols::{ResidencyProjection, ResidencyProjectionError, WorkerWithDpRank},
+    protocols::{
+        ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata, WorkerWithDpRank,
+    },
 };
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};
@@ -83,6 +85,8 @@ pub struct KvStateAttachmentIntent {
     pub raw_topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_token_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +135,8 @@ pub struct KvStateSourceAdvertisement {
     pub protocol_version: KvStateProtocolVersion,
     pub event_topic: String,
     pub recovery_control_target: Instance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,6 +384,7 @@ mod tests {
             protocol_version: KvStateProtocolVersion::V2,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: endpoint(),
+            router_hint_source: None,
         };
         let attachment = KvStateAttachmentAdvertisement {
             cache_owner_id,

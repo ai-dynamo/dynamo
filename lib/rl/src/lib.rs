@@ -40,6 +40,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Global cap on concurrent per-worker probes (across all in-flight discovery
 /// requests), so a large fleet or many concurrent callers can't fan out without bound.
 const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
+const RL_WORKERS_PROTOCOL_VERSION: u32 = 1;
 
 type ModelKey = (String, String, u64);
 
@@ -104,14 +105,19 @@ pub struct RlWorkerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub routes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_size: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RlWorkersResponse {
+    pub protocol_version: u32,
     pub namespace: String,
     pub workers: Vec<RlWorkerInfo>,
 }
@@ -195,6 +201,7 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
             namespace: state.config.namespace.clone(),
             workers,
         })
@@ -315,13 +322,17 @@ async fn describe_worker(
         call_worker_routes(state, &endpoint, timeout).await
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
-        Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+        Ok(Ok(routes)) => worker_info(endpoint, model, routes, None),
+        Ok(Err(err)) => worker_info(
+            endpoint,
+            model,
+            WorkerRoutes::default(),
+            Some(err.to_string()),
+        ),
         Err(_) => worker_info(
             endpoint,
             model,
-            Vec::new(),
-            None,
+            WorkerRoutes::default(),
             Some(format!(
                 "worker discovery timed out after {}s",
                 timeout.as_secs()
@@ -334,6 +345,8 @@ async fn describe_worker(
 struct WorkerRoutes {
     routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
 }
 
 async fn call_worker_routes(
@@ -440,18 +453,51 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
         .filter(|url| !url.is_empty())
         .map(ToString::to_string);
 
-    Ok(WorkerRoutes { routes, system_url })
+    let admin_base_url = value
+        .get("admin_base_url")
+        .map(|value| {
+            let url = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!("worker routes response has invalid 'admin_base_url'")
+            })?;
+            let url = url.trim();
+            if url.is_empty() {
+                anyhow::bail!("worker routes response has invalid 'admin_base_url'");
+            }
+            Ok(url.to_string())
+        })
+        .transpose()?;
+
+    let world_size = value
+        .get("world_size")
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("worker routes response has invalid 'world_size'")
+            })?;
+            u32::try_from(value)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| anyhow::anyhow!("worker routes response has invalid 'world_size'"))
+        })
+        .transpose()?;
+    if admin_base_url.is_some() && world_size.is_none() {
+        anyhow::bail!("worker routes response has 'admin_base_url' without valid 'world_size'");
+    }
+    Ok(WorkerRoutes {
+        routes,
+        system_url,
+        admin_base_url,
+        world_size,
+    })
 }
 
 fn worker_info(
     endpoint: Instance,
     model: Option<String>,
-    mut routes: Vec<String>,
-    system_url: Option<String>,
+    mut discovered: WorkerRoutes,
     error: Option<String>,
 ) -> RlWorkerInfo {
-    routes.sort();
-    routes.dedup();
+    discovered.routes.sort();
+    discovered.routes.dedup();
 
     RlWorkerInfo {
         request_plane_url: request_plane_url(&endpoint),
@@ -460,9 +506,11 @@ fn worker_info(
         endpoint: endpoint.endpoint,
         instance_id: endpoint.instance_id,
         transport: endpoint.transport,
-        system_url,
+        system_url: discovered.system_url,
+        admin_base_url: discovered.admin_base_url,
         model,
-        routes,
+        routes: discovered.routes,
+        world_size: discovered.world_size,
         error,
     }
 }
@@ -512,7 +560,39 @@ fn model_map(instances: Vec<DiscoveryInstance>) -> HashMap<ModelKey, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::{
+        discovery::DiscoverySpec,
+        pipeline::{
+            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, async_trait,
+            network::Ingress,
+        },
+    };
+    use futures::stream;
     use serde_json::json;
+
+    struct TestRoutesHandler;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<serde_json::Value>,
+            ManyOut<Annotated<serde_json::Value>>,
+            anyhow::Error,
+        > for TestRoutesHandler
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<serde_json::Value>,
+        ) -> anyhow::Result<ManyOut<Annotated<serde_json::Value>>> {
+            let (_, context) = input.into_parts();
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async {
+                    Annotated::from_data(json!({"status": "ok", "routes": []}))
+                })),
+                context.context(),
+            ))
+        }
+    }
 
     fn model_instance(
         namespace: &str,
@@ -537,12 +617,17 @@ mod tests {
         let parsed = parse_worker_routes(json!({
             "routes": ["pause_generation", "resume_generation"],
             "system_url": "  http://worker:8080  ",
+            "admin_base_url": "  http://worker:8120  ",
+            "world_size": 4,
+            "weight_transfer_backend": "nccl",
         }))
         .expect("valid payload");
         let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
         assert_eq!(routes, ["pause_generation", "resume_generation"]);
         // system_url is trimmed.
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
+        assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
+        assert_eq!(parsed.world_size, Some(4));
     }
 
     #[test]
@@ -570,6 +655,39 @@ mod tests {
     fn parse_worker_routes_rejects_empty_entry() {
         let err = parse_worker_routes(json!({ "routes": ["pause", ""] })).unwrap_err();
         assert!(err.to_string().contains("empty route entry"));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_rl_metadata() {
+        let zero = parse_worker_routes(json!({ "routes": [], "world_size": 0 })).unwrap_err();
+        assert!(zero.to_string().contains("world_size"));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_admin_base_url() {
+        for value in [json!("   "), json!(42)] {
+            let err = parse_worker_routes(json!({
+                "routes": [],
+                "admin_base_url": value,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains("admin_base_url"));
+        }
+    }
+
+    #[test]
+    fn parse_worker_routes_requires_world_size_with_admin_base_url() {
+        let err = parse_worker_routes(json!({
+            "routes": [],
+            "admin_base_url": "http://worker:8120",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("world_size"));
+
+        let parsed = parse_worker_routes(json!({ "routes": [], "world_size": 1 }))
+            .expect("world size does not require an admin URL");
+        assert_eq!(parsed.world_size, Some(1));
+        assert!(parsed.admin_base_url.is_none());
     }
 
     #[test]
@@ -638,5 +756,64 @@ mod tests {
             Some("lora-1"),
         )]);
         assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_workers_keeps_endpoints_without_unambiguous_model_metadata() {
+        let runtime = dynamo_runtime::Runtime::from_current().expect("test runtime");
+        let distributed = Arc::new(
+            DistributedRuntime::new(
+                runtime,
+                dynamo_runtime::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .expect("distributed runtime"),
+        );
+        let ingress = Ingress::for_engine(Arc::new(TestRoutesHandler)).expect("test ingress");
+        let started = distributed
+            .namespace("dynamo")
+            .expect("namespace")
+            .component("backend")
+            .expect("component")
+            .endpoint("rl")
+            .endpoint_builder()
+            .handler(ingress)
+            .start_with_registration()
+            .await
+            .expect("RL endpoint");
+        let state = RlDiscoveryState::new(RlDiscoveryConfig {
+            runtime: distributed.clone(),
+            namespace: "dynamo".to_string(),
+            rl_endpoint: "rl".to_string(),
+            component_filter: None,
+            request_timeout: Duration::from_secs(1),
+            max_concurrent_probes: 1,
+        });
+
+        let workers = list_workers(&state).await.expect("workers without models");
+        assert_eq!(workers.len(), 1);
+        assert!(workers[0].model.is_none());
+
+        for (endpoint, display_name) in [("generate", "model-a"), ("embed", "model-b")] {
+            distributed
+                .discovery()
+                .register(DiscoverySpec::Model {
+                    namespace: "dynamo".to_string(),
+                    component: "backend".to_string(),
+                    endpoint: endpoint.to_string(),
+                    card_json: json!({"display_name": display_name}),
+                    model_suffix: None,
+                })
+                .await
+                .expect("model registration");
+        }
+
+        let workers = list_workers(&state)
+            .await
+            .expect("workers with ambiguous models");
+        assert_eq!(workers.len(), 1);
+        assert!(workers[0].model.is_none());
+
+        started.shutdown().await.expect("endpoint shutdown");
     }
 }

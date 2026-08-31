@@ -65,10 +65,11 @@ curl localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-No published vLLM sidecar image is available yet. Follow the
+No published sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/README.md#deploy-on-kubernetes-quick-start)
-to build the CPU-only sidecar image and pair it with a stock upstream vLLM
-image. The source tree includes
+to build `dynamo-sidecar`, which contains all three engine-specific sidecar
+executables. The vLLM manifests run `dynamo-vllm-sidecar` as the container
+command and pair it with a stock upstream vLLM image. The source tree includes
 [aggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/agg.yaml)
 and
 [disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/disagg.yaml)

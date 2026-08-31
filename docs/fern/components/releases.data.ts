@@ -71,10 +71,10 @@ export const CURRENT_TAG = "1.4.1";
 export const CURRENT_WHEEL = "1.4.1";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.17",
+  sglang: "0.5.18",
   trtllm: "1.3.0rc24",
   vllm: "0.27.1",
-  nixlSglang: "1.3.2",
+  nixlSglang: "1.4.0",
   nixlTrtllm: "1.3.1",
   nixlVllm: "1.3.2",
 };
@@ -535,7 +535,10 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "LoRA",
-    sglang: { status: "no" },
+    sglang: {
+      status: "wip",
+      note: "Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated",
+    },
     trtllm: { status: "no" },
     vllm: { status: "yes", note: "Dynamic load/unload; KV-aware routing supports adapter affinity" },
   },
@@ -1192,17 +1195,17 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // KV Block Manager
       [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
       // Multimodal
-      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.17, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
+      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.18, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
       // Request Migration
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // Request Cancellation
       [{ status: "wip", label: "Remote-prefill limitation", note: "Cancellation during remote prefill is not supported in disaggregated mode.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // LoRA
-      [{ status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
+      [{ status: "wip", label: "Disaggregated LoRA not end-to-end validated", note: "Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Adapter-aware routing not end-to-end validated", note: "Aggregated LoRA inference is validated without the KV router; the combined path remains experimental.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Tool Calling
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip", label: "Experimental combination", note: "Tool calling with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Speculative Decoding
-      [{ status: "wip", label: "Limited integration", note: "Code hooks exist, but examples and documentation are not yet available." }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip" }, { status: "na" }],
+      [{ status: "wip", label: "Limited integration", note: "Code hooks exist, but examples and documentation are not yet available." }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip" }, { status: "na" }],
     ],
   },
   {

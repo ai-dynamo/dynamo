@@ -17,7 +17,6 @@ use crate::services::overlap::MooncakeOverlapSummary;
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
