@@ -293,6 +293,7 @@ impl PreparedRequest {
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }
     }
 
