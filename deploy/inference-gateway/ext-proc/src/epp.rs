@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -357,9 +357,7 @@ impl Router {
     /// worker index — O(1), no K8s API calls, no pod scan, no worker-ID
     /// rehashing (see [`WorkerEndpointIndex`]).
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
-        self.worker_index
-            .read()
-            .unwrap()
+        read_index(&self.worker_index)
             .endpoints
             .get(&worker_id)
             .cloned()
@@ -368,9 +366,7 @@ impl Router {
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        self.worker_index
-            .read()
-            .unwrap()
+        read_index(&self.worker_index)
             .endpoints
             .values()
             .next()
@@ -381,7 +377,7 @@ impl Router {
     /// Used for body-less requests that still carry an Envoy subset hint, so
     /// we never resolve a backend outside the requested subset.
     fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
-        let index = self.worker_index.read().unwrap();
+        let index = read_index(&self.worker_index);
         allowed
             .iter()
             .find_map(|id| index.endpoints.get(id).cloned())
@@ -406,7 +402,7 @@ impl Router {
             .iter()
             .filter_map(|s| s.parse().ok())
             .collect();
-        let index = self.worker_index.read().unwrap();
+        let index = read_index(&self.worker_index);
         index
             .endpoints
             .iter()
@@ -976,6 +972,39 @@ impl WorkerEndpointIndex {
     }
 }
 
+/// Read the worker index, recovering from a poisoned lock.
+///
+/// The index is derived state the reflector rebuilds, so a writer that panicked
+/// mid-update leaves it stale at worst. Propagating the poison instead would
+/// panic every subsequent `pick()` inside the tonic handler while the health
+/// server on its own port keeps answering SERVING — a pod that fails 100% of
+/// ext_proc calls and is never restarted. Stale routing degrades; poison does
+/// not.
+fn read_index(index: &RwLock<WorkerEndpointIndex>) -> RwLockReadGuard<'_, WorkerEndpointIndex> {
+    index.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Write the worker index, recovering from a poisoned lock — see [`read_index`].
+/// Without this a single writer panic would also kill every later update.
+fn write_index(index: &RwLock<WorkerEndpointIndex>) -> RwLockWriteGuard<'_, WorkerEndpointIndex> {
+    index.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Clears readiness when the reflector stops for *any* reason.
+///
+/// The stream-end path below lowers readiness explicitly, before clearing the
+/// index, so the pod stops advertising itself while it can still answer. This
+/// guard is the backstop for the path that cannot do that: a panic unwinding
+/// out of the loop, which would otherwise leave a dead reflector task behind a
+/// pod still reporting Ready.
+struct ReflectorReadinessGuard(Arc<AtomicBool>);
+
+impl Drop for ReflectorReadinessGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Drive the pod reflector stream, maintaining `index` from its per-object
 /// events until the stream ends.
 ///
@@ -995,6 +1024,8 @@ async fn run_pod_reflector(
     use futures::StreamExt;
     use kube::runtime::watcher;
 
+    let _readiness_guard = ReflectorReadinessGuard(ready.clone());
+
     tokio::pin!(reflect);
     loop {
         match reflect.next().await {
@@ -1008,7 +1039,7 @@ async fn run_pod_reflector(
                 // restarts out of. Mirrors pod_discovery.rs's stream-end path.
                 tracing::warn!("Pod reflector stream ended unexpectedly; marking not ready");
                 ready.store(false, Ordering::Release);
-                index.write().unwrap().clear();
+                write_index(&index).clear();
                 break;
             }
             // During a relist the reflector emits Init + one InitApply per
@@ -1016,13 +1047,13 @@ async fn run_pod_reflector(
             // instead of applying per-object deltas mid-relist.
             Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => continue,
             Some(Ok(watcher::Event::InitDone)) => {
-                index.write().unwrap().rebuild(&store);
+                write_index(&index).rebuild(&store);
             }
             Some(Ok(watcher::Event::Apply(pod))) => {
-                index.write().unwrap().upsert(&pod);
+                write_index(&index).upsert(&pod);
             }
             Some(Ok(watcher::Event::Delete(pod))) => {
-                index.write().unwrap().remove(&pod);
+                write_index(&index).remove(&pod);
             }
             Some(Err(e)) => {
                 tracing::warn!(error = %e, "Pod reflector watch error; retrying");
@@ -2217,6 +2248,71 @@ mod tests {
             "a retryable watch error must not clear readiness"
         );
         task.abort();
+    }
+
+    /// A writer panic poisons the lock. The request path must still answer
+    /// from the (stale) index rather than panicking inside the tonic handler
+    /// on every subsequent `pick()`.
+    #[test]
+    fn read_index_recovers_from_a_poisoned_lock() {
+        let index = Arc::new(RwLock::new(WorkerEndpointIndex::new(false)));
+        write_index(&index).upsert(&pod_mode_worker_pod());
+
+        let poisoner = index.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = write_index(&poisoner);
+            panic!("writer panicked while holding the index");
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            index.is_poisoned(),
+            "the panic must actually poison the lock"
+        );
+
+        assert_eq!(
+            read_index(&index).endpoints.get(&hash_pod_name("worker-0")),
+            Some(&"10.0.0.1:8000".to_string()),
+            "reads must survive a poisoned lock; the index is rebuildable"
+        );
+        // Writers too, or one panic freezes the index forever.
+        write_index(&index).clear();
+        assert!(read_index(&index).endpoints.is_empty());
+    }
+
+    /// A panic unwinding out of the reflector loop kills the task, so the
+    /// stream-end path never runs. Readiness must still drop, or the pod stays
+    /// Ready with no reflector behind it.
+    #[tokio::test]
+    async fn reflector_panic_still_drops_readiness() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let index = Arc::new(RwLock::new(WorkerEndpointIndex::new(false)));
+        let writer = kube::runtime::reflector::store::Writer::<Pod>::default();
+        let store = writer.as_reader();
+
+        let ready_probe = ready.clone();
+        let task = tokio::spawn(async move {
+            let _guard = ReflectorReadinessGuard(ready);
+            panic!("reflector task panicked");
+        });
+        assert!(task.await.is_err(), "the task must have panicked");
+        assert!(
+            !ready_probe.load(Ordering::Acquire),
+            "a panicking reflector must stop advertising readiness"
+        );
+
+        // Keep the canned-stream plumbing honest: the guard is armed inside
+        // run_pod_reflector itself, not only in this synthetic task.
+        let ready2 = Arc::new(AtomicBool::new(true));
+        run_pod_reflector(
+            futures::stream::iter(Vec::<
+                Result<kube::runtime::watcher::Event<Pod>, kube::runtime::watcher::Error>,
+            >::new()),
+            store,
+            index,
+            ready2.clone(),
+        )
+        .await;
+        assert!(!ready2.load(Ordering::Acquire));
     }
 
     /// A minimal pod exposing an `http`-named port, for

@@ -102,9 +102,12 @@ func eppSharedSpec(componentType nvidiacomv1beta1.ComponentType, image string) *
 	}
 }
 
-func fieldErrorFor(errs field.ErrorList, suffix string) *field.Error {
+// runtimeVersionOverrideError returns the runtimeVersionOverride error from
+// errs, or nil. That field is the one the EPP contract falls back to when the
+// image carries no resolvable version.
+func runtimeVersionOverrideError(errs field.ErrorList) *field.Error {
 	for _, err := range errs {
-		if strings.HasSuffix(err.Field, suffix) {
+		if strings.HasSuffix(err.Field, "runtimeVersionOverride") {
 			return err
 		}
 	}
@@ -131,7 +134,7 @@ func TestEPPRequiresResolvableRuntimeVersion(t *testing.T) {
 					field.NewPath("spec"),
 					dynamoComponentDeploymentSharedSpecValidationOptions{},
 				)
-				if fieldErrorFor(errs, "runtimeVersionOverride") == nil {
+				if runtimeVersionOverrideError(errs) == nil {
 					t.Fatalf("EPP on unresolvable image %q was admitted with no runtime-version error "+
 						"(allowMissingRuntimeVersionOverride=%v); its eppConfig contract went unchecked",
 						image, allowMissing)
@@ -153,7 +156,7 @@ func TestNonEPPKeepsMissingRuntimeVersionOverrideExemption(t *testing.T) {
 		field.NewPath("spec"),
 		dynamoComponentDeploymentSharedSpecValidationOptions{},
 	)
-	if err := fieldErrorFor(errs, "runtimeVersionOverride"); err != nil {
+	if err := runtimeVersionOverrideError(errs); err != nil {
 		t.Fatalf("non-EPP component lost its exemption: %v", err)
 	}
 }
@@ -178,7 +181,7 @@ func TestEPPRequiresResolvableRuntimeVersionOnUpdate(t *testing.T) {
 			schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
 			false,
 		)
-		if fieldErrorFor(errs, "runtimeVersionOverride") == nil {
+		if runtimeVersionOverrideError(errs) == nil {
 			t.Fatalf("EPP updated onto unresolvable image %q was admitted "+
 				"(allowMissingRuntimeVersionOverride=%v)", imageCISHATag, allowMissing)
 		}
@@ -201,7 +204,7 @@ func TestEPPUnchangedUnresolvableImageIsRatcheted(t *testing.T) {
 		schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
 		false,
 	)
-	if err := fieldErrorFor(errs, "runtimeVersionOverride"); err != nil {
+	if err := runtimeVersionOverrideError(errs); err != nil {
 		t.Fatalf("unchanged pre-existing image lost its ratchet: %v", err)
 	}
 }
