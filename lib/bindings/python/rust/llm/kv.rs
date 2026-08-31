@@ -1116,6 +1116,7 @@ pub(crate) struct KvEventPublisher {
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1158,9 +1159,10 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
-            // This bridge has no image-token configuration. Python callers can
-            // set one through the public constructor when needed.
+            // This bridge has no placeholder-token configuration. Python callers
+            // can set one through the public constructor when needed.
             image_token_id: None,
+            video_token_id: None,
         }
     }
 
@@ -1194,6 +1196,7 @@ impl KvEventPublisher {
                     block_mm_infos,
                     is_eagle,
                     self.image_token_id,
+                    self.video_token_id,
                 ),
             }),
             dp_rank: self.dp_rank,
@@ -1236,11 +1239,15 @@ impl KvEventPublisher {
     ///         so compatible events within that list are still coalesced.
     ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
+    ///     image_token_id: Optional model image-placeholder token used to
+    ///         normalize vLLM KV events for exact MM routing.
     ///     kv_state_endpoint: Optional endpoint that owns this publisher's KV event
     ///         and recovery state. When None, KV state maps to ``endpoint``; this
     ///         does not change the endpoint used for request routing.
+    ///     video_token_id: Optional model video-placeholder token used to
+    ///         normalize vLLM KV events for exact MM routing.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1253,11 +1260,13 @@ impl KvEventPublisher {
         batching_timeout_ms: Option<u64>,
         image_token_id: Option<u32>,
         kv_state_endpoint: Option<String>,
+        video_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
+            video_token_id,
         });
 
         if kv_block_size == 0 {
@@ -1286,6 +1295,7 @@ impl KvEventPublisher {
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
             image_token_id,
+            video_token_id,
         })
     }
 
