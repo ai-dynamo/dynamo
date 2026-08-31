@@ -28,6 +28,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ImportError:
+    # Fallback for SGLang <= 0.5.17. Remove when min supported version is 0.5.18+.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
 
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
@@ -174,6 +180,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
