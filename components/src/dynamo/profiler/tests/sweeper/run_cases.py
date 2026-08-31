@@ -40,6 +40,11 @@ _DGDR_HARDWARE_PATCH = "dgdr-v1beta1.patch.yaml"
 _SWEEPER_HARDWARE_PATCH = "sweeper.patch.yaml"
 _RENDERERS = ("aic", "direct")
 _MAX_DGDR_NAME_LENGTH = 28
+_YAML_SPDX_HEADER = (
+    "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & "
+    "AFFILIATES. All rights reserved.\n"
+    "# SPDX-License-Identifier: Apache-2.0\n\n"
+)
 _EXCEPTION_STATUSES = {"broken", "skipped"}
 _PHASE_VARIANTS = {
     "render": {
@@ -566,6 +571,13 @@ def _write_composed_inputs(case: ComparisonCase) -> None:
     )
 
 
+def _write_generated_dgd(path: Path, rendered: str) -> None:
+    """Write a checked-in DGD golden with the repository's SPDX header."""
+    if not rendered.startswith("# SPDX-FileCopyrightText:"):
+        rendered = f"{_YAML_SPDX_HEADER}{rendered}"
+    replace_text(path, rendered)
+
+
 def _cache_environment(case: ComparisonCase) -> dict[str, str]:
     return {
         "HF_HOME": str(case.cache_dir / "huggingface"),
@@ -617,7 +629,7 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
             raise RuntimeError(
                 f"v1beta1 profiler succeeded without writing {final_config}"
             )
-        replace_text(output_path, final_config.read_text())
+        _write_generated_dgd(output_path, final_config.read_text())
 
 
 def _candidate_document(candidate: Any) -> dict[str, Any]:
@@ -760,7 +772,7 @@ def _run_sweeper_renderers(
             )
             continue
         error_path.unlink(missing_ok=True)
-        replace_text(output_path, rendered)
+        _write_generated_dgd(output_path, rendered)
         _report_unexpected_pass(entry, "render", f"sweeper-{renderer}")
     return failures
 
