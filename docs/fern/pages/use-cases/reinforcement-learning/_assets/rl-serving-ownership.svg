@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="600" viewBox="0 0 1440 600" role="img" aria-labelledby="title description">
   <title id="title">Where Dynamo fits in the reinforcement learning post-training loop</title>
   <desc id="description">Prompt and task data enter Dynamo rollout serving. Dynamo routes work to inference backends that generate tokens and log probabilities. The reinforcement learning framework evaluates rewards, computes advantages, updates the policy, and sends the next policy back to the rollout fleet. The framework owns training decisions, Dynamo owns serving orchestration, and the inference backend owns model execution.</desc>
   <style>
@@ -33,7 +33,7 @@
     .inner-title { font-size: 19px; font-weight: 700; }
     .body { font-size: 14px; }
     .small { font-size: 12px; }
-    .arrow-label { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .arrow-label { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
   </style>
   <defs>
     <marker id="arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
@@ -47,62 +47,62 @@
   <text x="48" y="42" class="eyebrow muted">RL POST-TRAINING LOOP</text>
 
   <!-- Connections render behind the component boxes. -->
-  <line x1="252" y1="206" x2="314" y2="206" class="line" stroke-width="2" marker-end="url(#arrow)" />
-  <text x="283" y="192" class="arrow-label muted" text-anchor="middle">prompts</text>
+  <line x1="258" y1="210" x2="332" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
+  <text x="295" y="194" class="arrow-label muted" text-anchor="middle">prompts</text>
 
-  <line x1="754" y1="206" x2="808" y2="206" class="line" stroke-width="2" marker-end="url(#arrow)" />
-  <text x="781" y="192" class="arrow-label muted" text-anchor="middle">samples</text>
+  <line x1="860" y1="210" x2="936" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
+  <text x="898" y="194" class="arrow-label muted" text-anchor="middle">samples</text>
 
-  <line x1="990" y1="206" x2="1034" y2="206" class="line" stroke-width="2" marker-end="url(#arrow)" />
-  <text x="1012" y="192" class="arrow-label muted" text-anchor="middle">rewards</text>
+  <line x1="1144" y1="210" x2="1220" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
+  <text x="1182" y="194" class="arrow-label muted" text-anchor="middle">rewards</text>
 
-  <path d="M 1135 286 L 1135 410 Q 1135 438 1107 438 L 658 438 Q 630 438 630 410 L 630 306" fill="none" class="line-green" stroke-width="2.5" marker-end="url(#arrow-green)" />
-  <text x="884" y="427" class="arrow-label accent" text-anchor="middle">updated policy · weight refresh</text>
+  <path d="M 1314 300 L 1314 432 Q 1314 462 1284 462 L 750 462 Q 720 462 720 432 L 720 336" fill="none" class="line-green" stroke-width="2.5" marker-end="url(#arrow-green)" />
+  <text x="1017" y="450" class="arrow-label accent" text-anchor="middle">updated policy · weight refresh</text>
 
   <!-- Framework-owned inputs. -->
-  <rect x="48" y="142" width="204" height="144" rx="10" class="framework" stroke-width="1.5" />
-  <text x="68" y="170" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="68" y="208" class="title">Prompts and tasks</text>
-  <text x="68" y="238" class="body muted">Environments, tools, and</text>
-  <text x="68" y="260" class="body muted">sampling intent</text>
+  <rect x="48" y="150" width="210" height="150" rx="10" class="framework" stroke-width="1.5" />
+  <text x="68" y="180" class="eyebrow muted">RL FRAMEWORK</text>
+  <text x="68" y="220" class="title">Prompts and tasks</text>
+  <text x="68" y="252" class="body muted">Environments, tools, and</text>
+  <text x="68" y="276" class="body muted">sampling intent</text>
 
   <!-- Dynamo serving span. -->
-  <rect x="318" y="84" width="436" height="222" rx="12" class="dynamo" stroke-width="2" />
-  <text x="340" y="114" class="eyebrow accent">DYNAMO · ROLLOUT SERVING</text>
+  <rect x="336" y="90" width="524" height="246" rx="12" class="dynamo" stroke-width="2" />
+  <text x="360" y="122" class="eyebrow accent">DYNAMO · ROLLOUT SERVING</text>
 
-  <rect x="340" y="138" width="174" height="110" rx="8" class="panel line-green" stroke-width="1.5" />
-  <text x="427" y="171" class="title" text-anchor="middle">Frontend</text>
-  <text x="427" y="198" class="body muted" text-anchor="middle">Routing and admission</text>
-  <text x="427" y="222" class="small muted" text-anchor="middle">health · telemetry · controls</text>
+  <rect x="360" y="150" width="198" height="120" rx="8" class="panel line-green" stroke-width="1.5" />
+  <text x="459" y="186" class="title" text-anchor="middle">Frontend</text>
+  <text x="459" y="216" class="body muted" text-anchor="middle">Routing and admission</text>
+  <text x="459" y="242" class="small muted" text-anchor="middle">health · telemetry · controls</text>
 
-  <line x1="514" y1="193" x2="550" y2="193" class="line-green" stroke-width="2" marker-end="url(#arrow-green)" />
+  <line x1="558" y1="210" x2="612" y2="210" class="line-green" stroke-width="2" marker-end="url(#arrow-green)" />
 
-  <rect x="554" y="138" width="178" height="110" rx="8" class="backend" stroke-width="1.5" />
-  <text x="643" y="171" class="inner-title" text-anchor="middle">Inference backends</text>
-  <text x="643" y="198" class="body muted" text-anchor="middle">Generate and apply weights</text>
-  <text x="643" y="222" class="small muted" text-anchor="middle">vLLM · SGLang · TRT-LLM</text>
+  <rect x="616" y="150" width="220" height="120" rx="8" class="backend" stroke-width="1.5" />
+  <text x="726" y="186" class="inner-title" text-anchor="middle">Inference backends</text>
+  <text x="726" y="216" class="body muted" text-anchor="middle">Generate and apply weights</text>
+  <text x="726" y="242" class="small muted" text-anchor="middle">vLLM · SGLang · TRT-LLM</text>
 
-  <text x="340" y="279" class="small muted">Dynamo operates the fleet; the backend executes the model.</text>
+  <text x="360" y="310" class="small muted">Dynamo operates the fleet; the backend executes the model.</text>
 
   <!-- Framework-owned evaluation and optimization. -->
-  <rect x="810" y="142" width="180" height="144" rx="10" class="framework" stroke-width="1.5" />
-  <text x="830" y="170" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="830" y="208" class="title">Reward and verifier</text>
-  <text x="830" y="238" class="body muted">Score trajectories and</text>
-  <text x="830" y="260" class="body muted">apply environment rules</text>
+  <rect x="940" y="150" width="204" height="150" rx="10" class="framework" stroke-width="1.5" />
+  <text x="960" y="180" class="eyebrow muted">RL FRAMEWORK</text>
+  <text x="960" y="220" class="title">Evaluate rollouts</text>
+  <text x="960" y="252" class="body muted">Score trajectories and</text>
+  <text x="960" y="276" class="body muted">apply environment rules</text>
 
-  <rect x="1036" y="142" width="196" height="144" rx="10" class="framework" stroke-width="1.5" />
-  <text x="1056" y="170" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="1056" y="208" class="title">Optimize policy</text>
-  <text x="1056" y="238" class="body muted">Advantages, optimizer,</text>
-  <text x="1056" y="260" class="body muted">checkpoint, acceptance</text>
+  <rect x="1224" y="150" width="180" height="150" rx="10" class="framework" stroke-width="1.5" />
+  <text x="1244" y="180" class="eyebrow muted">RL FRAMEWORK</text>
+  <text x="1244" y="220" class="title">Optimize policy</text>
+  <text x="1244" y="252" class="body muted">Advantages and optimizer</text>
+  <text x="1244" y="276" class="body muted">Checkpoint and acceptance</text>
 
   <!-- Compact ownership legend. -->
-  <line x1="48" y1="492" x2="1232" y2="492" class="panel-border" stroke-width="1" />
-  <rect x="48" y="515" width="14" height="14" rx="3" class="framework" />
-  <text x="72" y="527" class="small muted">RL framework owns training decisions and trajectory semantics</text>
-  <rect x="492" y="515" width="14" height="14" rx="3" class="dynamo" />
-  <text x="516" y="527" class="small muted">Dynamo owns rollout-serving orchestration</text>
-  <rect x="830" y="515" width="14" height="14" rx="3" class="backend" />
-  <text x="854" y="527" class="small muted">Inference backend owns execution and weight application</text>
+  <line x1="48" y1="526" x2="1392" y2="526" class="panel-border" stroke-width="1" />
+  <rect x="48" y="551" width="14" height="14" rx="3" class="framework" />
+  <text x="72" y="563" class="small muted">RL framework owns training decisions and trajectory semantics</text>
+  <rect x="520" y="551" width="14" height="14" rx="3" class="dynamo" />
+  <text x="544" y="563" class="small muted">Dynamo owns rollout-serving orchestration</text>
+  <rect x="950" y="551" width="14" height="14" rx="3" class="backend" />
+  <text x="974" y="563" class="small muted">Inference backend owns execution and weight application</text>
 </svg>
