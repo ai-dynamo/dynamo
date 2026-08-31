@@ -8,7 +8,7 @@ provider: moonshot
 model:
   name: Kimi-K3
   hf_id: moonshotai/Kimi-K3
-  precision: MXFP4 experts + BF16 dense, FP8 KV cache
+  precision: MXFP4 experts, FP8 or BF16 KV cache
 status: experimental  # Day-0
 artifacts:
   recipe_specific_images:
@@ -20,6 +20,24 @@ artifacts:
     release_tag: v1.4.0-kimi-k3-dev.1
     release_state: prerelease
 targets:
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 32
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mxfp4
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/kimi-k3/vllm/agg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
 - id: vllm-agg-gb200
   recommended: false
   hardware:
