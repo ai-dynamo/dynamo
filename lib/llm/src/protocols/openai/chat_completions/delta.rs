@@ -291,7 +291,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             && (include_root_prompt_logprobs || include_nvext_prompt_logprobs)
         {
             self.prompt_logprobs =
-                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?;
         }
         let prompt_logprobs_payload = finish_reason
             .is_some()
@@ -826,6 +826,30 @@ mod tests {
                 assert!(response_json.get("nvext").is_none());
             }
         }
+    }
+
+    #[test]
+    fn test_prompt_logprobs_distinguishes_absent_from_invalid() {
+        let mut request = create_test_request();
+        request.common.prompt_logprobs = Some(1);
+
+        let absent = request
+            .response_generator("req-prompt-logprobs-absent".to_string())
+            .choice_from_postprocessor(final_backend_output())
+            .expect("absent prompt logprobs remain optional");
+        assert!(absent.prompt_logprobs.is_none());
+
+        let mut invalid_output = final_backend_output();
+        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+        let error = request
+            .response_generator("req-prompt-logprobs-invalid".to_string())
+            .choice_from_postprocessor(invalid_output)
+            .expect_err("malformed prompt logprobs must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prompt_logprobs payload")
+        );
     }
 
     #[test]
