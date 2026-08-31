@@ -18,6 +18,7 @@ from typing import Any
 # Tunables and conventional return codes (kept here to avoid magic numbers).
 DEFAULT_KUBECTL_TIMEOUT_SEC = 30
 DEFAULT_LOG_TAIL_LINES = 200
+DGD_POD_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 # POSIX-conventional return codes used when the wrapper itself fails before
 # kubectl can produce a real one.
 RETURNCODE_COMMAND_NOT_FOUND = 127  # `kubectl` not installed
@@ -25,19 +26,64 @@ RETURNCODE_TIMED_OUT = 124  # subprocess timeout
 
 # `kubectl describe` and pod logs can echo secret env values (HF tokens,
 # bearer tokens, passwords). Scrub them before anything is written to disk so
-# the bundle honors its no-secrets contract.
-_SECRET_KV_RE = re.compile(
-    r"(?i)([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|"
-    r"CREDENTIAL)[A-Z0-9_]*)(\s*[:=]\s*)(\S+)"
+# common credentials are not persisted verbatim in the bundle.
+_PLAIN_KV_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*)(\s*[:=]\s*)(\S+)")
+_JSON_STRING_KV_RE = re.compile(
+    r'(?P<prefix>"(?P<key>(?:\\.|[^"])*)"\s*:\s*)' r'"(?P<value>(?:\\.|[^"])*)"'
 )
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]+)")
 _HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{8,}\b")
 
 
+def is_secret_key(key: str) -> bool:
+    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    parts = tuple(
+        part for part in re.split(r"[^A-Za-z0-9]+", camel_split.lower()) if part
+    )
+    if not parts:
+        return False
+    if parts == ("token",) or parts == ("secret",):
+        return True
+    if {"password", "passwd", "credential", "credentials", "authorization"} & set(
+        parts
+    ):
+        return True
+    if parts[-1] in {"secret", "auth"}:
+        return True
+    sensitive_key_pairs = {("api", "key"), ("access", "key"), ("private", "key")}
+    if any(pair in sensitive_key_pairs for pair in zip(parts, parts[1:])):
+        return True
+    if parts[-1] == "token":
+        telemetry_prefixes = {
+            "prompt",
+            "completion",
+            "input",
+            "output",
+            "cached",
+            "max",
+            "num",
+            "total",
+        }
+        return len(parts) == 1 or parts[-2] not in telemetry_prefixes
+    return False
+
+
 def redact(text: str) -> str:
     if not text:
         return text
-    text = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+
+    def redact_json_value(match: re.Match[str]) -> str:
+        if not is_secret_key(match.group("key")):
+            return match.group(0)
+        return f'{match.group("prefix")}"<redacted>"'
+
+    def redact_plain_value(match: re.Match[str]) -> str:
+        if not is_secret_key(match.group(1)):
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}<redacted>"
+
+    text = _JSON_STRING_KV_RE.sub(redact_json_value, text)
+    text = _PLAIN_KV_RE.sub(redact_plain_value, text)
     text = _BEARER_RE.sub(lambda m: f"{m.group(1)}<redacted>", text)
     text = _HF_TOKEN_RE.sub("<redacted-hf-token>", text)
     return text
@@ -89,34 +135,53 @@ def write_result(outdir: Path, name: str, result: dict[str, Any]) -> None:
     )
 
 
-def kubectl_json(args: list[str], timeout: int) -> Any | None:
+def write_pod_discovery_result(outdir: Path, name: str, result: dict[str, Any]) -> None:
+    """Write pod-discovery status without persisting full pod specs."""
+    safe_result = dict(result)
+    safe_result["stdout"] = "<omitted: pod JSON used only for local discovery>"
+    write_result(outdir, name, safe_result)
+
+
+def kubectl_json(args: list[str], timeout: int) -> tuple[Any | None, dict[str, Any]]:
     result = run(["kubectl", *args, "-o", "json"], timeout)
     if result["returncode"] != 0:
-        return None
+        return None, result
     try:
-        return json.loads(result["stdout"])
+        return json.loads(result["stdout"]), result
     except json.JSONDecodeError:
-        return None
+        invalid_result = dict(result)
+        invalid_result["returncode"] = 1
+        invalid_result["stderr"] = (
+            str(result["stderr"]) + "\nFailed to parse kubectl JSON output."
+        ).lstrip()
+        return None, invalid_result
 
 
-def pod_names(namespace: str, selector: str | None, timeout: int) -> list[str]:
+def pod_names(
+    namespace: str, selector: str | None, timeout: int
+) -> tuple[list[str], dict[str, Any]]:
     args = ["get", "pods", "-n", namespace]
     if selector:
         args.extend(["-l", selector])
-    body = kubectl_json(args, timeout)
+    body, result = kubectl_json(args, timeout)
     if not body:
-        return []
-    return [
-        item.get("metadata", {}).get("name")
-        for item in body.get("items", [])
-        if item.get("metadata", {}).get("name")
-    ]
+        return [], result
+    return (
+        [
+            item.get("metadata", {}).get("name")
+            for item in body.get("items", [])
+            if item.get("metadata", {}).get("name")
+        ],
+        result,
+    )
 
 
-def container_names(namespace: str, pod: str, timeout: int) -> list[tuple[str, str]]:
-    body = kubectl_json(["get", "pod", pod, "-n", namespace], timeout)
+def container_names(
+    namespace: str, pod: str, timeout: int
+) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+    body, result = kubectl_json(["get", "pod", pod, "-n", namespace], timeout)
     if not body:
-        return []
+        return [], result
     specs = body.get("spec", {})
     containers: list[tuple[str, str]] = []
     for kind, field in [
@@ -126,7 +191,19 @@ def container_names(namespace: str, pod: str, timeout: int) -> list[tuple[str, s
         for item in specs.get(field, []):
             if item.get("name"):
                 containers.append((kind, item["name"]))
-    return containers
+    return containers, result
+
+
+def deployment_pod_selector(
+    deployment_name: str | None, selector: str | None
+) -> str | None:
+    """Build the pod selector, scoping to the named DGD when provided."""
+    selectors = []
+    if deployment_name:
+        selectors.append(f"{DGD_POD_LABEL}={deployment_name}")
+    if selector:
+        selectors.append(selector)
+    return ",".join(selectors) or None
 
 
 def main() -> int:
@@ -140,12 +217,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--outdir",
+        "--output-dir",
+        dest="outdir",
         default=None,
         help="Output dir; defaults to a private mkdtemp dynamo-debug-* directory",
     )
     parser.add_argument("--tail", type=int, default=DEFAULT_LOG_TAIL_LINES)
     parser.add_argument("--timeout", type=int, default=DEFAULT_KUBECTL_TIMEOUT_SEC)
     args = parser.parse_args()
+
+    pod_selector = deployment_pod_selector(args.deployment_name, args.selector)
 
     if args.outdir:
         outdir = Path(args.outdir).expanduser().resolve()
@@ -154,6 +235,10 @@ def main() -> int:
         # mkdtemp gives an unpredictable name with 0700 perms, unlike a
         # guessable /tmp/dynamo-debug-<timestamp> path on a shared host.
         outdir = Path(tempfile.mkdtemp(prefix="dynamo-debug-")).resolve()
+
+    pod_command = ["kubectl", "get", "pods", "-n", args.namespace, "-o", "wide"]
+    if pod_selector:
+        pod_command.extend(["-l", pod_selector])
 
     commands: list[tuple[str, list[str]]] = [
         ("context", ["kubectl", "config", "current-context"]),
@@ -172,7 +257,7 @@ def main() -> int:
                 "wide",
             ],
         ),
-        ("pods", ["kubectl", "get", "pods", "-n", args.namespace, "-o", "wide"]),
+        ("pods", pod_command),
         ("services", ["kubectl", "get", "svc", "-n", args.namespace, "-o", "wide"]),
         ("pvc", ["kubectl", "get", "pvc", "-n", args.namespace, "-o", "wide"]),
         ("jobs", ["kubectl", "get", "jobs", "-n", args.namespace, "-o", "wide"]),
@@ -206,7 +291,9 @@ def main() -> int:
     summary: dict[str, Any] = {
         "outdir": str(outdir),
         "namespace": args.namespace,
+        "pod_selector": pod_selector,
         "commands": [],
+        "detail_commands": [],
     }
     for name, cmd in commands:
         result = run(cmd, args.timeout)
@@ -215,14 +302,41 @@ def main() -> int:
             {"name": name, "cmd": cmd, "returncode": result["returncode"]}
         )
 
-    pods = pod_names(args.namespace, args.selector, args.timeout)
+    pods, pod_inventory_result = pod_names(args.namespace, pod_selector, args.timeout)
+    write_pod_discovery_result(outdir, "pods_json", pod_inventory_result)
+    summary["detail_commands"].append(
+        {
+            "name": "pods_json",
+            "cmd": pod_inventory_result["cmd"],
+            "returncode": pod_inventory_result["returncode"],
+            "required": True,
+        }
+    )
     summary["pods"] = pods
     for pod in pods:
         result = run(
             ["kubectl", "describe", "pod", pod, "-n", args.namespace], args.timeout
         )
         write_result(outdir, f"describe_pod_{pod}", result)
-        for kind, container in container_names(args.namespace, pod, args.timeout):
+        summary["detail_commands"].append(
+            {
+                "name": f"describe_pod_{pod}",
+                "cmd": result["cmd"],
+                "returncode": result["returncode"],
+                "required": True,
+            }
+        )
+        containers, pod_json_result = container_names(args.namespace, pod, args.timeout)
+        write_pod_discovery_result(outdir, f"pod_json_{pod}", pod_json_result)
+        summary["detail_commands"].append(
+            {
+                "name": f"pod_json_{pod}",
+                "cmd": pod_json_result["cmd"],
+                "returncode": pod_json_result["returncode"],
+                "required": True,
+            }
+        )
+        for kind, container in containers:
             result = run(
                 [
                     "kubectl",
@@ -236,7 +350,16 @@ def main() -> int:
                 ],
                 args.timeout,
             )
-            write_result(outdir, f"logs_{kind}_{pod}_{container}", result)
+            log_name = f"logs_{kind}_{pod}_{container}"
+            write_result(outdir, log_name, result)
+            summary["detail_commands"].append(
+                {
+                    "name": log_name,
+                    "cmd": result["cmd"],
+                    "returncode": result["returncode"],
+                    "required": True,
+                }
+            )
             previous_result = run(
                 [
                     "kubectl",
@@ -251,14 +374,41 @@ def main() -> int:
                 ],
                 args.timeout,
             )
-            write_result(
-                outdir, f"logs_previous_{kind}_{pod}_{container}", previous_result
+            previous_name = f"logs_previous_{kind}_{pod}_{container}"
+            write_result(outdir, previous_name, previous_result)
+            summary["detail_commands"].append(
+                {
+                    "name": previous_name,
+                    "cmd": previous_result["cmd"],
+                    "returncode": previous_result["returncode"],
+                    "required": False,
+                }
             )
+
+    failed_commands = [
+        item["name"]
+        for item in [*summary["commands"], *summary["detail_commands"]]
+        if item["returncode"] != 0 and item.get("required", True)
+    ]
+    summary["failed_commands"] = failed_commands
+    summary["optional_failed_commands"] = [
+        item["name"]
+        for item in summary["detail_commands"]
+        if item["returncode"] != 0 and not item["required"]
+    ]
+    summary["complete"] = not failed_commands
 
     (outdir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
     print(json.dumps(summary, indent=2))
+    if failed_commands:
+        print(
+            "Debug bundle is incomplete; inspect failed_commands and the matching files "
+            f"under {outdir}.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

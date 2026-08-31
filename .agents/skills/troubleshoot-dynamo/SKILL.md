@@ -28,7 +28,10 @@ time.
 
 - Python 3.10+ on the operator machine.
 - `kubectl` configured with read access to the target namespace.
-- Permission to read pods, events, jobs, PVCs, and `DynamoGraphDeployment` resources (NOT secrets).
+- Permission to read pods, pod logs (`pods/log`), events, jobs, PVCs, services, and
+  `DynamoGraphDeployment` resources in the target namespace (NOT secrets).
+- Permission to read cluster-scoped nodes and storage classes. Without it, the
+  bundle is still useful but is reported as incomplete.
 - Network reachability to the cluster API server.
 
 ## Instructions
@@ -50,7 +53,15 @@ python3 scripts/collect_dynamo_debug_bundle.py \
   --deployment-name <deployment-name>
 ```
 
-Do not collect Kubernetes secrets. Do not print Hugging Face tokens.
+`--deployment-name` limits pod listings, descriptions, and logs to pods with
+the deployment's `nvidia.com/dynamo-graph-deployment-name` label. Namespace
+summaries such as Services, Jobs, and PVCs remain namespace-wide. Add
+`--selector <label-selector>` only when a narrower pod subset is useful; it is
+combined with the deployment label.
+
+Do not request Kubernetes Secret resources. Treat the bundle as sensitive:
+descriptions and logs receive best-effort redaction, but inspect the output
+before sharing it.
 
 ### 2. Classify The Failure
 
@@ -71,7 +82,7 @@ Use `references/failure-decision-tree.md` and classify into one primary bucket:
 
 Check in this order:
 
-1. namespace, storage class, GPU nodes, and HF secret existence
+1. namespace, storage class, GPU nodes, and model-access Secret requirements
 2. PVC and model-download job
 3. `DynamoGraphDeployment` status and events
 4. pod status, `describe pod`, and container logs
@@ -84,7 +95,7 @@ Check in this order:
 
 Prefer the smallest reversible change:
 
-- create missing namespace or HF secret
+- create a missing namespace or required model-access Secret
 - patch `storageClassName`
 - patch image tag or image pull secret
 - reduce GPU request only if the recipe can still be valid
@@ -97,7 +108,7 @@ After each fix, rerun the relevant readiness check before moving deeper.
 
 | Script | Purpose | Arguments |
 |---|---|---|
-| `scripts/collect_dynamo_debug_bundle.py` | Collect a read-only debug bundle (pods, events, jobs, PVCs, CR status) | `--namespace`, `--deployment-name`, `--output-dir` |
+| `scripts/collect_dynamo_debug_bundle.py` | Collect a read-only debug bundle (pods, events, jobs, PVCs, CR status) | `--namespace`, `--deployment-name`, `--outdir` (`--output-dir` alias) |
 
 Invoke via the agentskills.io `run_script()` protocol:
 
@@ -142,8 +153,17 @@ Return:
 ## Limitations
 
 - Read-only. Never mutates the cluster; remediation commands are returned, not executed.
-- Will not collect secrets or print Hugging Face tokens; some failure modes (auth) may need user-side inspection.
-- Bundle size grows with deployment size; on very large namespaces, scope with `--deployment-name`.
+- Does not request Kubernetes Secret resources. Pod descriptions and logs
+  receive best-effort redaction, but custom credential formats can evade it;
+  inspect the bundle before sharing. Some authentication failures may still
+  need user-side inspection.
+- `--deployment-name` scopes pod details and logs, but namespace summaries
+  remain namespace-wide.
+- Any failed top-level read, pod discovery, pod description, or current-log
+  read makes the script return nonzero and records its name in `summary.json`;
+  the successfully collected evidence is still preserved. Missing
+  `--previous` logs are expected for containers that have not restarted and
+  are reported separately without making the bundle incomplete.
 - Does not validate disagg transport — use `dynamo-interconnect-check` for that.
 
 ## Troubleshooting
@@ -151,6 +171,7 @@ Return:
 | Symptom | Likely cause | Next step |
 |---|---|---|
 | `kubectl` returns Forbidden on events/pods | Service account lacks read RBAC | Ask operator for read-only role binding on the namespace |
+| Bundle reports `complete: false` | One or more required collection commands failed | Inspect `failed_commands` in `summary.json` and the matching result files |
 | Bundle missing `DynamoGraphDeployment` status | Operator not installed or different namespace | Verify `dynamo-platform` operator is installed and watching the namespace |
 | Model-download job in `Pending` | PVC unbound or HF secret missing | Fix PVC binding or create the named HF secret, then rerun the job |
 | Worker pods `CrashLoopBackOff` | Image/runtime mismatch or GPU not available | Inspect container logs; check `nvidia.com/gpu` allocatable on nodes |
