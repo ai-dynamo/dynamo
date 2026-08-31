@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Qwen3.8-Flash-Next on vLLM via Dynamo, disaggregated 1P1D, B200 (TP=4 per worker,
-# 8 GPUs total), agentic workload (64K ISL / 400 OSL, 90% prefix reuse).
+# Qwen3.8-Flash-Next on vLLM via Dynamo, disaggregated 2P1D, B200 (TP=4 per worker,
+# 12 GPUs total), agentic workload (64K ISL / 400 OSL, 90% prefix reuse).
 #
 # Model: 125B total params (176B incl. 51B N-gram embedding), 6B active per token.
 # Architecture: GDN (Gated DeltaNet) + QSA (Qwen Sparse Attention) hybrid MoE.
@@ -33,8 +33,10 @@
 #     --no-async-scheduling to both workers as a workaround.
 #   - Prefill --max-num-seqs 32: reduced from 256 to avoid OOM on 260K-token prompts
 #     with only 4 GPUs. Decode keeps 256 since decode is memory-light per request.
-#   - podAffinity: colocate all P+D workers on the same node so NIXL P->D stays on
-#     the InfiniBand (RDMA) fast path.
+#   - podAffinity: preferred colocation of P+D workers on the same node. The DGD
+#     operator requires preferredDuringScheduling (requiredDuringScheduling is
+#     rejected by the operator's strict YAML decoder). Workers may span multiple
+#     nodes; KV transfer uses InfiniBand RDMA across nodes.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment

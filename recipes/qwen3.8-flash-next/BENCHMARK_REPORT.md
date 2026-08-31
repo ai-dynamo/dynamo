@@ -8,20 +8,20 @@ SPDX-License-Identifier: Apache-2.0
 ## Configuration
 
 | | 4-GPU Agg | 8-GPU Agg | 12-GPU Agg | Disagg 1P1D | Disagg 2P1D |
-| --- | ----------- | ----------- | ----------- |
-| **Model** | Inferact/Qwen3.8-Flash-Next-NVFP4 (125B total, 6B active) | same | same |
-| **Image** | vllm/vllm-openai:qwen38-flash-next | same | same |
-| **Trace** | 64K agentic (15% subset, 3,541 requests) | same | same |
-| **Concurrency** | 24 | 24 | 24 |
+| --- | ----------- | ----------- | ----------- | ----------- | ----------- |
+| **Model** | Inferact/Qwen3.8-Flash-Next-NVFP4 (125B total, 6B active) | same | same | same | same |
+| **Image** | vllm/vllm-openai:qwen38-flash-next | same | same | same | same |
+| **Trace** | 64K agentic (15% subset, 3,541 requests) | same | same | same | same |
+| **Concurrency** | 24 | 24 | 24 | 24 | 24 |
 | **Workers** | 1 × TP4 | 2 × TP4 | 3 × TP4 | 1P (TP4) + 1D (TP4) | 2P (TP4) + 1D (TP4) |
 | **Total GPUs** | 4 | 8 | 12 | 8 | 12 |
-| **MTP3** | ✅ | ✅ | ✅ |
-| **Expert parallel** | ✅ | ✅ | ✅ |
-| **N-gram offload** | ✅ | ✅ | ✅ |
+| **MTP3** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Expert parallel** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **N-gram offload** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **KV transfer** | — | — | — | NIXL over InfiniBand RDMA (~18 GB/s) | NIXL over InfiniBand RDMA (~18 GB/s) |
-| **`--no-async-scheduling`** | — | — | Not needed (async ON, no errors observed) |
+| **`--no-async-scheduling`** | — | — | — | Not needed (async ON) | Not needed (async ON) |
 | **Prefill `--max-num-seqs`** | 256 | 256 | 256 | 32 (reduced to avoid OOM) | 32 (reduced to avoid OOM) |
-| **ai-dynamo** | 1.4.2 (pip) | 1.4.2 (pip) | 1.4.2 (pip) |
+| **ai-dynamo** | 1.4.2 (pip) | 1.4.2 (pip) | 1.4.2 (pip) | 1.4.2 (pip) | 1.4.2 (pip) |
 
 ## Results (from AIPerf `profile_export_aiperf.json`)
 
@@ -83,7 +83,7 @@ SPDX-License-Identifier: Apache-2.0
 2. **TTFT**: Agg p50 is 325ms vs disagg 407ms (**-20%**) — no KV transfer latency; agg p90 is 1,110ms vs 1,165ms (-5%)
 3. **ITL**: Agg p50 is 6.9ms vs disagg 7.5ms (-8%); but disagg p90 is better (8.9ms vs 11.3ms, **-21%**) — disagg's decode specialization helps tail latency
 4. **Cache hit**: Disagg wins (77.2% vs 74.5%, +2.7pp) — more prefill workers = more KV cache = more prefix reuse
-5. **Crossover**: At 8 GPUs, disagg 1P1D wins (+7%); at 12 GPUs, agg 3×TP4 wins (+4.5%). The crossover happens because agg scales linearly (no transfer cost) while disagg pays RDMA overhead per request
+5. **Crossover**: At 8 GPUs, disagg 1P1D wins (+7%); at 12 GPUs, agg 3×TP4 wins (+4.5%). Aggregated throughput scales sub-linearly (4→8 GPUs: +35%, 4→12 GPUs: +56%) due to the ultra-sparse model's low per-token compute, but has no KV transfer overhead. Disaggregated pays RDMA transfer cost per request but gains prefill/decode specialization and higher cache hit rate. At 12 GPUs the transfer overhead outweighs the specialization benefit for this short-output workload.
 
 ## Notes
 

@@ -62,6 +62,11 @@ Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 O
    kernels. `ai-dynamo` is pip-installed at pod startup.
 3. **Hugging Face access** to `Inferact/Qwen3.8-Flash-Next-NVFP4`.
 4. **Host memory**: ≥ 51 GB per worker for N-gram embedding offload (`VLLM_PLE_CPU_OFFLOAD=1`).
+5. **RDMA device plugin** (disaggregated only): The disagg manifests request
+   `rdma/rdma_shared_device_a` resources. Install an RDMA device plugin on your
+   cluster and adjust the resource name to match (e.g. `rdma/ib` on other setups).
+   See the [Dynamo RDMA Setup](../../docs/fern/pages/kubernetes/installation/rdma-setup/overview.md)
+   guide. Without it, disagg pods will remain Pending.
 
 ## Quick Start
 
@@ -182,7 +187,7 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 
 ```bash
 # Download a sample image
-curl -s -o /tmp/test.jpg https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Google_2015_logo.svg/250px-Google_2015_logo.svg.png
+curl -s -o /tmp/test.png https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Google_2015_logo.svg/250px-Google_2015_logo.svg.png
 
 # Send multimodal request
 curl -s http://localhost:8000/v1/chat/completions \
@@ -192,7 +197,7 @@ curl -s http://localhost:8000/v1/chat/completions \
     "messages": [{
       "role": "user",
       "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,'$(base64 -w0 /tmp/test.jpg)'"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,'$(base64 -w0 /tmp/test.png)'"}},
         {"type": "text", "text": "Describe this image in one sentence."}
       ]
     }],
