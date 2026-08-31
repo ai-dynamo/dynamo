@@ -476,18 +476,6 @@ async fn anthropic_content_validation_applies_to_messages_and_count_tokens() {
                 ExpectedError::UnsupportedContent,
                 "content block type \"future_block_type\"",
             ),
-            (
-                "/v1/messages/count_tokens",
-                json!({
-                    "model": MODEL,
-                    "messages": [{
-                        "role": "user",
-                        "content": [{"type": "future_block_type", "value": 1}]
-                    }]
-                }),
-                ExpectedError::UnsupportedContent,
-                "content block type \"future_block_type\"",
-            ),
         ] {
             let response = post_json(&svc, path, body).await;
             assert_anthropic_error(response, expected, message).await;

@@ -507,11 +507,9 @@ impl ErrorMessage {
         )
     }
 
-    /// Unsupported Content Error
-    /// Return this error when the client sends content that is not supported by the server.
-    /// This should be used for cases where the server cannot process the content type or format.
-    /// This is explicitly used for unsupported content types or formats for multimodal
-    /// and is intended to return a 400, as 500/501s are considered server errors in practice.
+    /// Unsupported multimodal content is a client error: no retry can make the
+    /// request succeed, and infrastructure above the frontend counts 5xx as a
+    /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
     pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::debug!("Unsupported Content error: {msg}");
         let code = StatusCode::BAD_REQUEST;
