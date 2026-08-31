@@ -11,6 +11,9 @@ the distinction between cases, hardware configurations, suites, goldens, and loc
 
 `testsuite-issue-8469.yaml` retains all 29 rows from issue #8469. Eight rows currently have paired
 v1beta1 and Sweeper inputs; the runner prints the missing inputs for the other 21 and continues.
+The checked-in baseline contains 16 successfully generated DGDs: eight v1beta1 profiler outputs,
+five Sweeper-AIC outputs, and three Sweeper-direct outputs. A missing variant means its generation
+failed; it is not represented by a placeholder golden.
 
 The portable runner and live-validation direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
@@ -47,6 +50,8 @@ generated/<suite-name>/<hardware>/<case>/dgd-profiler-v1beta1.yaml
 generated/<suite-name>/<hardware>/<case>/dgd-sweeper-aic.yaml
 generated/<suite-name>/<hardware>/<case>/dgd-sweeper-direct.yaml
 ```
+
+Only successfully generated variants are present in a case directory.
 
 For example:
 

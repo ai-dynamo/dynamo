@@ -202,6 +202,10 @@ generated/<suite-name>/<hardware>/<case>/
 └── dgd-sweeper-direct.yaml
 ```
 
+These are the possible variants, not three mandatory files per case. A failed search or renderer
+does not produce a placeholder golden; the absent variant and the runner failure make the coverage
+gap explicit.
+
 The suite name is the suite filename without `.yaml`, so every checked-in golden has one owning
 testsuite. Individual `--hardware` runs default to the ignored `generated/manual/` tree. All final
 DGDs are complete manifests that can be inspected, diffed, or applied individually. A golden CI
