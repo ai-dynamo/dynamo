@@ -299,8 +299,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             .flatten();
         let (root_prompt_logprobs, nvext_prompt_logprobs) =
             match (include_root_prompt_logprobs, include_nvext_prompt_logprobs) {
-                (true, true) => (prompt_logprobs_payload.clone(), prompt_logprobs_payload),
-                (true, false) => (prompt_logprobs_payload, None),
+                (true, true) => {
+                    let root = prompt_logprobs_payload.map(Arc::new);
+                    let nvext = root.as_deref().cloned();
+                    (root, nvext)
+                }
+                (true, false) => (prompt_logprobs_payload.map(Arc::new), None),
                 (false, true) => (None, prompt_logprobs_payload),
                 (false, false) => (None, None),
             };
@@ -813,6 +817,17 @@ mod tests {
             )
             .await
             .expect("aggregate response");
+
+            if request_prompt_logprobs {
+                let cloned = response.clone();
+                assert!(Arc::ptr_eq(
+                    response.prompt_logprobs.as_ref().expect("prompt logprobs"),
+                    cloned
+                        .prompt_logprobs
+                        .as_ref()
+                        .expect("cloned prompt logprobs")
+                ));
+            }
             let response_json = serde_json::to_value(response).expect("serialize unary response");
 
             if request_prompt_logprobs {

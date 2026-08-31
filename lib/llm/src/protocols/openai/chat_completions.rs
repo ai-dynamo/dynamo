@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
@@ -268,7 +268,7 @@ pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
 }
@@ -284,7 +284,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// Internal prompt logprobs payload for non-streaming response aggregation.
     /// This must never be serialized to client-facing streams.
     #[serde(skip)]
-    pub prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(skip)]
