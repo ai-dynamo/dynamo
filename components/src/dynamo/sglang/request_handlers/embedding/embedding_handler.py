@@ -93,7 +93,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
 
     async def generate(
         self, request: dict, context: Context
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[Dict[str, Any] | List[Dict[str, Any]], None]:
         """
         Generate embeddings for the given input.
 
@@ -102,8 +102,8 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
         """
         if "query" in request or "documents" in request:
-            async for response in self.rerank_handler.generate(request, context):
-                yield response
+            async for rerank_response in self.rerank_handler.generate(request, context):
+                yield rerank_response
             return
 
         embedding_input = request.get("input")

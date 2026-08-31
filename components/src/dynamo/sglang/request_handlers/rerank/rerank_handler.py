@@ -107,7 +107,10 @@ class RerankWorkerHandler:
 
         ranked = []
         for index, item in enumerate(result):
-            response = {"score": self._score(item, index), "index": index}
+            response: dict[str, Any] = {
+                "score": self._score(item, index),
+                "index": index,
+            }
             if rerank_request.return_documents:
                 response["document"] = rerank_request.documents[index]
             meta_info = item.get("meta_info") if isinstance(item, dict) else None

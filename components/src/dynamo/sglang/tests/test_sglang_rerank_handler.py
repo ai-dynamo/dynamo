@@ -124,7 +124,7 @@ async def test_omits_documents_when_not_requested():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "request",
+    "bad_request",
     [
         {"model": "m", "query": " ", "documents": ["doc"]},
         {"model": "m", "query": "query", "documents": []},
@@ -132,10 +132,10 @@ async def test_omits_documents_when_not_requested():
         {"model": "m", "query": "query", "documents": ["doc"], "top_n": 0},
     ],
 )
-async def test_rejects_invalid_requests_before_inference(request):
+async def test_rejects_invalid_requests_before_inference(bad_request):
     handler, manager = _handler([0.5])
     with pytest.raises(ValueError):
-        _ = [output async for output in handler.generate(request, _Context())]
+        _ = [output async for output in handler.generate(bad_request, _Context())]
     assert manager.requests == []
 
 
