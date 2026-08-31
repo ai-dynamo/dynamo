@@ -241,8 +241,10 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             invalid_argument(format!("{CONTEXT}: {message}")).into(),
             CONTEXT,
         ),
-        Some(ResponsesConversionError::NotImplemented(message)) => {
-            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        Some(ResponsesConversionError::UnsupportedContent(message)) => {
+            ErrorMessage::unsupported_content_error(format!(
+                "{VALIDATION_PREFIX}{CONTEXT}: {message}"
+            ))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
     }
@@ -488,6 +490,27 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: None,
+            }),
+        )
+    }
+
+    /// Unsupported Content Error
+    /// Return this error when the client sends content that is not supported by the server.
+    /// This should be used for cases where the server cannot process the content type or format.
+    /// This is explicitly used for unsupported content types or formats for multimodal
+    /// and is intended to return a 400, as 500/501s are considered server errors in practice.
+    pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
+        tracing::debug!("Unsupported Content error: {msg}");
+        let code = StatusCode::BAD_REQUEST;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
     }
@@ -7572,6 +7595,20 @@ mod tests {
     #[test]
     fn test_extract_error_type_from_response_not_implemented() {
         let response = ErrorMessage::not_implemented_error("Feature not available");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn unsupported_content_responses_conversion_errors_are_not_implemented() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::UnsupportedContent("feature not available".to_string())
+                .into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
