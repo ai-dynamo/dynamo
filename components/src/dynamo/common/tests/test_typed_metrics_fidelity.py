@@ -92,6 +92,9 @@ def test_registered_callback_carries_auto_labels_into_typed_samples():
     captured = []
 
     class FakeMetrics:
+        def register_prometheus_expfmt_callback(self, callback):
+            pass
+
         def register_prometheus_typed_callback(self, callback):
             captured.append(callback)
 

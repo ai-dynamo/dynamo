@@ -7,7 +7,31 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::rs::metrics::MetricsHierarchy;
+use crate::rs::metrics::{MetricsHierarchy, PrometheusExpositionFormatCallback};
+
+/// Wrap a Python callable into the Rust expfmt callback shape. Logs and
+/// returns an empty string on Python-side failures so a single broken
+/// callback can't poison the scrape.
+fn wrap_py_expfmt_callback(
+    callback: PyObject,
+    source: &'static str,
+) -> PrometheusExpositionFormatCallback {
+    Arc::new(move || {
+        Python::with_gil(|py| match callback.call0(py) {
+            Ok(result) => match result.extract::<String>(py) {
+                Ok(text) => Ok(text),
+                Err(e) => {
+                    tracing::error!(error = %e, source, "expfmt callback must return a string");
+                    Ok(String::new())
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = %e, source, "expfmt callback raised");
+                Ok(String::new())
+            }
+        })
+    })
+}
 
 /// What a typed callback returns: `[(name, help, type, [(sample, [(k, v)], value)])]`.
 ///
@@ -82,10 +106,20 @@ impl RuntimeMetrics {
 
 #[pymethods]
 impl RuntimeMetrics {
-    /// Register a callback returning typed metric families.
-    ///
-    /// Preferred over the exposition-text callback: it avoids rendering the
-    /// engine's already-typed metrics to text only to parse them back.
+    /// Register a callback that returns Prometheus exposition text. The
+    /// returned text is appended to the `/metrics` endpoint output.
+    fn register_prometheus_expfmt_callback(&self, callback: PyObject) -> PyResult<()> {
+        // Register on this hierarchy level only — combined scrapes traverse
+        // children, so registering on parents would double-count.
+        self.hierarchy
+            .get_metrics_registry()
+            .add_expfmt_callback(wrap_py_expfmt_callback(callback, "RuntimeMetrics"));
+        Ok(())
+    }
+
+    /// Register a callback returning typed metric families, which feed the
+    /// OTLP export. Independent of the exposition-text callback above: a
+    /// registry that should reach both surfaces registers both.
     fn register_prometheus_typed_callback(&self, callback: PyObject) -> PyResult<()> {
         self.hierarchy
             .get_metrics_registry()
@@ -116,6 +150,15 @@ impl EngineMetrics {
 
 #[pymethods]
 impl EngineMetrics {
+    /// Register a callback returning Prometheus exposition text.
+    /// Mirrors `RuntimeMetrics.register_prometheus_expfmt_callback`.
+    fn register_prometheus_expfmt_callback(&self, callback: PyObject) -> PyResult<()> {
+        self.hierarchy
+            .get_metrics_registry()
+            .add_expfmt_callback(wrap_py_expfmt_callback(callback, "EngineMetrics"));
+        Ok(())
+    }
+
     /// Mirrors `RuntimeMetrics.register_prometheus_typed_callback`.
     fn register_prometheus_typed_callback(&self, callback: PyObject) -> PyResult<()> {
         self.hierarchy

@@ -81,6 +81,16 @@ def register_engine_registry(
     labels = metrics.auto_labels
     from dynamo.common.utils.prometheus import get_prometheus_typed
 
+    # /metrics renders the engine's exposition text; OTLP exports the same
+    # metrics handed over typed. Register both so neither surface is missed.
+    metrics.register_prometheus_expfmt_callback(
+        lambda: gather_with_labels(
+            registry,
+            labels,
+            prefix_filters=prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+        )
+    )
     metrics.register_prometheus_typed_callback(
         lambda: get_prometheus_typed(
             registry,

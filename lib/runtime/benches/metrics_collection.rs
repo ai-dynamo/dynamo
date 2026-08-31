@@ -12,6 +12,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use dynamo_runtime::metrics::MetricsRegistry;
+use prometheus::Encoder;
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -48,6 +49,17 @@ fn registry(native_families: usize, engine_families: usize) -> MetricsRegistry {
         family.mut_metric().push(metric);
         typed_families.push(family);
     }
+    // Both surfaces are fed independently, so bench them as they run in
+    // production: the scrape appends the engine's exposition text, the export
+    // takes the same metrics typed.
+    let expfmt_text = {
+        let mut buffer = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&typed_families, &mut buffer)
+            .expect("encode");
+        String::from_utf8(buffer).expect("utf8")
+    };
+    registry.add_expfmt_callback(Arc::new(move || Ok(expfmt_text.clone())));
     registry.add_typed_callback(Arc::new(move || Ok(typed_families.clone())));
 
     registry
@@ -60,14 +72,14 @@ fn bench_collection(c: &mut Criterion) {
         let registry = registry(native, engine);
         let label = format!("{native}native_{engine}engine");
 
-        // The scrape path. Unchanged behaviour; benched to catch regressions
-        // from the shared-merger refactor.
+        // The scrape path: unchanged behaviour, benched to catch regressions
+        // from sharing the family merger with the export path.
         group.bench_function(format!("expfmt_combined/{label}"), |b| {
             b.iter(|| black_box(registry.prometheus_expfmt_combined().expect("expfmt")))
         });
 
-        // The export path: same collection, with the typed engine families
-        // merged into the native ones instead of appended as a string.
+        // The export path: the same metrics delivered typed and merged into
+        // the native families, instead of appended as text.
         group.bench_function(format!("families_combined/{label}"), |b| {
             b.iter(|| black_box(registry.metric_families_combined().expect("families")))
         });

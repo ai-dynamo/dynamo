@@ -711,6 +711,10 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 
 /// Returns already-built families, so engine metrics reach the structured
 /// path without being rendered to text and parsed back.
+/// Type alias for exposition text callback functions that return Prometheus text
+pub type PrometheusExpositionFormatCallback =
+    Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
+
 pub type PrometheusTypedCallback =
     Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync + 'static>;
 
@@ -743,7 +747,12 @@ pub struct MetricsRegistry {
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
 
-    /// Callbacks returning engine metric families; see [`PrometheusTypedCallback`].
+    /// Callbacks returning engine exposition text; these feed `/metrics` only.
+    #[allow(clippy::type_complexity)]
+    pub prometheus_expfmt_callbacks:
+        Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
+
+    /// Callbacks returning engine metric families; these feed OTLP only.
     /// Wrapped in Arc to preserve callbacks across clones (e.g. vLLM callbacks
     /// registered at Endpoint remain reachable at DRT).
     pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
@@ -758,6 +767,13 @@ impl std::fmt::Debug for MetricsRegistry {
                 &format!(
                     "<RwLock<Vec<Callback>>> with {} callbacks",
                     self.prometheus_update_callbacks.read().unwrap().len()
+                ),
+            )
+            .field(
+                "prometheus_expfmt_callbacks",
+                &format!(
+                    "<RwLock<Vec<Callback>>> with {} callbacks",
+                    self.prometheus_expfmt_callbacks.read().unwrap().len()
                 ),
             )
             .field(
@@ -778,6 +794,7 @@ impl MetricsRegistry {
             prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_typed_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
@@ -833,25 +850,50 @@ impl MetricsRegistry {
         out
     }
 
-    /// Render the exposition output for this registry and its children.
+    /// Combine metrics across this registry and all registered children into one Prometheus exposition output.
     ///
-    /// Encodes the same collection that feeds OTLP, so both surfaces agree by
-    /// construction. Engine metrics arrive typed rather than as text, giving
-    /// the endpoint one renderer instead of Dynamo's `TextEncoder` output
-    /// concatenated with the engine's `generate_latest` output.
+    /// Engine metrics are appended as the text the engine produced. This is the
+    /// scrape path and is deliberately independent of the typed path that feeds
+    /// OTLP: `/metrics` output stays byte-for-byte what the engine emitted.
     ///
     /// - Families are merged by name; HELP and TYPE must match.
     /// - Multiple series for the same name are allowed if labels differ.
-    /// - Exact duplicate series (same name and labels) are warned and dropped.
+    /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
-        let families = self.metric_families_combined()?;
+        let registries = self.registries_for_combined_scrape();
+        run_update_callbacks(&registries);
+
+        let merged = FamilyMerger::from_gathered(&registries)?.into_sorted();
+
+        let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
-        prometheus::TextEncoder::new().encode(&families, &mut buffer)?;
-        Ok(String::from_utf8(buffer)?)
+        encoder.encode(&merged, &mut buffer)?;
+        let mut result = String::from_utf8(buffer)?;
+
+        // Append expfmt callbacks deterministically in registry order.
+        let mut expfmt = String::new();
+        for registry in &registries {
+            let text = registry.execute_expfmt_callbacks();
+            if !text.is_empty() {
+                if !expfmt.is_empty() && !expfmt.ends_with('\n') {
+                    expfmt.push('\n');
+                }
+                expfmt.push_str(&text);
+            }
+        }
+
+        if !expfmt.is_empty() {
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&expfmt);
+        }
+
+        Ok(result)
     }
 
     /// Every metric family: Dynamo's own from `gather()`, plus engine families
-    /// delivered typed.
+    /// delivered typed. This is the OTLP export path.
     ///
     /// Engine metrics cross the binding as a structure rather than as
     /// exposition text, so their name, type and help arrive authoritative
@@ -886,9 +928,42 @@ impl MetricsRegistry {
             .push(callback);
     }
 
+    /// Add an exposition text callback that returns Prometheus text.
+    ///
+    /// This feeds `/metrics` only. Engines that also want to be exported over
+    /// OTLP must register a typed callback via [`Self::add_typed_callback`].
+    pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
+        self.prometheus_expfmt_callbacks
+            .write()
+            .unwrap()
+            .push(callback);
+    }
+
+    /// Execute all exposition text callbacks and return their concatenated text
+    pub fn execute_expfmt_callbacks(&self) -> String {
+        let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
+        let mut result = String::new();
+        for callback in callbacks.iter() {
+            match callback() {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error executing exposition text callback: {e}");
+                }
+            }
+        }
+        result
+    }
+
     /// Register a callback that returns typed families directly.
     ///
-    /// This is the only way engine metrics reach `/metrics` and OTLP.
+    /// This is how engine metrics reach OTLP.
     pub fn add_typed_callback(&self, callback: PrometheusTypedCallback) {
         self.prometheus_typed_callbacks
             .write()
@@ -1972,16 +2047,35 @@ mod test_metric_families_combined {
         assert!(names(&families).contains(&"dynamo_native_total"));
     }
 
-    /// /metrics renders from that same collection, so both surfaces agree by
-    /// construction rather than by convention.
+    /// The two surfaces are fed independently: typed callbacks reach OTLP,
+    /// exposition-text callbacks reach `/metrics`. A registry that registers
+    /// only one appears on only that surface -- which is why the Python
+    /// helpers always register both.
     #[test]
-    fn metrics_endpoint_renders_the_same_collection() {
+    fn typed_callbacks_feed_otlp_and_not_the_scrape() {
         let registry = registry();
+
         let text = registry.prometheus_expfmt_combined().expect("text");
-        for name in names(&registry.metric_families_combined().expect("combined")) {
-            assert!(text.contains(name), "{name} missing from /metrics");
-        }
-        assert!(text.contains("Running requests"), "engine HELP text lost");
+        assert!(
+            text.contains("dynamo_native_total"),
+            "native metrics must still render on /metrics"
+        );
+        assert!(
+            !text.contains("vllm:num_requests_running"),
+            "typed callbacks feed OTLP only; /metrics is fed by expfmt callbacks"
+        );
+
+        registry.add_expfmt_callback(StdArc::new(|| {
+            Ok("# HELP vllm:num_requests_running Running requests\n\
+                # TYPE vllm:num_requests_running gauge\n\
+                vllm:num_requests_running 4\n"
+                .to_string())
+        }));
+        let text = registry.prometheus_expfmt_combined().expect("text");
+        assert!(
+            text.contains("vllm:num_requests_running"),
+            "engine exposition text must be appended verbatim"
+        );
     }
 
     /// A failing engine callback is skipped, never fatal: one broken engine

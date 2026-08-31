@@ -180,6 +180,16 @@ def register_engine_metrics_callback(
             f"namespace={namespace_name}, component={component_name}, endpoint={endpoint_name_final}, model={model_name}"
         )
 
+    def get_expfmt() -> str:
+        """Callback to return engine Prometheus metrics in exposition format"""
+        result = get_prometheus_expfmt(
+            registry,
+            metric_prefix_filters=metric_prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=final_inject_labels if final_inject_labels else None,
+        )
+        return result
+
     def get_typed() -> list:
         """Callback returning engine metrics as a typed structure."""
         return get_prometheus_typed(
@@ -189,8 +199,10 @@ def register_engine_metrics_callback(
             inject_custom_labels=final_inject_labels or None,
         )
 
-    # The single mechanism: engine metrics cross as a structure and are
-    # rendered once, by Rust, for both /metrics and OTLP.
+    # Two independent surfaces: /metrics renders the engine's own exposition
+    # text, OTLP exports the same metrics handed over as a structure. Both are
+    # registered here so an engine cannot end up on only one of them.
+    endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
     endpoint.metrics.register_prometheus_typed_callback(get_typed)
 
 

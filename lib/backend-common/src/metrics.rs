@@ -9,13 +9,13 @@
 //! [`MetricsHierarchy`] and hands it to the engine via
 //! [`LLMEngine::setup_metrics`](crate::LLMEngine::setup_metrics). Engines never see the full `Endpoint` —
 //! only the surface needed to bridge a foreign registry into the runtime's
-//! `/metrics` output via [`EngineMetrics::add_typed_callback`].
+//! `/metrics` output via [`EngineMetrics::add_expfmt_callback`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    MetricsHierarchy, PrometheusTypedCallback, create_metric, prometheus_names::labels,
+    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric, prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
@@ -72,10 +72,10 @@ impl EngineMetrics {
 
     /// Register a scrape callback for a foreign Prometheus registry.
     /// Auto-labels are not injected — the callback owns its own labelling.
-    pub fn add_typed_callback(&self, callback: PrometheusTypedCallback) {
+    pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
         self.hierarchy
             .get_metrics_registry()
-            .add_typed_callback(callback);
+            .add_expfmt_callback(callback);
     }
 }
 
@@ -354,25 +354,15 @@ mod tests {
     }
 
     #[test]
-    fn add_typed_callback_appears_in_combined_scrape() {
+    fn add_expfmt_callback_appears_in_combined_scrape() {
         let m = EngineMetrics::from_hierarchy(TestHierarchy::new());
-        m.add_typed_callback(Arc::new(|| {
-            let mut family = prometheus::proto::MetricFamily::new();
-            family.set_name("external_metric".to_string());
-            family.set_field_type(prometheus::proto::MetricType::GAUGE);
-            let mut metric = prometheus::proto::Metric::new();
-            let mut gauge = prometheus::proto::Gauge::new();
-            gauge.set_value(1.0);
-            metric.set_gauge(gauge);
-            family.mut_metric().push(metric);
-            Ok(vec![family])
-        }));
+        m.add_expfmt_callback(Arc::new(|| Ok("# external metric\n".to_string())));
         let text = m
             .hierarchy()
             .get_metrics_registry()
             .prometheus_expfmt_combined()
             .expect("expfmt");
-        assert!(text.contains("external_metric"), "typed family missing: {text}");
+        assert!(text.contains("# external metric"));
     }
 
     /// Multi-level test hierarchy. Mirrors production's
