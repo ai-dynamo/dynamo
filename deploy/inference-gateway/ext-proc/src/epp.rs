@@ -976,6 +976,61 @@ impl WorkerEndpointIndex {
     }
 }
 
+/// Drive the pod reflector stream, maintaining `index` from its per-object
+/// events until the stream ends.
+///
+/// Split out of [`spawn_pod_reflector`] so the stream-end path can be tested
+/// without a Kubernetes API server.
+async fn run_pod_reflector(
+    reflect: impl futures::Stream<
+        Item = Result<
+            kube::runtime::watcher::Event<k8s_openapi::api::core::v1::Pod>,
+            kube::runtime::watcher::Error,
+        >,
+    >,
+    store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    index: Arc<RwLock<WorkerEndpointIndex>>,
+    ready: Arc<AtomicBool>,
+) {
+    use futures::StreamExt;
+    use kube::runtime::watcher;
+
+    tokio::pin!(reflect);
+    loop {
+        match reflect.next().await {
+            None => {
+                // Stop advertising readiness BEFORE dropping the index. The
+                // runner mirrors this flag onto the gRPC health status
+                // (`runner.rs::serve`), which documents it as a live signal
+                // that flips both ways; leaving it set would keep the pod 1/1
+                // Ready and SERVING with an empty index, no reflector task,
+                // and every lookup returning None -- a state Kubernetes never
+                // restarts out of. Mirrors pod_discovery.rs's stream-end path.
+                tracing::warn!("Pod reflector stream ended unexpectedly; marking not ready");
+                ready.store(false, Ordering::Release);
+                index.write().unwrap().clear();
+                break;
+            }
+            // During a relist the reflector emits Init + one InitApply per
+            // pod + InitDone; rebuild once from the completed store
+            // instead of applying per-object deltas mid-relist.
+            Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => continue,
+            Some(Ok(watcher::Event::InitDone)) => {
+                index.write().unwrap().rebuild(&store);
+            }
+            Some(Ok(watcher::Event::Apply(pod))) => {
+                index.write().unwrap().upsert(&pod);
+            }
+            Some(Ok(watcher::Event::Delete(pod))) => {
+                index.write().unwrap().remove(&pod);
+            }
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "Pod reflector watch error; retrying");
+            }
+        }
+    }
+}
+
 /// Start a background pod reflector that watches worker pods matching the
 /// InferencePool selector and incrementally maintains a [`WorkerEndpointIndex`]
 /// from its per-object events — O(1) request-path lookups, no K8s API calls
@@ -984,7 +1039,6 @@ async fn spawn_pod_reflector(
     dynamo_namespace: &str,
     container_discovery: bool,
 ) -> Result<(Arc<RwLock<WorkerEndpointIndex>>, Arc<AtomicBool>)> {
-    use futures::StreamExt;
     use k8s_openapi::api::core::v1::Pod;
     use kube::{Api, Client, runtime::reflector, runtime::watcher};
 
@@ -1020,36 +1074,12 @@ async fn spawn_pod_reflector(
     );
 
     let store_for_wait = store.clone();
-    let store_for_task = store;
-    let index_for_task = index.clone();
-    tokio::spawn(async move {
-        tokio::pin!(reflect);
-        loop {
-            match reflect.next().await {
-                None => {
-                    tracing::warn!("Pod reflector stream ended unexpectedly");
-                    index_for_task.write().unwrap().clear();
-                    break;
-                }
-                // During a relist the reflector emits Init + one InitApply per
-                // pod + InitDone; rebuild once from the completed store
-                // instead of applying per-object deltas mid-relist.
-                Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => continue,
-                Some(Ok(watcher::Event::InitDone)) => {
-                    index_for_task.write().unwrap().rebuild(&store_for_task);
-                }
-                Some(Ok(watcher::Event::Apply(pod))) => {
-                    index_for_task.write().unwrap().upsert(&pod);
-                }
-                Some(Ok(watcher::Event::Delete(pod))) => {
-                    index_for_task.write().unwrap().remove(&pod);
-                }
-                Some(Err(e)) => {
-                    tracing::warn!(error = %e, "Pod reflector watch error; retrying");
-                }
-            }
-        }
-    });
+    tokio::spawn(run_pod_reflector(
+        reflect,
+        store,
+        index.clone(),
+        ready.clone(),
+    ));
 
     // Wait for the initial LIST to populate the store so the first inference
     // request after startup doesn't race against an empty cache. Bounded so
@@ -2116,6 +2146,77 @@ mod tests {
             "an unnamed pod's upsert must not retract a named pod's entries"
         );
         assert_eq!(index.endpoints.len(), 3);
+    }
+
+    /// Drive [`run_pod_reflector`] over a canned event stream and return the
+    /// readiness flag and index it leaves behind once the stream ends.
+    async fn drive_reflector(
+        events: Vec<Result<kube::runtime::watcher::Event<Pod>, kube::runtime::watcher::Error>>,
+    ) -> (Arc<AtomicBool>, Arc<RwLock<WorkerEndpointIndex>>) {
+        let writer = kube::runtime::reflector::store::Writer::<Pod>::default();
+        let store = writer.as_reader();
+        let index = Arc::new(RwLock::new(WorkerEndpointIndex::new(false)));
+        // Starts ready, as it would after the initial LIST sync succeeded.
+        let ready = Arc::new(AtomicBool::new(true));
+
+        run_pod_reflector(
+            futures::stream::iter(events),
+            store,
+            index.clone(),
+            ready.clone(),
+        )
+        .await;
+
+        (ready, index)
+    }
+
+    /// A terminated reflector must stop advertising readiness, not just drop
+    /// its endpoints. `runner.rs::serve` mirrors this flag onto the gRPC health
+    /// status, so leaving it set strands the pod 1/1 Ready and SERVING with an
+    /// empty index and no reflector — every request fails and Kubernetes never
+    /// restarts it.
+    #[tokio::test]
+    async fn reflector_stream_end_drops_readiness_and_endpoints() {
+        let (ready, index) = drive_reflector(vec![Ok(kube::runtime::watcher::Event::Apply(
+            pod_mode_worker_pod(),
+        ))])
+        .await;
+
+        assert!(
+            !ready.load(Ordering::Acquire),
+            "readiness must drop when the reflector stream ends"
+        );
+        assert!(
+            index.read().unwrap().endpoints.is_empty(),
+            "a terminated reflector must not keep answering lookups"
+        );
+    }
+
+    /// A watch error is transient — the reflector retries — so it must not be
+    /// mistaken for stream end and must leave readiness alone.
+    #[tokio::test]
+    async fn reflector_watch_error_alone_keeps_readiness() {
+        let index = Arc::new(RwLock::new(WorkerEndpointIndex::new(false)));
+        let ready = Arc::new(AtomicBool::new(true));
+        let writer = kube::runtime::reflector::store::Writer::<Pod>::default();
+        let store = writer.as_reader();
+
+        // Never-ending stream: one error, then pending forever, so the loop
+        // stays in its retry path rather than reaching the stream-end arm.
+        use futures::StreamExt as _;
+        let events =
+            futures::stream::iter(vec![Err(kube::runtime::watcher::Error::NoResourceVersion)])
+                .chain(futures::stream::pending());
+
+        let ready_probe = ready.clone();
+        let task = tokio::spawn(run_pod_reflector(events, store, index, ready));
+        tokio::task::yield_now().await;
+
+        assert!(
+            ready_probe.load(Ordering::Acquire),
+            "a retryable watch error must not clear readiness"
+        );
+        task.abort();
     }
 
     /// A minimal pod exposing an `http`-named port, for
