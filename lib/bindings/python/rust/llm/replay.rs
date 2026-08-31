@@ -2513,68 +2513,131 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
     Ok(())
 }
 
-/// Resolve an output target without requiring the final file (or all of its
-/// parent directories) to exist. Existing ancestors are canonicalized so
-/// aliases through symlinked directories compare equal.
-fn resolve_output_target(path: &Path) -> std::io::Result<PathBuf> {
-    if let Ok(target) = path.canonicalize() {
-        return Ok(target);
-    }
+const MAX_OUTPUT_PATH_SYMLINKS: usize = 64;
 
+#[derive(Debug)]
+enum OwnedPathComponent {
+    Prefix(std::ffi::OsString),
+    RootDir,
+    CurDir,
+    ParentDir,
+    Normal(std::ffi::OsString),
+}
+
+fn owned_path_components(path: &Path) -> std::collections::VecDeque<OwnedPathComponent> {
+    path.components()
+        .map(|component| match component {
+            std::path::Component::Prefix(prefix) => {
+                OwnedPathComponent::Prefix(prefix.as_os_str().to_os_string())
+            }
+            std::path::Component::RootDir => OwnedPathComponent::RootDir,
+            std::path::Component::CurDir => OwnedPathComponent::CurDir,
+            std::path::Component::ParentDir => OwnedPathComponent::ParentDir,
+            std::path::Component::Normal(name) => OwnedPathComponent::Normal(name.to_os_string()),
+        })
+        .collect()
+}
+
+/// Resolve a prospective output target without requiring it to exist.
+///
+/// Unlike `canonicalize`, this follows every existing symlink component even
+/// when a later component is missing. That preserves filesystem ordering for
+/// constructs such as `link/../file` and resolves dangling final or
+/// intermediate symlinks to the target they would create.
+fn resolve_output_target(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    let components = absolute.components().collect::<Vec<_>>();
-    for prefix_len in (1..=components.len()).rev() {
-        let mut prefix = PathBuf::new();
-        for component in &components[..prefix_len] {
-            prefix.push(component.as_os_str());
-        }
-        if let Ok(mut target) = prefix.canonicalize() {
-            for component in &components[prefix_len..] {
-                match component {
-                    std::path::Component::CurDir => {}
-                    std::path::Component::ParentDir => {
-                        target.pop();
+    let mut pending = owned_path_components(&absolute);
+    let mut resolved = PathBuf::new();
+    let mut followed_symlinks = 0;
+
+    while let Some(component) = pending.pop_front() {
+        match component {
+            OwnedPathComponent::Prefix(prefix) => resolved = PathBuf::from(prefix),
+            OwnedPathComponent::RootDir => {
+                resolved.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+            }
+            OwnedPathComponent::CurDir => {}
+            OwnedPathComponent::ParentDir => {
+                resolved.pop();
+            }
+            OwnedPathComponent::Normal(name) => {
+                let candidate = resolved.join(&name);
+                match candidate.symlink_metadata() {
+                    Ok(metadata) => match candidate.read_link() {
+                        Ok(target) => {
+                            followed_symlinks += 1;
+                            if followed_symlinks > MAX_OUTPUT_PATH_SYMLINKS {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    format!(
+                                        "too many symbolic links while resolving replay output path {}",
+                                        path.display()
+                                    ),
+                                ));
+                            }
+                            let mut target_components = owned_path_components(&target);
+                            while let Some(target_component) = target_components.pop_back() {
+                                pending.push_front(target_component);
+                            }
+                        }
+                        Err(error) if metadata.file_type().is_symlink() => return Err(error),
+                        Err(_) => {
+                            if !pending.is_empty() && !metadata.is_dir() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::NotADirectory,
+                                    format!(
+                                        "replay output path component is not a directory: {}",
+                                        candidate.display()
+                                    ),
+                                ));
+                            }
+                            resolved = candidate.canonicalize()?;
+                        }
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved.push(name)
                     }
-                    std::path::Component::Prefix(_)
-                    | std::path::Component::RootDir
-                    | std::path::Component::Normal(_) => target.push(component.as_os_str()),
+                    Err(error) => return Err(error),
                 }
             }
-            return Ok(target);
         }
     }
-    Ok(absolute)
+    Ok(resolved)
+}
+
+fn resolved_output_targets_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn validate_jsonl_output_paths(
     report_jsonl_path: Option<&Path>,
     telemetry_jsonl_path: Option<&Path>,
 ) -> PyResult<()> {
-    let (Some(report_path), Some(telemetry_path)) =
-        (report_jsonl_path, telemetry_jsonl_path)
+    let (Some(report_path), Some(telemetry_path)) = (report_jsonl_path, telemetry_jsonl_path)
     else {
         return Ok(());
     };
-    #[cfg(unix)]
-    let same_existing_file = {
-        use std::os::unix::fs::MetadataExt;
-
-        match (report_path.metadata(), telemetry_path.metadata()) {
-            (Ok(report), Ok(telemetry)) => {
-                report.dev() == telemetry.dev() && report.ino() == telemetry.ino()
-            }
-            _ => false,
-        }
+    let same_existing_file = match same_file::is_same_file(report_path, telemetry_path) {
+        Ok(same) => same,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(to_pyerr(error)),
     };
-    #[cfg(not(unix))]
-    let same_existing_file = false;
     let report_target = resolve_output_target(report_path).map_err(to_pyerr)?;
     let telemetry_target = resolve_output_target(telemetry_path).map_err(to_pyerr)?;
-    if same_existing_file || report_target == telemetry_target {
+    // This is an early guard against accidental aliasing, not a held-handle
+    // guarantee; another process can still replace either path after validation.
+    if same_existing_file || resolved_output_targets_equal(&report_target, &telemetry_target) {
         return Err(PyValueError::new_err(
             "report_jsonl_path and telemetry_jsonl_path must refer to different files",
         ));

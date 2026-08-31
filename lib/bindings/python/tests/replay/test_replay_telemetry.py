@@ -232,7 +232,31 @@ def test_native_rejects_colliding_jsonl_paths_through_symlink_parent(tmp_path):
     assert not (target_root / "telemetry_missing").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="native inode comparison is Unix-only")
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+def test_native_resolves_symlink_after_cancelled_missing_component(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    base = tmp_path / "base"
+    base.mkdir()
+    target_root = tmp_path / "target_root"
+    real_parent = target_root / "nested"
+    real_parent.mkdir(parents=True)
+    link = base / "link"
+    link.symlink_to(real_parent, target_is_directory=True)
+    output = target_root / "samples.jsonl"
+    output.write_text("sentinel")
+    alias = base / "missing" / ".." / "link" / ".." / "samples.jsonl"
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=output,
+            telemetry_jsonl_path=alias,
+        )
+
+    assert output.read_text() == "sentinel"
+    assert not (base / "missing").exists()
+
+
 def test_native_rejects_hard_linked_jsonl_paths_before_truncation(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     output = tmp_path / "requests.jsonl"
@@ -249,3 +273,65 @@ def test_native_rejects_hard_linked_jsonl_paths_before_truncation(tmp_path):
 
     assert output.read_text() == "sentinel"
     assert telemetry.read_text() == "sentinel"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_native_rejects_dangling_symlink_jsonl_alias(tmp_path, intermediate):
+    trace_path = _write_multiturn_trace(tmp_path)
+    target_root = tmp_path / "target_root"
+    target_root.mkdir()
+    if intermediate:
+        target = target_root / "missing_parent" / "samples.jsonl"
+        alias_parent = tmp_path / "dangling_parent"
+        alias_parent.symlink_to(target.parent, target_is_directory=True)
+        alias = alias_parent / target.name
+    else:
+        target = target_root / "samples.jsonl"
+        alias = tmp_path / "dangling.jsonl"
+        alias.symlink_to(target)
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=target,
+            telemetry_jsonl_path=alias,
+        )
+
+    assert not target.exists()
+    assert alias.is_symlink() or alias.parent.is_symlink()
+
+
+def test_native_output_alias_validation_fails_closed_on_file_parent(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    parent_file = tmp_path / "not_a_directory"
+    parent_file.write_text("sentinel")
+
+    with pytest.raises(Exception, match="not a directory"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=tmp_path / "samples.jsonl",
+            telemetry_jsonl_path=parent_file / ".." / "samples.jsonl",
+        )
+
+    assert parent_file.read_text() == "sentinel"
+    assert not (tmp_path / "samples.jsonl").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+def test_native_rejects_symlink_loop_with_bounded_error(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.symlink_to(second)
+    second.symlink_to(first)
+
+    with pytest.raises(Exception, match="too many symbolic links"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=tmp_path / "report.jsonl",
+            telemetry_jsonl_path=first,
+        )
+
+    assert first.is_symlink()
+    assert second.is_symlink()
