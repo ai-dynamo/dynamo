@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    pin::Pin,
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_runtime::{
-    engine::AsyncEngineContext,
+    engine::{AsyncEngineContext, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType},
-    pipeline::{Error, ManyOut},
+    pipeline::{Error, ManyOut, ResponseStream},
 };
+use futures::Stream;
 use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -24,16 +27,13 @@ use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode, replica_sync::ReplicaSyncRuntime,
 };
-use crate::protocols::common::extensions::SessionAffinityId;
-
-mod stream;
-mod target;
-
-#[cfg(test)]
-pub(crate) use target::ADVISORY_DECODE_TARGET_CONTEXT_KEY;
-pub(crate) use target::explicit_target_for_routing;
-pub use target::{affinity_id, explicit_target};
-use target::{validate_bound_target, validate_dispatch_target};
+use crate::{
+    preprocessor::PreprocessedRequest,
+    protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        timing::RequestPhase,
+    },
+};
 
 pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
@@ -41,18 +41,6 @@ pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 pub(super) struct AffinityVersion {
     pub(super) sequence: u64,
     pub(super) writer_id: u64,
-}
-
-pub(super) fn initial_affinity_sequence(now: SystemTime) -> u64 {
-    let Some(sequence) = now
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
-    else {
-        tracing::warn!("system clock predates the session-affinity sequence epoch");
-        return 1;
-    };
-    sequence
 }
 
 enum AffinityEntry {
@@ -140,7 +128,12 @@ impl AffinityCoordinator {
             max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
-            next_sequence: AtomicU64::new(initial_affinity_sequence(SystemTime::now())),
+            next_sequence: AtomicU64::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            ),
             writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
@@ -414,7 +407,7 @@ impl AffinityCoordinator {
         capacity: usize,
     ) -> tokio::sync::mpsc::Receiver<SessionAffinityUpdate> {
         self.inner.writer_id.store(router_id, Ordering::Relaxed);
-        let (replica, rx) = ReplicaSyncRuntime::for_test(capacity);
+        let (replica, rx) = ReplicaSyncRuntime::for_test(router_id, capacity);
         self.inner
             .replica
             .set(replica)
@@ -454,11 +447,6 @@ impl AffinityCoordinator {
                 writer_id,
             },
         )
-    }
-
-    #[cfg(test)]
-    pub(super) fn next_sequence_for_test(&self) -> u64 {
-        self.inner.next_sequence.load(Ordering::Relaxed)
     }
 
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
@@ -647,10 +635,11 @@ impl AffinityAcquire {
                             AffinityTarget::new(dispatched_target.worker_id, Some(dp_rank))
                         }),
                     };
-                    if target != rebound_target {
-                        return Ok(stream::track(stream, lease, Some((target, rebound_target))));
+                    if target == rebound_target {
+                        lease.publish(target);
+                    } else if lease.rebind(target, rebound_target) {
+                        lease.publish(rebound_target);
                     }
-                    lease.publish(target);
                     return Ok(lease.into_stream(stream));
                 }
                 if let Err(error) = validate_dispatch_target("session", target, dispatched_target) {
@@ -753,12 +742,12 @@ impl AffinityLease {
         }
     }
 
-    fn rebind(&mut self, expected: AffinityTarget, target: AffinityTarget) {
+    fn rebind(&mut self, expected: AffinityTarget, target: AffinityTarget) -> bool {
         let Some(inner) = self.coordinator.upgrade() else {
-            return;
+            return false;
         };
         let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
-            return;
+            return false;
         };
         let AffinityEntry::Bound {
             target: current,
@@ -767,19 +756,27 @@ impl AffinityLease {
             ..
         } = entry.value_mut()
         else {
-            return;
+            return false;
         };
         if *revision != self.revision || *version != self.version || *current != expected {
-            return;
+            return false;
         }
         let next_version = inner.next_version();
         *current = target;
         *version = next_version;
         self.version = next_version;
+        true
     }
 
     pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
-        stream::track(stream, self, None)
+        let context = stream.context();
+        ResponseStream::new(
+            Box::pin(AffinityTrackedStream {
+                stream,
+                lease: Some(self),
+            }),
+            context,
+        )
     }
 
     fn release(&mut self) {
@@ -855,6 +852,117 @@ impl Drop for AffinityLease {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+struct AffinityTrackedStream {
+    stream: ManyOut<LlmResponse>,
+    lease: Option<AffinityLease>,
+}
+
+impl Stream for AffinityTrackedStream {
+    type Item = LlmResponse;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(None) => {
+                drop(self.lease.take());
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
+            poll => poll,
+        }
+    }
+}
+
+pub fn affinity_id(
+    request: &dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+) -> Result<Option<Arc<SessionAffinityId>>, Error> {
+    request
+        .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+        .map_err(|message| invalid_argument(format!("invalid session affinity context: {message}")))
+}
+
+pub fn explicit_target(
+    request: &PreprocessedRequest,
+    phase: RequestPhase,
+) -> Result<Option<AffinityTarget>, Error> {
+    let Some(routing) = request.routing.as_ref() else {
+        return Ok(None);
+    };
+    let (worker_id, dp_rank) = match phase {
+        RequestPhase::Prefill => (
+            routing.prefill_worker_id.or(routing.backend_instance_id),
+            routing.prefill_dp_rank.or(routing.dp_rank),
+        ),
+        RequestPhase::Decode | RequestPhase::Aggregated => (
+            routing.decode_worker_id.or(routing.backend_instance_id),
+            routing.dp_rank,
+        ),
+    };
+    if worker_id.is_none() && dp_rank.is_some() {
+        return Err(invalid_argument(
+            "DP rank requires an explicit worker for session affinity",
+        ));
+    }
+    Ok(worker_id.map(|worker_id| AffinityTarget { worker_id, dp_rank }))
+}
+
+fn validate_bound_target(
+    session_id: &str,
+    bound: AffinityTarget,
+    requested: Option<AffinityTarget>,
+) -> Result<(), Error> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if bound.worker_id != requested.worker_id {
+        return Err(invalid_argument(format!(
+            "session {session_id} is bound to worker {}, not {}",
+            bound.worker_id, requested.worker_id
+        )));
+    }
+    match (bound.dp_rank, requested.dp_rank) {
+        (Some(bound), Some(requested)) if bound != requested => Err(invalid_argument(format!(
+            "session {session_id} is bound to DP rank {bound}, not {requested}"
+        ))),
+        (None, Some(requested)) => Err(invalid_argument(format!(
+            "session {session_id} has worker-only affinity and cannot add DP rank {requested}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Validates that a request was dispatched within an existing session binding.
+///
+/// Unlike an explicit requested target, a dispatch target may add a DP rank to a worker-only
+/// binding because load-aware scheduling chooses that rank for this request only.
+fn validate_dispatch_target(
+    session_id: &str,
+    bound: AffinityTarget,
+    dispatched: AffinityTarget,
+) -> Result<(), Error> {
+    if bound.worker_id != dispatched.worker_id {
+        return Err(invalid_argument(format!(
+            "session {session_id} is bound to worker {}, not {}",
+            bound.worker_id, dispatched.worker_id
+        )));
+    }
+    if let Some(bound_rank) = bound.dp_rank {
+        match dispatched.dp_rank {
+            Some(dispatched_rank) if dispatched_rank == bound_rank => {}
+            Some(dispatched_rank) => {
+                return Err(invalid_argument(format!(
+                    "session {session_id} is bound to DP rank {bound_rank}, not {dispatched_rank}"
+                )));
+            }
+            None => {
+                return Err(invalid_argument(format!(
+                    "session {session_id} is bound to DP rank {bound_rank}, but dispatch did not select a DP rank"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {

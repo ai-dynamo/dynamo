@@ -1008,70 +1008,73 @@ impl<
         request: &mut SchedulingRequest,
         decay_now: Instant,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        let overloaded_worker_ids = self
-            .overloaded_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
-        let available_worker_ids = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let mut eligibility = request
-            .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
-            .with_available_workers(available_worker_ids.as_deref());
-        let workers = self.workers_with_configs.borrow();
-        if self.selector.uses_exclusive_affinity_target()
-            && let Some(target) = request.affinity_target
-            && eligibility.affinity_target_is_eligible(&workers, target)
+
         {
-            eligibility = eligibility.with_affinity_target(target);
+            let workers = self.workers_with_configs.borrow();
+            let overloaded_worker_ids = self
+                .overloaded_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let available_worker_ids = self
+                .available_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let mut eligibility = request
+                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .with_available_workers(available_worker_ids.as_deref());
+            if self.selector.uses_exclusive_affinity_target()
+                && let Some(target) = request.affinity_target
+                && eligibility.affinity_target_is_eligible(&workers, target)
+            {
+                eligibility = eligibility.with_affinity_target(target);
+            }
+            self.selector
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    request,
+                    eligibility,
+                    self.block_size,
+                ))
+                .map(|selection| {
+                    let non_max_overlap_selection = if request.mode.is_tracked()
+                        && self.non_max_overlap_selection_observer.get().is_some()
+                    {
+                        non_max_overlap_selection(
+                            &workers,
+                            request,
+                            eligibility,
+                            selection.worker,
+                            selection.effective_overlap_blocks,
+                        )
+                    } else {
+                        None
+                    };
+                    let config = workers
+                        .get(&selection.worker.worker_id)
+                        .expect("selected worker config must exist");
+                    let selected_worker_tiers = request
+                        .overlap
+                        .selected_worker_tiers(selection.worker, config);
+                    let worker_load = request.worker_load_for(selection.worker);
+                    let selected_worker_load = AdvisoryWorkerLoad {
+                        active_prefill_tokens: worker_load.active_prefill_tokens,
+                        prefill_token_capacity: config
+                            .max_num_batched_tokens()
+                            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
+                            as usize,
+                        total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+                    };
+                    SelectedWorkerForRequest {
+                        selection,
+                        selected_worker_tiers,
+                        selected_worker_load,
+                        non_max_overlap_selection,
+                    }
+                })
         }
-        self.selector
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                request,
-                eligibility,
-                self.block_size,
-            ))
-            .map(|selection| {
-                let non_max_overlap_selection = if request.mode.is_tracked()
-                    && self.non_max_overlap_selection_observer.get().is_some()
-                {
-                    non_max_overlap_selection(
-                        &workers,
-                        request,
-                        eligibility,
-                        selection.worker,
-                        selection.effective_overlap_blocks,
-                    )
-                } else {
-                    None
-                };
-                let config = workers
-                    .get(&selection.worker.worker_id)
-                    .expect("selected worker config must exist");
-                let selected_worker_tiers = request
-                    .overlap
-                    .selected_worker_tiers(selection.worker, config);
-                let worker_load = request.worker_load_for(selection.worker);
-                let selected_worker_load = AdvisoryWorkerLoad {
-                    active_prefill_tokens: worker_load.active_prefill_tokens,
-                    prefill_token_capacity: config
-                        .max_num_batched_tokens()
-                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
-                        as usize,
-                    total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
-                };
-                SelectedWorkerForRequest {
-                    selection,
-                    selected_worker_tiers,
-                    selected_worker_load,
-                    non_max_overlap_selection,
-                }
-            })
     }
 
     fn select_without_admission_inner(

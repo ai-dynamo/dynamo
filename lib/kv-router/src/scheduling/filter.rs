@@ -24,13 +24,6 @@ pub enum WorkerEligibilityError {
         end: DpRank,
     },
 
-    #[error("worker {worker_id} dp_rank {requested} does not match affinity dp_rank {affinity}")]
-    AffinityRankMismatch {
-        worker_id: WorkerId,
-        requested: DpRank,
-        affinity: DpRank,
-    },
-
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
@@ -193,18 +186,14 @@ impl<'a> RoutingEligibility<'a> {
                 worker_id: worker.worker_id,
             });
         }
-        if !self.matches_affinity_target(worker.worker_id) {
+        if !self.matches_affinity_target(worker.worker_id)
+            || self
+                .affinity_target
+                .and_then(|target| target.dp_rank)
+                .is_some_and(|rank| rank != worker.dp_rank)
+        {
             return Err(WorkerEligibilityError::WorkerNotAllowed {
                 worker_id: worker.worker_id,
-            });
-        }
-        if let Some(dp_rank) = self.affinity_target.and_then(|target| target.dp_rank)
-            && dp_rank != worker.dp_rank
-        {
-            return Err(WorkerEligibilityError::AffinityRankMismatch {
-                worker_id: worker.worker_id,
-                requested: worker.dp_rank,
-                affinity: dp_rank,
             });
         }
 
@@ -499,25 +488,6 @@ mod tests {
                 dp_rank: 5,
                 start: 2,
                 end: 5,
-            })
-        );
-    }
-
-    #[test]
-    fn routing_eligibility_reports_affinity_rank_mismatch() {
-        let workers = workers();
-        let constraints = RoutingConstraints::default();
-        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
-            .with_affinity_target(WorkerAffinityTarget::new(7, Some(3)));
-
-        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 4));
-
-        assert_eq!(
-            result.err(),
-            Some(WorkerEligibilityError::AffinityRankMismatch {
-                worker_id: 7,
-                requested: 4,
-                affinity: 3,
             })
         );
     }

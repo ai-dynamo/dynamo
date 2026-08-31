@@ -9,11 +9,7 @@ use std::{str::FromStr, time::Duration};
 use dynamo_runtime::{component::Client, pipeline::Error};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-pub(crate) use coordinator::ADVISORY_DECODE_TARGET_CONTEXT_KEY;
-pub(crate) use coordinator::{
-    AffinityAcquire, affinity_id, explicit_target_for_routing, invalid_argument,
-};
+pub(crate) use coordinator::{AffinityAcquire, affinity_id, invalid_argument};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

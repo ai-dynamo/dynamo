@@ -5,7 +5,7 @@ use std::sync::Weak;
 
 use anyhow::{Context, Result};
 use dynamo_runtime::{
-    component::{Client, Instance},
+    component::Client,
     discovery::EventTransportKind,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{
@@ -33,14 +33,13 @@ pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
-    #[serde(default)]
     pub sequence: u64,
-    /// Stable wire name for the writer ID used to order concurrent replica updates.
     pub router_id: u64,
 }
 
 #[derive(Clone)]
 struct ReplicaUpdateSender {
+    router_id: u64,
     tx: mpsc::Sender<SessionAffinityUpdate>,
 }
 
@@ -51,7 +50,7 @@ impl ReplicaUpdateSender {
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
             sequence: version.sequence,
-            router_id: version.writer_id,
+            router_id: self.router_id,
         };
         if let Err(error) = self.tx.try_send(update) {
             tracing::trace!(
@@ -66,24 +65,18 @@ impl ReplicaUpdateSender {
 
 #[derive(Clone)]
 struct ReplicaUpdateApplier {
-    publisher_id: u64,
-    local_instances: watch::Receiver<Vec<Instance>>,
+    router_id: u64,
+    local_worker_ids: watch::Receiver<Vec<u64>>,
     coordinator: Weak<AffinityCoordinatorInner>,
 }
 
 impl ReplicaUpdateApplier {
-    fn apply(&self, source_publisher_id: u64, update: SessionAffinityUpdate) -> bool {
-        let instances = self.local_instances.borrow();
-        if !should_apply_update(
-            self.publisher_id,
-            source_publisher_id,
-            instances
-                .iter()
-                .any(|instance| instance.id() == update.worker_id),
-        ) {
+    fn apply(&self, update: SessionAffinityUpdate) -> bool {
+        let worker_ids = self.local_worker_ids.borrow();
+        if !should_apply_update(self.router_id, worker_ids.as_slice(), &update) {
             return true;
         }
-        drop(instances);
+        drop(worker_ids);
 
         let Some(coordinator) = self.coordinator.upgrade() else {
             return false;
@@ -92,19 +85,12 @@ impl ReplicaUpdateApplier {
             worker_id: update.worker_id,
             dp_rank: update.dp_rank,
         };
-        // Revision-zero publishers predate versioned updates; normalize their writer as well as
-        // their sequence so any versioned update wins deterministically.
-        let writer_id = if update.sequence == 0 {
-            0
-        } else {
-            update.router_id
-        };
         let outcome = coordinator.apply_replica_update(
             update.session_id,
             target,
             AffinityVersion {
                 sequence: update.sequence,
-                writer_id,
+                writer_id: update.router_id,
             },
         );
         drop(coordinator);
@@ -132,6 +118,7 @@ impl ReplicaSyncRuntime {
         parent_cancel: &CancellationToken,
     ) -> Result<Self> {
         let endpoint = &client.endpoint;
+        let router_id = endpoint.drt().discovery().instance_id();
         let transport_kind = endpoint.drt().default_event_transport_kind();
         let publisher = EventPublisher::for_endpoint_with_transport(
             endpoint,
@@ -144,11 +131,11 @@ impl ReplicaSyncRuntime {
         if let Some(inner) = coordinator.upgrade() {
             inner
                 .writer_id
-                .store(publisher_id, std::sync::atomic::Ordering::Relaxed);
+                .store(router_id, std::sync::atomic::Ordering::Relaxed);
         }
         let applier = ReplicaUpdateApplier {
-            publisher_id,
-            local_instances: client.instance_source.as_ref().clone(),
+            router_id,
+            local_worker_ids: client.instance_avail_watcher(),
             coordinator,
         };
 
@@ -161,7 +148,7 @@ impl ReplicaSyncRuntime {
                     let update = codec
                         .decode_payload::<SessionAffinityUpdate>(&envelope.payload)
                         .context("decode session affinity update")?;
-                    handler_applier.apply(envelope.publisher_id, update);
+                    handler_applier.apply(update);
                     Ok(())
                 };
                 let observer = |observation: FanInObservation| match observation.event {
@@ -209,13 +196,8 @@ impl ReplicaSyncRuntime {
                         let Some(event) = event else {
                             return;
                         };
-                        match event {
-                            Ok((envelope, update)) => {
-                                if !applier.apply(envelope.publisher_id, update) {
-                                    return;
-                                }
-                                continue;
-                            }
+                        let update = match event {
+                            Ok((_envelope, update)) => update,
                             Err(error) => {
                                 tracing::trace!(
                                     %error,
@@ -223,13 +205,16 @@ impl ReplicaSyncRuntime {
                                 );
                                 continue;
                             }
+                        };
+                        if !applier.apply(update) {
+                            return;
                         }
                     }
                 })
             };
 
         let (tx, mut rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
-        let sender = ReplicaUpdateSender { tx };
+        let sender = ReplicaUpdateSender { router_id, tx };
 
         let publisher_cancel = cancel.clone();
         let publisher_task = tokio::spawn(async move {
@@ -278,11 +263,14 @@ impl ReplicaSyncRuntime {
     }
 
     #[cfg(test)]
-    pub(super) fn for_test(capacity: usize) -> (Self, mpsc::Receiver<SessionAffinityUpdate>) {
+    pub(super) fn for_test(
+        router_id: u64,
+        capacity: usize,
+    ) -> (Self, mpsc::Receiver<SessionAffinityUpdate>) {
         let (tx, rx) = mpsc::channel(capacity);
         (
             Self {
-                sender: ReplicaUpdateSender { tx },
+                sender: ReplicaUpdateSender { router_id, tx },
                 cancel: CancellationToken::new(),
                 publisher_task: None,
                 subscriber_task: None,
@@ -299,11 +287,11 @@ impl Drop for ReplicaSyncRuntime {
 }
 
 fn should_apply_update(
-    local_publisher_id: u64,
-    source_publisher_id: u64,
-    target_is_discovered: bool,
+    local_router_id: u64,
+    local_worker_ids: &[u64],
+    update: &SessionAffinityUpdate,
 ) -> bool {
-    source_publisher_id != local_publisher_id && target_is_discovered
+    update.router_id != local_router_id && local_worker_ids.contains(&update.worker_id)
 }
 
 fn should_use_direct_sync(transport_kind: EventTransportKind, direct_zmq_topology: bool) -> bool {
@@ -323,9 +311,16 @@ mod tests {
 
     #[test]
     fn replica_update_filter_rejects_self_and_unknown_workers() {
-        assert!(!should_apply_update(7, 7, true));
-        assert!(!should_apply_update(7, 8, false));
-        assert!(should_apply_update(7, 8, true));
+        let update = |router_id, worker_id| SessionAffinityUpdate {
+            session_id: "session".to_string(),
+            worker_id,
+            dp_rank: Some(0),
+            sequence: 1,
+            router_id,
+        };
+        assert!(!should_apply_update(7, &[10, 11], &update(7, 10)));
+        assert!(!should_apply_update(7, &[10, 11], &update(8, 12)));
+        assert!(should_apply_update(7, &[10, 11], &update(8, 10)));
     }
 
     #[test]
@@ -335,36 +330,9 @@ mod tests {
         assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
     }
 
-    #[test]
-    fn legacy_update_without_sequence_decodes_as_unversioned() {
-        #[derive(serde::Serialize)]
-        struct LegacyUpdate<'a> {
-            session_id: &'a str,
-            worker_id: u64,
-            dp_rank: Option<u32>,
-            router_id: u64,
-        }
-
-        let codec = Codec::default();
-        let payload = codec
-            .encode_payload(&LegacyUpdate {
-                session_id: "legacy",
-                worker_id: 7,
-                dp_rank: Some(2),
-                router_id: 11,
-            })
-            .unwrap();
-        let update = codec
-            .decode_payload::<SessionAffinityUpdate>(&payload)
-            .unwrap();
-
-        assert_eq!(update.sequence, 0);
-        assert_eq!(update.router_id, 11);
-    }
-
     #[tokio::test]
     async fn replica_update_backpressure_is_nonfatal() {
-        let (runtime, mut rx) = ReplicaSyncRuntime::for_test(1);
+        let (runtime, mut rx) = ReplicaSyncRuntime::for_test(7, 1);
         runtime.publish(
             "first",
             AffinityTarget {

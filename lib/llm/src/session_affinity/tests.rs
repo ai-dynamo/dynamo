@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    sync::Arc,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::{sync::Arc, time::Duration};
 
 use dynamo_runtime::{
     engine::AsyncEngineContext,
@@ -16,10 +13,8 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    ADVISORY_DECODE_TARGET_CONTEXT_KEY, AffinityAcquire, AffinityCoordinator, AffinityTarget,
-    LlmResponse, affinity_id,
-    coordinator::{ReplicaApplyOutcome, initial_affinity_sequence},
-    explicit_target, explicit_target_for_routing,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
+    coordinator::ReplicaApplyOutcome, explicit_target,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -133,38 +128,6 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
         ..Default::default()
     });
     assert!(explicit_target(&rank_without_worker, RequestPhase::Decode).is_err());
-}
-
-#[test]
-fn advisory_decode_target_is_not_an_explicit_affinity_pin() {
-    let request = request_with_routing(RoutingHints {
-        decode_worker_id: Some(3),
-        dp_rank: Some(4),
-        ..Default::default()
-    });
-    let mut request = Context::new(request);
-    request.insert(ADVISORY_DECODE_TARGET_CONTEXT_KEY, ());
-
-    assert_eq!(
-        explicit_target_for_routing(&request, RequestPhase::Decode).unwrap(),
-        None
-    );
-    assert_eq!(
-        explicit_target_for_routing(&request, RequestPhase::Prefill).unwrap(),
-        None
-    );
-    assert_eq!(
-        explicit_target_for_routing(&request, RequestPhase::Aggregated).unwrap(),
-        None
-    );
-}
-
-#[test]
-fn replica_sequence_epoch_advances_across_restarts() {
-    let first = initial_affinity_sequence(UNIX_EPOCH + Duration::from_secs(10));
-    let restarted = initial_affinity_sequence(UNIX_EPOCH + Duration::from_secs(11));
-
-    assert_eq!(restarted - first, 1_000_000_000);
 }
 
 #[test]
@@ -741,7 +704,7 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn soft_affinity_rebinds_only_after_dispatch_succeeds() {
+async fn soft_affinity_rebinds_after_dispatch() {
     let coordinator = coordinator();
     let original = target(7, Some(0));
     let replacement = target(8, Some(1));
@@ -755,46 +718,14 @@ async fn soft_affinity_rebinds_only_after_dispatch_succeeds() {
     );
 
     let successful_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = successful_attempt
+    let stream = successful_attempt
         .into_stream(replacement, response_stream(1), Soft)
         .unwrap();
     assert_eq!(
         coordinator.query_target(&session_id(), None).unwrap(),
-        Some(original)
-    );
-    while stream.next().await.is_some() {}
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
         Some(replacement)
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn failed_or_cancelled_soft_stream_preserves_binding() {
-    let coordinator = coordinator();
-    let original = target(7, Some(0));
-    let replacement = target(8, Some(1));
-    bind(&coordinator, original).await;
-
-    let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut failed = attempt
-        .into_stream(replacement, error_response_stream(), Soft)
-        .unwrap();
-    while failed.next().await.is_some() {}
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(original)
-    );
-
-    let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut cancelled = attempt
-        .into_stream(replacement, cancelled_response_stream(), Soft)
-        .unwrap();
-    assert!(cancelled.next().await.is_none());
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(original)
-    );
+    drop(stream);
 }
 
 #[tokio::test(start_paused = true)]
@@ -851,7 +782,7 @@ async fn stale_lease_cannot_invalidate_or_refresh_newer_replica_binding() {
     let replacement = target(8, Some(0));
     bind(&coordinator, original).await;
     let stale = coordinator.acquire(&session_id(), None).await.unwrap();
-    let replacement_sequence = coordinator.next_sequence_for_test().saturating_add(1);
+    let replacement_sequence = u64::MAX / 2;
     coordinator.apply_versioned_replica_update_for_test(
         session_id().as_str(),
         replacement,

@@ -39,7 +39,7 @@ use crate::{
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target_for_routing, invalid_argument,
+        explicit_target, invalid_argument,
     },
 };
 
@@ -542,7 +542,7 @@ where
         let Some(session_id) = affinity_id(request)? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target_for_routing(request, phase)?;
+        let explicit = explicit_target(request.content(), phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));

@@ -288,7 +288,7 @@ where
     {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let explicit = explicit_target_for_routing(&request, phase)?;
+        let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
         if is_direct && explicit.is_none() && !has_affinity_session {
