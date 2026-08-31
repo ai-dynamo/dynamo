@@ -54,28 +54,16 @@ ENV DYNAMO_HOME=/workspace \
 
 WORKDIR /workspace
 
-# Recipe-branch TRT-LLM fixes not yet in the pinned nightly
-# (runtime_image_tag 1.3.0rc25.dev2026082600, cut from TRT-LLM main at
-# 7e106301df). Both are upstream PRs; drop each patch once its fix lands in
-# the nightly this branch pins, and re-pin to a plain release tag once both
-# have shipped.
+# Recipe-branch TRT-LLM fix not yet in the pinned 1.3.0rc25 release.
 #
-#   18162 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18162 (merged 2026-08-26
-#            08:00 PDT, after this nightly's 2026-08-25 23:31Z cut)
 #   18274 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18274 (open)
-#   18002 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18002 (merged 2026-08-26
-#            08:05Z, ~8.5h after the cut). Gemma4 FA2 CUDA-graph decode on
-#            Hopper/SM90; without it Gemma4 hits an illegal memory access in
-#            CUDA-graph warmup. Generated as the nightly..merge diff over the two
-#            tensorrt_llm files -- nothing else touched them in that range, so it
-#            is exactly the PR's net change.
 #
-# The checked-in .patch files are the upstream PR diffs with the mail header
-# and the tests/ hunks stripped -- the release image installs only the
+# The checked-in .patch file is the upstream PR diff with the mail header and
+# the tests/ hunks stripped -- the release image installs only the
 # tensorrt_llm package, not the test tree. dist-packages is not a git repo,
 # but `git apply` operates on a plain working tree, so -p1 off dist-packages
-# lands a/tensorrt_llm/... on the installed package. --check first so a
-# nightly bump that already carries either fix fails the build loudly instead
+# lands a/tensorrt_llm/... on the installed package. --check first so a base
+# image bump that already carries the fix fails the build loudly instead
 # of silently shipping an unpatched image.
 RUN --mount=type=bind,source=./container/patches/trtllm,target=/tmp/trtllm-patches \
     cd /usr/local/lib/python3.12/dist-packages && \

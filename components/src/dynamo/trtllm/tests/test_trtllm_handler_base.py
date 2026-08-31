@@ -753,8 +753,8 @@ class TestDisaggRequestId:
         assert params.request_type == "context_and_generation"
 
 
-class TestGenerateLocally:
-    """Verify generate_locally validates and forwards requests.
+class TestHealthCheckPriority:
+    """Verify generate_locally forwards the correct priority to generate_async.
 
     Health check requests (built by TrtllmHealthCheckPayload) must reach
     the TRT-LLM engine at priority=1.0.  Regular inference requests
@@ -844,60 +844,6 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("prompt_logprobs", [0, 1])
-    async def test_speculative_decoding_rejects_prompt_logprobs(self, prompt_logprobs):
-        handler = self._make_handler()
-        handler.engine.engine_args = {
-            "speculative_config": {
-                "decoding_type": "MTP",
-                "max_draft_len": 3,
-                "mtp_eagle_one_model": True,
-            }
-        }
-
-        request = {
-            "token_ids": [1, 2, 3],
-            "stop_conditions": {"max_tokens": 10},
-            "sampling_options": {},
-            "output_options": {"prompt_logprobs": prompt_logprobs},
-        }
-
-        with pytest.raises(
-            ValueError,
-            match="does not support prompt log probabilities.*speculative decoding",
-        ):
-            _ = [
-                chunk
-                async for chunk in handler.generate_locally(
-                    request, self._make_context()
-                )
-            ]
-
-        handler.engine.llm.generate_async.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_non_speculative_decoding_allows_prompt_logprobs(self):
-        handler = self._make_handler()
-        handler.engine.engine_args = {}
-        generation_result = self._make_mock_generation_result()
-        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
-
-        request = {
-            "token_ids": [1, 2, 3],
-            "stop_conditions": {"max_tokens": 10},
-            "sampling_options": {},
-            "output_options": {"prompt_logprobs": 1},
-        }
-
-        chunks = [
-            chunk
-            async for chunk in handler.generate_locally(request, self._make_context())
-        ]
-
-        assert chunks
-        handler.engine.llm.generate_async.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
