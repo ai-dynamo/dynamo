@@ -401,16 +401,18 @@ when the user has requested or authorized the external contribution.
 1. Read the root `AGENTS.md` pull-request conventions and the current
    `.github/pull_request_template.md`; satisfy both. Repository-wide requirements remain mandatory
    when the template omits them.
-2. Confirm whether a pull-request object exists for the head branch. A pushed branch and a
+2. Confirm whether an active pull-request object exists for the head branch. A pushed branch and a
    `/pull/new/<branch>` URL are not pull requests; never report either one as a created PR.
 3. When creating or updating the PR, complete every applicable template section and include explicit
    `Summary` and `Validation` sections as required by the root `AGENTS.md`; do not assume `Overview`
    substitutes for `Summary`. Remove instructional comments and unused alternatives, report the
    validation actually run and its limitations, and do not invent a related issue.
 4. Verify the submitted PR with `gh pr view` (including `url`, `state`, `isDraft`, `body`,
-   `headRefName`, and `headRefOid`). Confirm that the URL contains `/pull/<number>`, the head branch
-   and commit are the intended ones, and the body contains no template placeholders before handing it
-   off.
+   `baseRefName`, `headRefName`, and `headRefOid`). Confirm that `state` is `OPEN`, the URL contains
+   `/pull/<number>`, the base, head branch, and commit are the intended ones, and the body contains no
+   template placeholders before handing it off. If the PR is closed, reopen it when appropriate or
+   create a new PR; if it is merged, create a new PR for remaining changes or report that no active PR
+   exists. Never present an inactive PR as reviewable.
 5. Report the PR's actual review and check state. Use the `pr-monitor` skill when CI diagnosis or
    continued monitoring is requested.
 
