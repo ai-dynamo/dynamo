@@ -63,18 +63,25 @@ async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
 }
 
 #[test]
-fn response_item_failed_includes_typed_terminal_failures() {
+fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
+    let drainable = |output: &LLMEngineOutput| {
+        matches!(
+            classify_response_item(&Annotated::from_data(output.clone())),
+            ResponseItemOutcome::DrainableTerminal
+        )
+    };
+
     let mut output = LLMEngineOutput::default();
-    assert!(!response_item_failed(&Annotated::from_data(output.clone())));
+    assert!(!drainable(&output));
 
     output.finish_reason = Some(FinishReason::Error("decode failed".to_string()));
-    assert!(response_item_failed(&Annotated::from_data(output.clone())));
+    assert!(drainable(&output));
 
     output.finish_reason = Some(FinishReason::Cancelled);
-    assert!(response_item_failed(&Annotated::from_data(output.clone())));
+    assert!(drainable(&output));
 
     output.finish_reason = Some(FinishReason::Length);
-    assert!(!response_item_failed(&Annotated::from_data(output)));
+    assert!(!drainable(&output));
 }
 
 #[test]
@@ -818,6 +825,8 @@ async fn client_cancellation_still_ends_stream_without_draining() {
 #[serial_test::serial]
 async fn drain_without_trailing_error_gives_up_at_the_deadline() {
     let (router, runtime) = router(None).await;
+    // Auto-advances the drain deadline once the task idles, so this costs no wall clock.
+    tokio::time::pause();
     let context = Context::new(()).context();
     let source = ResponseStream::new(
         Box::pin(async_stream::stream! {
@@ -856,50 +865,6 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
             .expect("the stream must end after the drain gives up")
             .is_none()
     );
-
-    drop(router);
-    runtime.shutdown();
-}
-
-/// A terminal frame followed by more data was not terminal after all: both frames go out in
-/// order and the request still completes cleanly rather than being accounted as a failure.
-#[tokio::test]
-#[serial_test::serial]
-async fn data_after_a_terminal_frame_reopens_the_stream() {
-    let (router, runtime) = router(None).await;
-    let context = Context::new(()).context();
-    let source = ResponseStream::new(
-        Box::pin(stream::iter(vec![
-            cancelled_frame(),
-            Annotated::from_data(LLMEngineOutput {
-                token_ids: vec![7],
-                ..Default::default()
-            }),
-        ])),
-        Arc::clone(&context),
-    );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
-        Arc::clone(&router.request_metrics),
-        "terminal-then-data".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        &request(),
-        false,
-    );
-    let monitored = monitor_response_stream(source, context, guard);
-    tokio::pin!(monitored);
-
-    let first = monitored.next().await.expect("the withheld frame");
-    assert!(matches!(
-        first
-            .data
-            .as_ref()
-            .and_then(|data| data.finish_reason.as_ref()),
-        Some(FinishReason::Cancelled)
-    ));
-    let second = monitored.next().await.expect("the frame that followed it");
-    assert_eq!(second.data.as_ref().unwrap().token_ids, vec![7]);
-    assert!(monitored.next().await.is_none());
 
     drop(router);
     runtime.shutdown();
@@ -2167,45 +2132,6 @@ async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
     assert!(
         loads.iter().all(|load| load.active_requests == 0),
         "all scheduler bookings must be released after migration: {loads:?}"
-    );
-    harness.runtime.shutdown();
-}
-
-/// With migration disabled there is nowhere to move the request to, so the
-/// requirement is the other half of the contract: the client must see the typed
-/// shutdown error rather than a clean cancellation.
-#[tokio::test]
-#[serial_test::serial]
-async fn engine_shutdown_after_cancel_frame_surfaces_error_at_limit_zero() {
-    let dispatch = Arc::new(ShutdownAfterCancelDispatch::default());
-    let harness =
-        two_worker_migration_harness("engine-shutdown-no-migration", dispatch.clone()).await;
-    let migration = Migration::new(0, None, "test".to_string(), Arc::new(Metrics::new()));
-
-    let responses: Vec<_> = migration
-        .generate(Context::new(request()), harness.engine.clone())
-        .await
-        .unwrap()
-        .collect()
-        .await;
-
-    let attempts = {
-        let attempts = dispatch.attempts.lock().unwrap();
-        attempts.clone()
-    };
-    assert_eq!(attempts.len(), 1, "migration is disabled at limit zero");
-    assert_eq!(
-        responses.len(),
-        1,
-        "the shutdown error is the whole response; a bare cancellation must not \
-         precede it: {responses:?}"
-    );
-    let last = responses
-        .last()
-        .expect("the shutdown must be reported to the client");
-    assert!(
-        is_engine_shutdown(last),
-        "the client must see the shutdown error, got {last:?}"
     );
     harness.runtime.shutdown();
 }

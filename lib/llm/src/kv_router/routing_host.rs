@@ -786,11 +786,5 @@ fn classify_response_item(item: &Annotated<LLMEngineOutput>) -> ResponseItemOutc
     }
 }
 
-/// Whether an item ends the response stream, whichever way it signals the failure.
-#[cfg(test)]
-fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
-    !matches!(classify_response_item(item), ResponseItemOutcome::Healthy)
-}
-
 #[cfg(test)]
 mod tests;
