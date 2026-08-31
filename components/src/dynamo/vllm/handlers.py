@@ -1565,6 +1565,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Format mapping:
             #   list_nodes() -> objects with .node_ip and .node_id
             #   ray.nodes()  -> dicts with "NodeManagerAddress" and "NodeID"
+            # Warm the heavy ray import off the event loop so the first scale on
+            # a worker does not block the loop; cached (fast) on later calls.
+            await asyncio.to_thread(importlib.import_module, "ray")
+            await asyncio.to_thread(importlib.import_module, "ray.util.state")
             import ray
             import ray.util.state as _ray_util_state
 
@@ -1576,8 +1580,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self.node_id: str = d["NodeID"]
 
             async def _scale_engine(size: int) -> None:
-                # add_dp_placement_groups calls ray.util.state.list_nodes();
-                # patch it to the GCS API for the duration of the reconfigure.
+                # add_dp_placement_groups calls ray.util.state.list_nodes(); patch
+                # it to the GCS API for the reconfigure. This mutates a
+                # process-global, but concurrent scales are serialised by
+                # _scale_ep_in_progress and the original is restored in finally.
                 original_list_nodes = _ray_util_state.list_nodes
                 try:
                     _ray_util_state.list_nodes = lambda **kw: [
@@ -1587,8 +1593,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 finally:
                     _ray_util_state.list_nodes = original_list_nodes
 
+            # Outer timeout backstop: vLLM has its own limits, but if a scale hangs
+            # past all of them the in-progress flag would stick and this endpoint
+            # would wedge forever. A hung scale is a wedged engine -> fail fast.
+            # Generous default; tune via DYN_SCALE_EP_TIMEOUT_S.
+            timeout_s = float(os.getenv("DYN_SCALE_EP_TIMEOUT_S", "600"))
+            # If this coroutine is cancelled externally (server shutdown or the
+            # caller going away), CancelledError propagates and the in-progress
+            # flag is cleared in finally, but we intentionally do NOT force a
+            # restart: on a graceful shutdown that would be a spurious non-zero
+            # exit, and a client disconnect should not kill a healthy worker.
             try:
-                await _scale_engine(new_dp_size)
+                await asyncio.wait_for(_scale_engine(new_dp_size), timeout=timeout_s)
             except EngineDeadError as dead_err:
                 # Engine died mid-grow. Restart it the same way every other engine
                 # path here does, so it comes back clean and re-registers.
@@ -1601,14 +1617,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as grow_err:
                 # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
                 # _scale_up_elastic_ep has no except and its /scale_elastic_ep
-                # endpoint just returns 500), so a failed grow leaves the engine
-                # partial/wedged with no safe way to recover in process. Restart the
-                # worker so it comes back clean, rather than fake a recovery that
-                # nothing acts on.
+                # endpoint just returns 500), so a failed (or timed-out, hence
+                # wedged) grow leaves the engine partial with no safe way to recover
+                # in process. Restart the worker so it comes back clean rather than
+                # fake a recovery that nothing acts on. (asyncio.wait_for raises
+                # TimeoutError, an Exception subclass, so a hang lands here too.)
                 logger.error(
-                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
-                    "back a failed scale; restarting the worker to recover a clean "
-                    "state.",
+                    "[ElasticEP] Scaling to dp=%s failed/timed out: %s. vLLM does "
+                    "not roll back a failed scale; restarting the worker to recover "
+                    "a clean state.",
                     new_dp_size,
                     grow_err,
                 )

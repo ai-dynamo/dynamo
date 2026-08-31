@@ -210,6 +210,7 @@ class _FakeVllmEngine:
         tensor_parallel_size=1,
         enable_elastic_ep=True,
         data_parallel_backend="ray",
+        hang_sizes=(),
     ):
         self.vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
@@ -221,10 +222,13 @@ class _FakeVllmEngine:
         )
         self._fail_sizes = list(fail_sizes)
         self._dead_sizes = list(dead_sizes)
+        self._hang_sizes = list(hang_sizes)  # sizes that hang until cancelled
         self.calls: list[int] = []  # every requested size, in order
 
     async def scale_elastic_ep(self, size: int) -> None:
         self.calls.append(size)
+        if size in self._hang_sizes:
+            await asyncio.sleep(3600)  # hang until wait_for cancels us
         if size in self._dead_sizes:
             raise EngineDeadError()
         if size in self._fail_sizes:
@@ -317,6 +321,19 @@ def test_failed_grow_restarts_the_worker(stub_ray):
     assert result is _RESTARTED  # never returned a success/recovery dict
     assert shutdown == ["worker"]  # worker restart was triggered
     assert engine.calls == [3]  # grow attempted once; no rollback call
+
+
+def test_hung_grow_times_out_and_restarts(stub_ray, monkeypatch):
+    # A scale that hangs past the outer backstop is a wedged engine: fail fast and
+    # restart, rather than leave the endpoint's in-progress flag stuck forever.
+    monkeypatch.setenv("DYN_SCALE_EP_TIMEOUT_S", "0.05")
+    engine = _FakeVllmEngine(prev_dp=2, hang_sizes=[3])
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result is _RESTARTED
+    assert shutdown == ["worker"]  # timeout -> fail-fast restart
+    assert engine.calls == [3]
 
 
 def test_engine_dead_restarts_the_worker(stub_ray):
