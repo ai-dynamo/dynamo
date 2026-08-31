@@ -262,6 +262,33 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" %}
+# Inkling: vLLM ships an Inkling tool parser but registers no structural tag for
+# it, so Dynamo finds no grammar to install for a tool request and silently
+# degrades to tool_choice="auto" -- HTTP 200, no warning, forced tool choice not
+# honoured. Layer the structural-tag patch here and assert its postconditions.
+#
+# The version test is load-bearing: these patches are cut against the exact
+# v0.28.0 tree, and `patch --forward` would otherwise skip or fuzz a hunk on a
+# different base and leave a half-patched image that still builds.
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.28.0/inkling,target=/tmp/inkling-vllm-patches,readonly \
+    --mount=type=bind,source=./container/deps/vllm/validate_inkling_runtime.py,target=/tmp/validate_inkling_runtime.py,readonly \
+    set -eux; \
+    installed_vllm_version="$(python3 -c 'import importlib.metadata as md; print(md.version("vllm"))')"; \
+    test "${installed_vllm_version}" = "0.28.0"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    for patch_file in /tmp/inkling-vllm-patches/*.patch; do \
+        echo "Applying ${patch_file}"; \
+        patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
+    done; \
+    apt-get purge -y patch; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 /tmp/validate_inkling_runtime.py
+
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton

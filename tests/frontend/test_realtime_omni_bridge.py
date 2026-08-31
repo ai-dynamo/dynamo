@@ -31,6 +31,21 @@ import requests
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
 
+# realtime_omni_mock_worker.py imports vllm_omni and dynamo.vllm.omni at module
+# scope, so if those are unavailable the worker dies at startup and this test
+# fails as "Main server process exited with code 1" -- an opaque symptom for a
+# plain missing/broken dependency. Probe the same imports here and skip instead.
+# RuntimeError is included because diffusers re-raises transitive import
+# failures as RuntimeError rather than ImportError.
+try:
+    import vllm_omni.outputs.mm_outputs  # noqa: F401
+
+    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler  # noqa: F401
+
+    _OMNI_AVAILABLE = True
+except (ImportError, OSError, NotImplementedError, RuntimeError):
+    _OMNI_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Shared with the worker module (realtime_omni_mock_worker.py imports these).
@@ -44,6 +59,12 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_0,
+    # skipif rather than a module-level skip, so the tests stay COLLECTED and are
+    # reported as skipped. A module-level skip can empty a marker selection, and
+    # pytest then exits 5 ("no tests ran"), which CI reports as a failure.
+    pytest.mark.skipif(
+        not _OMNI_AVAILABLE, reason="vLLM omni dependencies not available"
+    ),
 ]
 
 

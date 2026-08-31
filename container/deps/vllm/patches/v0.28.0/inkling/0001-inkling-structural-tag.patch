@@ -1,0 +1,185 @@
+diff --git a/vllm/tool_parsers/inkling_tool_parser.py b/vllm/tool_parsers/inkling_tool_parser.py
+index ab760015af7..517854500bc 100644
+--- a/vllm/tool_parsers/inkling_tool_parser.py
++++ b/vllm/tool_parsers/inkling_tool_parser.py
+@@ -5,7 +5,14 @@ from vllm.parser.engine.registered_adapters import InklingParserToolAdapter
+ 
+ 
+ class InklingEngineToolParser(InklingParserToolAdapter):  # type: ignore[valid-type, misc]
+-    # No Inkling structural-tag grammar is wired up yet; fall back to auto
+-    # parsing for named/required tool choice.
+-    structural_tag_model = None
+-    supports_required_and_named = False
++    # An Inkling structural tag is registered in structural_tag_registry.py, so
++    # named/required tool choice is constrained on the model's real wire format
++    # (<|message_model|><|content_invoke_tool_json|>{...}<|end_message|>) instead
++    # of silently falling back to "auto".
++    #
++    # Do NOT also set supports_required_and_named: AbstractToolParser's
++    # __init_subclass__ forces it to False whenever structural_tag_model is set
++    # and VLLM_ENFORCE_STRICT_TOOL_CALLING is on. That is the intended design --
++    # the structural tag supersedes the generic required/named JSON path -- so
++    # setting it here is both redundant and silently overwritten.
++    structural_tag_model = "inkling"
+diff --git a/vllm/tool_parsers/structural_tag_registry.py b/vllm/tool_parsers/structural_tag_registry.py
+index 1f9a651ee46..bc70a07c249 100644
+--- a/vllm/tool_parsers/structural_tag_registry.py
++++ b/vllm/tool_parsers/structural_tag_registry.py
+@@ -70,7 +70,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
+         "deepseek_v4",
+     }
+ )
+-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "kimi_k3"})
++VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "inkling", "kimi_k3"})
+ SUPPORTED_STRUCTURAL_TAG_MODELS = (
+     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+ )
+@@ -376,6 +376,7 @@ _K3_ARG_CLOSE = f"{_K3_CLOSE}argument{_K3_SEP}"
+ # the end-of-message token. It is generated (not part of the prompt prefix), so
+ # the tag must permit it or the FSM would mask the model's natural terminator.
+ _K3_MESSAGE_CLOSE = f"{_K3_CLOSE}message{_K3_SEP}"
++_K3_END_OF_MSG = "<|end_of_msg|>"
+ 
+ # JSON-schema type -> K3 XTML ``type=`` attribute value. Mirrors
+ # ``encoding_k3._xtml_type`` (integer collapses onto number).
+@@ -556,12 +557,17 @@ def _k3_response_prefix() -> list[Any]:
+ 
+     ``response`` is generated in thinking mode (prefix ends at
+     ``<|open|>think<|sep|>``) but is part of the generation prefix in
+-    non-thinking mode, so its open marker is optional. The body is bounded by
+-    the response close marker.
++    non-thinking mode, so its open marker is optional. Excluding the reserved
++    marker heads commits ``<|close|>`` to the response-close branch immediately
++    and prevents a nested channel from starting inside response text.
+     """
+     return [
+         OptionalFormat(content=ConstStringFormat(value=_K3_RESPONSE_OPEN)),
+-        TagFormat(begin="", content=AnyTextFormat(), end=_K3_RESPONSE_CLOSE),
++        TagFormat(
++            begin="",
++            content=AnyTextFormat(excludes=[_K3_OPEN, _K3_CLOSE, _K3_END_OF_MSG]),
++            end=_K3_RESPONSE_CLOSE,
++        ),
+     ]
+ 
+ 
+@@ -577,6 +583,119 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
+     )
+ 
+ 
++# --- Inkling -------------------------------------------------------------------
++# Wire format (vllm/parser/inkling.py):
++#   tool call: <|message_model|><|content_invoke_tool_json|>
++#              {"name": "get_weather", "args": {"city": "SF"}}<|end_message|>
++#   text:      <|message_model|><|content_text|>...<|end_message|>
++#
++# Inkling wraps its tool JSON in content markers, which is exactly why a BARE
++# JSON-schema constraint is wrong for it -- Dynamo's prepost.py gates that
++# fallback off for this parser because forcing raw JSON conflicts with the wire
++# format and can crash EngineCore under speculative decoding. The structural tag
++# constrains markers AND payload together, which is the whole point.
++#
++# The tag constrains the GENERATED SUFFIX, so it begins at the content-kind
++# marker, NOT at `<|message_model|>`. Inkling's chat template prefills the role
++# marker into the generation prompt -- it ends
++# `...<|end_message|><|message_model|>` -- so generation resumes inside the
++# model message and never re-emits it. Anchoring the tag at `<|message_model|>`
++# forces a DUPLICATE role marker: verified with xgrammar, that grammar rejects
++# the correct suffix and accepts only the doubled form. It appears to work
++# because the parser absorbs the duplicate, but it manufactures exactly the
++# unconsumed-control-marker residue that dynamo#12510 exists to strip.
++_INKLING_CONTENT_TEXT = "<|content_text|>"
++_INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
++_INKLING_END_MESSAGE = "<|end_message|>"
++_INKLING_END_SAMPLING = "<|content_model_end_sampling|>"
++_INKLING_TOOL_OPEN = _INKLING_TOOL_JSON
++_INKLING_TEXT_OPEN = _INKLING_CONTENT_TEXT
++# BOTH terminators, because the parser treats them as co-equal: it documents
++# that "sampling may also end a block with the standalone
++# <|content_model_end_sampling|> token", `is_reasoning_end` returns True on it,
++# and `count_reasoning_tokens` closes a reasoning block on either. Permitting
++# only <|end_message|> would mask a valid natural terminator -- and would remove
++# one of the two paths that flip is_reasoning_end.
++_INKLING_ENDS = [_INKLING_END_MESSAGE, _INKLING_END_SAMPLING]
++
++
++def _inkling_call_schema(tool: FunctionToolParam) -> dict[str, Any]:
++    """`{"name": "<this tool>", "args": {...}}` -- name pinned to ONE tool."""
++    parameters = get_function_parameters(tool.function)
++    args_schema: Any = (
++        parameters if isinstance(parameters, dict) else {"type": "object"}
++    )
++    return {
++        "type": "object",
++        "properties": {
++            "name": {"const": tool.function.name},
++            "args": args_schema,
++        },
++        "required": ["name", "args"],
++        "additionalProperties": False,
++    }
++
++
++def _inkling_call_tag(tool: FunctionToolParam) -> TagFormat:
++    return TagFormat(
++        begin=_INKLING_TOOL_OPEN,
++        content=JSONSchemaFormat(json_schema=_inkling_call_schema(tool)),
++        end=_INKLING_ENDS,
++    )
++
++
++def _inkling_tool_calls(tools: list[FunctionToolParam]) -> Any:
++    """One or more tool-call blocks, in any order, at least one."""
++    return TagsWithSeparatorFormat(
++        tags=[_inkling_call_tag(tool) for tool in tools],
++        separator="",
++        at_least_one=True,
++    )
++
++
++def _inkling_text_block() -> TagFormat:
++    return TagFormat(
++        begin=_INKLING_TEXT_OPEN,
++        content=AnyTextFormat(excludes=_INKLING_ENDS),
++        end=_INKLING_ENDS,
++    )
++
++
++@register_vllm_structural_tag("inkling")
++def get_inkling_structural_tag(
++    tools: list[FunctionToolParam],
++    builtin_tools: list[BuiltinToolParam],
++    tool_choice: SimplifiedToolChoice,
++    reasoning: bool,
++) -> StructuralTag:
++    # `reasoning` is deliberately unused: an Inkling thinking block is a separate
++    # <|content_thinking|> message that precedes this one, and constraining it here
++    # would forbid the model from thinking before it calls a tool.
++    del builtin_tools, reasoning
++
++    if not tools:
++        return StructuralTag(format=_inkling_text_block())
++
++    if tool_choice == "auto":
++        # The model may answer in text INSTEAD of calling a tool.
++        return StructuralTag(
++            format=OrFormat(
++                elements=[_inkling_tool_calls(tools), _inkling_text_block()]
++            )
++        )
++    if tool_choice == "forced":
++        # A named tool_choice. normalize_tool_choice() has ALREADY filtered
++        # `tools` to the named one, so tools[:1] IS that tool.
++        # Use the same CONTAINER format as the required branch, never a bare
++        # call tag: a bare TagFormat at the root is a TRIGGERED constraint
++        # (xgrammar only enforces after `begin` matches), so it never anchors
++        # and the model stays free to call a different tool. kimi_k3 wraps
++        # forced the same way, for the same reason.
++        return StructuralTag(format=_inkling_tool_calls(tools[:1]))
++    # required: at least one call from the offered set, no text alternative.
++    return StructuralTag(format=_inkling_tool_calls(tools))
++
++
+ @register_vllm_structural_tag("kimi_k3")
+ def get_kimi_k3_structural_tag(
+     tools: list[FunctionToolParam],

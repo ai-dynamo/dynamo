@@ -380,10 +380,16 @@ class TestVllmRendererApi:
         )
         reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
         abort_request_fields = (*reasoning_request_fields, "abort_immediately")
+        # vLLM 0.28.0 appends session_id after abort_immediately. Dynamo reads
+        # EngineCoreRequest by NAME (vllm_processor.py uses attribute access and
+        # builds EngineCoreOutput by keyword), so a trailing append is compatible
+        # with every shape below and needs no production change.
+        session_request_fields = (*abort_request_fields, "session_id")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
         omni_fields = (*reasoning_request_fields, "additional_information")
         abort_omni_fields = (*abort_request_fields, "additional_information")
+        session_omni_fields = (*session_request_fields, "additional_information")
         valid_request_fields = (
             base_request_fields,
             reasoning_request_fields,
@@ -391,6 +397,8 @@ class TestVllmRendererApi:
             (*base_request_fields, "additional_information"),
             omni_fields,
             abort_omni_fields,
+            session_request_fields,
+            session_omni_fields,
         )
         # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
         # reads EngineCoreRequest fields by name, so the append is compatible
@@ -447,15 +455,22 @@ class TestVllmRendererApi:
             "is_segment_finished",
             "new_prompt_len_snapshot",
         )
-        omni_output_fields = base_output_fields + omni_output_extra_fields
-        omni_cached_token_output_fields = (
-            cached_token_output_fields + omni_output_extra_fields
+        # vLLM 0.28.0 appends two fields after num_nans_in_logits, i.e. after
+        # vLLM's own fields but before anything vllm-omni adds. Dynamo builds
+        # EngineCoreOutput BY KEYWORD and feature-detects optional fields via
+        # __struct_fields__, so appended fields take their msgspec defaults and
+        # need no output mapping -- validated by ~7000 requests through this exact
+        # path on vLLM 0.28.0 (p0 + moontrace, 2-replica AGG and 1P1D).
+        vllm_0280_output_extra_fields = (
+            "mm_cache_miss_hashes",
+            "new_sampling_mask",
         )
-        valid_output_fields = (
-            base_output_fields,
-            cached_token_output_fields,
-            omni_output_fields,
-            omni_cached_token_output_fields,
+        _output_bases = (base_output_fields, cached_token_output_fields)
+        valid_output_fields = tuple(
+            base + vllm_extra + omni_extra
+            for base in _output_bases
+            for vllm_extra in ((), vllm_0280_output_extra_fields)
+            for omni_extra in ((), omni_output_extra_fields)
         )
         actual_output_fields = EngineCoreOutput.__struct_fields__
         assert actual_output_fields in valid_output_fields, (

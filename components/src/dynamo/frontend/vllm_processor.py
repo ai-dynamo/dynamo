@@ -39,11 +39,14 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    as_error_envelope,
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -62,6 +65,54 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
+
+
+class _ReasoningUsageAnnotator:
+    """Report reasoning-token usage on the PYTHON chat-processor path.
+
+    NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
+    (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
+    which bypasses that code entirely -- and the worker's _build_completion_usage()
+    emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
+    (not null) from usage.
+
+    The count is NOT derived here. Each StreamingPostProcessor accumulates
+    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
+    class only sums those totals and annotates usage. Deriving it here -- from the
+    choices this path emits -- is what reported zero whenever the response projection
+    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
+    tool path's terminal-delta buffering).
+
+    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
+    both reasoning and visible content counts entirely as reasoning. The non-streaming
+    tool path has no per-chunk classification, so it counts the parsed reasoning text
+    exactly; that is more precise than the Rust rather than divergent from it.
+    A positive backend-supplied count stays authoritative.
+    """
+
+    __slots__ = ("_post_processors",)
+
+    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
+        self._post_processors = post_processors
+
+    @property
+    def total(self) -> int:
+        return sum(
+            post.reasoning_token_total for post in self._post_processors.values()
+        )
+
+    def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
+        annotated = dict(usage)
+        details = dict(annotated.get("completion_tokens_details") or {})
+        # Only a POSITIVE backend count is authoritative. Missing, zero and
+        # negative all fall back to our own tally -- a negative would otherwise
+        # survive, since -1 is truthy.
+        backend = details.get("reasoning_tokens")
+        if not isinstance(backend, int) or backend <= 0:
+            details["reasoning_tokens"] = self.total
+        annotated["completion_tokens_details"] = details
+        return annotated
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -193,6 +244,7 @@ def _build_reasoning_parser_metadata(
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
+    model_config: Any = None,
 ) -> _ReasoningParserMetadata:
     if reasoning_parser_class is None:
         return _ReasoningParserMetadata(None, None, None)
@@ -203,9 +255,17 @@ def _build_reasoning_parser_metadata(
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
         return _ReasoningParserMetadata(True, True, parser_kwargs)
 
+    # Same construction as the other two sites. is_reasoning_end() does not read
+    # model_config, but constructing this one differently is exactly the drift that
+    # let the missing model_config go unnoticed at the adjust_request() site.
+    #
+    # Deliberately NOT added to parser_kwargs: that dict goes on the wire as
+    # dynamo_preproc["reasoning_parser_kwargs"], and ModelConfig is not
+    # serializable -- the worker builds its own.
     reasoning_parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
     )
     response_reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
     # include_reasoning controls response projection, not whether the model may
@@ -542,6 +602,8 @@ class VllmProcessor:
                 tokenizer=self.tokenizer,
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
+                reasoning_parser_class=self.reasoning_parser_class,
+                model_config=self.input_processor.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
@@ -608,9 +670,26 @@ class VllmProcessor:
             sampling_params.logprobs = top_logprobs
         # TODO: Support logprobs in the distributed vLLM chat processor by
         # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
+        #
+        # Until then, REJECT rather than warn-and-continue. Proceeding emits a
+        # response whose logprobs structure is empty, which the HTTP layer cannot
+        # deserialize ("invalid length 0, expected struct ChatChoiceLogprobs with
+        # 2 elements") -- so the client saw a 500 for a request the server simply
+        # does not implement, with no usable explanation.
+        #
+        # 400, NOT the 501 this API uses for other unimplemented fields
+        # (`previous_response_id`, `background`, `prompt`). Those are raised inside
+        # the Rust HTTP service; a status asserted by a Python engine is triaged by
+        # SanitizedError::for_backend_status (lib/llm/src/http/service/error.rs),
+        # where only 4xx is forwarded verbatim -- a 5xx has its body replaced with
+        # the generic internal-error message, so a 501 here reaches the client as an
+        # opaque 500 and the reason is lost. Verified live: 501 -> "Internal server
+        # error" with backend_status=501 buried in the log.
         if sampling_params.logprobs is not None:
-            logger.warning(
-                "Logprobs requested but not supported in distributed inference mode"
+            raise HttpError(
+                400,
+                "Validation: `logprobs` and `top_logprobs` are not supported by the "
+                "vLLM chat processor (--dyn-chat-processor vllm).",
             )
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
@@ -644,6 +723,7 @@ class VllmProcessor:
             chat_template_kwargs,
             request_for_sampling,
             tokens,
+            self.input_processor.model_config,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -745,6 +825,7 @@ class VllmProcessor:
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    model_config=self.input_processor.model_config,
                     response_reasoning_ended=(
                         reasoning_metadata.response_reasoning_ended
                     ),
@@ -838,6 +919,10 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        # Per-request reasoning-token usage (NVBug 6678449b); see
+        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
+        # The counts live on the post-processors, which are per-request too.
+        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
         _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
         _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
@@ -863,20 +948,24 @@ class VllmProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
                 if engine_response is None:
                     if dynamo_response.is_error():
-                        yield handle_engine_error(engine_response, request_id, logger)
+                        yield as_error_envelope(
+                            handle_engine_error(engine_response, request_id, logger)
+                        )
                         break
                     # No data or error fields, means we may have a comment or other kind of event.
                     # I'm not sure what those are used for, so TODO. Skip for now.
                     continue
 
                 if "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 # Count before any choice gate — tool/reasoning parsers may
@@ -887,15 +976,17 @@ class VllmProcessor:
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine choice index {output_idx} "
-                                f"for request {request_id}"
-                            ),
-                            "type": "internal_error",
+                    yield as_error_envelope(
+                        {
+                            "error": {
+                                "message": (
+                                    f"Invalid engine choice index {output_idx} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
                         }
-                    }
+                    )
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -932,15 +1023,17 @@ class VllmProcessor:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
                         if post is None:
-                            yield {
-                                "error": {
-                                    "message": (
-                                        f"Invalid postprocessor choice index {output.index} "
-                                        f"for request {request_id}"
-                                    ),
-                                    "type": "internal_error",
+                            yield as_error_envelope(
+                                {
+                                    "error": {
+                                        "message": (
+                                            f"Invalid postprocessor choice index "
+                                            f"{output.index} for request {request_id}"
+                                        ),
+                                        "type": "internal_error",
+                                    }
                                 }
-                            }
+                            )
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
@@ -962,7 +1055,7 @@ class VllmProcessor:
                         "object": "chat.completion.chunk",
                     }
                     if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = usage
+                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
                 metrics = {
@@ -988,8 +1081,20 @@ class VllmProcessor:
             # below is reserved for genuine internal failures.
             raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            yield as_error_envelope(make_internal_error(request_id, str(e)))
         finally:
             for output_request_id in registered_request_ids:
                 if output_request_id in self.output_processor.request_states:

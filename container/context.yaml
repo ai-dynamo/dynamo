@@ -71,7 +71,35 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.27.1-ubuntu2404
+    # Inkling requires 0.28.0. The Inkling NVIDIA path moved substantially after
+    # 0.27.1, and the MTP support this recipe runs on (MTP 8) is part of it:
+    #   * models/inkling/nvidia/mtp.py -- InklingMTP gains
+    #     SupportsMultiModalEmbeddings, from "Restore multimodal draft capability
+    #     detection" (vllm#50417), which also reworks v1/spec_decode/llm_base_proposer
+    #   * models/inkling/nvidia/ops/fa4_rel_attention.py (+400) and attention.py --
+    #     FA4 warmup migration (vllm#49315)
+    #   * model.py / moe.py / ops/lamport.py -- shared-expert partial addition fused
+    #     into the Lamport collective (vllm#50697)
+    #   * configs.py -- HF-config compat for Inkling (vllm#51850)
+    # Three Inkling parser fixes also land in this range (vllm#49876, #50528, #51391).
+    # Multi-arch manifest list (linux/arm64 + linux/amd64), so GB300 aarch64 is covered.
+    # xpu/cpu below stay at 0.27.1 -- untested at 0.28.0, and Inkling does not use them.
+    runtime_image_tag: v0.28.0-ubuntu2404
+    # PER-DEVICE, and it must stay that way: vllm-omni asserts matching
+    # major/minor against the installed vLLM at import, so this is pinned to the
+    # runtime_image_tag directly above it. A single global ref would install
+    # 0.28.0rc1 into the xpu/cpu images, which are still on vLLM 0.27.1, and
+    # reproduce the very mismatch this pins away from.
+    vllm_omni_ref: "v0.28.0"
+    # MUST stay <5.15 while vLLM-Omni is pinned to 0.28.0: that release
+    # declares `transformers>=5.10.1,<5.15`, so 5.15.x makes the image
+    # unbuildable -- "No solution found when resolving dependencies".
+    # vllm#49797 (the Gemma 4 heterogeneous-config fix) IS in 0.28.0, which makes
+    # 5.15 permissible for vLLM itself (it only needs >=5.5.3) but NOT required.
+    # OMNI is the binding constraint here, not vLLM. Revisit when an omni release
+    # relaxes the bound. Note the thin dev image that carries 5.15.1 does not
+    # install omni at all, so it is not evidence that this combination resolves.
+    transformers_version: "5.14.1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -85,18 +113,19 @@ vllm:
     runtime_image: vllm/vllm-openai-xpu
     base_image_tag: v0.27.1
     runtime_image_tag: v0.27.1
+    vllm_omni_ref: "v0.27.0rc1"   # matches this stanza's vLLM 0.27.1
+    # vLLM 0.27.1 here lacks vllm#49797, so it still needs the 5.14.x pin.
+    transformers_version: "5.14.1"
     baseline_sbom: vllm-openai-xpu@3309c2e1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
     runtime_image_tag: v0.27.1
+    vllm_omni_ref: "v0.27.0rc1"   # matches this stanza's vLLM 0.27.1
+    # vLLM 0.27.1 here lacks vllm#49797, so it still needs the 5.14.x pin.
+    transformers_version: "5.14.1"
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
-  vllm_omni_ref: "v0.27.0rc1"
-  # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
-  # support that landed upstream after the release. Remove this pin when the
-  # vLLM base images include https://github.com/vllm-project/vllm/pull/49797.
-  transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "true"
