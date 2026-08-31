@@ -70,6 +70,7 @@ impl<'a> RoutingRequestParts<'a> {
 
 pub(super) struct SelectionOptions {
     pub(super) affinity_target: Option<AffinityTarget>,
+    pub(super) planned_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
     pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
     pub(super) admission: FindBestMatchAdmission,
@@ -224,6 +225,7 @@ where
             !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
             affinity_target,
+            planned_worker,
             policy_class,
             session_context,
             admission,
@@ -255,9 +257,33 @@ where
                 .dp_rank
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
         });
-        let Some((pinned_worker_id, requested_dp_rank)) =
-            merge_affinity_pin(explicit_pin, affinity_pin)
-        else {
+        let requested_pin = merge_affinity_pin(explicit_pin, affinity_pin);
+        let pinned_worker = match planned_worker {
+            Some(planned_worker) => {
+                if let Some((worker_id, dp_rank)) = requested_pin
+                    && (worker_id != planned_worker.worker_id
+                        || dp_rank.is_some_and(|dp_rank| dp_rank != planned_worker.dp_rank))
+                {
+                    return Err(anyhow::anyhow!(
+                        "Previewed worker {} dp_rank {} conflicts with requested worker {} dp_rank {:?}",
+                        planned_worker.worker_id,
+                        planned_worker.dp_rank,
+                        worker_id,
+                        dp_rank,
+                    ));
+                }
+                Some(planned_worker)
+            }
+            None => match requested_pin {
+                Some((worker_id, requested_dp_rank)) => Some(resolve_pinned_worker_rank(
+                    worker_id,
+                    requested_dp_rank,
+                    self.kv_router().unique_dp_rank_for_worker(worker_id),
+                )?),
+                None => None,
+            },
+        };
+        let Some(pinned_worker) = pinned_worker else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -302,13 +328,6 @@ where
 
             return Ok(selection);
         };
-        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
-
-        let pinned_worker = resolve_pinned_worker_rank(
-            pinned_worker_id,
-            requested_dp_rank,
-            self.kv_router().unique_dp_rank_for_worker(pinned_worker_id),
-        )?;
         {
             let configs = self.kv_router().workers_with_configs.borrow();
             let eligibility = RoutingEligibility::new(

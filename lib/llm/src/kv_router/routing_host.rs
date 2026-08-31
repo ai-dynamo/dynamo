@@ -202,7 +202,7 @@ where
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
-/// An admitted KV route awaiting a topology decision.
+/// An admitted KV route awaiting dispatch.
 pub(crate) struct RoutePlan<Sel = DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -212,6 +212,14 @@ where
     cleanup: KvRequestCleanup<Sel>,
     affinity: Option<AffinityAcquire>,
 }
+
+/// A KV route selected without scheduler admission.
+pub(crate) struct RoutePreview {
+    request_id: String,
+    phase: RequestPhase,
+    signals: RoutePlanSignals,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RoutePlanSignals {
     pub(crate) worker: WorkerWithDpRank,
@@ -219,6 +227,12 @@ pub(crate) struct RoutePlanSignals {
     pub(crate) cached_tokens: usize,
     pub(crate) potential_decode_blocks: u64,
     pub(crate) total_kv_blocks: Option<u64>,
+}
+
+impl RoutePreview {
+    pub(crate) fn signals(&self) -> RoutePlanSignals {
+        self.signals
+    }
 }
 
 impl RoutePlanSignals {
@@ -236,6 +250,7 @@ where
         self.signals
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn abort(mut self) {
         self.cleanup.finish().await;
     }

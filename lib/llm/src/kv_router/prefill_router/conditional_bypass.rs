@@ -34,8 +34,8 @@ impl<Sel> PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    /// Ask the decode `RoutingHost` for one admitted route, then let the
-    /// topology policy decide whether to consume or release that route.
+    /// Preview one decode route, then admit it only when the topology policy
+    /// chooses local decode.
     pub(super) async fn plan_conditional_disagg_decode(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -72,10 +72,10 @@ where
             return Ok(None);
         }
 
-        let plan = decode_host
-            .plan_kv_route(request, RequestPhase::Decode)
+        let preview = decode_host
+            .preview_kv_route(request, RequestPhase::Decode)
             .await?;
-        let signals = plan.signals();
+        let signals = preview.signals();
         let mut input =
             ConditionalDisaggDecisionInput::new(routing_token_ids.len(), signals.cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
@@ -131,6 +131,9 @@ where
         );
 
         if bypass {
+            let plan = decode_host
+                .plan_kv_route_from_preview(request, preview)
+                .await?;
             return Ok(Some(ConditionalDisaggDecodeDecision {
                 plan,
                 overlap_tokens,
@@ -138,7 +141,6 @@ where
             }));
         }
 
-        plan.abort().await;
         Ok(None)
     }
 

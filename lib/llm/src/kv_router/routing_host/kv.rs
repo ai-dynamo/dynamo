@@ -14,6 +14,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
+        planned_worker: Option<WorkerWithDpRank>,
         admission: FindBestMatchAdmission,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
@@ -33,6 +34,7 @@ where
                 is_query_only,
                 SelectionOptions {
                     affinity_target,
+                    planned_worker,
                     policy_class,
                     session_context,
                     admission,
@@ -55,6 +57,7 @@ where
             phase,
             is_query_only,
             affinity_target,
+            None,
             FindBestMatchAdmission::WithAdmission {
                 track_lifecycle: true,
             },
@@ -75,6 +78,28 @@ where
         .await
     }
 
+    fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {
+        let total_kv_blocks = match selection.selected_worker_load {
+            Some(load) => load
+                .total_kv_blocks
+                .and_then(|blocks| blocks.try_into().ok()),
+            None => self
+                .kv_router()
+                .workers_with_configs
+                .borrow()
+                .get(&selection.worker.worker_id)
+                .and_then(WorkerConfigLike::total_kv_blocks),
+        };
+        RoutePlanSignals {
+            worker: selection.worker,
+            overlap_blocks: selection.overlap_amount,
+            cached_tokens: selection.cached_tokens,
+            potential_decode_blocks: selection.potential_decode_blocks,
+            total_kv_blocks,
+        }
+    }
+
+    #[allow(dead_code)]
     pub(crate) async fn plan_kv_route(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -87,19 +112,91 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (selection, affinity) = self.select_with_affinity(request, phase, false).await?;
-        let total_kv_blocks = self
-            .kv_router()
-            .workers_with_configs
-            .borrow()
-            .get(&selection.worker.worker_id)
-            .and_then(WorkerConfigLike::total_kv_blocks);
-        let signals = RoutePlanSignals {
-            worker: selection.worker,
-            overlap_blocks: selection.overlap_amount,
-            cached_tokens: selection.cached_tokens,
-            potential_decode_blocks: selection.potential_decode_blocks,
-            total_kv_blocks,
-        };
+        let signals = self.route_signals(&selection);
+        drop(route_guard);
+        Ok(RoutePlan {
+            signals,
+            cleanup: KvRequestCleanup::new(
+                Arc::clone(self.kv_router()),
+                request.context().id().to_string(),
+                selection.worker,
+                true,
+            ),
+            selection,
+            affinity,
+        })
+    }
+
+    pub(crate) async fn preview_kv_route(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+    ) -> Result<RoutePreview, Error> {
+        if self.kv_router_if_enabled().is_none() {
+            return Err(anyhow::anyhow!("KV route previews require KV routing"));
+        }
+
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (outcome, _) = self
+            .select_with_session_affinity(request, phase, true, |target| {
+                self.select_request_outcome(
+                    request,
+                    phase,
+                    true,
+                    target,
+                    None,
+                    FindBestMatchAdmission::WithoutAdmission,
+                )
+            })
+            .await?;
+        let selection = outcome.into_result()?;
+        let signals = self.route_signals(&selection);
+        drop(route_guard);
+        Ok(RoutePreview {
+            request_id: request.context().id().to_string(),
+            phase,
+            signals,
+        })
+    }
+
+    pub(crate) async fn plan_kv_route_from_preview(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        preview: RoutePreview,
+    ) -> Result<RoutePlan<Sel>, Error> {
+        if self.kv_router_if_enabled().is_none() {
+            return Err(anyhow::anyhow!("KV route plans require KV routing"));
+        }
+        if request.context().id() != preview.request_id {
+            return Err(anyhow::anyhow!(
+                "KV route preview belongs to request {}, not {}",
+                preview.request_id,
+                request.context().id(),
+            ));
+        }
+
+        let phase = preview.phase;
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let planned_worker = preview.signals.worker;
+        let (selection, affinity) = self
+            .select_with_session_affinity(request, phase, false, |target| async move {
+                self.select_request_outcome(
+                    request,
+                    phase,
+                    false,
+                    target,
+                    Some(planned_worker),
+                    FindBestMatchAdmission::WithAdmission {
+                        track_lifecycle: true,
+                    },
+                )
+                .await?
+                .into_result()
+            })
+            .await?;
+        let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
             signals,
@@ -165,6 +262,7 @@ where
                     RequestPhase::Prefill,
                     true,
                     target,
+                    None,
                     FindBestMatchAdmission::WithoutAdmission,
                 )
             })

@@ -773,6 +773,102 @@ async fn route_plan_holds_and_releases_the_decode_reservation() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn route_preview_does_not_admit_a_request() {
+    let (router, runtime) = router(None).await;
+    let request = Context::new(request());
+    let requests_started_before = router.request_metrics.requests_started_total().get();
+
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one request");
+    assert_eq!(preview.signals().worker.worker_id, 7);
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(loads.iter().all(|load| load.active_requests == 0));
+    assert_eq!(
+        router.request_metrics.requests_started_total().get(),
+        requests_started_before
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn route_plan_from_preview_admits_the_previewed_worker() {
+    let (router, runtime) = router_with_workers(None, &[7, 8]).await;
+    let request = Context::new(request());
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    let previewed_worker = preview.signals().worker;
+
+    let plan = router
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .unwrap();
+    assert_eq!(plan.signals().worker, previewed_worker);
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        loads
+            .iter()
+            .find(|load| {
+                load.worker_id == previewed_worker.worker_id
+                    && load.dp_rank == previewed_worker.dp_rank
+            })
+            .expect("previewed worker must be reported")
+            .active_requests,
+        1
+    );
+    assert_eq!(
+        loads.iter().filter(|load| load.active_requests > 0).count(),
+        1
+    );
+
+    plan.abort().await;
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn route_preview_does_not_acquire_session_affinity() {
+    let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+    let session_id = SessionAffinityId::new("preview-only");
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+    router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+
+    let affinity = router.affinity.as_ref().unwrap();
+    let acquisition = tokio::time::timeout(
+        Duration::from_millis(100),
+        affinity.acquire(&session_id, None),
+    )
+    .await
+    .expect("preview must not leave affinity initialization pending")
+    .unwrap();
+    assert!(matches!(acquisition, AffinityAcquire::Initialize(_)));
+    drop(acquisition);
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
     let requests_started_before = router.request_metrics.requests_started_total().get();
