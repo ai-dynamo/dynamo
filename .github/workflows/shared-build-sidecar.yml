@@ -103,6 +103,10 @@ jobs:
             echo 'EOF'
           } >> "${GITHUB_OUTPUT}"
 
+      # TODO: Align the sidecar with the standard shared-build-image.yml path
+      # once it supports this handwritten, CPU-only, multi-binary Dockerfile.
+      # That should consolidate tagging, caching, publishing, and compliance
+      # orchestration instead of maintaining a parallel container build path.
       - name: Build and Push Image
         uses: $/.github/actions/docker-remote-build
         with:
