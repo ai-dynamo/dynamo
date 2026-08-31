@@ -41,11 +41,8 @@ def get_aiperf_cmd(
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
-    # Build nvext JSON with optional agent_hints.osl
-    nvext_dict = {"ignore_eos": True}
     if use_expected_osl:
-        nvext_dict["agent_hints"] = {"osl": osl}
-    nvext_json = json.dumps({"nvext": nvext_dict})
+        nvext_json = json.dumps({"nvext": {"agent_hints": {"osl": osl}}})
 
     cmd = [
         "aiperf",
@@ -64,8 +61,6 @@ def get_aiperf_cmd(
         str(osl),
         "--output-tokens-stddev",
         str(round(osl / 4)),
-        "--extra-inputs",
-        nvext_json,
         "--concurrency",
         str(concurrency),
         "--request-count",
@@ -83,6 +78,8 @@ def get_aiperf_cmd(
         "--dataset-sampling-strategy",
         "shuffle",
     ]
+    if use_expected_osl:
+        cmd.extend(["--extra-inputs", nvext_json])
     cmd.extend(get_common_aiperf_flags())
     return cmd
 

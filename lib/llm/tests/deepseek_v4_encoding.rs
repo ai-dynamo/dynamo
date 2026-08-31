@@ -6,7 +6,7 @@
 //! These tests use the official test files from:
 //! https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/encoding
 
-use dynamo_llm::preprocessor::prompt::deepseek_v4::{ThinkingMode, encode_messages};
+use dynamo_renderer::deepseek::v4::{ThinkingMode, encode_messages};
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::PathBuf;

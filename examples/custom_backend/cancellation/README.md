@@ -88,4 +88,4 @@ python3 client.py --middle
 - Both modes demonstrate the same cancellation behavior
 - The middle server shows how to properly forward context in proxy scenarios
 
-For more details on the request cancellation architecture, refer to the [architecture documentation](../../../docs/fault-tolerance/request-cancellation.md).
+For more details on the request cancellation architecture, refer to the [architecture documentation](../../../docs/fern/pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).

@@ -13,6 +13,8 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
+    CommitLayoutRequest,
+    CommitLayoutResponse,
     CommitRequest,
     CommitResponse,
     ExportAllocationRequest,
@@ -54,7 +56,24 @@ class _GMSClientSession:
     ):
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
-        self._transport.connect()
+        # Two distinct timeouts apply to this session, and they're asymmetric on
+        # purpose:
+        #
+        #   socket connect (here) — bounded by 30 s when the caller passes None.
+        #     This is the wait for the GMS server's UDS socket to be listening.
+        #     The server is a native sidecar in the same pod (intra-pod GMS) or a
+        #     sister pod under the same Grove gang-schedule (inter-pod GMS), so
+        #     the actual ready window is sub-second to a few seconds in the
+        #     normal case. A 30 s ceiling produces a clean ConnectionError on a
+        #     missing-server misconfiguration instead of an indefinite hang.
+        #
+        #   handshake / lock acquisition (below) — passes the caller's timeout_ms
+        #     through unchanged, including None which means "wait indefinitely."
+        #     The handshake wait depends on what other clients are doing
+        #     (engine loading weights, loader committing, etc.) and can be
+        #     minutes for large models. We deliberately don't impose a
+        #     server-availability ceiling on a workload-shaped wait.
+        self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:
@@ -117,6 +136,28 @@ class _GMSClientSession:
             logger.warning("Commit succeeded but closing transport failed: %s", exc)
         logger.info("Committed weights and released RW connection")
         return True
+
+    def commit_layout(self) -> CommitLayoutResponse:
+        """Seal the shape and keep writing.
+
+        Deliberately unlike :meth:`commit`: the connection stays open and the caller's
+        mappings are untouched, because the point is to go on writing bytes into a pool
+        whose geometry is now fixed. Committing narrows this session, and the new grant
+        is read back from the response rather than assumed, the same way the handshake
+        does it.
+        """
+        response = self._transport.request(CommitLayoutRequest(), CommitLayoutResponse)
+        if not response.success:
+            raise RuntimeError("GMS commit_layout returned failure")
+        if response.granted_lock_type is None:
+            raise RuntimeError("CommitLayoutResponse omitted granted_lock_type")
+        self._granted_lock_type = response.granted_lock_type
+        logger.info(
+            "Committed layout shape (hash %s...); session narrowed to %s",
+            response.memory_layout_hash[:16],
+            self._granted_lock_type.name,
+        )
+        return response
 
     def allocate_info(self, size: int, tag: str = "default") -> AllocateResponse:
         return self._transport.request(

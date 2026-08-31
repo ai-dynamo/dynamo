@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,18 +12,95 @@ from .replay_utils import (
     _assert_basic_report_metrics,
     _assert_replay_cli_outputs,
     _planner_profile_data_dir_path,
+    _require_aisimulate_distribution,
     _run_replay_cli,
     _write_cli_smoke_trace,
     _write_multiturn_trace,
     _write_planner_profile_data_npz,
 )
 
+_require_aisimulate_distribution(allow_module_level=True)
+replay_main = importlib.import_module("dynamo.replay.main")
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_aic_perf_config(**kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(replay_main, "AicPerfConfig", fake_aic_perf_config)
+
+    config = replay_main._load_aic_perf_config(
+        SimpleNamespace(
+            aic_backend="vllm",
+            aic_system="h200_sxm",
+            aic_model_path="moonshotai/Kimi-K2-Instruct",
+            aic_backend_version=None,
+            aic_tp_size=2,
+            aic_moe_tp_size=2,
+            aic_moe_ep_size=1,
+            aic_attention_dp_size=1,
+            aic_nextn=None,
+            aic_nextn_accept_rates=None,
+            aic_gemm_dtype=None,
+            aic_moe_dtype=None,
+            aic_fmha_dtype=None,
+            aic_kv_cache_dtype=None,
+            aic_comm_dtype=None,
+        )
+    )
+
+    assert config == captured_kwargs
+    assert captured_kwargs == {
+        "aic_backend": "vllm",
+        "aic_system": "h200_sxm",
+        "aic_model_path": "moonshotai/Kimi-K2-Instruct",
+        "aic_tp_size": 2,
+        "aic_backend_version": None,
+        "aic_moe_tp_size": 2,
+        "aic_moe_ep_size": 1,
+        "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
+        "aic_gemm_dtype": None,
+        "aic_moe_dtype": None,
+        "aic_fmha_dtype": None,
+        "aic_kv_cache_dtype": None,
+        "aic_comm_dtype": None,
+    }
+
+
+def test_replay_policy_config_flag_overrides_router_json(monkeypatch):
+    captured = []
+
+    class FakeKvRouterConfig:
+        @staticmethod
+        def from_json(value):
+            captured.append(value)
+            return value
+
+    monkeypatch.setattr(replay_main, "KvRouterConfig", FakeKvRouterConfig)
+
+    config = replay_main._load_router_config(
+        '{"router_queue_policy":"wspt","router_policy_config":"embedded.yaml"}',
+        "explicit.yaml",
+    )
+
+    assert config == captured[0]
+    assert json.loads(captured[0]) == {
+        "router_queue_policy": "wspt",
+        "router_policy_config": "explicit.yaml",
+    }
 
 
 @pytest.mark.timeout(30)
@@ -47,6 +126,8 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
+    assert set(report) == {"summary", "per_request", "coverage", "planner"}
+    assert report["per_request"] is None
     _assert_basic_report_counts(
         report,
         num_requests=10,
@@ -93,6 +174,7 @@ def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["per_request"] is None
     _assert_basic_report_counts(
         report,
         num_requests=10,
@@ -114,6 +196,10 @@ def test_replay_cli_subprocess_synthetic_multiturn_smoke(tmp_path):
         "4",
         "--request-count",
         "3",
+        "--request-rate",
+        "10",
+        "--arrival-seed",
+        "17",
         "--turns-per-session",
         "2",
         "--shared-prefix-ratio",
@@ -168,6 +254,60 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
         output_tokens=25,
     )
     _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_online_trace_jsonl_and_sla(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "online_trace_report.json"
+    jsonl_path = tmp_path / "online_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "online",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--per-request-jsonl",
+        str(jsonl_path),
+        "--sla-e2e-ms",
+        "1000000",
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["goodput_completed_requests"] == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_offline_per_request_jsonl_enables_capture(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "offline_trace_report.json"
+    jsonl_path = tmp_path / "offline_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "offline",
+        "--per-request-jsonl",
+        str(jsonl_path),
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert len(report["per_request"]) == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
 @pytest.mark.timeout(30)

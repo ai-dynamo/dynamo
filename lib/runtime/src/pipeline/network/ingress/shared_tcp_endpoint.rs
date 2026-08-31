@@ -8,12 +8,13 @@
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
+    ENGINE_REQUEST_GAUGE, REJECTION_REQUEST_TOTAL, REQUEST_QUEUE_GAUGE,
     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
     WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -21,19 +22,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
+use tokio_rustls::TlsAcceptor;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 /// Default worker pool size for TCP request handling
-const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
+const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
 /// Default work queue size for TCP request handling
 /// this is 4X the worker pool size to handle burst traffic
-const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
+const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
 
 /// Get worker pool size from environment or use default
 fn get_worker_pool_size() -> usize {
@@ -51,6 +56,51 @@ fn get_work_queue_size() -> usize {
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
 }
 
+/// Default small overflow queue when the engine-request limit is set but the
+/// queue limit is left unset. Keeps the hard cap close to N.
+const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
+
+/// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
+///
+/// `read_loop` front-acquires a worker-pool permit and dispatches directly when
+/// a worker is free, falls back to the bounded overflow queue, and returns 503
+/// ("Server overloaded") when both are full. The knobs set the *sizes*:
+///
+/// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
+///   (default 16). Hard cap N+Q.
+/// * unset → large defaults (10000 / 40000), so rejection only triggers under
+///   extreme saturation.
+struct SizingConfig {
+    pool_size: usize,
+    queue_size: usize,
+}
+
+fn resolve_sizing() -> SizingConfig {
+    match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        Some(engine_limit) => {
+            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
+            // The single dispatcher holds one request between `recv()` and
+            // acquiring an engine permit, so size the channel to limit-1:
+            // channel + the dispatcher-held request cap "queued, not in engine"
+            // at exactly `limit`.
+            SizingConfig {
+                pool_size: engine_limit.max(1),
+                queue_size: queue_limit.saturating_sub(1).max(1),
+            }
+        }
+        None => SizingConfig {
+            pool_size: get_worker_pool_size(),
+            queue_size: get_work_queue_size(),
+        },
+    }
+}
+
 /// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
 /// `Drop` decrements, so a single owner expresses the "task is active" interval.
 /// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
@@ -62,6 +112,8 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
+        // `dynamo_engine_request`: requests currently in the engine.
+        ENGINE_REQUEST_GAUGE.inc();
         Self
     }
 }
@@ -69,6 +121,7 @@ impl ActiveTaskGuard {
 impl Drop for ActiveTaskGuard {
     fn drop(&mut self) {
         WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
+        ENGINE_REQUEST_GAUGE.dec();
     }
 }
 
@@ -95,6 +148,14 @@ pub struct SharedTcpServer {
     cancellation_token: CancellationToken,
     /// Channel for sending work to the worker pool
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+    /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
+    /// `read_loop` so it can front-acquire a permit and dispatch directly.
+    engine_sem: Arc<Semaphore>,
+    /// Overflow-queue capacity; `read_loop` compares against it to tell whether
+    /// the queue is empty for the FIFO direct-dispatch rule.
+    queue_capacity: usize,
+    /// Optional TLS acceptor for encrypting request plane connections.
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 struct EndpointHandler {
@@ -109,14 +170,19 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
-        let worker_pool_size = get_worker_pool_size();
-        let work_queue_size = get_work_queue_size();
+    pub fn new(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<Arc<Self>> {
+        let SizingConfig {
+            pool_size: worker_pool_size,
+            queue_size: work_queue_size,
+        } = resolve_sizing();
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
             worker_pool_size,
-            work_queue_size
+            work_queue_size,
         );
 
         // Publish static capacities so dashboards can compute saturation ratios.
@@ -132,18 +198,55 @@ impl SharedTcpServer {
         // Create bounded channel for work items
         let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
 
-        // Start worker pool
-        Self::start_worker_pool(worker_pool_size, work_rx, cancellation_token.clone());
+        // Shared with read_loop, which front-acquires permits for direct dispatch.
+        let engine_sem = Arc::new(Semaphore::new(worker_pool_size));
 
-        Arc::new(Self {
+        // Dispatcher drains the overflow queue.
+        Self::start_worker_pool(engine_sem.clone(), work_rx, cancellation_token.clone());
+
+        // Build TLS acceptor from the same env vars as the call-home transport.
+        let tls_acceptor = {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let cert = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
+            let key = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
+            let client_ca = std::env::var(env::DYN_TCP_TLS_CLIENT_CA_CERT_PATH).ok();
+            Self::request_plane_tls_acceptor(
+                cert.as_deref().map(std::path::Path::new),
+                key.as_deref().map(std::path::Path::new),
+                client_ca.as_deref().map(std::path::Path::new),
+            )?
+        };
+
+        Ok(Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
-            // address we requested to bind to.
             bind_addr,
-            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
-        })
+            engine_sem,
+            queue_capacity: work_queue_size,
+            tls_acceptor,
+        }))
+    }
+
+    /// Build the request-plane TLS acceptor from cert/key/client-CA paths.
+    /// Validation and diagnostics are shared with the response-stream server via
+    /// [`crate::tls_utils::server_tls_acceptor_config`]; when a client CA is
+    /// provided, mTLS is enforced (clients must present a trusted certificate).
+    fn request_plane_tls_acceptor(
+        cert: Option<&std::path::Path>,
+        key: Option<&std::path::Path>,
+        client_ca: Option<&std::path::Path>,
+    ) -> Result<Option<TlsAcceptor>> {
+        Ok(
+            crate::tls_utils::server_tls_acceptor_config(
+                "TCP request plane",
+                cert,
+                key,
+                client_ca,
+            )?
+            .map(|config| TlsAcceptor::from(Arc::new(config))),
+        )
     }
 
     /// Start the worker pool dispatcher that processes requests with bounded concurrency
@@ -151,11 +254,11 @@ impl SharedTcpServer {
     /// Uses a single receiver with a semaphore to bound concurrent execution,
     /// avoiding mutex contention that would serialize all workers.
     fn start_worker_pool(
-        pool_size: usize,
+        semaphore: Arc<Semaphore>,
         mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
         cancellation_token: CancellationToken,
     ) {
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(pool_size));
+        let pool_size = semaphore.available_permits();
 
         tokio::spawn(async move {
             tracing::trace!(
@@ -181,10 +284,13 @@ impl SharedTcpServer {
                         // gauge strictly reflects channel occupancy. Permit-acquire wait is
                         // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
                         WORK_HANDLER_QUEUE_DEPTH.dec();
+                        REQUEST_QUEUE_GAUGE.dec();
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
-                        // `dynamo_work_handler_permit_wait_seconds`.
+                        // `dynamo_work_handler_permit_wait_seconds`. Only the queued (dispatcher)
+                        // path observes permit-wait; the direct path in read_loop already holds
+                        // a permit before enqueuing is ever considered.
                         let permit_wait_start = Instant::now();
                         let permit = match semaphore.clone().acquire_owned().await {
                             Ok(p) => p,
@@ -196,17 +302,7 @@ impl SharedTcpServer {
                         WORK_HANDLER_PERMIT_WAIT_SECONDS
                             .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Construct the guard before spawn (inc runs synchronously
-                        // here, so the gauge is never observed negative even if
-                        // the future completes on another worker first), then
-                        // move ownership into the future — Drop handles dec on
-                        // every exit path.
-                        let active_guard = ActiveTaskGuard::new();
-                        tokio::spawn(async move {
-                            let _active_guard = active_guard;
-                            Self::handle_work_item(work_item).await;
-                            drop(permit);
-                        });
+                        Self::spawn_handle(work_item, permit);
                     }
                 }
             }
@@ -218,6 +314,19 @@ impl SharedTcpServer {
             "Started TCP worker dispatcher with concurrency limit {}",
             pool_size
         );
+    }
+
+    /// Spawn the worker task for an item that already holds a permit (the
+    /// direct path in `read_loop` and the queued path in the dispatcher). The
+    /// `ActiveTaskGuard` is built synchronously so the gauge increments before
+    /// the task is polled; the permit drops on completion.
+    fn spawn_handle(work_item: WorkItem, permit: OwnedSemaphorePermit) {
+        let active_guard = ActiveTaskGuard::new();
+        tokio::spawn(async move {
+            let _active_guard = active_guard;
+            Self::handle_work_item(work_item).await;
+            drop(permit);
+        });
     }
 
     /// Handle a single work item
@@ -325,8 +434,43 @@ impl SharedTcpServer {
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
+                            let engine_sem = self.engine_sem.clone();
+                            let queue_capacity = self.queue_capacity;
+                            let tls_acceptor = self.tls_acceptor.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
+                                let (reader, writer): (BoxRead, BoxWrite) =
+                                    if let Some(ref tls) = tls_acceptor {
+                                        match tokio::time::timeout(
+                                            crate::tls_utils::handshake_timeout(),
+                                            tls.accept(stream),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(tls_stream)) => {
+                                                let (r, w) = tokio::io::split(tls_stream);
+                                                (Box::new(r), Box::new(w))
+                                            }
+                                            Ok(Err(e)) => {
+                                                tracing::warn!(
+                                                    peer_addr = %peer_addr,
+                                                    error = %e,
+                                                    "Request-plane TLS handshake failed"
+                                                );
+                                                return;
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    peer_addr = %peer_addr,
+                                                    "Request-plane TLS handshake timed out"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        let (r, w) = tokio::io::split(stream);
+                                        (Box::new(r), Box::new(w))
+                                    };
+                                if let Err(e) = Self::handle_connection(reader, writer, handlers, work_tx, engine_sem, queue_capacity).await {
                                     tracing::error!("TCP connection error: {e}");
                                 }
                             });
@@ -393,21 +537,13 @@ impl SharedTcpServer {
                 "Unregistered TCP endpoint handler"
             );
 
-            let inflight_count = handler.inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    inflight_count = inflight_count,
-                    "Waiting for inflight TCP requests to complete"
-                );
-                while handler.inflight.load(Ordering::SeqCst) > 0 {
-                    handler.notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    "All inflight TCP requests completed"
-                );
-            }
+            super::drain_inflight(
+                handler.inflight.clone(),
+                handler.notify.clone(),
+                endpoint_name,
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
         }
     }
 
@@ -424,14 +560,14 @@ impl SharedTcpServer {
     }
 
     async fn handle_connection(
-        stream: TcpStream,
+        read_half: BoxRead,
+        write_half: BoxWrite,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
-
-        // Split stream into read and write halves for concurrent operations
-        let (read_half, write_half) = tokio::io::split(stream);
 
         // Channel for sending responses to the write task (zero-copy Bytes)
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
@@ -440,7 +576,15 @@ impl SharedTcpServer {
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
 
         // Run read task in current context
-        let read_result = Self::read_loop(read_half, handlers, response_tx, work_tx).await;
+        let read_result = Self::read_loop(
+            read_half,
+            handlers,
+            response_tx,
+            work_tx,
+            engine_sem,
+            queue_capacity,
+        )
+        .await;
 
         // Write task will end when response_tx is dropped
         write_task.await??;
@@ -448,16 +592,30 @@ impl SharedTcpServer {
         read_result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_loop(
-        mut read_half: tokio::io::ReadHalf<TcpStream>,
+        mut read_half: BoxRead,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
 
         // Create zero-copy decoder with optimized buffer size
         let mut decoder = ZeroCopyTcpDecoder::new();
+
+        // Encode and send a response frame; returns false if the write task is gone.
+        let send_response = |msg: TcpResponseMessage| -> bool {
+            match msg.encode() {
+                Ok(encoded) => response_tx.send(encoded).is_ok(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to encode TCP response");
+                    true
+                }
+            }
+        };
 
         loop {
             // Read one complete message with ZERO copies!
@@ -541,60 +699,57 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Reserve a slot in the bounded channel BEFORE incrementing the
-            // queue-depth gauge. Senders parked in `send().await` waiting for
-            // capacity would otherwise count as queue occupancy, letting the
-            // gauge exceed `queue_capacity` under saturation — exactly the
-            // regime this metric exists to surface. `reserve()` waits for
-            // capacity, then `Permit::send` is non-blocking and infallible,
-            // providing the same happens-before edge to the dispatcher's
-            // `recv()` as `send().await` did.
-            match work_tx.reserve().await {
-                Ok(permit) => {
-                    WORK_HANDLER_QUEUE_DEPTH.inc();
-                    permit.send(work_item);
+            // Engine permit free and nothing queued ahead → dispatch directly.
+            // Take the direct path only when the queue is empty so a new request
+            // can't jump ahead of queued ones (FIFO).
+            let queue_empty = work_tx.capacity() == queue_capacity;
+            let direct_permit = if queue_empty {
+                engine_sem.clone().try_acquire_owned().ok()
+            } else {
+                None
+            };
 
-                    // Send acknowledgment ONLY after successful queuing
-                    let ack_response = TcpResponseMessage::empty();
-                    if let Ok(encoded_ack) = ack_response.encode()
-                        && response_tx.send(encoded_ack).is_err()
-                    {
-                        tracing::debug!("Write task closed, ending read loop");
-                        // Clean up inflight counter since work was queued but ACK failed
-                        handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                        handler.notify.notify_one();
+            if let Some(permit) = direct_permit {
+                // Bypass the queue — routing through work_tx would make it a throat.
+                Self::spawn_handle(work_item, permit);
+                if !send_response(TcpResponseMessage::empty()) {
+                    break;
+                }
+                continue;
+            }
+
+            // All engine slots busy (or items already queued): try the overflow queue.
+            match work_tx.try_reserve() {
+                Ok(slot) => {
+                    WORK_HANDLER_QUEUE_DEPTH.inc();
+                    REQUEST_QUEUE_GAUGE.inc();
+                    slot.send(work_item);
+                    // Queued: the dispatcher owns inflight, so don't touch it here.
+                    if !send_response(TcpResponseMessage::empty()) {
                         break;
                     }
-
-                    tracing::trace!(
-                        endpoint = handler.endpoint_name.as_str(),
-                        instance_id = handler.instance_id,
-                        "Request queued and acknowledged"
-                    );
                 }
-                Err(e) => {
-                    // `reserve()` only errors when the receiver has been
-                    // dropped (channel closed) — the dispatcher is gone, so
-                    // the read loop must terminate.
-                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Engine and queue both full → shed; keep the connection open.
+                    REJECTION_REQUEST_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        error = %e,
-                        "Failed to reserve worker pool slot, sending error response"
+                        "Worker at capacity (engine + queue full), rejecting request"
                     );
-
-                    // Send error response to client instead of ACK
-                    let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
-                    if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
-                    }
-
-                    // Clean up inflight counter
+                    send_response(TcpResponseMessage::new(Bytes::from_static(
+                        b"Server overloaded: worker at capacity",
+                    )));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
-
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
+                    send_response(TcpResponseMessage::new(Bytes::from_static(
+                        b"Server unavailable: worker pool channel closed",
+                    )));
+                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                    handler.notify.notify_one();
                     tracing::error!("Worker pool channel closed, shutting down read loop");
                     break;
                 }
@@ -605,7 +760,7 @@ impl SharedTcpServer {
     }
 
     async fn write_loop(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
         while let Some(response) = response_rx.recv().await {
@@ -753,7 +908,7 @@ mod tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Create SharedTcpServer
-        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         // Create a handler that takes 1s to process requests
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
@@ -964,7 +1119,11 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         // Start worker pool with small concurrency limit
-        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
 
         // Create tracking handler
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
@@ -1044,7 +1203,11 @@ mod tests {
         let total_requests = 4;
         let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
         let cancellation_token = CancellationToken::new();
-        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
 
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(25)));
         let inflight = Arc::new(AtomicU64::new(0));
@@ -1096,7 +1259,7 @@ mod tests {
         // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         assert!(
             WORK_HANDLER_POOL_CAPACITY.get() > 0,
@@ -1107,5 +1270,126 @@ mod tests {
             "queue_capacity should be set to DEFAULT_WORK_QUEUE_SIZE"
         );
         cancellation_token.cancel();
+    }
+
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    #[tokio::test]
+    async fn new_no_tls_env_is_plaintext() {
+        let token = CancellationToken::new();
+        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
+            let server =
+                SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+            assert!(server.tls_acceptor.is_none());
+        });
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_partial_tls_config_errors() {
+        let (cert, key) = make_cert_files();
+        let cert_str = cert.path().to_str().unwrap();
+        let key_str = key.path().to_str().unwrap();
+        let token = CancellationToken::new();
+        // only cert set -> returns Err (must not panic)
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert_str)),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        // only key set -> returns Err
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key_str)),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_both_paths_enables_tls() {
+        let (cert, key) = make_cert_files();
+        let token = CancellationToken::new();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+            ],
+            || {
+                let server =
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+                assert!(server.tls_acceptor.is_some());
+            },
+        );
+        token.cancel();
+    }
+
+    #[test]
+    fn request_plane_tls_acceptor_enables_mtls() {
+        let (cert, key) = make_cert_files();
+        // cert + key + client CA -> mTLS acceptor built.
+        assert!(
+            SharedTcpServer::request_plane_tls_acceptor(
+                Some(cert.path()),
+                Some(key.path()),
+                Some(cert.path()),
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn request_plane_tls_rejects_client_ca_without_server_identity() {
+        let (client_ca, _) = make_cert_files();
+        let error = SharedTcpServer::request_plane_tls_acceptor(None, None, Some(client_ca.path()))
+            .err()
+            .expect("a client CA without a server certificate/key must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_TCP_TLS_CLIENT_CA_CERT_PATH requires")
+        );
+    }
+
+    #[test]
+    fn request_plane_tls_reads_client_ca_path() {
+        let (cert, key) = make_cert_files();
+        let error = SharedTcpServer::request_plane_tls_acceptor(
+            Some(cert.path()),
+            Some(key.path()),
+            Some(std::path::Path::new(
+                "/nonexistent/request-plane-client-ca.pem",
+            )),
+        )
+        .err()
+        .expect("an invalid client CA path must fail mTLS configuration");
+        assert!(format!("{error:#}").contains("reading client CA cert"));
     }
 }

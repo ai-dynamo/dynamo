@@ -1,45 +1,47 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shadow mode utilities for GMS vLLM integration."""
+"""GMS vLLM integration utilities."""
 
 import logging
 import os
 
 logger = logging.getLogger(__name__)
 
+# Optional override for the gpu_memory_service log level in the vLLM worker
+# (a logging level name, e.g. "DEBUG"); unset falls back to vLLM's own level.
+# vLLM-integration-scoped, so it lives here rather than in common (which is
+# reserved for operator/Go-lockstep env vars honored across every context).
+ENV_LOG_LEVEL = "DYN_GMS_VLLM_LOG_LEVEL"
 
-def is_shadow_mode() -> bool:
-    """True when DYN_GMS_SHADOW_MODE=1 (set by main.py at startup)."""
-    return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
 
+def configure_gms_worker_logging() -> None:
+    """Route gpu_memory_service logs through vLLM's handler in worker subprocesses.
 
-def validate_cudagraph_mode(engine_args) -> None:
-    """Validate and set cudagraph mode for shadow engines.
-
-    Defaults unset mode to PIECEWISE (attention stubbed during graph capture).
-    Accepts NONE (e.g. enforce_eager). Rejects FULL variants which need
-    KV cache tensors that don't exist during shadow init.
+    vLLM configures only the "vllm" logger, so gpu_memory_service.* INFO is
+    silently dropped in EngineCore worker processes. Copy vLLM's handlers onto
+    the "gpu_memory_service" parent logger so every child inherits them via
+    propagation, at DYN_GMS_VLLM_LOG_LEVEL or vLLM's own level. Idempotent.
     """
-    from vllm.config import CompilationConfig, CUDAGraphMode
+    gms_root = logging.getLogger("gpu_memory_service")
+    if gms_root.handlers:
+        return
+    import vllm.logger  # noqa: F401 — ensure vLLM configured logging first
 
-    cc = engine_args.compilation_config
-    assert isinstance(cc, CompilationConfig), (
-        f"Expected CompilationConfig, got {type(cc).__name__}. "
-        f"vLLM's arg parsing may have changed."
-    )
-
-    if cc.cudagraph_mode is None:
-        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        logger.info("[Shadow] cudagraph_mode defaulted to PIECEWISE")
-    elif cc.cudagraph_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-        pass  # compatible
+    vllm_logger = logging.getLogger("vllm")
+    for handler in vllm_logger.handlers:
+        gms_root.addHandler(handler)
+    level_name = os.environ.get(ENV_LOG_LEVEL)
+    # getLevelName maps a valid level name to its int; anything unknown comes
+    # back as a "Level <x>" string, so only apply it when it resolved to an int.
+    level = logging.getLevelName(level_name) if level_name else None
+    if isinstance(level, int):
+        gms_root.setLevel(level)
+    elif vllm_logger.level != logging.NOTSET:
+        gms_root.setLevel(vllm_logger.level)
     else:
-        raise ValueError(
-            f"Shadow mode requires PIECEWISE or NONE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}. FULL modes capture attention ops "
-            f"that need KV cache tensors, which don't exist during shadow init."
-        )
+        gms_root.setLevel(logging.INFO)
+    gms_root.propagate = False
 
 
 def configure_gms_lock_mode(engine_args) -> None:
@@ -72,3 +74,34 @@ def configure_gms_lock_mode(engine_args) -> None:
         extra["gms_read_only"] = True
 
     engine_args.model_loader_extra_config = extra
+
+
+def configure_mx_ports(engine_args) -> None:
+    """Offset MX metadata and gRPC base ports per engine to avoid bind collisions.
+
+    In failover pods, both engines share a network namespace. MX binds
+    NIXL metadata on ``MX_METADATA_PORT + device_id`` and worker gRPC on
+    ``MX_WORKER_GRPC_PORT + device_id``. Without offsetting, engines with
+    the same device_id collide (EADDRINUSE on the NIXL listener).
+
+    Offsets by ``engine_id * tp_size`` so each engine's port range is
+    non-overlapping:
+        engine 0, TP=2: metadata 5555-5556, gRPC 6555-6556
+        engine 1, TP=2: metadata 5557-5558, gRPC 6557-6558
+    """
+    if os.environ.get("MX_ENABLED", "0") != "1":
+        return
+
+    engine_id = int(os.environ.get("ENGINE_ID", "0"))
+    offset = engine_id * (engine_args.tensor_parallel_size or 1)
+    mx_metadata_base = int(os.environ.get("MX_METADATA_PORT", "5555")) + offset
+    mx_grpc_base = int(os.environ.get("MX_WORKER_GRPC_PORT", "6555")) + offset
+    os.environ["MX_METADATA_PORT"] = str(mx_metadata_base)
+    os.environ["MX_WORKER_GRPC_PORT"] = str(mx_grpc_base)
+
+    logger.info(
+        "[GMS-MX] MX ports for engine-%d: metadata=%d, grpc=%d",
+        engine_id,
+        mx_metadata_base,
+        mx_grpc_base,
+    )

@@ -19,15 +19,26 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import (
+    configure_snapshot_capture_env,
+    is_snapshot_enabled,
+)
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import enable_disjoint_streaming_output
+from dynamo.sglang._compat import ensure_sglang_tensor_image_size
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -35,7 +46,13 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool = False
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -61,6 +78,85 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
+    """Translate Dynamo's SGLang config into DiffGenerator arguments."""
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    kwargs = {
+        "model_path": server_args.model_path,
+        "num_gpus": tp_size * dp_size,
+        "tp_size": tp_size,
+        "dp_size": dp_size,
+        "dist_timeout": getattr(server_args, "dist_timeout", None),
+    }
+
+    # The text-engine CLI names this --nccl-port; DiffGenerator v0.5.15+
+    # names the same torch.distributed rendezvous setting ``master_port``.
+    # Omit it when unset so SGLang retains its own default/settling behavior.
+    if (master_port := getattr(server_args, "nccl_port", None)) is not None:
+        kwargs["master_port"] = master_port
+
+    return kwargs
+
+
+def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
+    """Return the worker role when the selected path does not create an FPM relay."""
+    if is_snapshot_enabled():
+        return "snapshot"
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if (
+        dynamo_config.multimodal_encode_worker
+        or dynamo_config.multimodal_worker
+        or dynamo_config.dedicated_mm_encoder
+    ):
+        return "dedicated multimodal"
+    if dynamo_config.image_diffusion_worker:
+        return "image diffusion"
+    if dynamo_config.video_generation_worker:
+        return "video generation"
+    return None
+
+
+def _forward_pass_metrics_source(dynamo_config: DynamoConfig) -> Optional[str]:
+    """Resolve the FPM opt-in source while preserving the legacy port switch."""
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
+        return "DYN_FORWARDPASS_METRIC_PORT"
+    if not dynamo_config.fpm_trace:
+        return None
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None:
+        return "--fpm-trace/DYN_FPM_TRACE"
+
+    logging.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but SGLang %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return None
+
+
+def use_modelexpress_remote_instance(args: Any) -> bool:
+    return (
+        getattr(args, "load_format", None) == "remote_instance"
+        and getattr(args, "remote_instance_weight_loader_backend", None)
+        == "modelexpress"
+    )
+
+
+def is_object_storage_path(model_path: str) -> bool:
+    return model_path.startswith(("s3://", "gs://", "az://"))
+
+
+def should_fetch_model(args: Any, model_path: str) -> bool:
+    if os.path.exists(model_path):
+        return False
+    if is_object_storage_path(model_path):
+        return False
+    return not use_modelexpress_remote_instance(args)
+
+
 # Register SGLang-specific encoders with the shared system
 @register_encoder(Config)
 def _preprocess_for_encode_config(
@@ -70,9 +166,9 @@ def _preprocess_for_encode_config(
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
-        "serving_mode": config.serving_mode.value
-        if config.serving_mode is not None
-        else "None",
+        "serving_mode": (
+            config.serving_mode.value if config.serving_mode is not None else "None"
+        ),
     }
 
 
@@ -90,6 +186,20 @@ def _has_cli_flag(args: list[str], flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
 
 
+def _get_last_cli_flag_value(args: list[str], flag: str) -> Optional[str]:
+    """Return the last CLI flag value from '--flag val' or '--flag=val' form."""
+    prefix = f"{flag}="
+    value = None
+    for idx, arg in enumerate(args):
+        if arg.startswith(prefix):
+            value = arg[len(prefix) :]
+        if arg == flag:
+            if idx + 1 >= len(args):
+                continue
+            value = args[idx + 1]
+    return value
+
+
 def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
     """Remove a flag from CLI args, supporting '--flag val' and '--flag=val' forms."""
     updated: list[str] = []
@@ -105,6 +215,73 @@ def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
             continue
         updated.append(arg)
     return updated
+
+
+def _set_cli_flag_value(args: list[str], flag: str, value: str) -> list[str]:
+    """Set a flag value once, preserving argparse's last-value-wins behavior."""
+    updated = _remove_cli_flag_and_value(args, flag)
+    updated.extend([flag, value])
+    return updated
+
+
+def _normalize_multimodal_disaggregation_args(
+    unknown: list[str], dynamo_config: "DynamoConfig"
+) -> list[str]:
+    """Map Dynamo's canonical multimodal args to SGLang's current flags."""
+    disaggregation_mode = _get_last_cli_flag_value(unknown, "--disaggregation-mode")
+    if disaggregation_mode is None:
+        if dynamo_config.dedicated_mm_encoder and not dynamo_config.multimodal_worker:
+            raise ValueError(
+                "--dedicated-mm-encoder requires --disaggregation-mode=pd, "
+                "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+            )
+        return unknown
+
+    requested_disaggregation_mode = disaggregation_mode
+    if disaggregation_mode in {
+        DisaggregationMode.AGGREGATED.value,
+        PREFILL_DECODE_DISAGGREGATION_MODE,
+    }:
+        unknown = _set_cli_flag_value(unknown, "--disaggregation-mode", "null")
+        disaggregation_mode = "null"
+
+    if disaggregation_mode == DisaggregationMode.ENCODE.value:
+        if dynamo_config.dedicated_mm_encoder:
+            raise ValueError(
+                "--dedicated-mm-encoder is for PD/P/D workers that consume or "
+                "forward embeddings from a separate encode worker. Do not "
+                "combine it with --disaggregation-mode=encode."
+            )
+        if not dynamo_config.enable_multimodal:
+            logging.warning(
+                "--disaggregation-mode=encode is only valid for SGLang "
+                "multimodal EPD; treating it as --enable-multimodal "
+                "--disaggregation-mode=encode for this release."
+            )
+            dynamo_config.enable_multimodal = True
+        dynamo_config.multimodal_encode_worker = True
+        return _remove_cli_flag_and_value(unknown, "--disaggregation-mode")
+
+    internal_multimodal_role = (
+        requested_disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE
+        or disaggregation_mode in {"prefill", "decode"}
+    )
+    if dynamo_config.dedicated_mm_encoder and not internal_multimodal_role:
+        raise ValueError(
+            "--dedicated-mm-encoder only applies to --disaggregation-mode=pd, "
+            "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+        )
+
+    if (
+        dynamo_config.enable_multimodal
+        and dynamo_config.dedicated_mm_encoder
+        and not dynamo_config.multimodal_encode_worker
+        and not dynamo_config.multimodal_worker
+        and internal_multimodal_role
+    ):
+        dynamo_config.multimodal_worker = True
+
+    return unknown
 
 
 def _load_disagg_config_section(config_path: str, config_key: str) -> dict[str, Any]:
@@ -164,7 +341,6 @@ async def parse_args(args: list[str]) -> Config:
 
     Args:
         args: Command-line argument strings.
-
     Returns:
         Config object with server_args and dynamo_args.
 
@@ -201,13 +377,21 @@ async def parse_args(args: list[str]) -> Config:
             continue
         sg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto DynamoConfig: the router's --router-kv-events lands on
+    # `use_kv_events`, which DynamoConfig already uses for "this worker
+    # publishes KV events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     dynamo_args, unknown = parser.parse_known_args(args)
 
     dynamo_config = DynamoConfig.from_cli_args(dynamo_args)
+    # Consume the router flags before the SGLang parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
     dynamo_config.validate()
 
     # Dealing with SGLang native configs
-    temp_config_file = None  # Track temp file for cleanup
+    temp_config_file = None
     if dynamo_config.disagg_config and dynamo_config.disagg_config_key:
         section_data = _load_disagg_config_section(
             dynamo_config.disagg_config, dynamo_config.disagg_config_key
@@ -220,18 +404,25 @@ async def parse_args(args: list[str]) -> Config:
         unknown.append("--config")
         unknown.append(temp_config_file)
 
-    if "--config" in unknown:
-        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        unknown = config_merger.merge_config_with_args(unknown)
+    try:
+        if "--config" in unknown:
+            config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
+            unknown = config_merger.merge_config_with_args(unknown)
 
-    parsed_args = sglang_only_parser.parse_args(unknown)
+        unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
+        dynamo_config.validate_multimodal_topology()
 
-    # Clean up temp file if created
-    if temp_config_file and os.path.exists(temp_config_file):
-        try:
-            os.unlink(temp_config_file)
-        except Exception:
-            logging.warning(f"Failed to clean up temp config file: {temp_config_file}")
+        parsed_args = sglang_only_parser.parse_args(unknown)
+    finally:
+        if temp_config_file and os.path.exists(temp_config_file):
+            try:
+                os.unlink(temp_config_file)
+            except OSError as e:
+                logging.warning(
+                    "Failed to clean up temp config file %s: %s",
+                    temp_config_file,
+                    e,
+                )
 
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
 
@@ -246,9 +437,18 @@ async def parse_args(args: list[str]) -> Config:
     # otherwise fall back to default endpoints
     namespace = dynamo_config.namespace
 
+    # Dynamo's parser consumes --enable-multimodal; forward it to SGLang.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
+
+    # Enable encoder_only mode for multimodal encode workers to load only vision encoder
+    # This significantly reduces memory usage by avoiding loading the full LLM weights
+    if dynamo_config.multimodal_encode_worker:
+        parsed_args.encoder_only = True
 
     endpoint = dynamo_config.endpoint
     if endpoint is None:
@@ -264,7 +464,7 @@ async def parse_args(args: list[str]) -> Config:
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
         elif dynamo_config.multimodal_encode_worker:
-            endpoint = f"dyn://{namespace}.encoder.generate"
+            endpoint = f"dyn://{namespace}.encode.generate"
         elif (
             dynamo_config.multimodal_worker
             and parsed_args.disaggregation_mode == "prefill"
@@ -278,17 +478,13 @@ async def parse_args(args: list[str]) -> Config:
         endpoint
     )
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
-    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    # Native and Dynamo tool parsers both construct tool calls, so they remain
+    # mutually exclusive. Reasoning parsers intentionally may be paired: the
+    # native parser gates guided decoding while Dynamo constructs the response.
     _validate_parser_flags(
         parsed_args.tool_call_parser,
         dynamo_config.dyn_tool_call_parser,
         "tool-call-parser",
-    )
-    _validate_parser_flags(
-        parsed_args.reasoning_parser,
-        dynamo_config.dyn_reasoning_parser,
-        "reasoning-parser",
     )
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
@@ -314,7 +510,24 @@ async def parse_args(args: list[str]) -> Config:
             )
 
     model_path = parsed_args.model_path
-    # Name the model
+
+    # --served-model-name may pack several names (whitespace-/comma-separated);
+    # the first is the primary, the rest are aliases. Split BEFORE the
+    # model_path fallback so a model path containing whitespace doesn't produce
+    # spurious aliases.
+    served_names = split_served_model_names(parsed_args.served_model_name)
+    if served_names:
+        parsed_args.served_model_name = served_names[0]
+        dynamo_config.served_model_aliases = served_names[1:]
+        if served_names[1:]:
+            logging.info(
+                "Multi-name registration: primary=%r, aliases=%s",
+                served_names[0],
+                served_names[1:],
+            )
+
+    # Name the model — falls back to model_path only if neither
+    # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
@@ -324,8 +537,11 @@ async def parse_args(args: list[str]) -> Config:
     # sglang will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if not os.path.exists(model_path):
+    if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
+
+    if is_snapshot_enabled():
+        configure_snapshot_capture_env()
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
@@ -335,6 +551,19 @@ async def parse_args(args: list[str]) -> Config:
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = dynamo_config.image_diffusion_worker
     video_generation_worker = dynamo_config.video_generation_worker
+
+    # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    fpm_source = _forward_pass_metrics_source(dynamo_config)
+    if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
+        parsed_args.enable_forward_pass_metrics = True
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
+
+    if (
+        parsed_args.dllm_algorithm
+        and getattr(parsed_args, "max_running_requests", None) is None
+    ):
+        parsed_args.max_running_requests = 8
+        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     if image_diffusion_worker or video_generation_worker:
         worker_type = (
@@ -356,16 +585,31 @@ async def parse_args(args: list[str]) -> Config:
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.tp_size = getattr(parsed_args, "tp_size", 1)
         server_args.dp_size = getattr(parsed_args, "dp_size", 1)
+        # DiffGenerator calls this ``master_port``. Preserve SGLang's existing
+        # --nccl-port CLI value on the lightweight diffusion config so the init
+        # path can map a test-allocated port into torch.distributed.
+        server_args.nccl_port = getattr(parsed_args, "nccl_port", None)
+        # _diffusion_generator_kwargs forwards dist_timeout to DiffGenerator;
+        # without this copy the stub never carries it and --dist-timeout is
+        # silently dropped for diffusion workers.
+        server_args.dist_timeout = getattr(parsed_args, "dist_timeout", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
         server_args.load_format = None
         server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
+        server_args.enable_forward_pass_metrics = getattr(
+            parsed_args, "enable_forward_pass_metrics", False
+        )
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
     else:
+        # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
+        parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
+        if server_args.get_model_config().is_multimodal:
+            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
@@ -373,12 +617,6 @@ async def parse_args(args: list[str]) -> Config:
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
         )
-
-    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. Modern SGLang gates this
-    # behavior behind incremental_streaming_output, while older releases used
-    # stream_output.
-    enable_disjoint_streaming_output(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
@@ -410,19 +648,6 @@ async def parse_args(args: list[str]) -> Config:
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
-
-    # SGLang's DLLM scheduler reads server_args.max_running_requests directly
-    # but the field stays None until the normal scheduler init sets it from
-    # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
-    # doesn't crash on `None - int`.
-    # Only applies to real DLLM workers (truthy algorithm string), not
-    # video/image diffusion stubs where dllm_algorithm=False.
-    if (
-        server_args.dllm_algorithm
-        and getattr(server_args, "max_running_requests", None) is None
-    ):
-        server_args.max_running_requests = 8
-        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name

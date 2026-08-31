@@ -231,6 +231,13 @@ class TestImageDiffusionWorkerHandler:
         async for result in handler.generate(request, mock_context):
             results.append(result)
 
+        assert (
+            handler.generator.generate.call_args.kwargs["sampling_params_kwargs"][
+                "num_inference_steps"
+            ]
+            == 50
+        )
+
     @pytest.mark.asyncio
     async def test_generate_error_handling(self, handler, mock_context):
         """Test error handling in generate method."""
@@ -365,13 +372,11 @@ class TestImageDiffusionWorkerHandler:
 
         # Execute generation
         results = []
-        trace_patch = patch(
-            "dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler.build_trace_headers",
-            return_value={"traceparent": "00-1234567890-1234567890-01"},
+        mock_context.trace_headers = MagicMock(
+            return_value={"traceparent": "00-1234567890-1234567890-01"}
         )
-        with trace_patch:
-            async for result in handler.generate(request, mock_context):
-                results.append(result)
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
 
         # Verify results
         handler._generate_images.assert_called_once_with(

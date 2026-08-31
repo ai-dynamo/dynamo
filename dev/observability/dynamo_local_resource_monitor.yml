@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dedicated Prometheus config for high-frequency GPU monitoring metrics.
+#
+# WHY A SEPARATE INSTANCE?
+#
+# The dynamo_local_resource_monitor.py exporter is scraped at 200ms (5 samples/sec)
+# to capture short-lived GPU memory spikes and PCIe bursts.  This is ~5-50x
+# the rate of the main Prometheus instance (which scrapes at 1-10s intervals).
+#
+# Mixing 200ms scrapes into the main instance would:
+#   1. Inflate TSDB storage for ALL metrics (retention is global, not per-job).
+#   2. Increase memory/CPU pressure on the main Prometheus, risking query latency
+#      for the dashboards that rely on it (Grafana, alerting rules, etc.).
+#   3. Make a short retention (15m) impossible without also truncating the
+#      long-lived NATS/etcd/DCGM/frontend/backend history.
+#
+# By running a second instance with --storage.tsdb.retention.time=15m, we get
+# high-frequency samples without any impact on the primary observability stack.
+# Grafana can query both instances as separate datasources.
+
+global:
+  scrape_interval: 200ms
+  evaluation_interval: 1s
+
+scrape_configs:
+  - job_name: 'dynamo-resource-monitor'
+    scrape_interval: 200ms
+    # scrape_timeout < scrape_interval to leave headroom for GIL/NVML/serialization spikes.
+    scrape_timeout: 150ms
+    static_configs:
+      - targets: ['host.docker.internal:8051']

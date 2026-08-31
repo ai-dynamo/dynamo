@@ -143,11 +143,41 @@ class CancellableRequest:
         self._active_sockets.clear()
 
         # Also close at the requests level for cleanup
-        if self.response:
+        if self.response is not None:
             self.response.close()
         for adapter in self.session.adapters.values():
             adapter.close()
         self.session.close()
+
+    def raise_for_early_failure(self) -> None:
+        """Raise when a request finishes with an error before reaching a worker."""
+        request_thread = self._request_thread
+        if request_thread is None or request_thread.is_alive():
+            return
+
+        if self.exception is not None:
+            exception = self.exception
+            self.cancel()
+            raise AssertionError(
+                f"Request failed before reaching the worker: {exception}"
+            ) from exception
+
+        if self.response is None:
+            self.cancel()
+            raise AssertionError(
+                "Request finished before reaching the worker without a response"
+            )
+
+        if not 200 <= self.response.status_code < 300:
+            status_code = self.response.status_code
+            response_body = self.response.text.strip()
+            if len(response_body) > 1000:
+                response_body = f"{response_body[:1000]}..."
+            self.cancel()
+            raise AssertionError(
+                "Request failed before reaching the worker: "
+                f"HTTP {status_code}: {response_body}"
+            )
 
     def get_response(self):
         """Get the response or raise exception if there was one"""
@@ -235,6 +265,7 @@ def send_cancellable_request(
     frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
+    max_tokens: int = 16384,
 ) -> CancellableRequest:
     """Send a request that can be manually cancelled.
 
@@ -242,6 +273,7 @@ def send_cancellable_request(
         frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
+        max_tokens: Maximum tokens to generate for the cancellable request
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -251,11 +283,15 @@ def send_cancellable_request(
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384, frontend_port)
+        return send_completion_request(prompt, max_tokens, frontend_port)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=False
+        )
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=True
+        )
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -435,6 +471,8 @@ def verify_runtime_cancellation_metrics(
     worker_system_port: int,
     expected_count: int = 0,
     component: str = "backend",
+    max_wait_ms: int = 0,
+    poll_interval_ms: int = 100,
 ) -> None:
     """
     Verify runtime (worker) cancellation metrics.
@@ -443,6 +481,65 @@ def verify_runtime_cancellation_metrics(
         worker_system_port: Port where the worker /metrics is served
         expected_count: Expected cumulative cancellation count
         component: The dynamo_component label value (e.g. "backend", "prefill")
+        max_wait_ms: If > 0, retry the scrape until the metric matches
+            expected_count or the timeout expires. Use this when the counter
+            increment is asynchronous to whatever signal triggered the check
+        poll_interval_ms: Interval between retries when max_wait_ms > 0.
+    """
+    worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+
+    deadline = time.monotonic() + max_wait_ms / 1000.0
+    count = -1
+    while True:
+        try:
+            response = requests.get(worker_metrics_url, timeout=5)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            pytest.fail(
+                f"Failed to fetch worker metrics from {worker_metrics_url}: {e}"
+            )
+
+        worker_text = response.text
+        count = _parse_runtime_cancellation_metric(worker_text, component=component)
+        if count == expected_count or time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval_ms / 1000.0)
+
+    logger.info(f"Runtime cancellation metrics (component={component}): {count}")
+
+    assert count == expected_count, (
+        f"Runtime (component={component}): expected {expected_count} cancellations, "
+        f"but got {count}"
+    )
+
+
+def _parse_labeled_metric(
+    metrics_text: str, metric_name: str, label_filters: Dict[str, str]
+) -> float | None:
+    """Return the first matching line's value, or None if not found."""
+    for line in metrics_text.splitlines():
+        if not line.startswith(f"{metric_name}{{"):
+            continue
+        if not all(f'{k}="{v}"' in line for k, v in label_filters.items()):
+            continue
+        parts = line.rsplit(None, 1)
+        if len(parts) == 2:
+            try:
+                return float(parts[1])
+            except ValueError:
+                pass
+    return None
+
+
+def read_worker_generate_summary(
+    worker_system_port: int,
+    component: str,
+) -> Dict[str, float]:
+    """
+    Read the dynamo-runtime ingress summary metrics for the worker `generate`
+    endpoint. `duration_count` increments only after RequestMetricsGuard::drop,
+    so it confirms the response stream fully drained (i.e. the request wasn't
+    aborted mid-flight).
     """
     worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
     try:
@@ -451,15 +548,22 @@ def verify_runtime_cancellation_metrics(
     except requests.RequestException as e:
         pytest.fail(f"Failed to fetch worker metrics from {worker_metrics_url}: {e}")
 
-    worker_text = response.text
-    count = _parse_runtime_cancellation_metric(worker_text, component=component)
-
-    logger.info(f"Runtime cancellation metrics (component={component}): {count}")
-
-    assert count == expected_count, (
-        f"Runtime (component={component}): expected {expected_count} cancellations, "
-        f"but got {count}"
-    )
+    text = response.text
+    filters = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    return {
+        "duration_sum": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_sum", filters
+        )
+        or 0.0,
+        "duration_count": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_count", filters
+        )
+        or 0.0,
+        "response_bytes": _parse_labeled_metric(
+            text, "dynamo_component_response_bytes_total", filters
+        )
+        or 0.0,
+    }
 
 
 def read_log_content(log_path: str | None) -> str:
@@ -487,6 +591,7 @@ def poll_for_pattern(
     max_wait_ms: int = 500,
     poll_interval_ms: int = 5,
     match_type: str = "endswith",  # "contains" or "endswith"
+    cancellable_request: CancellableRequest | None = None,
 ) -> tuple[str, int]:
     """
     Poll process log for a specific pattern.
@@ -498,6 +603,7 @@ def poll_for_pattern(
         max_wait_ms: Maximum time to wait for the pattern in milliseconds
         poll_interval_ms: Interval between polls in milliseconds
         match_type: How to match the pattern - "contains" or "endswith"
+        cancellable_request: Request to check for an early HTTP or transport failure
 
     Returns:
         Tuple of (matched_content, new_log_offset) where matched_content is:
@@ -546,9 +652,15 @@ def poll_for_pattern(
         # Update offset for next poll
         current_offset = len(log_content)
 
+        if cancellable_request is not None:
+            cancellable_request.raise_for_early_failure()
+
         # Wait before next poll
         time.sleep(poll_interval_ms / 1000.0)
         iteration += 1
+
+    if cancellable_request is not None:
+        cancellable_request.raise_for_early_failure()
 
     raise AssertionError(
         f"Failed to find '{pattern}' pattern after {max_iterations} iterations ({max_wait_ms}ms)"

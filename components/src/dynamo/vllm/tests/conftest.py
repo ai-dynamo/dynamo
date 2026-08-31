@@ -6,10 +6,52 @@ Handles conditional test collection to prevent import errors when the vllm
 framework is not installed in the current container.
 """
 
+import importlib
 import importlib.util
 import sys
 
 import pytest
+
+# Cached result of attempting to import the omni handler module.
+# `None` = not yet attempted, `True` = succeeded, `False` = raised.
+_omni_importable: bool | None = None
+_vllm_importable: bool | None = None
+
+
+def _can_import_vllm() -> bool:
+    """Try to import a canonical vLLM submodule once and cache the result.
+
+    Some CI images carry a top-level ``vllm`` namespace without the full vLLM
+    package. ``find_spec("vllm")`` is true there, but backend tests still fail
+    during collection when they import ``vllm.config``/``vllm.inputs``.
+    """
+    global _vllm_importable
+    if _vllm_importable is None:
+        try:
+            importlib.import_module("vllm.config")
+            _vllm_importable = True
+        except Exception:
+            _vllm_importable = False
+    return _vllm_importable
+
+
+def _can_import_omni() -> bool:
+    """Try to import dynamo.vllm.omni.base_handler once and cache the result.
+
+    Catches any exception, not just ImportError — vllm_omni's import chain
+    can raise NotImplementedError (and other types) when vllm._C / libcuda
+    aren't available on a CPU-only runner. importlib.util.find_spec is
+    insufficient because it only resolves the top-level package, not the
+    transitive imports that actually fail.
+    """
+    global _omni_importable
+    if _omni_importable is None:
+        try:
+            importlib.import_module("dynamo.vllm.omni.base_handler")
+            _omni_importable = True
+        except Exception:
+            _omni_importable = False
+    return _omni_importable
 
 
 def pytest_ignore_collect(collection_path, config):
@@ -18,9 +60,69 @@ def pytest_ignore_collect(collection_path, config):
     """
     filename = collection_path.name
     if filename.startswith("test_vllm_"):
-        if importlib.util.find_spec("vllm") is None:
+        if not _can_import_vllm():
             return True  # vllm not available, skip this file
+    # Omni tests import dynamo.vllm.omni.* which transitively imports
+    # vllm_omni at module load. On CPU-only sample-runtime runners the
+    # import chain reaches vllm._C and raises (NotImplementedError when
+    # libcuda.so.1 is missing). Each file's local try/except ImportError
+    # doesn't catch this, so skip collection up-front if the canonical
+    # omni module isn't importable.
+    parts = collection_path.parts
+    if "omni" in parts and filename.startswith("test_"):
+        if not _can_import_omni():
+            return True
     return None
+
+
+_PLATFORM_UNSET = object()
+
+
+@pytest.fixture
+def vllm_cpu_platform_when_no_accelerator():
+    """Pin vLLM's CpuPlatform on hosts where vLLM recognizes no accelerator.
+
+    Tests that build the vLLM engine argument parser reach
+    ``DeviceConfig.__post_init__``, which resolves ``current_platform`` when
+    ``device`` is left at ``"auto"`` and raises ``RuntimeError: Failed to infer
+    device type`` if the resolved platform has an empty ``device_type``. With no
+    accelerator every builtin platform plugin declines and the resolver falls
+    back to ``UnspecifiedPlatform``, whose ``device_type`` is exactly that. The
+    parser instantiates each config dataclass to compute its argparse default,
+    so this fires while *building* the parser -- passing ``--device cpu`` cannot
+    avoid it.
+
+    Gating on ``device_type`` rather than on ``torch.cuda`` makes this a no-op
+    wherever vLLM already recognizes the hardware, so both CUDA and XPU runners
+    keep exercising real detection (these modules are also marked ``xpu_1``).
+
+    ``vllm.platforms`` resolves ``current_platform`` lazily through a module
+    ``__getattr__``, and assigning the name writes a real module-dict entry that
+    shadows the hook. That entry, not the ``__setattr__`` the module also
+    defines, is what makes the pin visible: the interpreter never calls a
+    module-level ``__setattr__``, since PEP 562 covers only ``__getattr__`` and
+    ``__dir__``. Teardown therefore *deletes* the entry to re-arm the lazy hook
+    -- assigning the previous value back would leave the resolver shadowed for
+    every later test on this xdist worker.
+    """
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms import current_platform
+
+    if current_platform.device_type:
+        yield
+        return
+
+    from vllm.platforms.cpu import CpuPlatform
+
+    previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
+    vllm_platforms.current_platform = CpuPlatform()
+    try:
+        yield
+    finally:
+        if previous is _PLATFORM_UNSET:
+            del vllm_platforms.current_platform
+        else:
+            vllm_platforms.current_platform = previous
 
 
 def make_cli_args_fixture(module_name: str):

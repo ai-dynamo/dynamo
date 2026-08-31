@@ -22,7 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -30,16 +30,18 @@ import (
 type CheckpointInfo struct {
 	Enabled          bool
 	Exists           bool
-	Identity         *nvidiacomv1alpha1.DynamoCheckpointIdentity
 	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	Hash             string
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
+	// Empty means the restore pod targets the default main container.
+	RestoreTargetContainers []string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
-	hash, err := checkpointIdentityHash(ckpt)
+	hash, err := CheckpointID(ckpt)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +49,6 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	return &CheckpointInfo{
 		Enabled:          true,
 		Exists:           true,
-		Identity:         &ckpt.Spec.Identity,
 		GPUMemoryService: ckpt.Spec.GPUMemoryService,
 		Hash:             hash,
 		ArtifactVersion:  checkpointArtifactVersion(ckpt),
@@ -65,10 +66,14 @@ func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string 
 
 func ResolveCheckpointForService(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
+	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
+	}
 	switch {
 	case config == nil || !config.Enabled:
 		return &CheckpointInfo{Enabled: false}, nil
@@ -81,9 +86,20 @@ func ResolveCheckpointForService(
 			return nil, fmt.Errorf("failed to get referenced checkpoint %s: %w", *config.CheckpointRef, err)
 		}
 
-		return checkpointInfoFromObject(ckpt)
+		info, err := checkpointInfoFromObject(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		if config.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{config.TargetContainerName}
+		}
+		info.StartupPolicy = startupPolicy
+		return info, nil
 	case config.Identity == nil:
-		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
+		return &CheckpointInfo{
+			Enabled:       true,
+			StartupPolicy: startupPolicy,
+		}, nil
 	}
 
 	hash, err := ComputeIdentityHash(*config.Identity)
@@ -97,9 +113,9 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:       true,
+			Hash:          hash,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -107,6 +123,9 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
-	info.Identity = config.Identity
+	if config.TargetContainerName != "" {
+		info.RestoreTargetContainers = []string{config.TargetContainerName}
+	}
+	info.StartupPolicy = startupPolicy
 	return info, nil
 }

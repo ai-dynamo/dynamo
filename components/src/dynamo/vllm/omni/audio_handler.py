@@ -11,7 +11,15 @@ import base64
 import logging
 from typing import Any, Dict
 
+from transformers import AutoTokenizer
 from vllm_omni.inputs.data import OmniTextPrompt
+
+try:
+    from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
+        Qwen3TTSPromptEmbedsBuilder,
+    )
+except ImportError:
+    Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
@@ -179,8 +187,28 @@ class AudioGenerationHandler:
         if not req.input or not req.input.strip():
             raise ValueError("Input text cannot be empty")
 
+        output_format = (req.response_format or "wav").lower()
+
+        # URL delivery, whole-file encoders, and speed adjustment require the
+        # complete waveform before the worker can emit a response. A missing or
+        # false capability identifies a legacy frontend that also needs one
+        # aggregated item. TODO(v1.7): Remove this compatibility check after
+        # v1.4 leaves the N-2 window.
+        frontend_accepts_audio_chunks = bool(
+            req.nvext and req.nvext.frontend_accepts_audio_chunks
+        )
+        returns_audio_bytes = req.data_source != "url"
+        supports_chunk_encoding = output_format in {"pcm", "wav"}
+        uses_default_speed = req.speed is None or req.speed == 1.0
+        stream_audio = (
+            frontend_accepts_audio_chunks
+            and returns_audio_bytes
+            and supports_chunk_encoding
+            and uses_default_speed
+        )
+
         if self._is_tts_model():
-            return await self._engine_inputs_tts(req)
+            return await self._engine_inputs_tts(req, stream_audio=stream_audio)
 
         # Generic audio model – plain text prompt (same as image/video)
         prompt = OmniTextPrompt(prompt=req.input)
@@ -189,13 +217,17 @@ class AudioGenerationHandler:
             prompt=prompt,
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
-            response_format=req.response_format,
+            response_format=req.data_source,
+            output_format=req.response_format,
             speed=req.speed or 1.0,
+            stream_audio=stream_audio,
         )
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
-    async def _engine_inputs_tts(self, req: NvCreateAudioSpeechRequest):
+    async def _engine_inputs_tts(
+        self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
+    ):
         """Build engine inputs for Qwen3-TTS models."""
         from dynamo.vllm.omni.omni_handler import EngineInputs
 
@@ -245,8 +277,10 @@ class AudioGenerationHandler:
             prompt=prompt,
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
-            response_format=req.response_format,
+            response_format=req.data_source,
+            output_format=req.response_format,
             speed=req.speed or 1.0,
+            stream_audio=stream_audio,
         )
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
@@ -377,25 +411,25 @@ class AudioGenerationHandler:
 
         Falls back to 2048 if the model-specific estimator is unavailable.
         """
-        try:
-            from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
-                Qwen3TTSTalkerForConditionalGeneration,
+        if Qwen3TTSPromptEmbedsBuilder is None:
+            logger.warning(
+                "Qwen3-TTS prompt estimator is unavailable, using fallback 2048"
+            )
+            return 2048
+
+        if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
+            self._tts_tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model,
+                trust_remote_code=self.config.engine_args.trust_remote_code,
+                padding_side="left",
             )
 
-            if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
-                from transformers import AutoTokenizer
+        hf_config = self.engine_client.model_config.hf_config
+        talker_config = getattr(hf_config, "talker_config", None)
+        task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
 
-                self._tts_tokenizer = AutoTokenizer.from_pretrained(
-                    self.config.model,
-                    trust_remote_code=True,
-                    padding_side="left",
-                )
-
-            hf_config = self.engine_client.model_config.hf_config
-            talker_config = getattr(hf_config, "talker_config", None)
-            task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
-
-            return Qwen3TTSTalkerForConditionalGeneration.estimate_prompt_len_from_additional_information(
+        return (
+            Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
                 additional_information=tts_params,
                 task_type=task_type,
                 tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
@@ -412,8 +446,4 @@ class AudioGenerationHandler:
                     else None
                 ),
             )
-        except Exception as e:
-            logger.warning(
-                "Failed to estimate TTS prompt length, using fallback 2048: %s", e
-            )
-            return 2048
+        )

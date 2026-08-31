@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-import httpx
 import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
-from dynamo.common.multimodal.url_validator import (
-    UrlValidationError,
-    UrlValidationPolicy,
-    validate_media_url,
-)
+from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,98 +32,37 @@ def _permissive_http_policy() -> UrlValidationPolicy:
     )
 
 
-async def test_normalize_audio_url_converts_local_paths(tmp_path):
-    audio_path = tmp_path / "sample.wav"
-    audio_path.write_bytes(b"RIFF")
-
-    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
-
-    assert (
-        await validate_media_url(str(audio_path), policy)
-        == audio_path.resolve().as_uri()
-    )
-
-
-async def test_normalize_audio_url_preserves_data_urls():
-    data_url = "data:audio/wav;base64,UklGRg=="
-    policy = UrlValidationPolicy()
-    assert await validate_media_url(data_url, policy) == data_url
-
-
-async def test_normalize_audio_url_preserves_http_urls():
-    url = "https://example.com/audio.wav"
-    policy = _permissive_http_policy()
-    assert await validate_media_url(url, policy) == url
-
-
-async def test_normalize_audio_url_rejects_bare_path_by_default(tmp_path):
-    audio_path = tmp_path / "sample.wav"
-    audio_path.write_bytes(b"RIFF")
-
-    policy = UrlValidationPolicy()
-
-    with pytest.raises(UrlValidationError, match="Local media paths are not permitted"):
-        await validate_media_url(str(audio_path), policy)
-
-
-async def test_normalize_audio_url_rejects_private_ip():
-    policy = UrlValidationPolicy()
-
-    with pytest.raises(UrlValidationError):
-        await validate_media_url("https://169.254.169.254/audio.wav", policy)
-
-
-async def test_normalize_audio_url_accepts_file_uri_inside_prefix(tmp_path):
-    audio_path = tmp_path / "sample.wav"
-    audio_path.write_bytes(b"RIFF")
-    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
-
-    file_uri = audio_path.resolve().as_uri()
-    assert await validate_media_url(file_uri, policy) == file_uri
-
-
-async def test_normalize_audio_url_rejects_file_uri_outside_prefix(tmp_path):
-    allowed = tmp_path / "media"
-    allowed.mkdir()
-    other = tmp_path / "secret.wav"
-    other.write_bytes(b"RIFF")
-    policy = UrlValidationPolicy(allowed_local_path=str(allowed))
-
-    with pytest.raises(UrlValidationError, match="outside the allowed directory"):
-        await validate_media_url(other.resolve().as_uri(), policy)
-
-
 @pytest.mark.asyncio
 async def test_load_audio_rejects_http_by_default():
+    """Wiring smoke: AudioLoader plumbs ``url_policy`` to the validator.
+
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
+    """
     loader = AudioLoader(url_policy=UrlValidationPolicy())
 
-    with pytest.raises(ValueError, match="not allowed"):
+    with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_audio("http://example.com/x.wav")
 
 
 @pytest.mark.asyncio
-async def test_load_audio_blocks_redirect_to_private_ip():
-    """A 302 to a blocked IP must be rejected per-hop, not only the initial URL."""
-    loader = AudioLoader(url_policy=UrlValidationPolicy())
-    loader._create_vllm_audio_io = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+    ],
+)
+async def test_load_audio_preserves_client_error(client_error):
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=client_error
+    )
 
-    redirect = MagicMock(spec=httpx.Response)
-    redirect.status_code = 302
-    redirect.is_redirect = True
-    redirect.headers = {"location": "https://169.254.169.254/evil"}
-    redirect.url = httpx.URL("https://8.8.8.8/a.wav")
-    redirect.aclose = AsyncMock()
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_audio("https://example.com/x.wav")
 
-    client = MagicMock(spec=httpx.AsyncClient)
-    client.build_request = MagicMock(return_value=MagicMock(spec=httpx.Request))
-    client.send = AsyncMock(return_value=redirect)
-
-    with patch(
-        "dynamo.common.multimodal.audio_loader.get_http_client",
-        return_value=client,
-    ):
-        with pytest.raises(ValueError, match="blocked range"):
-            await loader.load_audio("https://8.8.8.8/a.wav")
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
@@ -187,6 +124,31 @@ async def test_load_audio_batch_rejects_malformed_items():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+    ],
+)
+async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
+    loader = AudioLoader()
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/bad.wav"},
+                {"Url": "https://localhost/private.wav"},
+            ]
+        )
+
+    assert exc_info.value is client_error
+
+
+@pytest.mark.asyncio
 async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decoding():
     loader = AudioLoader(enable_frontend_decoding=False)
 
@@ -222,3 +184,36 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_load_audio_missing_decoder_is_actionable():
+    """vLLM's own hint here is `pip install vllm[audio]`, which drags in an
+    unpinned stack; the wrap must point at the validated bounded install and
+    say there is no hardware alternative for audio."""
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ImportError("Please install vllm[audio] for audio support")
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_audio("https://example.com/x.mp3")
+
+    msg = str(exc_info.value)
+    assert VALIDATED_SPECS["av"] in msg
+    assert "install_media_decoders vllm" in msg
+    assert "NVDEC does not decode audio" in msg
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_preserves_missing_decoder_error():
+    """The batch aggregate wraps failures in a generic Exception; the
+    missing-decoder type must survive it (review finding)."""
+    loader = AudioLoader()
+    err = audio_loader_module.audio_decoder_missing("vllm")
+    loader.load_audio = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/x.mp3"}])
+
+    assert exc_info.value is err

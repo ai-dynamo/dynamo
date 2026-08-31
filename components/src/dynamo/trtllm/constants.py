@@ -10,7 +10,10 @@ from enum import Enum
 
 
 class DisaggregationMode(Enum):
-    """Disaggregation mode for LLM workers."""
+    """Disaggregation mode for LLM workers.
+
+    TODO: unify with `dynamo.common.constants.DisaggregationMode`.
+    """
 
     AGGREGATED = "prefill_and_decode"
     PREFILL = "prefill"

@@ -128,7 +128,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args: ["python3 -m dynamo.frontend --router-mode round-robin --http-port 8000"]
           env:
-            - name: DYN_TOKENIZER_BACKEND
+            - name: DYN_TOKENIZER
               value: "default"
             - name: DYN_PERF_DIAG
               value: "1"
@@ -310,8 +310,8 @@ Key metrics for saturation analysis:
 
 - `dynamo_frontend_stage_duration_seconds{stage="preprocess"}` -- tokenization time
 - `dynamo_frontend_stage_duration_seconds{stage="transport_roundtrip"}` -- backend latency
-- `dynamo_frontend_queued_requests` -- requests waiting in HTTP queue (should be 0 below saturation)
-- `dynamo_frontend_inflight_requests` -- concurrent in-flight requests
+- `sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})` -- requests waiting in pipeline stages (should be 0 below saturation)
+- `dynamo_frontend_active_requests` -- concurrent active requests
 - `dynamo_frontend_time_to_first_token_seconds` -- TTFT histogram buckets
 
 ---
@@ -333,7 +333,7 @@ python3 sweep_runner.py --mode k8s \
 
 The template substitutes these variables at deploy time:
 `${DGD_NAME}`, `${IMAGE}`, `${MODEL}`, `${MODEL_NAME}`,
-`${WORKER_REPLICAS}`, `${DYN_TOKENIZER_BACKEND}`, `${FRONTEND_PORT}`,
+`${WORKER_REPLICAS}`, `${DYN_TOKENIZER}`, `${FRONTEND_PORT}`,
 `${ROUTER_MODE}`.
 
 ---

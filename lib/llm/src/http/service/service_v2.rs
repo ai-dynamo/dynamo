@@ -1,30 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::frontend_extension::{
+    FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
+};
 use super::metrics;
-use super::metrics::register_worker_timing_metrics;
+use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
@@ -36,9 +44,15 @@ use dynamo_runtime::metrics::{
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
 use std::net::SocketAddr;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -53,13 +67,310 @@ async fn echo_request_id_header(
     response
 }
 
+/// State used to select the error format for unmatched routes.
+#[derive(Clone)]
+struct UnmatchedRouteState {
+    /// Base path of the Anthropic Messages API, or `None` when those endpoints
+    /// are disabled and every miss belongs to the OpenAI surface.
+    anthropic_path: Option<Arc<str>>,
+}
+
+/// Returns a protocol-compatible JSON `404` error response for an
+/// unmatched route.
+///
+/// Requests under the configured Anthropic Messages path receive an Anthropic
+/// error envelope. All other requests receive an OpenAI-compatible envelope.
+async fn unmatched_route_fallback(
+    axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    match state.anthropic_path.as_deref() {
+        Some(path) if path_within_namespace(uri.path(), path) => {
+            super::anthropic::unmatched_route_response(&method, &uri)
+        }
+        _ => super::openai::unmatched_route_response(&method, &uri).into_response(),
+    }
+}
+
+/// Returns whether `path` is `namespace` or a route beneath it.
+fn path_within_namespace(path: &str, namespace: &str) -> bool {
+    let namespace = namespace.trim_end_matches('/');
+    path.strip_prefix(namespace)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+async fn track_inflight_inference(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use futures::StreamExt;
+
+    // Requests rejected during draining should not extend the drain window.
+    if !state.is_ready() {
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    let permit = state.acquire_inflight();
+    // Close the race where shutdown starts after the readiness check but
+    // before this request is counted as inflight.
+    if !state.is_ready() {
+        drop(permit);
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    let response = next.run(request).await;
+    let (parts, body) = response.into_parts();
+    // Keep the permit alive until the full response body, including streams,
+    // finishes or is dropped.
+    let stream = body.into_data_stream().map(move |result| {
+        let _permit = &permit;
+        result
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
 /// HTTP service shared state
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
+    service_observer: Arc<ServiceObserver>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    // Frontend API behavior read by request handlers after the service is built.
+    frontend_api_config: FrontendApiConfig,
+    nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+/// Typed config needed only to construct HTTP shared state.
+///
+/// `MetricsConfig` initializes the per-service metrics object, while
+/// `FrontendApiConfig` is retained in `State` for route and handler decisions.
+struct StateConfig {
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
+    nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            return None;
+        }
+    };
+
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if std::time::Instant::now().checked_add(interval).is_some() {
+                Some(interval)
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                    value,
+                    "ignoring SSE keep-alive interval outside the platform range"
+                );
+                None
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            None
+        }
+    }
+}
+
+fn sse_keep_alive_from_env() -> Option<Duration> {
+    parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
+}
+
+const DEFERRED_RESPONSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+fn effective_sse_keep_alive(
+    configured: Option<Duration>,
+    response_can_defer_all_output: bool,
+) -> Option<Duration> {
+    configured.or(response_can_defer_all_output.then_some(DEFERRED_RESPONSE_KEEP_ALIVE))
+}
+
+/// Lifecycle stage for the HTTP frontend.
+///
+/// The stage gates readiness and request admission separately from the runtime
+/// cancellation token so the frontend can stop accepting new requests before
+/// tearing down discovery and transport state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceStage {
+    /// The frontend is ready to admit new inference requests.
+    Ready = 0,
+    /// The frontend is rejecting new requests while admitted responses drain.
+    Draining = 1,
+    /// The frontend is cancelling runtime state and shutting down.
+    Stopping = 2,
+}
+
+impl ServiceStage {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Ready,
+            1 => Self::Draining,
+            _ => Self::Stopping,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ready"),
+            Self::Draining => f.write_str("draining"),
+            Self::Stopping => f.write_str("stopping"),
+        }
+    }
+}
+
+/// Shared HTTP frontend lifecycle and inflight request tracker.
+///
+/// `ServiceObserver` is shared by HTTP handlers, health endpoints, and the
+/// shutdown path. It lets shutdown first mark the frontend as draining, then
+/// wait for admitted inference response bodies to complete before cancelling
+/// runtime state.
+#[derive(Debug)]
+pub struct ServiceObserver {
+    stage: AtomicU8,
+    inflight_inference: AtomicU64,
+    inflight_zero: Notify,
+}
+
+impl Default for ServiceObserver {
+    fn default() -> Self {
+        Self {
+            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
+            inflight_inference: AtomicU64::new(0),
+            inflight_zero: Notify::new(),
+        }
+    }
+}
+
+impl ServiceObserver {
+    /// Return the current frontend lifecycle stage.
+    pub fn stage(&self) -> ServiceStage {
+        ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
+    }
+
+    /// Return true when the frontend should admit new inference requests.
+    pub fn is_ready(&self) -> bool {
+        self.stage() == ServiceStage::Ready
+    }
+
+    /// Mark the frontend as draining.
+    ///
+    /// Draining makes readiness fail and causes request admission checks to
+    /// reject new inference requests while existing response bodies continue.
+    pub fn start_draining(&self) {
+        tracing::info!(
+            previous_stage = ?self.stage(),
+            inflight_requests = self.inflight_count(),
+            "frontend service entering draining stage"
+        );
+        self.stage
+            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
+    }
+
+    /// Mark the frontend as stopping.
+    ///
+    /// Stopping is entered after inflight requests drain or the graceful
+    /// shutdown timeout expires.
+    pub fn start_stopping(&self) {
+        tracing::info!(
+            previous_stage = ?self.stage(),
+            inflight_requests = self.inflight_count(),
+            "frontend service entering stopping stage"
+        );
+        self.stage
+            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+    }
+
+    /// Track one admitted inference response body.
+    ///
+    /// The returned permit must live for the full HTTP response body lifetime,
+    /// including streaming responses. Dropping the permit decrements the
+    /// inflight count and wakes shutdown waiters when the count reaches zero.
+    pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
+        self.inflight_inference.fetch_add(1, Ordering::Relaxed);
+        InflightPermit {
+            observer: self.clone(),
+        }
+    }
+
+    /// Return the number of admitted inference requests still in flight.
+    pub fn inflight_count(&self) -> u64 {
+        self.inflight_inference.load(Ordering::Acquire)
+    }
+
+    /// Wait until all admitted inference requests drain or `timeout` expires.
+    ///
+    /// Returns `true` when inflight work drained before the timeout and `false`
+    /// when shutdown should proceed because the timeout expired.
+    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.inflight_zero.notified();
+                tokio::pin!(notified);
+                // Register before reading the count so a final permit drop
+                // cannot notify between the count check and the await.
+                notified.as_mut().enable();
+                if self.inflight_count() == 0 {
+                    break;
+                }
+                notified.as_mut().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+/// RAII guard for one admitted inference response.
+///
+/// This permit is held by a response-body wrapper so it is released only when
+/// the client response body finishes or is dropped.
+pub struct InflightPermit {
+    observer: Arc<ServiceObserver>,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        if self
+            .observer
+            .inflight_inference
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+            && self.observer.stage() != ServiceStage::Ready
+        {
+            self.observer.inflight_zero.notify_waiters();
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -67,11 +378,16 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    classify_endpoints_enabled: AtomicBool,
+    pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
+    generate_endpoints_enabled: AtomicBool,
+    batch_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -80,13 +396,18 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
+            EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -101,6 +422,12 @@ impl StateFlags {
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Classify => self
+                .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Pooling => self
+                .pooling_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -110,37 +437,56 @@ impl StateFlags {
             EndpointType::Audios => self
                 .audios_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Realtime => self
+                .realtime_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::AnthropicMessages => self
                 .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Generate => self
+                .generate_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Batch => self
+                .batch_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
 
 impl State {
-    pub fn new(
+    fn new(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
+        config: StateConfig,
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
+            service_observer: Arc::new(ServiceObserver::default()),
+            nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                classify_endpoints_enabled: AtomicBool::new(false),
+                pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
+                generate_endpoints_enabled: AtomicBool::new(false),
+                batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            frontend_api_config: config.frontend_api_config,
+            sse_keep_alive: config.sse_keep_alive,
         }
     }
 
@@ -161,9 +507,50 @@ impl State {
         self.discovery_client.clone()
     }
 
+    pub fn service_observer(&self) -> Arc<ServiceObserver> {
+        self.service_observer.clone()
+    }
+
+    pub fn service_stage(&self) -> ServiceStage {
+        self.service_observer.stage()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.service_observer.is_ready()
+    }
+
+    pub fn start_draining(&self) {
+        self.service_observer.start_draining();
+    }
+
+    pub fn start_stopping(&self) {
+        self.service_observer.start_stopping();
+    }
+
+    pub fn acquire_inflight(&self) -> InflightPermit {
+        self.service_observer.acquire_inflight()
+    }
+
+    pub fn inflight_count(&self) -> u64 {
+        self.service_observer.inflight_count()
+    }
+
+    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
+        self.service_observer
+            .wait_inflight_zero_or_timeout(timeout)
+            .await
+    }
+
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Master switch for the `nvext` extension protocol (see
+    /// `environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT`).
+    #[inline]
+    pub fn nvext_enabled(&self) -> bool {
+        self.nvext_enabled
     }
 
     /// Get the cancellation token
@@ -171,29 +558,61 @@ impl State {
         &self.cancel_token
     }
 
-    // TODO
+    /// Interval for SSE comment frames while the response stream is idle.
+    ///
+    /// Disabled by default because some OpenAI-compatible clients do not
+    /// ignore SSE comments. Provider-facing deployments can opt in with
+    /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
+        self.sse_keep_alive
     }
 
-    /// Returns true if streaming tool call dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    /// Interval for a response that can intentionally suppress all generated
+    /// data frames while it waits to decide which output field owns the text.
+    /// Keep the configured interval when present; otherwise use Axum's standard
+    /// 15-second heartbeat so proxies and clients do not see an idle connection.
+    pub fn sse_keep_alive_for_response(
+        &self,
+        response_can_defer_all_output: bool,
+    ) -> Option<Duration> {
+        effective_sse_keep_alive(self.sse_keep_alive, response_can_defer_all_output)
+    }
+
+    /// Returns true if Anthropic billing preamble stripping is enabled.
+    pub fn strip_anthropic_preamble_enabled(&self) -> bool {
+        self.frontend_api_config.anthropic().strip_preamble()
+    }
+
+    /// Returns true if the Anthropic Messages API is enabled by service config.
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.frontend_api_config.anthropic().enabled()
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
     /// SSE events for each complete tool call, letting clients start processing tool calls
     /// before `finish_reason="tool_calls"` arrives.
     pub fn streaming_tool_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
     }
 
-    /// Returns true if streaming reasoning dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    /// Returns true if streaming reasoning dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path accumulates reasoning tokens and
     /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
     /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
     pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -209,6 +628,11 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// Worker capabilities accepted by the mounted engine-native Generate routes.
+    generate_engine_capabilities: Vec<&'static str>,
+    /// RL worker discovery router, served on a dedicated port when enabled.
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
 }
 
 #[derive(Clone, Builder)]
@@ -229,8 +653,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     tls_key_path: Option<PathBuf>,
 
-    // #[builder(default)]
-    // custom: Vec<axum::Router>
+    /// Metrics naming config used when initializing the HTTP service metrics registry.
+    #[builder(default)]
+    metrics_config: MetricsConfig,
+
+    /// Additional system routes merged with the built-in health, metrics, and model routes.
+    /// Each extension is invoked with a read-only [`FrontendExtensionContext`].
+    #[builder(default)]
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
@@ -243,8 +674,23 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    /// OpenAI-compatible Batch API placeholders. Disabled by default until
+    /// batch storage and job lifecycle support are implemented; when enabled,
+    /// the placeholder handlers return 501.
     #[builder(default = "false")]
-    enable_anthropic_endpoints: bool,
+    enable_batch_endpoints: bool,
+
+    /// Experimental engine-native Generate APIs. **Disabled by default**. The
+    /// builder flag mounts both vLLM `/inference/v1/generate` and SGLang
+    /// `/generate`; the backend-specific `DYN_*_ENABLE_*` variables mount one.
+    /// Capability-scoped discovery prevents either opaque request envelope from
+    /// reaching the other backend. Disabled routes return 404.
+    #[builder(default = "false")]
+    enable_engine_apis: bool,
+
+    /// API behavior config retained in HTTP state for route and streaming decisions.
+    #[builder(default)]
+    frontend_api_config: FrontendApiConfig,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -264,6 +710,41 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When true, serve the RL worker discovery API on `rl_port`.
+    #[builder(default = "false")]
+    enable_rl: bool,
+
+    /// Master switch for the `nvext` extension protocol. Default `true`;
+    /// env-truthy `DYN_DISABLE_FRONTEND_NVEXT` overrides to `false`.
+    #[builder(default = "true")]
+    enable_nvext: bool,
+
+    /// Master switch for the frontend admin API surface (`GET` /
+    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    #[builder(default = "true")]
+    enable_admin_api: bool,
+
+    /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
+
+    /// Distributed runtime used by the RL worker discovery API.
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Interval for SSE comment frames while a streaming response is idle.
+    /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
+    #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
+    sse_keep_alive: Option<Duration>,
+}
+
+fn default_rl_port() -> u16 {
+    std::env::var("DYN_RL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8001)
 }
 
 impl HttpService {
@@ -283,12 +764,59 @@ impl HttpService {
         self.state().manager()
     }
 
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.state().anthropic_api_enabled()
+    }
+
+    pub(crate) fn generate_engine_capabilities(&self) -> Vec<&'static str> {
+        self.generate_engine_capabilities.clone()
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
         let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
+        self.run_inner(cancel_token, None).await
+    }
+
+    /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
+    /// port-allocation gap for tests that need to know the bound port up front. Not
+    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
+    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
+    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// service built with `enable_tls(true)`.
+    ///
+    /// [`spawn`]: HttpService::spawn
+    pub async fn spawn_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> JoinHandle<Result<()>> {
+        let this = self.clone();
+        tokio::spawn(async move { this.run_with_listener(cancel_token, listener).await })
+    }
+
+    /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
+    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
+    /// restriction.
+    ///
+    /// [`run`]: HttpService::run
+    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
+    pub async fn run_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> Result<()> {
+        self.run_inner(cancel_token, Some(listener)).await
+    }
+
+    async fn run_inner(
+        &self,
+        cancel_token: CancellationToken,
+        listener: Option<tokio::net::TcpListener>,
+    ) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -296,13 +824,20 @@ impl HttpService {
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
-        let state_cancel = self.state.cancel_token().clone();
-
-        let addr: SocketAddr = address
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+        let state = self.state.clone();
+        let state_cancel = state.cancel_token().clone();
 
         if self.enable_tls {
+            if listener.is_some() {
+                return Err(anyhow::anyhow!(
+                    "Pre-bound listener is not supported in TLS mode; \
+                     axum_server::bind_rustls owns its own bind. \
+                     Use run()/spawn() (which bind internally) when enable_tls is set."
+                ));
+            }
+            let addr: SocketAddr = address
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -327,64 +862,133 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             tokio::select! {
                 result = server => {
                     let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    state.start_stopping();
                     cancel_token.cancel();
                     result?;
                 }
                 _ = observer.cancelled() => {
-                    state_cancel.cancel();
+                    state.start_draining();
                     tracing::info!("HTTPS server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
-                    // no longer accepting requests, draining all existing connections
+                    let shutdown_timeout =
+                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+                    handle.graceful_shutdown(Some(shutdown_timeout));
+                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                        tracing::warn!(
+                            inflight_requests = state.inflight_count(),
+                            "Timed out waiting for inflight inference requests to drain"
+                        );
+                    }
+                    state.start_stopping();
+                    state_cancel.cancel();
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                tracing::error!(
-                    protocol = %protocol,
-                    address = %address,
-                    error = %e,
-                    "Failed to bind server to address"
-                );
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                        protocol,
-                        self.port
-                    ),
-                    _ => anyhow::anyhow!(
-                        "Failed to start {} server on {}: {}",
-                        protocol,
-                        address,
-                        e
-                    ),
+            let listener = match listener {
+                Some(l) => l,
+                None => {
+                    let addr: SocketAddr = address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                        tracing::error!(
+                            protocol = %protocol,
+                            address = %address,
+                            error = %e,
+                            "Failed to bind server to address"
+                        );
+                        match e.kind() {
+                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                                protocol,
+                                self.port
+                            ),
+                            _ => anyhow::anyhow!(
+                                "Failed to start {} server on {}: {}",
+                                protocol,
+                                address,
+                                e
+                            ),
+                        }
+                    })?
                 }
-            })?;
+            };
+
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
+            let state = self.state.clone();
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
-                    state_cancel.cancel();
+                    state.start_draining();
                     tracing::info!("HTTP server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
-                        .await;
-                    // no longer accepting requests, draining all existing connections
+                    let shutdown_timeout =
+                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                        tracing::warn!(
+                            inflight_requests = state.inflight_count(),
+                            "Timed out waiting for inflight inference requests to drain"
+                        );
+                    }
+                    state.start_stopping();
+                    state_cancel.cancel();
                 })
                 .await
-                .inspect_err(|_| cancel_token.cancel())?;
+                .inspect_err(|_| {
+                    self.state.start_stopping();
+                    cancel_token.cancel()
+                })?;
+            self.state.start_stopping();
             cancel_token.cancel();
         }
 
+        Ok(())
+    }
+
+    async fn spawn_rl_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let Some(rl_router) = self.rl_router.clone() else {
+            return Ok(());
+        };
+        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
+        // should abort service startup rather than silently leave RL discovery
+        // unavailable while the main HTTP service keeps running.
+        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+            tracing::error!(
+                address = %rl_addr,
+                error = %e,
+                "Failed to bind RL worker discovery listener"
+            );
+            anyhow::anyhow!("Failed to bind RL worker discovery listener on {rl_addr}: {e}")
+        })?;
+        tracing::info!(
+            address = %rl_addr,
+            "RL worker discovery listener started"
+        );
+        let rl_cancel = cancel_token.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, rl_router)
+                .with_graceful_shutdown(async move {
+                    rl_cancel.cancelled_owned().await;
+                })
+                .await
+            {
+                tracing::error!("RL worker discovery listener error: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -393,13 +997,21 @@ impl HttpService {
         &self.route_docs
     }
 
-    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+    /// Updates runtime availability for model-backed endpoints.
+    ///
+    /// Batch API availability is configured when the service is built and cannot be changed here.
+    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) -> Result<()> {
+        if endpoint_type == EndpointType::Batch {
+            anyhow::bail!("batch endpoint availability is fixed when the HTTP service is built");
+        }
+
         self.state.flags.set(&endpoint_type, enable);
         tracing::info!(
             "{} endpoints {}",
             endpoint_type.as_str(),
             if enable { "enabled" } else { "disabled" }
         );
+        Ok(())
     }
 }
 
@@ -424,14 +1036,94 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the classify endpoint path (default: `/v1/classify`)
+static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
+static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the batch files endpoint path (default: `/v1/files`)
+static HTTP_SVC_FILES_PATH_ENV: &str = "DYN_HTTP_SVC_FILES_PATH";
+/// Environment variable to set the batches endpoint path (default: `/v1/batches`)
+static HTTP_SVC_BATCHES_PATH_ENV: &str = "DYN_HTTP_SVC_BATCHES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
+/// Environment variable to enable the experimental vLLM-compatible
+/// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
+pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
+    "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
+
+/// Environment variable to set the vLLM Generate endpoint path
+/// (default: `/inference/v1/generate`).
+pub(super) static HTTP_SVC_VLLM_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_VLLM_GENERATE_PATH";
+/// Environment variable to enable the experimental SGLang-compatible
+/// `/generate` endpoint. Truthy value opts in; disabled by default.
+pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE";
+/// Environment variable to set the SGLang Generate endpoint path
+/// (default: `/generate`).
+pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+fn validate_generate_route_path(path: &str) -> Result<()> {
+    if !path.starts_with("/") {
+        anyhow::bail!("Generate route path must start with '/': {path:?}");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.starts_with([':', '*']))
+    {
+        anyhow::bail!("Generate route path segment must not start with ':' or '*': {path:?}");
+    }
+    Ok(())
+}
+
+fn append_route_docs(
+    all_docs: &mut Vec<RouteDoc>,
+    seen_routes: &mut HashSet<RouteDoc>,
+    route_docs: Vec<RouteDoc>,
+) -> Result<()> {
+    for route_doc in route_docs {
+        if let Some(existing) = seen_routes.get(&route_doc) {
+            anyhow::bail!("duplicate HTTP route registered: {route_doc} conflicts with {existing}");
+        }
+        seen_routes.insert(route_doc.clone());
+        all_docs.push(route_doc);
+    }
+    Ok(())
+}
 
 impl HttpServiceConfigBuilder {
+    pub fn add_frontend_route_extension<F>(mut self, extension: F) -> Self
+    where
+        F: Fn(FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> + Send + Sync + 'static,
+    {
+        self.frontend_route_extensions
+            .get_or_insert_with(Vec::new)
+            .push(Arc::new(extension));
+        self
+    }
+
+    pub fn add_frontend_route_extension_arc(mut self, extension: FrontendRouteExtension) -> Self {
+        self.frontend_route_extensions
+            .get_or_insert_with(Vec::new)
+            .push(extension);
+        self
+    }
+
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        let metrics_config = config.metrics_config.clone();
+        let frontend_api_config = config.frontend_api_config.clone();
+        let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
+        let vllm_generate_enabled =
+            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
+        let sglang_generate_enabled =
+            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
+        let generate_engine_capabilities = [
+            vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -444,7 +1136,23 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        // Both surfaces are on by default; an env-truthy DISABLE var turns them
+        // off. The builder flag can also force off (e.g. tests), and wins.
+        let nvext_enabled =
+            config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
+        let admin_api_enabled =
+            config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            StateConfig {
+                metrics_config,
+                frontend_api_config,
+                nvext_enabled,
+                sse_keep_alive: config.sse_keep_alive,
+            },
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -457,9 +1165,16 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Batch, config.enable_batch_endpoints);
         state.flags.set(
             &EndpointType::AnthropicMessages,
-            config.enable_anthropic_endpoints,
+            anthropic_endpoints_enabled,
+        );
+        state.flags.set(
+            &EndpointType::Generate,
+            !generate_engine_capabilities.is_empty(),
         );
 
         // enable prometheus metrics
@@ -503,8 +1218,12 @@ impl HttpServiceConfigBuilder {
         if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register transport metrics: {}", e);
         }
+        if let Err(e) = register_lora_allocation_metrics(&registry) {
+            tracing::warn!("Failed to register LoRA allocation metrics: {}", e);
+        }
 
         let mut all_docs = Vec::new();
+        let mut seen_route_docs = HashSet::new();
 
         // Shared on_response callback for both system and inference routes
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
@@ -518,13 +1237,13 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
                     state.clone(),
                     var(HTTP_SVC_MODELS_PATH_ENV).ok(),
@@ -534,32 +1253,56 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
-            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        if admin_api_enabled {
+            system_routes.push(super::busy_threshold::busy_threshold_router(
+                state.clone(),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — busy_threshold routes not registered"
+            );
+        }
+        for extension in &config.frontend_route_extensions {
+            let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
+            system_routes.push(route_set.into_parts());
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             system_router = system_router.merge(route);
-            all_docs.extend(route_docs);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
-        let endpoint_routes =
-            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
+            state.clone(),
+            &config.request_template,
+            anthropic_endpoints_enabled,
+            vllm_generate_enabled,
+            sglang_generate_enabled,
+            config.enable_batch_endpoints,
+        )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
-            all_docs.extend(route_docs);
         }
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
                 .on_response(on_response),
         );
+        inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            track_inflight_inference,
+        ));
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
+        append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
-        all_docs.extend(openapi_docs);
 
         system_router = system_router.layer(
             TraceLayer::new_for_http()
@@ -569,8 +1312,53 @@ impl HttpServiceConfigBuilder {
 
         let router = system_router.merge(inference_router);
 
+        // Return protocol-compatible JSON errors for unmatched routes. Register this router
+        // outside `track_inflight_inference` so unmatched requests do not acquire an
+        // inference permit or return `503` while the service is draining.
+        let unmatched_router = axum::Router::new()
+            .fallback(unmatched_route_fallback)
+            .with_state(UnmatchedRouteState {
+                anthropic_path: anthropic_endpoints_enabled.then(|| {
+                    var(HTTP_SVC_ANTHROPIC_PATH_ENV)
+                        .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
+                        .into()
+                }),
+            })
+            .layer(
+                // Use the inference span maker so 404s retain method, URI, and request ID
+                // at the default log level.
+                TraceLayer::new_for_http()
+                    .make_span_with(make_inference_request_span)
+                    .on_response(on_response),
+            );
+        let router = router.fallback_service(unmatched_router);
+
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
+
+        let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
+        let rl_router = if enable_rl_router {
+            let Some(drt) = config.runtime.as_ref() else {
+                return Err(anyhow::anyhow!(
+                    "RL worker discovery was requested (DYN_ENABLE_RL=true \
+                     or enable_rl) but HttpServiceConfig.runtime is not set."
+                ));
+            };
+            let router = super::openai::rl_router(drt.clone())?;
+            tracing::info!(
+                rl_port = config.rl_port,
+                "RL worker discovery enabled at /v1/rl/workers"
+            );
+            Some(
+                router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+            )
+        } else {
+            None
+        };
 
         Ok(HttpService {
             state,
@@ -581,6 +1369,9 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            generate_engine_capabilities,
+            rl_router,
+            rl_port: config.rl_port,
         })
     }
 
@@ -589,10 +1380,58 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn metrics_prefix(mut self, prefix: Option<String>) -> Self {
+        self.metrics_config = Some(MetricsConfig::new(prefix));
+        self
+    }
+
+    pub fn enable_anthropic_endpoints(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_enabled(enabled);
+        self
+    }
+
+    pub fn strip_anthropic_preamble(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
+        self
+    }
+
+    pub fn enable_streaming_tool_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
+        self
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
-    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+        enable_anthropic_endpoints: bool,
+        vllm_generate_enabled: bool,
+        sglang_generate_enabled: bool,
+        enable_batch_endpoints: bool,
+    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -604,9 +1443,14 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (classify_docs, classify_route) =
+            super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (pooling_docs, pooling_route) =
+            super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -616,12 +1460,24 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
-        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+        if enable_batch_endpoints {
+            let (batch_docs, batch_route) = super::openai::batch_router(
+                state.clone(),
+                var(HTTP_SVC_FILES_PATH_ENV).ok(),
+                var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+            );
+            endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
+        }
+
+        if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
             let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
                 state.clone(),
@@ -632,6 +1488,31 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
+        }
+
+        if vllm_generate_enabled || sglang_generate_enabled {
+            tracing::warn!("The engine-native Generate APIs are experimental.");
+            let mut generate_docs = Vec::new();
+            let mut generate_route = axum::Router::new();
+            if vllm_generate_enabled {
+                let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
+                if let Some(path) = generate_path.as_deref() {
+                    validate_generate_route_path(path)?;
+                }
+                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
+                generate_docs.extend(docs);
+                generate_route = generate_route.merge(route);
+            }
+            if sglang_generate_enabled {
+                let generate_path = var(HTTP_SVC_SGLANG_GENERATE_PATH_ENV).ok();
+                if let Some(path) = generate_path.as_deref() {
+                    validate_generate_route_path(path)?;
+                }
+                let (docs, route) = super::sglang_generate::router(state.clone(), generate_path);
+                generate_docs.extend(docs);
+                generate_route = generate_route.merge(route);
+            }
+            endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
         for endpoint_type in EndpointType::all() {
@@ -658,51 +1539,917 @@ impl HttpServiceConfigBuilder {
             ));
             routes.push((docs, route));
         }
-        routes
+        Ok(routes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    #[tokio::test]
-    #[serial]
-    async fn test_liveness_endpoint_reflects_cancellation() {
-        // 1. Setup service & token
-        let cancel_token = Arc::new(CancellationToken::new());
-        let service = HttpService::builder().build().unwrap();
-        let port = service.port;
+    async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if state.service_stage() == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "service did not enter {expected} before timeout; current stage is {}",
+                state.service_stage()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 
-        // 2. Spawn service with shared token
+    #[test]
+    fn batch_endpoint_enablement_is_fixed_at_build_time() {
+        let disabled = HttpService::builder().build().unwrap();
+        let error = disabled
+            .enable_model_endpoint(EndpointType::Batch, true)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
+        assert!(!disabled.state.flags.get(&EndpointType::Batch));
+
+        let enabled = HttpService::builder()
+            .enable_batch_endpoints(true)
+            .build()
+            .unwrap();
+        let error = enabled
+            .enable_model_endpoint(EndpointType::Batch, false)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
+        assert!(enabled.state.flags.get(&EndpointType::Batch));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_liveness_endpoint_stays_live_while_draining() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                cancel_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+                let resp = reqwest::Client::new()
+                    .get(format!("http://localhost:{}/live", port))
+                    .send()
+                    .await
+                    .expect("Request failed");
+
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+                drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_health_endpoint_reflects_draining_before_cancellation() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                cancel_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+                assert_eq!(state.service_stage(), ServiceStage::Draining);
+
+                let client = reqwest::Client::new();
+                let health = client
+                    .get(format!("http://localhost:{}/health", port))
+                    .send()
+                    .await
+                    .expect("health request failed");
+                assert_eq!(health.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+                let live = client
+                    .get(format!("http://localhost:{}/live", port))
+                    .send()
+                    .await
+                    .expect("live request failed");
+                assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+                drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_service_observer_waits_for_inflight_requests() {
+        let observer = Arc::new(ServiceObserver::default());
+        let permit = observer.acquire_inflight();
+
+        observer.start_draining();
+        assert_eq!(observer.inflight_count(), 1);
+        assert!(
+            !observer
+                .wait_inflight_zero_or_timeout(Duration::from_millis(1))
+                .await
+        );
+
+        let waiter = {
+            let observer = observer.clone();
+            tokio::spawn(async move {
+                observer
+                    .wait_inflight_zero_or_timeout(Duration::from_secs(1))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(permit);
+        assert!(waiter.await.unwrap());
+        assert_eq!(observer.inflight_count(), 0);
+    }
+
+    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
+    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
+    /// tests).
+    #[tokio::test]
+    async fn test_admin_api_disabled_404s_busy_threshold() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_admin_api(false)
+            .build()
+            .unwrap();
+
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
-            service.run((*service_token).clone()).await.unwrap();
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
         });
-
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-
-        // 3. Cancel the token
-        cancel_token.cancel();
-
-        // 4. Wait a tiny bit for propagation
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // 5. Hit the endpoint
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{}/busy_threshold", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And /live still works (sanity: only the admin surface is gated).
+        let live = reqwest::Client::new()
             .get(format!("http://localhost:{}/live", port))
             .send()
             .await
-            .expect("Request failed");
+            .expect("request failed");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
 
-        // 6. ASSERTION: Should be 503 Service Unavailable
-        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
-        // Clean up
+        cancel_token.cancel();
         handle.abort();
+    }
+
+    /// Starts an `HttpService` on an ephemeral local port.
+    ///
+    /// Applies `configure` before starting the service. These tests run before the
+    /// readiness check, so no model registration is required.
+    async fn spawn_service(
+        configure: impl FnOnce(HttpServiceConfigBuilder) -> HttpServiceConfigBuilder,
+    ) -> (u16, Arc<State>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = configure(HttpService::builder().port(port))
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .ok();
+        });
+
+        // Allow the server to begin accepting connections.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        (port, state, handle)
+    }
+
+    async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
+        let (port, _, handle) = spawn_service(|builder| builder).await;
+        (port, handle)
+    }
+
+    /// Verifies that an unsupported content type returns the standard JSON error
+    /// envelope instead of Axum's default plain-text rejection.
+    #[tokio::test]
+    async fn test_responses_non_json_content_type_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .header("content-type", "text/plain")
+            .body(r#"{"model":"model","input":"hi"}"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 415);
+        assert_eq!(
+            body["message"],
+            "Expected request with Content-Type application/json"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that malformed JSON returns the standard JSON error envelope
+    /// instead of Axum's default plain-text rejection.
+    #[tokio::test]
+    async fn test_responses_malformed_json_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"model","input":"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 400);
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message must be a string")
+                .starts_with("Failed to deserialize the JSON body into the target type"),
+            "unexpected message: {}",
+            body["message"]
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that an unknown response ID returns a JSON `404 Not Found` response.
+    #[tokio::test]
+    async fn test_unknown_response_id_returns_json_404() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/responses/resp_missing"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 404);
+        assert_eq!(
+            body["message"],
+            "Route not found: GET /v1/responses/resp_missing"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that an oversized request body returns a JSON `413 Payload Too Large`
+    /// response.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_oversized_body_returns_json_413() {
+        temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
+            let (port, handle) = spawn_default_service().await;
+
+            let oversized = serde_json::json!({
+                "model": "model",
+                "input": "x".repeat(2 * 1024 * 1024),
+            });
+            let resp = reqwest::Client::new()
+                .post(format!("http://localhost:{port}/v1/responses"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&oversized).unwrap())
+                .send()
+                .await
+                .expect("request failed");
+
+            assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+            let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+            assert_eq!(body["code"], 413);
+            assert_eq!(
+                body["message"],
+                format!(
+                    "Request body exceeds the limit of 1 MB set by {}",
+                    env_llm::DYN_HTTP_BODY_LIMIT_MB
+                )
+            );
+
+            handle.abort();
+        })
+        .await;
+    }
+
+    /// Verifies that unmatched routes return `404 Not Found` while registered
+    /// inference routes return `503 Service Unavailable` during draining.
+    #[tokio::test]
+    async fn test_unmatched_route_while_draining_returns_json_404() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        state.start_draining();
+
+        let client = reqwest::Client::new();
+        let unmatched = client
+            .get(format!("http://localhost:{port}/v1/not_a_route"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(unmatched.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = unmatched.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 404);
+
+        let registered = client
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "model", "input": "hi"}))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(
+            registered.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "draining must still reject registered inference routes"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that unmatched routes under the Anthropic Messages API path return
+    /// the Anthropic error envelope.
+    #[tokio::test]
+    async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
+        let (port, _state, handle) =
+            spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/messages/missing"))
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(
+            body["error"]["message"],
+            "Route not found: GET /v1/messages/missing"
+        );
+
+        let openai_response = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/messages_beta/missing"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(openai_response.status(), reqwest::StatusCode::NOT_FOUND);
+        let openai_body: serde_json::Value =
+            openai_response.json().await.expect("body must be JSON");
+        assert_eq!(openai_body["code"], 404);
+        assert_eq!(
+            openai_body["message"],
+            "Route not found: GET /v1/messages_beta/missing"
+        );
+        assert!(
+            openai_body.get("error").is_none(),
+            "sibling paths must use the OpenAI error envelope"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that Anthropic fallback routing matches complete path segments.
+    #[test]
+    fn test_path_within_namespace() {
+        assert!(path_within_namespace("/v1/messages", "/v1/messages"));
+        assert!(path_within_namespace("/v1/messages/", "/v1/messages"));
+        assert!(path_within_namespace(
+            "/v1/messages/missing",
+            "/v1/messages"
+        ));
+        assert!(path_within_namespace(
+            "/v1/messages/missing",
+            "/v1/messages/"
+        ));
+        assert!(!path_within_namespace("/v1/messages_beta", "/v1/messages"));
+        assert!(!path_within_namespace("/v1/messages-v2", "/v1/messages"));
+        assert!(!path_within_namespace(
+            "/v1/chat/completions",
+            "/v1/messages"
+        ));
+    }
+
+    /// Verifies that `GET /v1/responses` returns `405 Method Not Allowed` and an
+    /// `Allow: POST` header.
+    #[tokio::test]
+    async fn test_registered_route_with_unsupported_method_returns_405() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/responses"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::ALLOW)
+                .and_then(|value| value.to_str().ok()),
+            Some("POST"),
+            "expected Allow header to contain POST"
+        );
+
+        handle.abort();
+    }
+
+    fn make_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    // Test extensions read live state via the narrowed context captured in the
+    // handler closure (the Python bridge's shape), not Router::with_state.
+    fn readiness_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get("/test/frontend-route", move || {
+                let context = context.clone();
+                async move {
+                    if context.has_any_ready_model() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            })?
+            .build())
+    }
+
+    fn first_test_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/one")
+    }
+
+    fn second_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/two")
+    }
+
+    fn duplicate_health_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/health")
+    }
+
+    fn duplicate_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/duplicate")
+    }
+
+    fn draining_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get("/test/frontend-route/draining", move || {
+                let context = context.clone();
+                async move {
+                    if context.is_ready() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                }
+            })?
+            .build())
+    }
+
+    fn test_status_extension(
+        _context: FrontendExtensionContext,
+        path: &str,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get(path.to_string(), || async {
+                axum::http::StatusCode::NO_CONTENT
+            })?
+            .build())
+    }
+
+    async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .get(format!("http://localhost:{}{}", port, path))
+            .send()
+            .await
+            .expect("request failed")
+            .status()
+    }
+
+    fn build_error_message(builder: HttpServiceConfigBuilder) -> String {
+        match builder.build() {
+            Ok(_) => panic!("service build unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_frontend_route_extension_uses_live_frontend_state() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .add_frontend_route_extension(readiness_extension)
+            .build()
+            .unwrap();
+
+        assert!(
+            service
+                .route_docs()
+                .iter()
+                .any(|doc| doc.to_string() == "GET /test/frontend-route")
+        );
+
+        let running_service = service.clone();
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            running_service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        service
+            .model_manager()
+            .save_model_card("instance-pending", card)
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "card-only model registration must not make the extension report ready"
+        );
+
+        service
+            .model_manager()
+            .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::OK
+        );
+
+        let openapi = reqwest::Client::new()
+            .get(format!("http://localhost:{}/openapi.json", port))
+            .send()
+            .await
+            .expect("openapi request failed")
+            .text()
+            .await
+            .expect("openapi body failed");
+        assert!(openapi.contains("/test/frontend-route"));
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    #[test]
+    fn test_multiple_frontend_route_extensions_are_registered() {
+        let service = HttpService::builder()
+            .add_frontend_route_extension(first_test_extension)
+            .add_frontend_route_extension(second_test_extension)
+            .build()
+            .unwrap();
+        let route_doc_strings = service
+            .route_docs()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/one".to_string()));
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/two".to_string()));
+    }
+
+    #[test]
+    fn test_frontend_route_extension_rejects_builtin_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder().add_frontend_route_extension(duplicate_health_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /health"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_frontend_route_extension_rejects_extension_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder()
+                .add_frontend_route_extension(duplicate_test_extension)
+                .add_frontend_route_extension(duplicate_test_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /test/frontend-route/duplicate"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frontend_route_extension_stays_available_while_draining() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .add_frontend_route_extension(draining_extension)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let inflight = state.acquire_inflight();
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        cancel_token.cancel();
+        wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+        assert_eq!(
+            get_status(port, "/test/frontend-route/draining").await,
+            reqwest::StatusCode::ACCEPTED
+        );
+
+        drop(inflight);
+        handle.abort();
+    }
+
+    /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
+    /// exposed via the accessor used by the openai handlers.
+    #[test]
+    #[serial_test::serial]
+    fn test_enable_nvext_propagates_through_builder_to_state() {
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
+
+        // `build()` ANDs the builder flag with the env var, so this test must
+        // pin the env to unset. Going through `temp_env` also serializes it
+        // against `test_dyn_disable_frontend_nvext_env_var_mirror`, which mutates
+        // the same process-global var in parallel.
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
+            let on = HttpService::builder().enable_nvext(true).build().unwrap();
+            assert!(on.state.nvext_enabled());
+
+            let off = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(!off.state.nvext_enabled());
+
+            let default = HttpService::builder().build().unwrap();
+            assert!(
+                default.state.nvext_enabled(),
+                "default should preserve current behavior (nvext on)"
+            );
+        });
+    }
+
+    /// `DYN_DISABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset -> builder default wins (on). Falsey strings -> on.
+    /// Truthy strings (`1` / `true` / `yes` / `on`, case-insensitive) ->
+    /// off, regardless of what the builder asked for.
+    #[test]
+    #[serial_test::serial]
+    fn test_dyn_disable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
+
+        // Unset -> builder default (true) wins.
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(
+                svc.state.nvext_enabled(),
+                "unset env + default builder = on"
+            );
+        });
+
+        // Explicit falsey -> still on (disable not requested).
+        temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some("false"), || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(
+                svc.state.nvext_enabled(),
+                "disable=false + default builder = on"
+            );
+        });
+
+        // Explicit truthy -> off, even though the builder default is on.
+        for truthy in ["true", "1", "yes", "on", "TRUE"] {
+            temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some(truthy), || {
+                let svc = HttpService::builder().build().unwrap();
+                assert!(
+                    !svc.state.nvext_enabled(),
+                    "disable={truthy:?} should override builder default to off"
+                );
+            });
+        }
+
+        // Builder=false short-circuits regardless of env.
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
+            let svc = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(
+                !svc.state.nvext_enabled(),
+                "builder=false wins even if disable is unset"
+            );
+        });
+    }
+
+    #[test]
+    fn test_sse_keep_alive_env_var() {
+        assert_eq!(
+            parse_sse_keep_alive(Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("0".to_string())), None);
+        assert_eq!(
+            parse_sse_keep_alive(Ok("5000".to_string())),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("invalid".to_string())), None);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
+                    vec![0xff]
+                ),))),
+                None
+            );
+        }
+
+        let interval = Duration::from_millis(u64::MAX);
+        let expected = std::time::Instant::now()
+            .checked_add(interval)
+            .map(|_| interval);
+        assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
+    fn test_sse_keep_alive_for_deferred_response() {
+        let configured = Duration::from_millis(5000);
+        assert_eq!(
+            effective_sse_keep_alive(Some(configured), true),
+            Some(configured),
+            "an explicit interval must win"
+        );
+        assert_eq!(
+            effective_sse_keep_alive(None, true),
+            Some(Duration::from_secs(15)),
+            "a response that can suppress every data frame needs a heartbeat"
+        );
+        assert_eq!(
+            effective_sse_keep_alive(None, false),
+            None,
+            "ordinary responses keep the opt-in behavior"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_capabilities_follow_startup_gates() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+            ],
+            || {
+                let disabled = HttpService::builder().build().unwrap();
+                assert!(disabled.generate_engine_capabilities().is_empty());
+
+                let enabled = HttpService::builder()
+                    .enable_engine_apis(true)
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    enabled.generate_engine_capabilities(),
+                    vec![
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                        SGLANG_GENERATE_CAPABILITY
+                    ]
+                );
+
+                for (variable, capability) in [
+                    (
+                        VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                    ),
+                    (SGLANG_ENABLE_GENERATE_ENV, SGLANG_GENERATE_CAPABILITY),
+                ] {
+                    temp_env::with_var(variable, Some("1"), || {
+                        let enabled = HttpService::builder().build().unwrap();
+                        assert_eq!(enabled.generate_engine_capabilities(), vec![capability]);
+                    });
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_route_paths_follow_backend_env_overrides() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/vllm")),
+                (SGLANG_ENABLE_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, Some("/native/sglang")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let route_docs: Vec<_> = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+
+                assert!(route_docs.contains(&"POST /native/vllm".to_string()));
+                assert!(route_docs.contains(&"POST /native/sglang".to_string()));
+                assert!(route_docs.contains(&"PUT /native/sglang".to_string()));
+                assert!(!route_docs.contains(&"POST /generate".to_string()));
+                assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn generate_route_path_validation_rejects_invalid_paths() {
+        for path in ["", "native/vllm", "/:model", "/*path"] {
+            assert!(validate_generate_route_path(path).is_err());
+        }
     }
 }

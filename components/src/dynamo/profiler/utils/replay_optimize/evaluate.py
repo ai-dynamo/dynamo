@@ -16,7 +16,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import (
@@ -26,15 +27,7 @@ from .engine_args import (
 )
 from .logging import ensure_dynamo_logging, log_state_finish, log_state_start
 from .models import DenseAggReplayState, DenseReplayState
-from .specs import (
-    EngineSpec,
-    HardwareSpec,
-    ReplayObjective,
-    ReplayOptimizeSpec,
-    RouterSpec,
-    SLASpec,
-    WorkloadSpec,
-)
+from .specs import HardwareSpec, ReplayOptimizeSpec, SLASpec, WorkloadSpec
 
 
 def _run_replay_for_state(
@@ -46,7 +39,7 @@ def _run_replay_for_state(
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:
-        return run_trace_replay(
+        report = run_trace_replay(
             Path(workload.traceFile),
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -60,9 +53,12 @@ def _run_replay_for_state(
             trace_format=workload.traceFormat,
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
+            capture_per_request=False,
+            capture_planner_details=False,
         )
+        return report.summary
 
-    return run_synthetic_trace_replay(
+    report = run_synthetic_trace_replay(
         workload.isl,
         workload.osl,
         int(workload.requestCount),
@@ -71,15 +67,22 @@ def _run_replay_for_state(
         router_config=router_config,
         num_prefill_workers=state.prefill_workers,
         num_decode_workers=state.decode_workers,
-        replay_concurrency=int(workload.concurrency),
+        replay_concurrency=(
+            None if workload.concurrency is None else int(workload.concurrency)
+        ),
         replay_mode="offline",
         router_mode=state.router_mode,
+        request_rate=workload.requestRate,
         arrival_interval_ms=workload.arrivalIntervalMs,
+        arrival_seed=workload.arrivalSeed,
         turns_per_session=workload.turnsPerSession,
         shared_prefix_ratio=workload.sharedPrefixRatio,
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
+        capture_per_request=False,
+        capture_planner_details=False,
     )
+    return report.summary
 
 
 def _run_agg_replay_for_state(
@@ -90,7 +93,7 @@ def _run_agg_replay_for_state(
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:
-        return run_trace_replay(
+        report = run_trace_replay(
             Path(workload.traceFile),
             extra_engine_args=engine_args,
             router_config=router_config,
@@ -102,24 +105,34 @@ def _run_agg_replay_for_state(
             trace_format=workload.traceFormat,
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
+            capture_per_request=False,
+            capture_planner_details=False,
         )
+        return report.summary
 
-    return run_synthetic_trace_replay(
+    report = run_synthetic_trace_replay(
         workload.isl,
         workload.osl,
         int(workload.requestCount),
         extra_engine_args=engine_args,
         router_config=router_config,
         num_workers=state.workers,
-        replay_concurrency=int(workload.concurrency),
+        replay_concurrency=(
+            None if workload.concurrency is None else int(workload.concurrency)
+        ),
         replay_mode="offline",
         router_mode=state.router_mode,
+        request_rate=workload.requestRate,
         arrival_interval_ms=workload.arrivalIntervalMs,
+        arrival_seed=workload.arrivalSeed,
         turns_per_session=workload.turnsPerSession,
         shared_prefix_ratio=workload.sharedPrefixRatio,
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
+        capture_per_request=False,
+        capture_planner_details=False,
     )
+    return report.summary
 
 
 def _feasibility(
@@ -176,7 +189,9 @@ def _evaluate_state(
     router_config = None
     if state.router_mode == "kv_router":
         router_config = _build_router_config(
-            spec.router.baseRouterConfig, state.overlap_score_weight
+            spec.router.baseRouterConfig,
+            state.overlap_score_credit,
+            state.prefill_load_scale,
         )
     report = _run_replay_for_state(
         state=state,
@@ -239,7 +254,9 @@ def _evaluate_agg_state(
     router_config = None
     if state.router_mode == "kv_router":
         router_config = _build_router_config(
-            spec.router.baseRouterConfig, state.overlap_score_weight
+            spec.router.baseRouterConfig,
+            state.overlap_score_credit,
+            state.prefill_load_scale,
         )
     report = _run_agg_replay_for_state(
         state=state,
@@ -276,94 +293,10 @@ def _evaluate_agg_state(
     return record
 
 
-# ---- Cross-process payload bridge ----
-# `MockEngineArgs` and `KvRouterConfig` are Rust-bound and don't pickle through
-# `ProcessPoolExecutor`; we round-trip them via their own `dump_json()` /
-# `from_json()` methods. Everything else on `ReplayOptimizeSpec` is a Pydantic
-# model and pickles natively, but we serialize the whole payload dict to keep
-# cross-process transport explicit.
-
-
-def _spec_to_payload(spec: ReplayOptimizeSpec) -> dict[str, Any]:
-    engine = spec.engine
-    router = spec.router
-    return {
-        "engine_model": engine.model,
-        "engine_backend": engine.backend.value,
-        "engine_base_agg_json": (
-            engine.baseEngineArgs.dump_json()
-            if engine.baseEngineArgs is not None
-            else None
-        ),
-        "engine_base_prefill_json": (
-            engine.basePrefillEngineArgs.dump_json()
-            if engine.basePrefillEngineArgs is not None
-            else None
-        ),
-        "engine_base_decode_json": (
-            engine.baseDecodeEngineArgs.dump_json()
-            if engine.baseDecodeEngineArgs is not None
-            else None
-        ),
-        "hardware_json": spec.hardware.model_dump_json(),
-        "workload_json": spec.workload.model_dump_json(),
-        "sla_json": spec.sla.model_dump_json(),
-        "router_mode": router.mode,
-        "router_overlap_weights": (
-            None if router.overlapWeights is None else list(router.overlapWeights)
-        ),
-        "router_base_config_json": (
-            router.baseRouterConfig.dump_json()
-            if router.baseRouterConfig is not None
-            else None
-        ),
-        "objective": spec.objective.value,
-        "max_parallel_evals": spec.maxParallelEvals,
-    }
-
-
-def _spec_from_payload(payload: Mapping[str, Any]) -> ReplayOptimizeSpec:
-    return ReplayOptimizeSpec(
-        engine=EngineSpec(
-            model=payload["engine_model"],
-            backend=payload["engine_backend"],
-            baseEngineArgs=(
-                MockEngineArgs.from_json(payload["engine_base_agg_json"])
-                if payload["engine_base_agg_json"] is not None
-                else None
-            ),
-            basePrefillEngineArgs=(
-                MockEngineArgs.from_json(payload["engine_base_prefill_json"])
-                if payload["engine_base_prefill_json"] is not None
-                else None
-            ),
-            baseDecodeEngineArgs=(
-                MockEngineArgs.from_json(payload["engine_base_decode_json"])
-                if payload["engine_base_decode_json"] is not None
-                else None
-            ),
-        ),
-        hardware=HardwareSpec.model_validate_json(payload["hardware_json"]),
-        workload=WorkloadSpec.model_validate_json(payload["workload_json"]),
-        sla=SLASpec.model_validate_json(payload["sla_json"]),
-        router=RouterSpec(
-            mode=payload["router_mode"],
-            overlapWeights=payload["router_overlap_weights"],
-            baseRouterConfig=(
-                KvRouterConfig.from_json(payload["router_base_config_json"])
-                if payload["router_base_config_json"] is not None
-                else None
-            ),
-        ),
-        objective=ReplayObjective(payload["objective"]),
-        maxParallelEvals=payload["max_parallel_evals"],
-    )
-
-
 def _evaluate_state_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return _evaluate_state(
         state=payload["state"],
-        spec=_spec_from_payload(payload["spec"]),
+        spec=payload["spec"],
         cache={},
     )
 
@@ -371,7 +304,7 @@ def _evaluate_state_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _evaluate_agg_state_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return _evaluate_agg_state(
         state=payload["state"],
-        spec=_spec_from_payload(payload["spec"]),
+        spec=payload["spec"],
         cache={},
     )
 
@@ -404,8 +337,7 @@ def _evaluate_states(
             records[index] = _evaluate_state(state=state, spec=spec, cache=cache)
         return [record for record in records if record is not None]
 
-    spec_payload = _spec_to_payload(spec)
-    payloads = [{"state": state, "spec": spec_payload} for state in uncached_states]
+    payloads = [{"state": state, "spec": spec} for state in uncached_states]
 
     future_records = list(executor.map(_evaluate_state_from_payload, payloads))
 
@@ -449,8 +381,7 @@ def _evaluate_agg_states(
             records[index] = _evaluate_agg_state(state=state, spec=spec, cache=cache)
         return [record for record in records if record is not None]
 
-    spec_payload = _spec_to_payload(spec)
-    payloads = [{"state": state, "spec": spec_payload} for state in uncached_states]
+    payloads = [{"state": state, "spec": spec} for state in uncached_states]
 
     future_records = list(executor.map(_evaluate_agg_state_from_payload, payloads))
 

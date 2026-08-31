@@ -31,6 +31,7 @@ pub struct MediaTensorInfo {
 pub struct DecodedMediaData {
     pub(crate) data: SystemStorage,
     pub(crate) tensor_info: MediaTensorInfo,
+    pub(crate) content_hash: Option<u64>,
 }
 
 // Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
@@ -45,15 +46,84 @@ pub struct RdmaMediaDataDescriptor {
     #[serde(flatten)]
     pub(crate) tensor_info: MediaTensorInfo,
 
+    /// Canonical xxh3-64 key for `(shape, dtype, decoded image byte payload)`.
+    /// Serialized once so routing and backend embedding caches consume the
+    /// exact same hash without reimplementing the payload contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_hash: Option<String>,
+
     // reference to the actual data, kept alive while the rdma descriptor is alive
     #[serde(skip, default)]
     #[allow(dead_code)]
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
+impl RdmaMediaDataDescriptor {
+    /// Canonical cache/routing key serialized on the descriptor.
+    pub(crate) fn content_hash_key(&self) -> Option<&str> {
+        self.content_hash.as_deref()
+    }
+
+    /// Numeric form used by MM-aware KV routing.
+    #[cfg(feature = "mm-routing")]
+    pub(crate) fn content_hash(&self) -> Option<u64> {
+        self.content_hash_key()
+            .and_then(|key| u64::from_str_radix(key, 16).ok())
+    }
+}
+
+fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64 {
+    use xxhash_rust::xxh3::Xxh3;
+
+    let mut hasher = Xxh3::new();
+    // Rank and dimensions are fixed-width so distinct shapes cannot alias
+    // after concatenation.
+    hasher.update(&(shape.len() as u64).to_le_bytes());
+    for &dim in shape {
+        hasher.update(&(dim as u64).to_le_bytes());
+    }
+    // Widen this discriminant if DataType gains another variant.
+    let dtype_byte: u8 = match dtype {
+        DataType::UINT8 => 0,
+    };
+    hasher.update(&[dtype_byte]);
+    hasher.update(bytes);
+    hasher.digest()
+}
+
+fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStorage) -> Option<u64> {
+    use dynamo_memory::{MemoryDescriptor, actions::Slice};
+
+    // The current consumers cache and route images only. Avoid an otherwise
+    // unused full-buffer pass over decoded videos.
+    if !matches!(
+        tensor_info.metadata.as_ref(),
+        Some(DecodedMediaMetadata::Image(_))
+    ) || storage.size() == 0
+    {
+        return None;
+    }
+
+    // SAFETY: storage owns this stable buffer and is only read while the
+    // descriptor is being built, before NIXL can access it concurrently.
+    let bytes = unsafe { storage.as_slice().ok()? };
+    Some(canonical_content_hash(
+        &tensor_info.shape,
+        tensor_info.dtype,
+        bytes,
+    ))
+}
+
 impl DecodedMediaData {
+    /// Precompute the canonical image hash while still running on the decode
+    /// thread. Videos and empty buffers intentionally remain unkeyed.
+    pub(crate) fn compute_content_hash(&mut self) {
+        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data);
+    }
+
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
+        let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
         let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
@@ -64,6 +134,7 @@ impl DecodedMediaData {
             nixl_metadata,
             nixl_descriptor,
             tensor_info: self.tensor_info,
+            content_hash,
             // Keep registered storage alive
             source_storage: Some(Arc::new(registered)),
         })
@@ -92,6 +163,7 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
                 dtype: DataType::UINT8,
                 metadata: None,
             },
+            content_hash: None,
         })
     }
 }
@@ -120,4 +192,18 @@ pub fn get_nixl_agent() -> Result<NixlAgent> {
     let name = format!("media-loader-{}", uuid::Uuid::new_v4());
     let nixl_agent = NixlAgent::with_backends(&name, &["UCX"])?;
     Ok(nixl_agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DataType, canonical_content_hash};
+
+    #[test]
+    fn canonical_content_hash_payload_is_stable() {
+        let bytes = [0_u8, 1, 2, 3, 4, 5];
+        let hash = canonical_content_hash(&[1, 2, 3], DataType::UINT8, &bytes);
+
+        assert_eq!(hash, 0x7a9b_bcb1_1a89_8630);
+        assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
+    }
 }

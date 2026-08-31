@@ -14,13 +14,16 @@ use std::{
 };
 
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub(crate) use common::build_preprocessed_routing_with_selector;
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
+
+use crate::http::service::FrontendRouteExtension;
 
 /// The various ways of connecting prompts to an engine
 #[derive(PartialEq)]
@@ -98,20 +101,30 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    // Initialize audit bus + sink workers (off hot path; fan-out supported)
-    if crate::audit::config::policy().enabled {
-        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env().await?;
-        tracing::info!(cap, "Audit initialized");
+    run_input_with_frontend_route_extensions(drt, in_opt, engine_config, Vec::new()).await
+}
+
+/// Run the given engine (EngineConfig) connected to an input, with optional
+/// frontend route extensions for the HTTP frontend.
+pub async fn run_input_with_frontend_route_extensions(
+    drt: dynamo_runtime::DistributedRuntime,
+    in_opt: Input,
+    engine_config: super::EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+) -> anyhow::Result<()> {
+    // Frontend route extensions only apply to the HTTP frontend; reject them
+    // once here rather than repeating the guard in every non-HTTP arm.
+    if !matches!(&in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
+        anyhow::bail!("frontend route extensions are only supported by HTTP input");
+    }
+    if !matches!(&in_opt, Input::Http) {
+        initialize_input(&drt, &engine_config).await;
     }
 
     match in_opt {
         Input::Http => {
-            http::run(drt, engine_config).await?;
+            http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
+                .await?;
         }
         Input::Grpc => {
             grpc::run(drt, engine_config).await?;
@@ -129,4 +142,21 @@ pub async fn run_input(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn initialize_input(
+    drt: &dynamo_runtime::DistributedRuntime,
+    engine_config: &super::EngineConfig,
+) {
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
+    }
+    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
+        drt.clone(),
+        engine_config.local_model(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
+    }
 }

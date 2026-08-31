@@ -21,8 +21,10 @@ from typing import TYPE_CHECKING, Optional
 import boto3
 import pytest
 import requests
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
@@ -31,12 +33,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # LoRA testing constants
+#
+# Port 9000 / container name / bucket are hardcoded singletons — only one MinIO
+# can exist per host at a time. NOT multi-tenant safe:
+#   - Two concurrent pytest runs (or CI jobs) on the same host race on the
+#     `dynamo-minio-test` container; whichever calls `docker rm -f` second
+#     kills the other's mid-test.
+#   - xdist workers within one pytest run only work because CI pre-starts MinIO
+#     externally (see action.yml "Start MinIO Service" step) so all workers
+#     skip the start path and just connect.
+#   - If a host already has MinIO on :9000 with different creds, the fixture
+#     connects, fails to auth on bucket create, and surfaces a confusing error.
+#
+# TODO: make these overridable per-worker / per-job (env vars or PYTEST_XDIST_WORKER-
+# derived suffixes) so concurrent runs don't collide. Pattern to mirror is
+# tests/utils/runtime_services_dynamic_ports for ETCD/NATS.
 MINIO_ENDPOINT = "http://localhost:9000"
 MINIO_ACCESS_KEY = "minioadmin"
 MINIO_SECRET_KEY = "minioadmin"
 MINIO_BUCKET = "my-loras"
 DEFAULT_LORA_REPO = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 DEFAULT_LORA_NAME = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
+
+# The CRT transfer client can ignore the configured MinIO endpoint.
+MINIO_TRANSFER_CONFIG = TransferConfig(preferred_transfer_client="classic")
 
 
 @dataclass
@@ -233,7 +253,7 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path.
+        """Resolve the LoRA snapshot path from the local HF cache.
 
         Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
         """
@@ -243,29 +263,19 @@ class MinioService:
                 "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
             )
 
-        self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
-        self._logger.info(
-            f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
+        # The adapter is staged into the HF cache by predownload_models (via
+        # @pytest.mark.model) before HF_HUB_OFFLINE is enabled. Resolve the cache
+        # snapshot path directly — passing local_dir bypasses the cache-hit
+        # short-circuit in snapshot_download and forces a copy that fails under
+        # local_files_only=True with an empty target dir.
+        snapshot_path = snapshot_download(
+            self.config.lora_repo,
+            local_files_only=True,
         )
-
-        # Temporarily unset HF_HUB_OFFLINE so the download works even when
-        # the predownload_models fixture has already enabled offline mode.
-        old_offline = os.environ.pop("HF_HUB_OFFLINE", None)
-        try:
-            snapshot_download(
-                self.config.lora_repo,
-                local_dir=self._temp_download_dir,
-            )
-        finally:
-            if old_offline is not None:
-                os.environ["HF_HUB_OFFLINE"] = old_offline
-
-        # Clean up cache directory
-        cache_dir = os.path.join(self._temp_download_dir, ".cache")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-
-        return self._temp_download_dir
+        self._logger.info(
+            f"Resolved LoRA {self.config.lora_repo} from HF cache at {snapshot_path}"
+        )
+        return snapshot_path
 
     def upload_lora(self, local_path: str) -> None:
         """Upload LoRA to MinIO using boto3."""
@@ -286,9 +296,17 @@ class MinioService:
             s3_key = f"{self.config.lora_name}/{relative_path}"
 
             try:
-                s3_client.upload_file(str(file_path), self.config.bucket, s3_key)
-            except ClientError as e:
-                raise RuntimeError(f"Failed to upload {file_path}: {e}") from e
+                s3_client.upload_file(
+                    str(file_path),
+                    self.config.bucket,
+                    s3_key,
+                    Config=MINIO_TRANSFER_CONFIG,
+                )
+            except (ClientError, S3UploadFailedError, BotoCoreError) as e:
+                raise RuntimeError(
+                    f"Failed to upload {file_path} to "
+                    f"{self.config.endpoint}/{self.config.bucket}/{s3_key}: {e}"
+                ) from e
 
         self._logger.info("LoRA upload completed")
 

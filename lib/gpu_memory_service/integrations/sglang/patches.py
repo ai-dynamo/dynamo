@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from contextlib import contextmanager
 from typing import Optional
@@ -72,6 +71,7 @@ def patch_torch_memory_saver() -> None:
             gms_impl = GMSMemorySaverImpl(
                 device_index=device_index,
                 mode=gms_sglang._gms_lock_mode,
+                ro_connect_timeout_ms=gms_sglang._gms_ro_connect_timeout_ms,
             )
 
             # Set _impl directly (accessible via gms_impl property)
@@ -139,12 +139,14 @@ def patch_torch_memory_saver() -> None:
 
 
 def patch_model_runner() -> None:
-    """Patch SGLang's ModelRunner to fix memory accounting with pre-loaded weights.
+    """Patch SGLang's ModelRunner to size KV cache with GMS-resident weights.
 
-    SGLang 0.5.9 passes a startup free-memory snapshot as total_gpu_memory into
-    init_memory_pool(). In GMS read mode, imported weights can already occupy GPU
-    memory, so that snapshot is lower than physical device capacity and the KV cache
-    overhead term is under-reserved.
+    SGLang's KV sizing formula reserves dynamic headroom from a free-memory
+    snapshot taken before its own model load. In GMS read mode, the committed
+    weight handles already exist in the GMS server before that snapshot, so the
+    snapshot is lower by those weights. Add just those preloaded weight bytes
+    back to the baseline. Do not adjust write mode: weights are loaded after
+    the snapshot there, so upstream's formula already subtracts them correctly.
     """
     global _model_runner_patched
 
@@ -160,61 +162,33 @@ def patch_model_runner() -> None:
     if hasattr(ModelRunner, "_gms_patched"):
         return
 
-    original_init_memory_pool = ModelRunner.init_memory_pool
-    memory_arg_name = next(
-        (
-            name
-            for name in inspect.signature(original_init_memory_pool).parameters
-            if name != "self"
-        ),
-        None,
-    )
+    original_alloc_memory_pool = ModelRunner.alloc_memory_pool
 
-    def patched_init_memory_pool(self, *args, **kwargs):
-        """Patch init_memory_pool for SGLang versions that use total_gpu_memory.
-
-        SGLang's KV cache formula uses total_gpu_memory as the baseline:
-        rest_memory = available - total*(1-mem_fraction).
-        Replace that baseline with physical device capacity when GMS imported
-        weights are already resident. Newer SGLang versions changed this API, so
-        only rewrite the old total_gpu_memory parameter shape.
-        """
+    def patched_alloc_memory_pool(self, *args, **kwargs):
         impl = get_gms_memory_saver_impl()
-        if impl is not None and impl.imported_weights_bytes > 0:
-            total_memory_gib = torch.cuda.get_device_properties(
-                torch.cuda.current_device()
-            ).total_memory / (1 << 30)
-            if memory_arg_name == "total_gpu_memory":
-                if args:
-                    old_value = args[0]
-                    args = (total_memory_gib,) + args[1:]
-                elif memory_arg_name in kwargs:
-                    old_value = kwargs[memory_arg_name]
-                    kwargs = dict(kwargs)
-                    kwargs[memory_arg_name] = total_memory_gib
-                else:
-                    old_value = None
-                logger.info(
-                    "[GMS] Adjusted total_gpu_memory: %s -> %.2f GiB",
-                    (
-                        f"{old_value:.2f} GiB"
-                        if isinstance(old_value, (int, float))
-                        else "<missing>"
-                    ),
-                    total_memory_gib,
-                )
-            elif memory_arg_name is not None:
-                logger.info(
-                    "[GMS] Leaving %s unchanged in patched init_memory_pool",
-                    memory_arg_name,
-                )
+        if (
+            impl is not None
+            and impl.preloaded_weights_bytes > 0
+            and not self.__dict__.get("_gms_memory_baseline_adjusted", False)
+        ):
+            preloaded_weights_gib = impl.preloaded_weights_bytes / (1 << 30)
+            old_value = self.pre_model_load_memory
+            self.pre_model_load_memory += preloaded_weights_gib
+            self._gms_memory_baseline_adjusted = True
+            logger.info(
+                "[GMS] Adjusted pre_model_load_memory for preloaded weights: "
+                "%.2f GiB + %.2f GiB = %.2f GiB",
+                old_value,
+                preloaded_weights_gib,
+                self.pre_model_load_memory,
+            )
 
-        return original_init_memory_pool(self, *args, **kwargs)
+        return original_alloc_memory_pool(self, *args, **kwargs)
 
-    ModelRunner.init_memory_pool = patched_init_memory_pool
+    ModelRunner.alloc_memory_pool = patched_alloc_memory_pool
     ModelRunner._gms_patched = True
     _model_runner_patched = True
-    logger.info("[GMS] Patched ModelRunner.init_memory_pool")
+    logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
 
 
 def patch_static_state_for_gms() -> None:

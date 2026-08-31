@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -21,40 +21,49 @@ const (
 	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
 	dataParallelSizeFlag      = "--data-parallel-size"
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
+	dataParallelBackendFlag   = "--data-parallel-backend"
+	// dataParallelBackendShortFlag is vLLM's documented short alias for
+	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
+	dataParallelBackendShortFlag = "-dpb"
+	dataParallelBackendRay       = "ray"
 )
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 }
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than
-	// from disk. --load-format gms and DYN_VLLM_GMS_SHADOW_MODE activate the
-	// vLLM-side GMS client path and apply to both standalone inter-pod GMS
-	// and inter-pod GMS + failover; the "shadow mode" name is a vLLM upstream
-	// naming convention, not a statement about whether shadow pods are
-	// present.
+	// from disk.
 	if component.IsInterPodGMSEnabled() {
 		if !containerHasArg(container, "--load-format", "gms") {
 			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 		}
-		// DYN_VLLM_GMS_SHADOW_MODE is a vLLM-engine-specific switch (activates
-		// the vLLM-side GMS client path for shadow weight loading). It is
-		// injected here — in the vLLM backend — rather than in the backend-
-		// agnostic GMS helpers so non-vLLM backends do not inherit a stray,
-		// meaningless env var if/when inter-pod GMS is extended to them.
-		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		if component.IsInterPodFailoverEnabled() {
+			// DYN_VLLM_GMS_SHADOW_MODE activates vLLM's standby/failover behavior
+			// on top of --load-format gms. Standalone inter-pod GMS should not set
+			// it: those engines are active clients of the dedicated GMS weight
+			// server, not shadow engines waiting for failover activation.
+			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		}
 	}
 
 	isMultinode := numberOfNodes > 1
+	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes, component.Annotations)
+		containerGPUs, err := containerGPUCount()
+		if err != nil {
+			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		}
 
-		if shouldUseMpBackend(component.Annotations) {
+		// Apply multinode-specific argument modifications
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
+
+		if shouldUseMpBackend(annotations) {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
@@ -65,23 +74,50 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			})
 		}
 
-		// Remove probes for multinode worker and leader
+		// Remove probes for multinode workers.
 		if role == RoleWorker {
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
+	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
+		// A single-pod elastic-EP component still needs a Ray head, so that
+		// follower pods created later have a cluster to join. Only the leader
+		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+			// Bind both addresses only when a Ray head was actually injected.
+			//
+			// Both resolve from status.podIP, which is the point: the Ray head
+			// registers under that address and vLLM searches for that address, so
+			// the two cannot disagree. POD_IP is what the launch command
+			// interpolates into --node-ip-address; VLLM_DP_MASTER_IP is what the
+			// engine reads.
+			//
+			// The engine needs telling because at --data-parallel-size 1 vLLM
+			// discards the DP master IP it derives from the Ray node and falls back
+			// to VLLM_DP_MASTER_IP, which defaults to 127.0.0.1 — so it looks for a
+			// node that does not exist and aborts with "The DP master node (ip:
+			// 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP nor
+			// --data-parallel-address survives that overwrite; this env var is the
+			// only value the fallback reads.
+			podIPRef := func() *corev1.EnvVarSource {
+				return &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "status.podIP",
+					},
+				}
+			}
+			container.Env = append(container.Env,
+				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			)
+		}
 	}
 
 	// Set compilation cache environment variables for VLLM
 	cacheDir := ""
-
-	// Check for volumeMounts with useAsCompilationCache=true
-	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.UseAsCompilationCache {
-			cacheDir = volumeMount.MountPoint
-			break
-		}
+	if component.CompilationCache != nil {
+		cacheDir = component.CompilationCache.MountPath
 	}
 
 	if cacheDir != "" {
@@ -101,6 +137,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			"env-vars-set", true,
 			"env-vars", "VLLM_CACHE_ROOT")
 	}
+
+	return nil
 }
 
 const (
@@ -216,28 +254,14 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(component.Annotations) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
 		return
 	}
 
-	// Elastic EP workers use a Ray cluster, not the MP coordinator. The worker
-	// command (injected by injectElasticEPRayLaunchFlags) already contains an
-	// inline health gate that polls DynamoSystemPort (9090) before joining Ray.
-	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
-	// in the elastic EP path — injecting it would cause the worker to hang forever.
-	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
-		if hasFlag(getExpandedArgs(component.ExtraPodSpec.MainContainer), enableElasticEPFlag) {
-			return
-		}
-	}
-
-	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
-		return
-	}
-
+	mainContainer := &podSpec.Containers[0]
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mainImage := podSpec.Containers[0].Image
+	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -275,11 +299,19 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 }
 
+func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
+	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
+		return false
+	}
+
+	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+}
+
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32, annotations map[string]string) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
-	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, resources)
+	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
@@ -297,8 +329,8 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
 		// so vLLM naturally places all initial DP workers on the leader node.
 		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
+	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -320,7 +352,7 @@ func getExpandedArgs(container *corev1.Container) []string {
 //
 // Decision logic:
 //  1. Explicit override annotation takes priority (user set "mp" or "ray")
-//  2. Operator origin version feature gate: uses featuregate.VLLMMultiprocessing
+//  2. Operator origin version compatibility gate: uses compatibility.VLLMMultiprocessing
 func shouldUseMpBackend(annotations map[string]string) bool {
 	logger := log.Log.WithName("vllm-backend")
 
@@ -340,7 +372,7 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 	}
 
 	// Step 2: Check operator origin version gate
-	return featuregate.VLLMMultiprocessing.IsEnabled(annotations)
+	return compatibility.VLLMMultiprocessing.Enabled(annotations)
 }
 
 // injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.
@@ -353,7 +385,8 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 // the leader's master port before the worker's main container starts.
 func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mpFlags := fmt.Sprintf("--distributed-executor-backend mp --nnodes %d --master-addr %s --master-port %s",
+	mpFlags := fmt.Sprintf("%s mp --nnodes %d --master-addr %s --master-port %s",
+		distributedExecutorFlag,
 		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
 
 	needsShell := false
@@ -383,7 +416,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
 		originalArgs := strings.Join(quotedArgs, " ")
-		vllmMultinodeFlags := "--distributed-executor-backend ray"
+		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)
 		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
 		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
@@ -420,30 +453,74 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
 // naturally places all --data-parallel-size workers on the leader node.
 //
-// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
+// Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
-func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+// injectElasticEPRayLaunchFlags returns true when it rewrote the container to
+// front the engine with a Ray head, and false when it deliberately left the
+// container untouched (see the empty-Command case below), so callers can gate
+// side effects such as the VLLM_DP_MASTER_IP injection on whether a Ray head was
+// actually set up.
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) bool {
 	switch role {
-	case RoleLeader:
+	// RoleMain is a component deployed as a single pod; it heads the Ray
+	// cluster exactly as a multi-node leader does.
+	case RoleLeader, RoleMain:
+		// The Ray-head wrapper has to run a concrete executable once the head is
+		// up, but an empty Command means the real entrypoint is the image
+		// ENTRYPOINT, which the operator cannot see or reconstruct. Rewriting here
+		// would emit a shell command with no executable (e.g. `exec --model ...`)
+		// and break a pod that Kubernetes would otherwise start from its
+		// ENTRYPOINT. Leave that invocation intact and skip the Ray head; a
+		// single-pod Ray head needs an explicit Command.
+		if len(container.Command) == 0 {
+			log.Log.WithName("vllm-backend").Info(
+				"elastic-EP Ray head not injected: container has no explicit Command; "+
+					"set an explicit command to start the single-pod Ray head",
+				"service", serviceName, "role", role)
+			return false
+		}
 		quotedCmd := make([]string, len(container.Command))
 		for i, tok := range container.Command {
-			quotedCmd[i] = shellQuoteForBashC(tok)
+			quotedCmd[i] = shellQuotePOSIX(tok)
 		}
 		quotedArgs := make([]string, len(container.Args))
 		for i, arg := range container.Args {
-			quotedArgs[i] = shellQuoteForBashC(arg)
+			quotedArgs[i] = shellQuotePOSIX(arg)
+		}
+		vllmCommand := strings.TrimSpace(strings.Join(quotedCmd, " ") + " " + strings.Join(quotedArgs, " "))
+		// A single-pod RoleMain leader is an ordinary serving pod that Kubernetes
+		// rolls, evicts, and deletes, so exec the engine: it then runs as the
+		// container's main process (PID 1) and receives SIGTERM directly for a
+		// graceful shutdown, instead of being killed after the grace period with
+		// in-flight requests dropped. The backgrounded Ray head continues as its
+		// child. The multinode RoleLeader keeps its historical no-exec form so
+		// this stays scoped to the new single-pod path.
+		if role == RoleMain {
+			vllmCommand = "exec " + vllmCommand
+		}
+		// Name the head's address on the single-pod path instead of letting Ray
+		// pick one. vLLM is told the DP master is at status.podIP (see the caller)
+		// and then looks for the Ray node registered under that exact address.
+		// Ray left to itself chooses an interface by its own heuristic, so on a
+		// pod with more than one network the two disagree and the engine aborts
+		// with the same "DP master node is missing or dead" the env var exists to
+		// prevent. The multinode leader keeps auto-detection: neither side of that
+		// pair is pinned, so both run the same heuristic and agree with each other.
+		nodeIPFlag := ""
+		if role == RoleMain {
+			nodeIPFlag = fmt.Sprintf(` --node-ip-address="$%s"`, commonconsts.PodIPEnvVar)
 		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
-			`ray start --head --port=%s --block & `+
+			`ray start --head --port=%s%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
 			VLLMPort,
+			nodeIPFlag,
 			VLLMPort,
-			strings.Join(quotedCmd, " "),
-			strings.Join(quotedArgs, " "),
+			vllmCommand,
 		)}
 	case RoleWorker:
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
@@ -458,7 +535,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
 		// Without a bound, a permanently broken leader leaves the worker looping
 		// forever with no Kubernetes liveness probe to detect it (probes are removed
-		// at the UpdatePodSpec level for elastic EP workers).
+		// from vLLM multinode containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+
@@ -472,6 +549,42 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
+	return true
+}
+
+// IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
+// topology.
+//
+// Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
+// what grows and shrinks workers at runtime, and the engine refuses a scale
+// request on any other backend. Requiring both flags keeps a Ray head off pods
+// that pass --enable-elastic-ep while running the default backend, where it
+// would launch a process nothing ever talks to.
+//
+// Detection scans the full command line (Command + Args) so the flags are found
+// whether the manifest carries them in Command or Args, and it accepts vLLM's
+// long --data-parallel-backend flag and its documented -dpb alias in both the
+// "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
+// as equivalent, so any of them must trigger Ray-head injection.
+func IsElasticEPRayLaunch(container *corev1.Container) bool {
+	expanded := getExpandedCommandLine(container)
+	return hasFlag(expanded, enableElasticEPFlag) &&
+		(hasArg(expanded, dataParallelBackendFlag, dataParallelBackendRay) ||
+			hasArg(expanded, dataParallelBackendShortFlag, dataParallelBackendRay))
+}
+
+// getExpandedCommandLine flattens Command and Args and splits any space-joined
+// tokens, so flag detection works whether the manifest puts flags in Command or
+// Args and whether they are separate list items or a single combined string.
+func getExpandedCommandLine(container *corev1.Container) []string {
+	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
+	commandLine = append(commandLine, container.Command...)
+	commandLine = append(commandLine, container.Args...)
+	expanded := make([]string, 0, len(commandLine))
+	for _, arg := range commandLine {
+		expanded = append(expanded, strings.Fields(arg)...)
+	}
+	return expanded
 }
 
 // hasFlag returns true if flag exists in expandedArgs.
@@ -484,12 +597,11 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	// Calculate engines per node
-	containerGPUs := getContainerGPUs(resources)
 	worldSize := getWorldSize(expandedArgs) // TP * PP per engine
 	dataParallelSizeLocal := containerGPUs / worldSize
 
@@ -542,9 +654,8 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 }
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
-// exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
-func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
-	containerGPUs := getContainerGPUs(resources)
+// exceeds the GPU count of one engine container, requiring multi-node distribution (via mp or ray).
+func needsTensorParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
 	if containerGPUs == 0 {
 		return false
 	}
@@ -558,9 +669,8 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+func needsDataParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
-	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
 	}
@@ -579,14 +689,4 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 		}
 	}
 	return flagValue
-}
-
-func getContainerGPUs(resources *v1alpha1.Resources) int64 {
-	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
-		return 0
-	}
-	if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 64); err == nil {
-		return gpus
-	}
-	return 0
 }

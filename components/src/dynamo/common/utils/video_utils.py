@@ -83,10 +83,15 @@ def normalize_video_frames(images: list) -> list:
 
 
 def frames_to_numpy(images: list) -> np.ndarray:
-    """Convert a list of PIL Images to a numpy array suitable for video encoding.
+    """Convert a list of video frames to a numpy array suitable for encoding.
+
+    Accepts either PIL Images or numpy arrays. Diffusion video pipelines (e.g.
+    Wan2.1 T2V) emit numpy frames — float in ``[0, 1]`` by default — while other
+    stages hand back PIL Images; this normalizes both to ``uint8`` RGB, matching
+    the conversion ``diffusers.export_to_video`` performs internally.
 
     Args:
-        images: List of PIL Image objects (video frames).
+        images: List of PIL Image objects or ``np.ndarray`` frames (H, W, 3).
 
     Returns:
         Numpy array of shape ``(num_frames, height, width, 3)`` with dtype
@@ -100,7 +105,14 @@ def frames_to_numpy(images: list) -> np.ndarray:
 
     frames = []
     for img in images:
-        arr = np.array(img.convert("RGB"))
+        if isinstance(img, np.ndarray):
+            arr = img
+            if arr.dtype != np.uint8:
+                # Diffusers convention: numpy frames are float in [0, 1].
+                arr = (arr * 255.0).round().clip(0, 255).astype(np.uint8)
+        else:
+            # PIL Image.
+            arr = np.array(img.convert("RGB"))
         frames.append(arr)
 
     # Validate consistent sizes
@@ -154,13 +166,16 @@ def encode_to_mp4(
     logger.info(f"Encoding {len(frames)} frames to {output_path} at {fps} fps")
 
     try:
-        # Use imageio to write MP4
-        # imageio.v3 API
+        # Encode with VP9 (libvpx-vp9). The in-tree ffmpeg build is LGPL-only and
+        # royalty-free: it carries no H.264 codec (not even the h264_nvenc HW
+        # encoder), so VP9 is the video encoder we ship. VP9-in-mp4 is valid and
+        # decodes with our VP8/VP9 decoder allowlist; see
+        # container/templates/wheel_builder.Dockerfile.
         if hasattr(iio, "imwrite"):
-            iio.imwrite(output_path, frames, fps=fps, codec="libx264")
+            iio.imwrite(output_path, frames, fps=fps, codec="libvpx-vp9")
         else:
             # Fall back to v2 API
-            writer = iio.get_writer(output_path, fps=fps, codec="libx264")  # type: ignore[attr-defined]
+            writer = iio.get_writer(output_path, fps=fps, codec="libvpx-vp9")  # type: ignore[attr-defined]
             try:
                 for frame in frames:
                     writer.append_data(frame)
@@ -175,19 +190,21 @@ def encode_to_mp4(
         raise RuntimeError(f"Video encoding failed: {e}") from e
 
 
-def encode_to_mp4_bytes(
+def encode_to_video_bytes(
     frames: np.ndarray,
     fps: int = 16,
+    output_format: str = "mp4",
 ) -> bytes:
-    """Encode numpy frames to MP4 bytes (in-memory).
+    """Encode numpy frames to video bytes (in-memory).
 
     Args:
         frames: Video frames as numpy array of shape (num_frames, height, width, 3)
             with uint8 values 0-255.
         fps: Frames per second for the output video.
+        output_format: Container format — "mp4", "webm".
 
     Returns:
-        MP4 video as bytes.
+        Encoded video as bytes.
 
     Raises:
         ImportError: If imageio is not available.
@@ -204,20 +221,26 @@ def encode_to_mp4_bytes(
                 "Install with: pip install imageio[ffmpeg]"
             )
 
-    logger.info(f"Encoding {len(frames)} frames to bytes at {fps} fps")
+    logger.info(f"Encoding {len(frames)} frames to {output_format} bytes at {fps} fps")
 
     try:
-        # Use in-memory buffer
         buffer = io.BytesIO()
 
-        # imageio can write to BytesIO with format hint
+        # VP9 (libvpx-vp9) for both containers: the in-tree ffmpeg is royalty-free
+        # and carries no H.264 encoder. VP9-in-mp4 and VP9-in-webm are both valid.
+        kwargs: dict = {"fps": fps}
+        if output_format in ("webm", "mp4"):
+            kwargs["codec"] = "libvpx-vp9"
+        else:
+            raise ValueError(f"No codec specified for response format: {output_format}")
+
         if hasattr(iio, "imwrite"):
-            # v3 API - write to buffer
-            iio.imwrite(buffer, frames, extension=".mp4", fps=fps, codec="libx264")
+            # v3 API
+            iio.imwrite(buffer, frames, extension=f".{output_format}", **kwargs)
         else:
             # v2 API
             writer = iio.get_writer(  # type: ignore[attr-defined]
-                buffer, format="FFMPEG", mode="I", fps=fps, codec="libx264"
+                buffer, format="FFMPEG", mode="I", **kwargs
             )
             try:
                 for frame in frames:

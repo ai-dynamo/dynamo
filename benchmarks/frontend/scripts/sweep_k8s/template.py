@@ -17,12 +17,13 @@ from typing import Dict
 from sweep_core.models import DeployDimension, SweepConfig
 from sweep_k8s.kubectl import apply_yaml
 
-# Tokenizer backend mapping for template substitution
+# Tokenizer name mapping for template substitution (DYN_TOKENIZER accepts
+# "default" or "fastokens")
 TOKENIZER_TEMPLATE_MAP = {
     "hf": "default",
     "default": "default",
-    "fast": "fast",
-    "fastokens": "fast",
+    "fast": "fastokens",
+    "fastokens": "fastokens",
 }
 
 DEFAULT_HF_TOKEN_SECRET_NAME = "hf-token-secret"
@@ -56,9 +57,7 @@ def build_substitution_dict(
     hf_token_secret_name = DEFAULT_HF_TOKEN_SECRET_NAME
     variables: Dict[str, str] = {
         # Deploy dimensions
-        "DYN_TOKENIZER_BACKEND": TOKENIZER_TEMPLATE_MAP.get(
-            deploy.tokenizer, deploy.tokenizer
-        ),
+        "DYN_TOKENIZER": TOKENIZER_TEMPLATE_MAP.get(deploy.tokenizer, deploy.tokenizer),
         "NUM_WORKERS": str(deploy.workers),
         # Model info
         "MODEL": config.model,

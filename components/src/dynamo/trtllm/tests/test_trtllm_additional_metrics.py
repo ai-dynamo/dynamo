@@ -11,9 +11,21 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from prometheus_client import CollectorRegistry, generate_latest
+import pytest
+from prometheus_client import CollectorRegistry
+from prometheus_client import Counter as RealCounter
+from prometheus_client import Gauge as RealGauge
+from prometheus_client import Histogram as RealHistogram
+from prometheus_client import generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 try:
     from dynamo.trtllm.request_handlers.handler_base import HandlerBase
@@ -30,14 +42,13 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         """Create a fresh registry and collector for each test."""
         self.registry = CollectorRegistry()
 
-        # Patch prometheus_client.Counter and Histogram to use our test registry
+        # Patch prometheus_client metrics to use our test registry
         with patch("dynamo.trtllm.metrics.Counter") as MockCounter, patch(
             "dynamo.trtllm.metrics.Histogram"
-        ) as MockHistogram:
-            from prometheus_client import Counter, Histogram
+        ) as MockHistogram, patch("dynamo.trtllm.metrics.Gauge") as MockGauge:
 
             def make_counter(name, documentation, labelnames=None, **_kw):
-                return Counter(
+                return RealCounter(
                     name,
                     documentation,
                     labelnames=labelnames or [],
@@ -50,12 +61,21 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 kwargs = {"registry": self.registry}
                 if buckets is not None:
                     kwargs["buckets"] = buckets
-                return Histogram(
+                return RealHistogram(
                     name, documentation, labelnames=labelnames or [], **kwargs
+                )
+
+            def make_gauge(name, documentation, labelnames=None, **_kw):
+                return RealGauge(
+                    name,
+                    documentation,
+                    labelnames=labelnames or [],
+                    registry=self.registry,
                 )
 
             MockCounter.side_effect = make_counter
             MockHistogram.side_effect = make_histogram
+            MockGauge.side_effect = make_gauge
 
             self.collector = AdditionalMetricsCollector(
                 labels={
@@ -125,7 +145,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         sample = self.registry.get_sample_value(
             "trtllm_kv_transfer_latency_seconds_count"
         )
-        self.assertEqual(sample, 0.0)
+        self.assertIn(sample, (None, 0.0))
 
     def test_kv_transfer_perf_return_values(self):
         """Verify record_kv_transfer_perf returns True on record, False on skip."""
@@ -216,6 +236,37 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         # appear as a sample row.
         self.assertIn(count, (None, 0.0))
 
+    def test_kv_event_buffer_telemetry(self):
+        """KV event drains report capacity, distribution, and ID loss."""
+        self.collector.set_kv_event_buffer_capacity(100_000)
+        self.collector.record_kv_event_drain_batch(64)
+        self.collector.record_kv_event_drain_batch(512)
+        self.collector.record_kv_event_drain_batch(128)
+        self.collector.record_kv_event_id_gap(7)
+        self.collector.record_kv_event_id_gap(0)
+
+        labels = {
+            "model_name": "test-model",
+            "disaggregation_mode": "prefill_and_decode",
+            "engine_type": "trtllm",
+        }
+        self.assertEqual(
+            self.registry.get_sample_value("trtllm_kv_event_buffer_capacity", labels),
+            100_000,
+        )
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "trtllm_kv_event_drain_batch_size_count", labels
+            ),
+            3,
+        )
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "trtllm_kv_event_id_gap_events_total", labels
+            ),
+            7,
+        )
+
     def test_no_duplicate_metrics(self):
         """Test that removed duplicate metrics are not present."""
         output = generate_latest(self.registry).decode()
@@ -248,19 +299,21 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
 
     def test_structured_output_detection_keys(self):
         """Verify guided decoding detection keys in generate_locally match _override_sampling_params."""
-        # Extract detection keys from generate_locally: the tuple in
+        # Extract detection keys from _generate_locally_impl: the tuple in
         #   any(guided.get(k) for k in ("json", ...))
-        gen_source = textwrap.dedent(inspect.getsource(HandlerBase.generate_locally))
+        # generate_locally is a thin wrapper; the logic lives in the impl.
+        gen_source = textwrap.dedent(
+            inspect.getsource(HandlerBase._generate_locally_impl)
+        )
         gen_tree = ast.parse(gen_source)
         detection_keys = set()
         for node in ast.walk(gen_tree):
             # Find: any(guided.get(k) for k in (...))
             if isinstance(node, ast.Tuple) and all(
-                isinstance(e, (ast.Constant, ast.Str)) for e in node.elts
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in node.elts
             ):
-                vals = {
-                    e.value if isinstance(e, ast.Constant) else e.s for e in node.elts
-                }
+                vals = {e.value for e in node.elts}
                 if "json_object" in vals:  # identify the right tuple
                     detection_keys = vals
 

@@ -30,14 +30,17 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+const testDGDName = "my-dgd"
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
 		"sla": map[string]interface{}{
-			"ttft": float64(500),
-			"itl":  float64(20),
-			"isl":  float64(2048),
-			"osl":  float64(512),
+			"ttft":             float64(500),
+			"itl":              float64(20),
+			"isl":              float64(2048),
+			"osl":              float64(512),
+			"optimizationType": "latency",
 		},
 		"deployment": map[string]interface{}{
 			"modelCache": map[string]interface{}{
@@ -60,10 +63,11 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			Model:     "meta-llama/Llama-3.1-8B",
-			Backend:   "vllm",
-			AutoApply: true,
-			UseMocker: true,
+			Model:                  "meta-llama/Llama-3.1-8B",
+			Backend:                "vllm",
+			RuntimeVersionOverride: "1.2.3",
+			AutoApply:              true,
+			UseMocker:              true,
 			ProfilingConfig: ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
 				OutputPVC:     "output-pvc",
@@ -72,7 +76,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			},
 			EnableGPUDiscovery: &trueVal,
 			DeploymentOverrides: &DeploymentOverridesSpec{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				Labels:    map[string]string{"team": "ml"},
 			},
@@ -83,7 +87,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			ObservedGeneration: 3,
 			ProfilingResults:   "configmap/profiling-cm",
 			Deployment: &DeploymentStatus{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				State:     "initializing",
 				Created:   true,
@@ -109,10 +113,11 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:     "Qwen/Qwen3-32B",
-			Backend:   v1beta1.BackendTypeVllm,
-			AutoApply: &autoApplyFalse,
-			Image:     "nvcr.io/nvidia/dynamo:0.3.2",
+			Model:                  "Qwen/Qwen3-32B",
+			Backend:                v1beta1.BackendTypeVllm,
+			AutoApply:              &autoApplyFalse,
+			Image:                  "nvcr.io/nvidia/dynamo:custom",
+			RuntimeVersionOverride: "1.2.3",
 			SLA: &v1beta1.SLASpec{
 				TTFT: &ttft,
 				ITL:  &itl,
@@ -127,14 +132,16 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 				PVCMountPath: "/models",
 			},
 			Features: &v1beta1.FeaturesSpec{
-				Mocker:  &v1beta1.MockerSpec{Enabled: true},
-				Planner: &runtime.RawExtension{Raw: rawPlanner},
+				Mocker:   &v1beta1.MockerSpec{Enabled: true},
+				KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
+				Planner:  &runtime.RawExtension{Raw: rawPlanner},
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
-			Phase:              v1beta1.DGDRPhaseDeployed,
+			Phase:              v1beta1.DGDRPhaseProfiling,
 			ObservedGeneration: 2,
 			DGDName:            "hub-dgd",
+			ProfilingPhase:     v1beta1.ProfilingPhaseSweepingDecode,
 			ProfilingJobName:   "profiling-job-1",
 			ProfilingResults: &v1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: rawDGD},
@@ -162,6 +169,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
 	}
+	if dst.Spec.RuntimeVersionOverride != src.Spec.RuntimeVersionOverride {
+		t.Errorf("RuntimeVersionOverride: got %q, want %q", dst.Spec.RuntimeVersionOverride, src.Spec.RuntimeVersionOverride)
+	}
 
 	// ProfilerImage → Image
 	if dst.Spec.Image != src.Spec.ProfilingConfig.ProfilerImage {
@@ -185,6 +195,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 	if dst.Spec.SLA.ITL == nil || *dst.Spec.SLA.ITL != 20 {
 		t.Errorf("SLA.ITL: got %v, want 20", dst.Spec.SLA.ITL)
+	}
+	if dst.Spec.SLA.OptimizationType == nil || *dst.Spec.SLA.OptimizationType != v1beta1.OptimizationTypeLatency {
+		t.Errorf("SLA.OptimizationType: got %v, want %q", dst.Spec.SLA.OptimizationType, v1beta1.OptimizationTypeLatency)
 	}
 
 	// Workload from JSON blob
@@ -212,19 +225,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 		t.Errorf("ModelCache.PVCMountPath: got %q, want %q", dst.Spec.ModelCache.PVCMountPath, "/data/model")
 	}
 
-	// EnableGPUDiscovery → annotation
-	if dst.Annotations[annDGDREnableGPUDisc] != "true" {
-		t.Errorf("annDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[annDGDREnableGPUDisc], "true")
-	}
-
-	// OutputPVC → annotation
-	if dst.Annotations[annDGDROutputPVC] != "output-pvc" {
-		t.Errorf("annDGDROutputPVC annotation: got %q, want %q", dst.Annotations[annDGDROutputPVC], "output-pvc")
-	}
-
-	// DeploymentOverrides → annotation
-	if dst.Annotations[annDGDRDeployOverrides] == "" {
-		t.Error("annDGDRDeployOverrides annotation is empty")
+	// Alpha-only fields use the structural sparse payload.
+	if dst.Annotations[annDGDRSpec] == "" {
+		t.Error("annDGDRSpec structural annotation is empty")
 	}
 }
 
@@ -246,18 +249,35 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 
 	// Deployment.Name → DGDName
-	if dst.Status.DGDName != "my-dgd" {
-		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, "my-dgd")
+	if dst.Status.DGDName != testDGDName {
+		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, testDGDName)
 	}
 
-	// Backend → annotation
-	if dst.Annotations[annDGDRStatusBackend] != "vllm" {
-		t.Errorf("annDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[annDGDRStatusBackend], "vllm")
+	// Alpha-only status uses the structural sparse payload.
+	if dst.Annotations[annDGDRStatus] == "" {
+		t.Error("annDGDRStatus structural annotation is empty")
+	}
+}
+
+func TestScrubDGDRInternalAnnotationsRemovesRetiredKeys(t *testing.T) {
+	metadata := &metav1.ObjectMeta{Annotations: map[string]string{
+		annDGDRSpec:        "spec",
+		annDGDRStatus:      "status",
+		"example.com/keep": "value",
+	}}
+	for _, key := range retiredDGDRAnnotationKeys {
+		metadata.Annotations[key] = "stale"
 	}
 
-	// ProfilingResults → annotation
-	if dst.Annotations[annDGDRProfilingResults] != "configmap/profiling-cm" {
-		t.Errorf("annDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[annDGDRProfilingResults], "configmap/profiling-cm")
+	scrubDGDRInternalAnnotations(metadata)
+
+	for _, key := range append([]string{annDGDRSpec, annDGDRStatus}, retiredDGDRAnnotationKeys...) {
+		if _, ok := metadata.Annotations[key]; ok {
+			t.Errorf("internal annotation %q was not scrubbed", key)
+		}
+	}
+	if got := metadata.Annotations["example.com/keep"]; got != "value" {
+		t.Errorf("unrelated annotation = %q, want value", got)
 	}
 }
 
@@ -305,7 +325,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if blob["extra_key"] != "preserved" {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
-	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
+	// Planner round-trip via profiling-config projection helpers.
 	plannerMap, _ := blob["planner"].(map[string]interface{})
 	if plannerMap == nil {
 		t.Fatal("planner key missing in restored JSON blob")
@@ -342,11 +362,7 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 
 	// --- Status checks ---
-	// Phase is intentionally lossy: DGDRPhaseDeployed → Ready → Ready
-	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
-		t.Errorf("Status.Phase: got %q, want %q (Deployed→Ready is lossy)", restored.Status.Phase, v1beta1.DGDRPhaseReady)
-	}
-	if diff := cmp.Diff(original.Status, restored.Status, cmpopts.IgnoreFields(v1beta1.DynamoGraphDeploymentRequestStatus{}, "Phase")); diff != "" {
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
 		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 	// GeneratedDeployment round-trip via ProfilingResults.SelectedConfig
@@ -366,4 +382,202 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
 	}
+}
+
+func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
+	original := newV1beta1DGDR()
+	concurrency := float64(8)
+	requestRate := float64(2.5)
+	e2eLatency := float64(900)
+	totalGPUs := int32(8)
+	replicas := int32(3)
+	availableReplicas := int32(2)
+	original.Spec.Workload.Concurrency = &concurrency
+	original.Spec.Workload.RequestRate = &requestRate
+	original.Spec.SLA.E2ELatency = &e2eLatency
+	original.Spec.Hardware = &v1beta1.HardwareSpec{
+		GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+		TotalGPUs: &totalGPUs,
+	}
+	original.Spec.SearchStrategy = v1beta1.SearchStrategyThorough
+	original.Status.Phase = v1beta1.DGDRPhaseDeployed
+	original.Status.ProfilingPhase = ""
+	original.Status.ProfilingJobName = ""
+	original.Status.DeploymentInfo = &v1beta1.DeploymentInfoStatus{
+		Replicas:          &replicas,
+		AvailableReplicas: &availableReplicas,
+	}
+	original.Status.ProfilingResults.Pareto = []v1beta1.ParetoConfig{
+		{Config: runtime.RawExtension{Raw: []byte(`{"candidate":"a"}`)}},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestStripDGDRTypedProfilingConfig(t *testing.T) {
+	const (
+		customKey         = "custom"
+		deployKey         = "deployment"
+		islKey            = "isl"
+		itlKey            = "itl"
+		keepValue         = "keep"
+		modelCache        = "modelCache"
+		modelPathInPvcKey = "modelPathInPvc"
+		optimizationType  = "optimizationType"
+		oslKey            = "osl"
+		plannerKey        = "planner"
+		pvcMountPathKey   = "pvcMountPath"
+		pvcNameKey        = "pvcName"
+		slaKey            = "sla"
+		ttftKey           = "ttft"
+		unrelatedKey      = "unrelated"
+	)
+	tests := []struct {
+		name string
+		in   dgdrProfilingConfigBlob
+		want dgdrProfilingConfigBlob
+	}{
+		{
+			name: "strips projected leaves and keeps opaque siblings",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          float64(10),
+					itlKey:           float64(20),
+					optimizationType: string(v1beta1.OptimizationTypeLatency),
+					islKey:           float64(30),
+					oslKey:           float64(40),
+					customKey:        keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        "cache-pvc",
+						modelPathInPvcKey: "/models",
+						pvcMountPathKey:   "/cache",
+						customKey:         keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				plannerKey: map[string]any{"enabled": true},
+				"top":      keepValue,
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					customKey: keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						customKey: keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				"top": keepValue,
+			},
+		},
+		{
+			name: "preserves typed-looking values that projection skips",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+		},
+		{
+			name: "removes empty containers only when projected leaves were stripped",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey: float64(10),
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey: "cache-pvc",
+					},
+				},
+				plannerKey: map[string]any{"enabled": true},
+			},
+			want: dgdrProfilingConfigBlob{},
+		},
+		{
+			name: "preserves explicit empty maps that were not projected",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := mustDGDRJSON(t, tt.in)
+			got := stripDGDRTypedProfilingConfig(tt.in)
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("stripped config mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(string(before), string(mustDGDRJSON(t, tt.in))); diff != "" {
+				t.Fatalf("input was mutated (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func mustDGDRJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return data
 }

@@ -22,6 +22,11 @@ enable_chunked_prefill: true
 # Overlap scheduler not currently supported in prefill only workers.
 disable_overlap_scheduler: true
 
+model_kwargs:
+  torch_dtype: bfloat16
+  text_config:
+    torch_dtype: bfloat16
+
 # Note: Encode workers use MultimodalEncoder (vision encoder + projector only),
 # which ignores most engine_args. No kv_cache_config or cache_transceiver_config
 # is needed since MultimodalEncoder doesn't allocate KV cache or transfer buffers.

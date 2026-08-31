@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .model import SupportedModels, is_model_supported, is_qwen_vl_model
+from .model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +106,8 @@ def encode_image_embeddings(
         NotImplementedError: If model is not supported
     """
     with torch.no_grad():
-        # Route through the correct encoder based on model
-        if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+        family = resolve_model_family(model_name)
+        if family is ModelFamily.LLAVA:
             pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
             vision_outputs = vision_encoder(pixel_values)
 
@@ -116,7 +116,7 @@ def encode_image_embeddings(
 
             embeddings = projector(vision_outputs.last_hidden_state)
 
-        elif is_qwen_vl_model(model_name):
+        elif family is ModelFamily.QWEN_VL:
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
         else:
@@ -146,12 +146,13 @@ def get_encoder_components(
     Raises:
         NotImplementedError: If model is not supported
     """
-    if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+    family = resolve_model_family(model_name)
+    if family is ModelFamily.LLAVA:
         vision_encoder = vision_model.vision_tower
         projector = getattr(vision_model, "multi_modal_projector", None)
         return vision_encoder, projector
 
-    elif is_qwen_vl_model(model_name):
+    elif family is ModelFamily.QWEN_VL:
         vision_encoder = vision_model
         projector = None
         return vision_encoder, projector

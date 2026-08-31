@@ -22,12 +22,14 @@ class MockServer:
     def __init__(self):
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata: dict[str, str] = {}
 
     async def generate(self, request, context):
         print("################## generate called ######################")
 
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata = {}
 
         method_name = request
         assert hasattr(
@@ -39,31 +41,60 @@ class MockServer:
 
     async def _generate_until_context_cancelled(self, request, context):
         """
-        Generate method that yields numbers 0-999 every 0.1 seconds
+        Generate method that yields numbers 0-999 every 0.1 seconds.
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
-        CancelledError if stopped / killed
+        CancelledError if stopped / killed.
         """
         for i in range(1000):
             print(f"Processing iteration {i}")
 
-            # Check if context is stopped
             if context.is_stopped():
                 print(f"Context stopped at iteration {i}")
                 self.context_is_stopped = True
                 self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
                 raise asyncio.CancelledError
 
-            # Check if context is killed
             if context.is_killed():
                 print(f"Context killed at iteration {i}")
                 self.context_is_stopped = context.is_stopped()
                 self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
-
             print(f"Sending iteration {i}")
             yield i
+
+        assert (
+            False
+        ), "Test failed: generate_until_cancelled did not raise CancelledError"
+
+    async def _generate_until_context_cancelled_with_metadata(self, request, context):
+        """
+        Variant of _generate_until_context_cancelled that includes context metadata
+        in each yielded payload so the test can assert metadata propagation.
+        """
+        for i in range(1000):
+            print(f"Processing iteration {i}")
+
+            if context.is_stopped():
+                print(f"Context stopped at iteration {i}")
+                self.context_is_stopped = True
+                self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
+                raise asyncio.CancelledError
+
+            if context.is_killed():
+                print(f"Context killed at iteration {i}")
+                self.context_is_stopped = context.is_stopped()
+                self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
+                raise asyncio.CancelledError
+
+            await asyncio.sleep(0.1)
+            print(f"Sending iteration {i}")
+            yield {"i": i, "metadata": dict(context.metadata.items())}
 
         assert (
             False
@@ -198,6 +229,38 @@ async def test_client_context_cancel(temp_file_store, server, client):
     assert not handler.context_is_killed
 
     # TODO: Test with _generate_until_asyncio_cancelled server handler
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+async def test_client_context_cancel_preserves_metadata(
+    temp_file_store, server, client
+):
+    _, handler = server
+    context = Context(metadata={"tenant": "alpha", "region": "us-west"})
+    stream = await client.generate(
+        "_generate_until_context_cancelled_with_metadata", context=context
+    )
+
+    iteration_count = 0
+    async for annotated in stream:
+        payload = annotated.data()
+        print(f"Received iteration: {payload}")
+        assert payload["i"] == iteration_count
+        assert payload["metadata"] == {"region": "us-west", "tenant": "alpha"}
+
+        if iteration_count >= 2:
+            context.stop_generating()
+            break
+
+        iteration_count += 1
+
+    await asyncio.sleep(0.2)
+
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+    assert handler.context_metadata == {"region": "us-west", "tenant": "alpha"}
 
 
 @pytest.mark.forked

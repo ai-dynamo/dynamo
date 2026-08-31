@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""ThunderAgent router CLI parsing and config assembly."""
+
+from __future__ import annotations
+
+import argparse
+from typing import Optional
+
+from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.utils import add_argument
+from dynamo.router.args import (
+    DynamoRouterArgGroup,
+    DynamoRouterConfig,
+    build_aic_perf_config,
+    build_kv_router_config,
+)
+from dynamo.thunderagent_router.router import ThunderAgentConfig
+
+
+class ThunderAgentRouterConfig(DynamoRouterConfig):
+    """Extends the standalone-router config with ThunderAgent scheduler params."""
+
+    pause_threshold: float
+    pause_target: float
+    soft_demote_threshold: float
+    soft_demote_priority_jump: float
+    resume_priority_boost: float
+    resume_timeout_seconds: float
+    resume_hysteresis: float
+    acting_token_weight: float
+    acting_decay_tau_seconds: float
+    scheduler_interval_seconds: float
+    model_name: Optional[str] = None
+    model_path: Optional[str] = None
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+
+    def to_thunderagent_config(self) -> ThunderAgentConfig:
+        return ThunderAgentConfig(
+            pause_threshold=self.pause_threshold,
+            pause_target=self.pause_target,
+            soft_demote_threshold=self.soft_demote_threshold,
+            soft_demote_priority_jump=self.soft_demote_priority_jump,
+            resume_priority_boost=self.resume_priority_boost,
+            resume_timeout_seconds=self.resume_timeout_seconds,
+            resume_hysteresis=self.resume_hysteresis,
+            acting_token_weight=self.acting_token_weight,
+            acting_decay_tau_seconds=self.acting_decay_tau_seconds,
+            scheduler_interval_seconds=self.scheduler_interval_seconds,
+        )
+
+    def validate(self) -> None:  # type: ignore[override]
+        super().validate()
+        if not 0.0 <= self.pause_threshold <= 1.0:
+            raise ValueError("--pause-threshold must be in [0, 1]")
+        if not 0.0 <= self.pause_target <= self.pause_threshold:
+            raise ValueError("--pause-target must be in [0, --pause-threshold]")
+        if not 0.0 <= self.soft_demote_threshold <= self.pause_threshold:
+            raise ValueError(
+                "--soft-demote-threshold must be in [0, --pause-threshold]"
+            )
+        if not 0.0 <= self.resume_hysteresis <= self.pause_threshold:
+            raise ValueError("--resume-hysteresis must be in [0, --pause-threshold]")
+        if self.acting_token_weight <= 0:
+            raise ValueError("--acting-token-weight must be > 0")
+        if self.scheduler_interval_seconds <= 0:
+            raise ValueError("--scheduler-interval-seconds must be > 0")
+        if self.resume_timeout_seconds <= 0:
+            raise ValueError("--resume-timeout-seconds must be > 0")
+
+
+class ThunderAgentArgGroup(ArgGroup):
+    name = "thunderagent-router"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        # Inherit standard router options (--endpoint, --router-block-size, KV
+        # router knobs, AicPerf options).
+        DynamoRouterArgGroup().add_arguments(parser)
+
+        g = parser.add_argument_group("ThunderAgent Scheduler Options")
+
+        add_argument(
+            g,
+            flag_name="--pause-threshold",
+            env_var="DYN_THUNDERAGENT_PAUSE_THRESHOLD",
+            default=0.95,
+            help="Hard-pause when worker utilization >= this fraction of "
+            "max_num_batched_tokens (default: 0.95)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--soft-demote-threshold",
+            env_var="DYN_THUNDERAGENT_SOFT_DEMOTE_THRESHOLD",
+            default=0.80,
+            help="Soft-demote priority when worker utilization >= this and "
+            "below --pause-threshold (default: 0.80)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--soft-demote-priority-jump",
+            env_var="DYN_THUNDERAGENT_SOFT_DEMOTE_PRIORITY_JUMP",
+            default=-2.0,
+            help="priority_jump (seconds) applied to soft-demoted programs. "
+            "Negative pushes the request later in the queue (default: -2.0)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--resume-priority-boost",
+            env_var="DYN_THUNDERAGENT_RESUME_PRIORITY_BOOST",
+            default=1.0,
+            help="priority_jump (seconds) added to a request that just resumed "
+            "from hard pause (default: 1.0)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--resume-timeout-seconds",
+            env_var="DYN_THUNDERAGENT_RESUME_TIMEOUT_SECONDS",
+            default=1800.0,
+            help="Maximum wait on a paused program before a forced resume "
+            "(default: 1800)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--resume-hysteresis",
+            env_var="DYN_THUNDERAGENT_RESUME_HYSTERESIS",
+            default=0.10,
+            help="Util drop below pause_threshold required before any resume "
+            "(default: 0.10).",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--pause-target",
+            env_var="DYN_THUNDERAGENT_PAUSE_TARGET",
+            default=0.80,
+            help="Setpoint that pause cycles drain util down to. Must be "
+            "<= --pause-threshold (default: 0.80).",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--acting-token-weight",
+            env_var="DYN_THUNDERAGENT_ACTING_TOKEN_WEIGHT",
+            default=1.0,
+            help="Multiplier on token_total for ACTING programs in the "
+            "pause-side working set (default: 1.0).",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--acting-decay-tau-seconds",
+            env_var="DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS",
+            default=1.0,
+            help="Tau (s) for ``2^(-idle/tau)`` decay of ACTING tokens on "
+            "the resume side. Idle >= 10*tau contributes ~0 (default: 1.0).",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--scheduler-interval-seconds",
+            env_var="DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS",
+            default=5.0,
+            help="Period of the background pause/resume scheduler tick (default: 5.0)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--model-name",
+            env_var="DYN_THUNDERAGENT_MODEL_NAME",
+            default=None,
+            help="Model name to register at the Dynamo frontend. When set the "
+            "router calls register_model so the frontend dispatches "
+            "requests for this model to the router (which then forwards to "
+            "the worker pointed at by --endpoint). Leave unset to behave as "
+            "a pure utility endpoint with no frontend registration.",
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--model-path",
+            env_var="DYN_THUNDERAGENT_MODEL_PATH",
+            default=None,
+            help="Path or HF repo ID to load tokenizer + model card from for "
+            "register_model. Defaults to --model-name; set this when the "
+            "client-facing name differs from the on-disk location (e.g. "
+            "served name 'zai-org/GLM-4.6-FP8' but local cache "
+            "/home/nvidia/hf_cache/models/glm-4.6-fp8).",
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-tool-call-parser",
+            dest="tool_call_parser",
+            env_var="DYN_TOOL_CALL_PARSER",
+            default=None,
+            help="Tool-call parser forwarded to register_model so the frontend "
+            "translates model-native tool calls (e.g. MiniMax's "
+            "<minimax:tool_call> XML, Qwen hermes) into OpenAI tool_calls "
+            "before agents see them. Use the same value as the worker's "
+            "--dyn-tool-call-parser. Only applies when --model-name is set.",
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-reasoning-parser",
+            dest="reasoning_parser",
+            env_var="DYN_REASONING_PARSER",
+            default=None,
+            help="Reasoning parser forwarded to register_model, mirroring the "
+            "worker's --dyn-reasoning-parser. Only applies when --model-name "
+            "is set.",
+            arg_type=str,
+        )
+
+
+def parse_args(argv: Optional[list[str]] = None) -> ThunderAgentRouterConfig:
+    parser = argparse.ArgumentParser(
+        description="Dynamo ThunderAgent Router: program-level scheduler with "
+        "tool-boundary pause/resume on top of native KV-aware routing",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    ThunderAgentArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    config = ThunderAgentRouterConfig.from_cli_args(args)
+    config.validate()
+    return config
+
+
+__all__ = [
+    "ThunderAgentArgGroup",
+    "ThunderAgentRouterConfig",
+    "build_aic_perf_config",
+    "build_kv_router_config",
+    "parse_args",
+]

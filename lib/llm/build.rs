@@ -12,7 +12,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Declare our custom cfg flag to avoid unexpected_cfgs warnings
     println!("cargo:rustc-check-cfg=cfg(have_vec_copy_fatbin)");
 
-    println!("cargo:warning=Building with CUDA KV off");
     build_protos()?;
 
     // Get FATBIN path and copy it to OUT_DIR for embedding

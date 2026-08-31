@@ -20,7 +20,6 @@ from typing import Any, Optional
 import networkx as nx
 import numpy as np
 import pandas as pd
-from aiperf.dataset.synthesis import RollingHasher
 from prefix_data_generator.graph_utils import (
     CACHE_END,
     END_NODE,
@@ -31,6 +30,7 @@ from prefix_data_generator.graph_utils import (
     _remove_leaves,
     _verify_tree,
 )
+from prefix_data_generator.hasher import RollingHasher
 from prefix_data_generator.sampler import EmpiricalSampler, sample_from_cdf
 
 

@@ -47,8 +47,13 @@ class PrefillRegressionModel(_BaseRegressionModel):
 
     def _update_moving_averages(self, fpm: ForwardPassMetrics) -> None:
         sched = fpm.scheduled_requests
+        # TODO: This is scheduled prefill tokens per FPM request, not true
+        # frontend request ISL. Prefer request-level ISL once it is available
+        # at admission time.
         if sched.num_prefill_requests > 0:
             self._avg_isl.add(sched.sum_prefill_tokens / sched.num_prefill_requests)
+        else:
+            self._avg_isl.add(0.0)
         self._avg_num_prefill.add(float(sched.num_prefill_requests))
 
     @property

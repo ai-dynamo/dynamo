@@ -25,7 +25,6 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
-    use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::model_type::{ModelInput, ModelType};
     use dynamo_llm::protocols::tensor;
@@ -61,7 +60,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
-    use crate::ports::get_random_port;
+    use crate::ports::{bind_random_port, get_random_port};
     use dynamo_protocols::types::Prompt;
     use prost::Message;
 
@@ -541,6 +540,14 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         for output in &response.get_ref().outputs {
             match output.name.as_str() {
                 "text_output" => {
@@ -700,6 +707,13 @@ pub mod kserve_test {
                         "Expected response ID to match request ID"
                     );
                     let expected_output: Vec<Vec<u8>> = vec!["dummy".into(), "input".into()];
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -791,6 +805,13 @@ pub mod kserve_test {
                         format!("{response_idx}"),
                         "Expected response ID to match request ID"
                     );
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -874,30 +895,21 @@ pub mod kserve_test {
             .unwrap();
         let mut inbound = response.into_inner();
 
-        loop {
-            match inbound.message().await {
-                Ok(Some(_)) => {
-                    panic!("Expecting failure in the stream");
-                }
-                Err(err) => {
-                    assert_eq!(
-                        err.code(),
-                        tonic::Code::Internal,
-                        "Expected Internal error for streaming, get {}",
-                        err
-                    );
-                    assert!(
-                        err.message().contains("Failed to generate completions:"),
-                        "Expected error message to contain 'Failed to generate completions:', got: {}",
-                        err.message()
-                    );
-                }
-                Ok(None) => {
-                    // End of stream
-                    break;
-                }
-            }
-        }
+        let err = inbound
+            .message()
+            .await
+            .expect_err("the failing engine must terminate the stream with an error");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for streaming, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("Failed to generate completions:"),
+            "Expected error message to contain 'Failed to generate completions:', got: {}",
+            err.message()
+        );
     }
 
     #[rstest]
@@ -1020,6 +1032,22 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = response
+            .get_ref()
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &response.get_ref().inputs {
             match io.name.as_str() {
@@ -1092,6 +1120,20 @@ pub mod kserve_test {
             config.name, model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = config
+            .input
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = config
+            .output
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &config.input {
             match io.name.as_str() {
@@ -1166,25 +1208,22 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                name: "tensor".to_string(),
-                inputs: vec![tensor::TensorMetadata {
-                    name: "input".to_string(),
-                    data_type: tensor::DataType::Int32,
-                    shape: vec![3],
-                    parameters: Default::default(),
-                }],
-                outputs: vec![tensor::TensorMetadata {
-                    name: "output".to_string(),
-                    data_type: tensor::DataType::Bool,
-                    shape: vec![-1],
-                    parameters: Default::default(),
-                }],
-                triton_model_config: None,
-            }),
-            ..Default::default()
-        };
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            name: "tensor".to_string(),
+            inputs: vec![tensor::TensorMetadata {
+                name: "input".to_string(),
+                data_type: tensor::DataType::Int32,
+                shape: vec![3],
+                parameters: Default::default(),
+            }],
+            outputs: vec![tensor::TensorMetadata {
+                name: "output".to_string(),
+                data_type: tensor::DataType::Bool,
+                shape: vec![-1],
+                parameters: Default::default(),
+            }],
+            triton_model_config: None,
+        });
         let tensor = Arc::new(TensorEngine {});
         service_with_engines
             .0
@@ -1268,13 +1307,10 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                triton_model_config: Some(buf.clone()),
-                ..Default::default()
-            }),
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            triton_model_config: Some(buf.clone()),
             ..Default::default()
-        };
+        });
         let tensor = Arc::new(TensorEngine {});
         service_with_engines
             .0
@@ -1318,25 +1354,22 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                name: "tensor".to_string(),
-                inputs: vec![tensor::TensorMetadata {
-                    name: "input".to_string(),
-                    data_type: tensor::DataType::Int32,
-                    shape: vec![1],
-                    parameters: Default::default(),
-                }],
-                outputs: vec![tensor::TensorMetadata {
-                    name: "output".to_string(),
-                    data_type: tensor::DataType::Bool,
-                    shape: vec![-1],
-                    parameters: Default::default(),
-                }],
-                triton_model_config: Some(buf.clone()),
-            }),
-            ..Default::default()
-        };
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            name: "tensor".to_string(),
+            inputs: vec![tensor::TensorMetadata {
+                name: "input".to_string(),
+                data_type: tensor::DataType::Int32,
+                shape: vec![1],
+                parameters: Default::default(),
+            }],
+            outputs: vec![tensor::TensorMetadata {
+                name: "output".to_string(),
+                data_type: tensor::DataType::Bool,
+                shape: vec![-1],
+                parameters: Default::default(),
+            }],
+            triton_model_config: Some(buf.clone()),
+        });
         let _ = service_with_engines
             .0
             .model_manager()
@@ -1368,13 +1401,10 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                triton_model_config: Some(vec![1, 2, 3, 4, 5]),
-                ..Default::default()
-            }),
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            triton_model_config: Some(vec![1, 2, 3, 4, 5]),
             ..Default::default()
-        };
+        });
         let _ = service_with_engines
             .0
             .model_manager()
@@ -1484,25 +1514,22 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                name: "tensor".to_string(),
-                inputs: vec![tensor::TensorMetadata {
-                    name: "input".to_string(),
-                    data_type: tensor::DataType::Bytes,
-                    shape: vec![1],
-                    parameters: Default::default(),
-                }],
-                outputs: vec![tensor::TensorMetadata {
-                    name: "output".to_string(),
-                    data_type: tensor::DataType::Bool,
-                    shape: vec![-1],
-                    parameters: Default::default(),
-                }],
-                triton_model_config: None,
-            }),
-            ..Default::default()
-        };
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            name: "tensor".to_string(),
+            inputs: vec![tensor::TensorMetadata {
+                name: "input".to_string(),
+                data_type: tensor::DataType::Bytes,
+                shape: vec![1],
+                parameters: Default::default(),
+            }],
+            outputs: vec![tensor::TensorMetadata {
+                name: "output".to_string(),
+                data_type: tensor::DataType::Bool,
+                shape: vec![-1],
+                parameters: Default::default(),
+            }],
+            triton_model_config: None,
+        });
         let _ = service_with_engines
             .0
             .model_manager()
@@ -1518,6 +1545,24 @@ pub mod kserve_test {
             response.get_ref().name,
             "tensor",
             "Expected response of the same model name",
+        );
+        assert_eq!(
+            response
+                .get_ref()
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            ["input"]
+        );
+        assert_eq!(
+            response
+                .get_ref()
+                .outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            ["output"]
         );
         // input
         for io in &response.get_ref().inputs {
@@ -1847,7 +1892,7 @@ pub mod kserve_test {
     #[tokio::test]
     async fn test_kserve_grpc_metrics_endpoint() {
         let grpc_port = get_random_port().await;
-        let http_metrics_port = get_random_port().await;
+        let (http_metrics_listener, http_metrics_port) = bind_random_port().await;
 
         let service = KserveService::builder()
             .port(grpc_port)
@@ -1871,25 +1916,22 @@ pub mod kserve_test {
         let mut tensor_card = ModelDeploymentCard::with_name_only("test_tensor_model");
         tensor_card.model_type = ModelType::TensorBased;
         tensor_card.model_input = ModelInput::Tensor;
-        tensor_card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                name: "test_tensor_model".to_string(),
-                inputs: vec![tensor::TensorMetadata {
-                    name: "input".to_string(),
-                    data_type: tensor::DataType::Int32,
-                    shape: vec![1],
-                    parameters: Default::default(),
-                }],
-                outputs: vec![tensor::TensorMetadata {
-                    name: "output".to_string(),
-                    data_type: tensor::DataType::Int32,
-                    shape: vec![1],
-                    parameters: Default::default(),
-                }],
-                triton_model_config: None,
-            }),
-            ..Default::default()
-        };
+        tensor_card.tensor_model_config = Some(tensor::TensorModelConfig {
+            name: "test_tensor_model".to_string(),
+            inputs: vec![tensor::TensorMetadata {
+                name: "input".to_string(),
+                data_type: tensor::DataType::Int32,
+                shape: vec![1],
+                parameters: Default::default(),
+            }],
+            outputs: vec![tensor::TensorMetadata {
+                name: "output".to_string(),
+                data_type: tensor::DataType::Int32,
+                shape: vec![1],
+                parameters: Default::default(),
+            }],
+            triton_model_config: None,
+        });
         manager
             .add_tensor_model(
                 "test_tensor_model",
@@ -1904,7 +1946,10 @@ pub mod kserve_test {
         // Start services
         let cancel_token = CancellationToken::new();
         let grpc_task = service.spawn(cancel_token.clone()).await;
-        let http_task = service.http_service().spawn(cancel_token.clone()).await;
+        let http_task = service
+            .http_service()
+            .spawn_with_listener(cancel_token.clone(), http_metrics_listener)
+            .await;
 
         // Wait for services to be ready
         let mut grpc_client = get_ready_client(grpc_port, 10).await;
@@ -1963,8 +2008,8 @@ pub mod kserve_test {
 
         // Verify metrics are present and have correct values
         assert!(
-            metrics_body.contains("dynamo_frontend_inflight_requests"),
-            "Metrics should contain inflight gauge"
+            metrics_body.contains("dynamo_frontend_active_requests"),
+            "Metrics should contain active requests gauge"
         );
         assert_metric_value(&metrics_body, "test_model", "completions", 1);
         assert_metric_value(&metrics_body, "test_tensor_model", "tensor", 1);
@@ -2013,25 +2058,22 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.runtime_config = ModelRuntimeConfig {
-            tensor_model_config: Some(tensor::TensorModelConfig {
-                name: "tensor".to_string(),
-                inputs: vec![tensor::TensorMetadata {
-                    name: "input".to_string(),
-                    data_type: tensor::DataType::Int32,
-                    shape: vec![1],
-                    parameters: Default::default(),
-                }],
-                outputs: vec![tensor::TensorMetadata {
-                    name: "output".to_string(),
-                    data_type: tensor::DataType::Bool,
-                    shape: vec![-1],
-                    parameters: Default::default(),
-                }],
-                triton_model_config: None,
-            }),
-            ..Default::default()
-        };
+        card.tensor_model_config = Some(tensor::TensorModelConfig {
+            name: "tensor".to_string(),
+            inputs: vec![tensor::TensorMetadata {
+                name: "input".to_string(),
+                data_type: tensor::DataType::Int32,
+                shape: vec![1],
+                parameters: Default::default(),
+            }],
+            outputs: vec![tensor::TensorMetadata {
+                name: "output".to_string(),
+                data_type: tensor::DataType::Bool,
+                shape: vec![-1],
+                parameters: Default::default(),
+            }],
+            triton_model_config: None,
+        });
         let tensor = Arc::new(TensorEngine {});
         service
             .model_manager()

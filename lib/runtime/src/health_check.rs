@@ -460,7 +460,11 @@ mod push_handler_notify_tests {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new(options).await.unwrap();
 
-        let context = crate::pipeline::Context::with_id((), request_id.to_string());
+        let context = crate::pipeline::Context::with_id_and_metadata(
+            (),
+            request_id.to_string(),
+            Default::default(),
+        );
         let stream_options = StreamOptions::builder()
             .context(context.context())
             .enable_request_stream(false)
@@ -499,6 +503,7 @@ mod push_handler_notify_tests {
                 instance_id: 0,
                 transport: TransportType::Nats(endpoint_name.to_string()),
                 device_type: None,
+                request_plane_codec: None,
             },
             payload,
         );
@@ -740,6 +745,7 @@ mod integration_tests {
                 instance_id: 12345,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
+                request_plane_codec: None,
             },
             payload.clone(),
         );
@@ -776,6 +782,7 @@ mod integration_tests {
                     instance_id: i,
                     transport: crate::component::TransportType::Nats(endpoint.clone()),
                     device_type: None,
+                    request_plane_codec: None,
                 },
                 payload,
             );
@@ -820,6 +827,7 @@ mod integration_tests {
                 instance_id: 999,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
+                request_plane_codec: None,
             },
             payload.clone(),
         );

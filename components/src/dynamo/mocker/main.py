@@ -15,6 +15,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -154,7 +155,18 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
+        or base_engine_args.aic_nextn is not None
     )
+
+    # An advertised router config rides in this worker set's model deployment
+    # card and overrides the frontend's global mode for this set only. Left as
+    # None, the card carries nothing and the worker inherits the frontend's mode.
+    advertised_router_config = build_router_config(args.router_advertisement)
+    if advertised_router_config is not None:
+        logger.info(
+            "Advertising router mode '%s' in the model card",
+            args.router_advertisement.router_mode,
+        )
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
@@ -186,6 +198,11 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_replay_ports_list
                     else None
                 ),
+                aic_mtp_seed=(
+                    (base_engine_args.aic_mtp_seed + worker_id) % (1 << 64)
+                    if base_engine_args.aic_nextn is not None
+                    else None
+                ),
             )
         else:
             worker_engine_args = base_engine_args
@@ -198,12 +215,13 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            context_length=0,
             extra_engine_args=None,
             mocker_engine_args=worker_engine_args,
             runtime_config=runtime_config,
             kv_cache_block_size=kv_cache_block_size,
             is_prefill=args.is_prefill_worker,
+            is_decode=args.is_decode_worker,
+            router_config=advertised_router_config,
         )
 
         # Create the engine with this worker's isolated runtime

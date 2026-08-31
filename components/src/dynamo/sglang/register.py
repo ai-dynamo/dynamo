@@ -4,44 +4,146 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, List, Optional
 
 import sglang as sgl
-from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
+from dynamo.common.utils.media_decoder import (
+    build_frontend_image_decoder_options,
+    enable_frontend_video_decoding,
+)
 from dynamo.common.utils.output_modalities import get_output_modalities
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
-from dynamo.sglang.args import DynamoConfig
+from dynamo.common.utils.topology import apply_topology_config
+from dynamo.llm import (
+    MediaDecoder,
+    MediaFetcher,
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
+from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
+from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
+    get_spec_decode_runtime_data,
+    kv_event_block_size,
+    model_card_dp_rank_bounds,
+    runtime_capacity,
+)
+from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+
+
+def _supports_engine_generate(
+    input_type: ModelInput,
+    output_type: ModelType,
+    worker_type: WorkerType,
+) -> bool:
+    if input_type != ModelInput.Tokens:
+        return False
+    if worker_type == WorkerType.Prefill:
+        return output_type == ModelType.Prefill
+    return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
+        output_type.supports_chat() or output_type == ModelType.Completions
+    )
+
+
+def _register_model_source_path(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> str:
+    """Pick the path passed to `register_model` for MDC construction.
+
+    When `--model-path` is a remote URI (`s3://...`, `gs://...`), SGLang's
+    `ModelConfig.maybe_pull_model_tokenizer_from_remote` (sglang/srt/configs/
+    model_config.py) pulls metadata files (`*config.json`) to a local temp dir
+    and rewrites the engine's ModelConfig:
+
+      - `.model_weights = <original URI>`  (preserved for the weight loader)
+      - `.model_path    = <local temp dir>` (now contains the metadata)
+
+    `server_args.model_path` itself is NOT mutated. Dynamo's `register_model`
+    would otherwise pass the raw URI through `hub.rs` -> ModelExpress, which
+    has no S3 provider and 404s. Returning the post-pull local dir lets
+    `register_model` take its `fs::exists` shortcut and skip the broken MX
+    path.
+
+    Temporary LLM-only workaround mirroring the vLLM fix in
+    `components/src/dynamo/vllm/main.py`. Diffusion paths (Images/Videos) skip
+    the Rust-side HF download entirely (lib/bindings/python/rust/lib.rs:314)
+    and don't need this rewrite.
+    """
+    if engine is None:
+        return server_args.model_path
+    try:
+        mc = engine.tokenizer_manager.model_config
+    except AttributeError:
+        return server_args.model_path
+    weights = getattr(mc, "model_weights", None)
+    if weights:
+        return mc.model_path
+    return server_args.model_path
+
+
+def _build_media_decoder_and_fetcher():
+    """Construct MediaDecoder/MediaFetcher for frontend-decoded multimodal.
+
+    Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
+    """
+    media_decoder = MediaDecoder()
+    media_decoder.enable_image(build_frontend_image_decoder_options())
+    enable_frontend_video_decoding(media_decoder)
+
+    media_fetcher = MediaFetcher()
+    media_fetcher.timeout_ms(30000)
+    allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+    media_fetcher.allow_direct_ip(allow_internal)
+    media_fetcher.allow_direct_port(allow_internal)
+
+    return media_decoder, media_fetcher
 
 
 async def _register_model_with_runtime_config(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
+    *,
+    worker_type: WorkerType,
+    needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         endpoint: The Dynamo endpoint for communication.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
+        worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
+            Required (keyword-only); the Rust binding rejects a missing `worker_type`.
+        needs: DNF list of peer roles this worker requires to serve. Empty (or
+            `None`) means no peer dependency, which is the correct value for
+            Aggregated workers.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
-    runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
+    runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
     if dynamo_args.use_sglang_tokenizer:
         logging.warning(
@@ -52,17 +154,77 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
+    if runtime_config is not None and _supports_engine_generate(
+        input_type, output_type, worker_type
+    ):
+        runtime_config.set_engine_specific(
+            SGLANG_GENERATE_CAPABILITY,
+            json.dumps(True),
+        )
+        logging.info("Published SGLang engine-native generate capability")
+    # Configure the Rust frontend's media decoder so it ships pre-decoded
+    # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    media_decoder = None
+    media_fetcher = None
+    if getattr(dynamo_args, "frontend_decoding", False):
+        media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
+
+    # Advertise the worker's LoRA slot budget on the BASE registration so the frontend allocator
+    # can place adapters onto idle-but-LoRA-capable workers before any adapter is loaded here.
+    # Only workers that actually SERVE the LoRA load endpoints (init_decode / init_prefill, which
+    # pass serves_lora_load=True) may advertise capacity. Other worker modes (embedding, diffusion,
+    # multimodal-encode) register through this same wrapper but do not serve load_lora, so they
+    # must never advertise capacity they cannot fulfill -- hence an explicit allowlist flag rather
+    # than an output_type denylist.
+    lora_enabled = bool(
+        getattr(server_args, "enable_lora", None)
+        or getattr(server_args, "lora_paths", None)
+    )
+    max_gpu_lora_count = (
+        getattr(server_args, "max_loras_per_batch", None)
+        if (serves_lora_load and lora_enabled)
+        else None
+    )
+    kv_cache_block_size = kv_event_block_size(server_args)
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size > 1:
+        logging.info(
+            "Using DCP-aware SGLang paged KV-event block size %d "
+            "(page_size=%d, dcp_size=%d)",
+            kv_cache_block_size,
+            server_args.page_size,
+            dcp_size,
+        )
+
+    aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
+    # Built before the try: an invalid advertised configuration must fail
+    # startup, not be swallowed by the registration handler below and logged as
+    # a failed registration.
+    advertised_router_config = build_router_config(
+        getattr(dynamo_args, "router_advertisement", None)
+    )
     try:
         await register_model(
             input_type,
             output_type,
             endpoint,
-            server_args.model_path,
+            _register_model_source_path(engine, server_args),
             server_args.served_model_name,
-            context_length=server_args.context_length,
-            kv_cache_block_size=server_args.page_size,
+            kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
+            worker_type=worker_type,
+            needs=needs,
+            # Advertise this worker set's own routing when --router-mode is set;
+            # None inherits the frontend's global config. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=advertised_router_config,
+            ignore_weights=use_modelexpress_remote_instance(server_args),
+            max_gpu_lora_count=max_gpu_lora_count,
+            model_aliases=aliases or None,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -74,49 +236,11 @@ async def _register_model_with_runtime_config(
 def _get_bootstrap_info_for_config(
     engine: sgl.Engine,
 ) -> tuple[Optional[str], Optional[int]]:
-    """Extract bootstrap host and port from SGLang engine for config registration.
+    """Thin wrapper for the shared `_disagg.compute_bootstrap_address`,
+    kept for source-compat with this module's callers."""
+    from dynamo.sglang._disagg import compute_bootstrap_address
 
-    Args:
-        engine: The SGLang engine instance.
-
-    Returns:
-        Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
-    """
-    try:
-        inner_tm = engine.tokenizer_manager
-        bootstrap_port = getattr(
-            inner_tm.server_args, "disaggregation_bootstrap_port", None
-        )
-
-        if bootstrap_port is None:
-            return None, None
-
-        if inner_tm.server_args.dist_init_addr:
-            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
-            resolved = dist_init.resolved()
-            bootstrap_host = (
-                NetworkAddress(resolved.host, bootstrap_port)
-                .to_host_port_str()
-                .rsplit(":", 1)[0]
-            )
-            logging.info(
-                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
-                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
-            )
-        else:
-            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
-            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
-            local_ip = get_local_ip_auto()
-            local_addr = NetworkAddress(local_ip, bootstrap_port)
-            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
-            logging.info(
-                f"Using auto-detected local IP: {local_ip} "
-                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
-            )
-        return bootstrap_host, bootstrap_port
-    except Exception as e:
-        logging.warning(f"Failed to get bootstrap info: {e}")
-        return None, None
+    return compute_bootstrap_address(engine)
 
 
 def _parse_hicache_storage_extra_config(
@@ -163,33 +287,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         getattr(server_args, "hicache_storage_backend_extra_config", None)
     )
 
-    try:
-        from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
-            MooncakeStoreConfig,
-        )
-    except ImportError as e:
-        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
-        return None
-
-    # Graceful degradation: Mooncake runtime metadata is optional. If config
-    # resolution fails for any reason (file not found, malformed env vars,
-    # upstream API change), skip publishing the metadata rather than crashing
-    # the worker -- the worker still serves requests, just without HiCache
-    # router hints. Broad catch is intentional per python-guidelines.md.
-    try:
-        if extra_config and (
-            extra_config.get("master_server_address") is not None
-            or extra_config.get("client_server_address") is not None
-        ):
-            mooncake_config = MooncakeStoreConfig.load_from_extra_config(extra_config)
-        elif envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
-            mooncake_config = MooncakeStoreConfig.from_file()
-        else:
-            mooncake_config = MooncakeStoreConfig.load_from_env()
-    except Exception as e:
-        logging.warning(f"Failed to resolve Mooncake config for runtime metadata: {e}")
-        return None
-
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
@@ -227,10 +324,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
         extra_backend_tag = None
 
-    master_server_address = getattr(mooncake_config, "master_server_address", None)
-    if not isinstance(master_server_address, str) or not master_server_address:
-        master_server_address = None
-
     return {
         "backend": "mooncake",
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
@@ -241,20 +334,63 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
-        "master_server_address": master_server_address,
-        "master_metrics_port": int(
-            getattr(mooncake_config, "master_metrics_port", 9003)
-        ),
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
 
-async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
+def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
+    """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
+
+    Derived from sglang's ``SpeculativeAlgorithm.is_eagle()`` -- the SAME predicate the radix
+    cache uses to bigram-key its KV-event block hashes (``srt/managers/scheduler.py``). The KV
+    router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes; deriving it
+    from ``is_eagle()`` (instead of a hand-maintained name set) keeps the two in lockstep and
+    covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
+    normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
+    """
+    try:
+        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    except Exception as e:
+        # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
+        # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
+        # ``None``, so the default case does not raise); catch broadly -- matching the sibling
+        # ``_get_mooncake_runtime_data`` above, per python-guidelines.md -- so any future signature/enum
+        # change can't crash the worker either. Default to not enabling eagle bigram routing; the
+        # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
+        logging.warning(
+            "Could not derive enable_eagle from speculative_algorithm %r: %s; leaving it disabled.",
+            speculative_algorithm,
+            e,
+        )
+        return False
+
+
+def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudget:
+    """Describe SGLang's request-overflow behavior."""
+    tokenizer_manager = engine.tokenizer_manager
+
+    return TokenBudget(
+        # Speculative decoding reserves draft-token space inside context_len.
+        combined_limit=max(
+            0, tokenizer_manager.context_len - tokenizer_manager.num_reserved_tokens
+        ),
+        reject_prompt_overflow=not server_args.allow_auto_truncate,
+        reject_total_overflow=(
+            tokenizer_manager.validate_total_tokens
+            and not server_args.allow_auto_truncate
+        ),
+    )
+
+
+async def get_runtime_config(
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+    dynamo_args: DynamoConfig,
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
 
@@ -262,27 +398,70 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
+    runtime_config.context_length = server_args.context_length
+    # Multimodal encode workers have no tokenizer manager and delegate
+    # generation overflow handling to their downstream backend.
+    if engine is not None:
+        publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if dynamo_args.dyn_default_thinking_mode is not None:
+        runtime_config.set_engine_specific(
+            "default_thinking_mode",
+            json.dumps(dynamo_args.dyn_default_thinking_mode),
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if dynamo_args.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
 
-    # Set data_parallel_size for DP attention mode
-    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    runtime_config.data_parallel_size = dp_size
-    if dp_size > 1:
-        logging.info(f"Registering with data_parallel_size={dp_size}")
+    start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
+    registered_dp_size = end_dp_rank - start_dp_rank
+    runtime_config.data_parallel_start_rank = start_dp_rank
+    runtime_config.data_parallel_size = registered_dp_size
+    if registered_dp_size > 1:
+        logging.info(
+            "Registering with routable data_parallel rank range [%s, %s)",
+            start_dp_rank,
+            end_dp_rank,
+        )
+
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                json.dumps(worker_group_id),
+            )
+            logging.info(
+                "Published SGLang worker group metadata for KV attribution: %s",
+                worker_group_id,
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to attach SGLang worker group metadata to registration: %s",
+                e,
+            )
+
+    # Set topology and KV transfer policy for topology-aware routing
+    apply_topology_config(runtime_config)
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
-    bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
+    bootstrap_host, bootstrap_port = (
+        _get_bootstrap_info_for_config(engine) if engine is not None else (None, None)
+    )
     if bootstrap_host and bootstrap_port:
         runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
         logging.info(
@@ -292,16 +471,30 @@ async def _get_runtime_config(
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
-    max_running_requests = getattr(server_args, "max_running_requests", None)
-    if max_running_requests:
-        runtime_config.max_num_seqs = max_running_requests
+    base_capacity = runtime_capacity(server_args, {})
+    if base_capacity.max_num_seqs is not None:
+        runtime_config.max_num_seqs = base_capacity.max_num_seqs
+    if base_capacity.max_num_batched_tokens is not None:
+        runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
-    max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
-    if max_prefill_tokens:
-        runtime_config.max_num_batched_tokens = max_prefill_tokens
-
-    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+    if _eagle_enabled_for(server_args.speculative_algorithm):
         runtime_config.enable_eagle = True
+
+    spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
+    if spec_decode_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published SGLang spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach SGLang spec decode runtime metadata: {e}"
+            )
 
     mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
     if mooncake_runtime_data is not None:
@@ -316,65 +509,87 @@ async def _get_runtime_config(
                 f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
             )
 
+    if engine is None:
+        return runtime_config
+
     try:
-        scheduler_info = get_scheduler_info(engine)
+        scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
+        capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
         if max_total_tokens:
-            page_size = server_args.page_size
-            if page_size:
-                runtime_config.total_kv_blocks = (
-                    max_total_tokens + page_size - 1
-                ) // page_size
+            if capacity.total_kv_blocks is not None:
+                runtime_config.total_kv_blocks = capacity.total_kv_blocks
                 logging.info(
                     f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                    f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                    f"(max_total_tokens={max_total_tokens}, page_size={server_args.page_size})"
                 )
 
-            # When max_prefill_tokens is not explicitly set by the user, fall back
-            # to max_total_num_tokens from the scheduler. This ensures the planner
-            # always has a prefill load signal for aggregated scaling decisions.
-            if not max_prefill_tokens:
-                runtime_config.max_num_batched_tokens = max_total_tokens
-                logging.info(
-                    f"max_prefill_tokens not set, using max_total_num_tokens "
-                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
-                )
+            if capacity.max_num_batched_tokens is not None:
+                runtime_config.max_num_batched_tokens = capacity.max_num_batched_tokens
+                if getattr(server_args, "max_prefill_tokens", None) is None:
+                    logging.info(
+                        f"max_prefill_tokens not set, using max_total_num_tokens "
+                        f"from scheduler as max_num_batched_tokens: "
+                        f"{capacity.max_num_batched_tokens}"
+                    )
         else:
             unpublished = "total_kv_blocks"
-            if not max_prefill_tokens:
+            if getattr(server_args, "max_prefill_tokens", None) is None:
                 unpublished += " and max_num_batched_tokens"
             logging.warning(
                 f"Could not access scheduler info from SGLang engine. "
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
 
+    try:
+        offloading_capacity = get_hicache_native_offloading_capacity(
+            server_args, scheduler_info
+        )
+        if offloading_capacity is not None:
+            runtime_config.set_engine_specific(
+                NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+                json.dumps(offloading_capacity),
+            )
+            logging.info("Published native offloading capacity from SGLang HiCache.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach native offloading capacity from SGLang HiCache: %s",
+            e,
+        )
+
+    return runtime_config
+
 
 async def register_model_with_readiness_gate(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
+    *,
+    worker_type: WorkerType,
+    needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         generate_endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
+        worker_type: Topology role; see `_register_model_with_runtime_config`.
+        needs: DNF peer requirements; see `_register_model_with_runtime_config`.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -386,6 +601,9 @@ async def register_model_with_readiness_gate(
         dynamo_args,
         input_type,
         output_type,
+        worker_type=worker_type,
+        needs=needs,
+        serves_lora_load=serves_lora_load,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
@@ -447,6 +665,11 @@ async def register_image_diffusion_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # Diffusion has no prefill/decode split: a single worker owns the
+            # whole pipeline, so it always advertises as Aggregated with no
+            # peer dependencies.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
@@ -488,6 +711,10 @@ async def register_video_generation_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # See `register_image_diffusion_model` — diffusion is always
+            # Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:

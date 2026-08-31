@@ -24,7 +24,7 @@ pub fn is_numa_enabled() -> bool {
     if dynamo_memory::numa::is_numa_disabled() {
         return false;
     }
-    dynamo_config::env_is_truthy("DYN_KVBM_ENABLE_NUMA")
+    dynamo_runtime::config::env_is_truthy("DYN_KVBM_ENABLE_NUMA")
 }
 
 #[cfg(test)]

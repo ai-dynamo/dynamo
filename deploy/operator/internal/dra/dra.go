@@ -8,14 +8,15 @@ package dra
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"regexp"
+	"sort"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,71 +33,379 @@ const (
 	DefaultDeviceClassName = "gpu.nvidia.com"
 )
 
-// ApplyClaim replaces the first container's nvidia.com/gpu resources with a
-// shared DRA ResourceClaim. Every container that references this claim name
-// will share the same physical GPUs. The function is idempotent — calling it
-// on a pod that already has the claim is a no-op.
+// deviceDriverEqualityPattern extracts positive device.driver equality constraints
+// from CEL conjunctions. classifyDeviceClass deliberately ignores disjunctions,
+// where one matching branch does not classify every device selected by the class.
+var deviceDriverEqualityPattern = regexp.MustCompile(`(?:^|&&)\s*\(*\s*device\.driver\s*==\s*["']([^"']+)["']`)
+
+// ApplyClaim replaces the first container's scalar GPU resources with a shared
+// DRA ResourceClaim. Every container that references this claim name will share
+// the same physical GPUs.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
 	}
 
-	// Skip if the pod-level claim already exists (idempotent).
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == ClaimName {
-			return nil
+	// Replace GPU resources with the shared DRA claim. The resource name can be
+	// nvidia.com/gpu or a MIG shape such as nvidia.com/mig-3g.20gb.
+	container := &podSpec.Containers[0]
+	RemoveGPUResources(container.Resources.Limits)
+	RemoveGPUResources(container.Resources.Requests)
+	hasClaim := false
+	for i := range container.Resources.Claims {
+		if container.Resources.Claims[i].Name == ClaimName {
+			hasClaim = true
+			break
 		}
 	}
-
-	// Replace nvidia.com/gpu with the shared DRA claim.
-	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
-	delete(podSpec.Containers[0].Resources.Limits, gpuResource)
-	delete(podSpec.Containers[0].Resources.Requests, gpuResource)
-	podSpec.Containers[0].Resources.Claims = append(podSpec.Containers[0].Resources.Claims, corev1.ResourceClaim{
-		Name: ClaimName,
-	})
+	if !hasClaim {
+		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: ClaimName})
+	}
 
 	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. DRA
 	// bypasses the device-plugin toleration injection, so add it explicitly.
-	podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
-		Key:      commonconsts.KubeResourceGPUNvidia,
-		Operator: corev1.TolerationOpExists,
-		Effect:   corev1.TaintEffectNoSchedule,
-	})
+	hasToleration := false
+	for i := range podSpec.Tolerations {
+		toleration := podSpec.Tolerations[i]
+		if toleration.Key == commonconsts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
+			hasToleration = true
+			break
+		}
+	}
+	if !hasToleration {
+		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
+			Key:      commonconsts.KubeResourceGPUNvidia,
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		})
+	}
 
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+	claim := corev1.PodResourceClaim{
 		Name:                      ClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
-	})
-
+	}
+	for i := range podSpec.ResourceClaims {
+		if podSpec.ResourceClaims[i].Name == ClaimName {
+			podSpec.ResourceClaims[i] = claim
+			return nil
+		}
+	}
+	podSpec.ResourceClaims = append(podSpec.ResourceClaims, claim)
 	return nil
 }
 
 // ResourceClaimTemplateName returns the deterministic name for the
 // ResourceClaimTemplate associated with a component.
-func ResourceClaimTemplateName(parentName, serviceName string) string {
-	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(serviceName))
+func ResourceClaimTemplateName(parentName, componentName string) string {
+	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(componentName))
 }
 
-// ExtractGPUParams extracts the GPU count and device class name from API types
-// shared by DGD components and DynamoCheckpoint specs. Returns gpuCount=0 when
-// GMS is not enabled, which tells GenerateResourceClaimTemplate to delete.
-func ExtractGPUParams(gmsSpec *v1alpha1.GPUMemoryServiceSpec, resources *v1alpha1.Resources) (gpuCount int, deviceClassName string) {
-	if gmsSpec == nil || !gmsSpec.Enabled {
-		return 0, ""
+func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) (int, error) {
+	if name, q, ok := gpuResourceQuantity(resources.Limits); ok {
+		return gpuCountFromQuantity(name, q)
 	}
-	deviceClassName = gmsSpec.DeviceClassName
-	if resources != nil {
-		gpuStr := ""
-		if resources.Limits != nil {
-			gpuStr = resources.Limits.GPU
-		}
-		if gpuStr == "" && resources.Requests != nil {
-			gpuStr = resources.Requests.GPU
-		}
-		gpuCount, _ = strconv.Atoi(gpuStr)
+	if name, q, ok := gpuResourceQuantity(resources.Requests); ok {
+		return gpuCountFromQuantity(name, q)
 	}
-	return gpuCount, deviceClassName
+	return 0, nil
+}
+
+// ResolveGPUCount returns the number of GPUs requested by a container, including
+// devices requested through DRA ResourceClaims. Scalar resources take precedence
+// because operator-managed DRA paths intentionally retain them until rendering.
+func ResolveGPUCount(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	podSpec *corev1.PodSpec,
+	resources corev1.ResourceRequirements,
+) (int, error) {
+	scalarCount, err := ExtractGPUCountFromResourceRequirements(resources)
+	if err != nil || scalarCount > 0 || len(resources.Claims) == 0 {
+		return scalarCount, err
+	}
+	if cl == nil {
+		return 0, fmt.Errorf("cannot resolve GPU ResourceClaims without a Kubernetes client")
+	}
+	if podSpec == nil {
+		return 0, fmt.Errorf("cannot resolve GPU ResourceClaims without a pod spec")
+	}
+
+	podClaims := make(map[string]corev1.PodResourceClaim, len(podSpec.ResourceClaims))
+	for _, claim := range podSpec.ResourceClaims {
+		podClaims[claim.Name] = claim
+	}
+
+	total := 0
+	seen := make(map[string]struct{}, len(resources.Claims))
+	deviceClasses := newDeviceClassResolver(cl)
+	for _, containerClaim := range resources.Claims {
+		key := containerClaim.Name + "\x00" + containerClaim.Request
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		podClaim, ok := podClaims[containerClaim.Name]
+		if !ok {
+			return 0, fmt.Errorf("container ResourceClaim %q has no matching pod resourceClaim", containerClaim.Name)
+		}
+		claimSpec, err := getClaimSpec(ctx, cl, namespace, podClaim)
+		if err != nil {
+			return 0, err
+		}
+		count, err := gpuCountFromClaimSpec(ctx, deviceClasses, claimSpec, containerClaim.Request)
+		if err != nil {
+			return 0, fmt.Errorf("cannot determine GPU count for ResourceClaim %q: %w", containerClaim.Name, err)
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func getClaimSpec(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	podClaim corev1.PodResourceClaim,
+) (*resourcev1.ResourceClaimSpec, error) {
+	switch {
+	case podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "":
+		name := *podClaim.ResourceClaimTemplateName
+		template := &resourcev1.ResourceClaimTemplate{}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
+			return nil, fmt.Errorf("failed to get ResourceClaimTemplate %s/%s: %w", namespace, name, err)
+		}
+		return &template.Spec.Spec, nil
+	case podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "":
+		name := *podClaim.ResourceClaimName
+		claim := &resourcev1.ResourceClaim{}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, claim); err != nil {
+			return nil, fmt.Errorf("failed to get ResourceClaim %s/%s: %w", namespace, name, err)
+		}
+		return &claim.Spec, nil
+	default:
+		return nil, fmt.Errorf("pod resourceClaim %q does not reference a ResourceClaim or ResourceClaimTemplate", podClaim.Name)
+	}
+}
+
+func gpuCountFromClaimSpec(
+	ctx context.Context,
+	deviceClasses *deviceClassResolver,
+	spec *resourcev1.ResourceClaimSpec,
+	requestName string,
+) (int, error) {
+	total := 0
+	foundRequest := requestName == ""
+	for _, request := range spec.Devices.Requests {
+		if requestName != "" && request.Name != requestName {
+			continue
+		}
+		foundRequest = true
+
+		count, isGPU, err := gpuCountFromDeviceRequest(ctx, deviceClasses, request)
+		if err != nil {
+			return 0, err
+		}
+		if isGPU {
+			total += count
+		}
+	}
+	if !foundRequest {
+		return 0, fmt.Errorf("device request %q was not found", requestName)
+	}
+	return total, nil
+}
+
+func gpuCountFromDeviceRequest(
+	ctx context.Context,
+	deviceClasses *deviceClassResolver,
+	request resourcev1.DeviceRequest,
+) (int, bool, error) {
+	if request.Exactly != nil {
+		isGPU, err := deviceClasses.isGPU(ctx, request.Exactly.DeviceClassName, request.Exactly.Selectors)
+		if err != nil {
+			return 0, false, err
+		}
+		if !isGPU {
+			return 0, false, nil
+		}
+		count, err := exactDeviceCount(request.Exactly.AllocationMode, request.Exactly.Count)
+		return count, true, err
+	}
+	if len(request.FirstAvailable) == 0 {
+		return 0, false, fmt.Errorf("device request %q must set exactly or firstAvailable", request.Name)
+	}
+
+	var count int
+	var hasGPU, hasNonGPU bool
+	for _, subRequest := range request.FirstAvailable {
+		isGPU, err := deviceClasses.isGPU(ctx, subRequest.DeviceClassName, subRequest.Selectors)
+		if err != nil {
+			return 0, false, err
+		}
+		if !isGPU {
+			hasNonGPU = true
+			continue
+		}
+		candidateCount, err := exactDeviceCount(subRequest.AllocationMode, subRequest.Count)
+		if err != nil {
+			return 0, false, err
+		}
+		if hasGPU && candidateCount != count {
+			return 0, false, fmt.Errorf("GPU device request %q has firstAvailable alternatives with different counts", request.Name)
+		}
+		count = candidateCount
+		hasGPU = true
+	}
+	if hasGPU && hasNonGPU {
+		return 0, false, fmt.Errorf("device request %q mixes GPU and non-GPU firstAvailable alternatives", request.Name)
+	}
+	return count, hasGPU, nil
+}
+
+func exactDeviceCount(mode resourcev1.DeviceAllocationMode, count int64) (int, error) {
+	switch mode {
+	case "", resourcev1.DeviceAllocationModeExactCount:
+		if count == 0 {
+			return 1, nil
+		}
+		if count < 0 {
+			return 0, fmt.Errorf("GPU device count must be positive")
+		}
+		return int(count), nil
+	case resourcev1.DeviceAllocationModeAll:
+		return 0, fmt.Errorf("GPU allocationMode %q has no deterministic per-node device count", mode)
+	default:
+		return 0, fmt.Errorf("unsupported GPU allocationMode %q", mode)
+	}
+}
+
+func looksLikeGPUIdentifier(name string) bool {
+	normalized := strings.ToLower(name)
+	return normalized == "gpu" ||
+		strings.HasPrefix(normalized, "gpu.") ||
+		strings.HasPrefix(normalized, "gpu/") ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, "/gpu.") ||
+		strings.Contains(normalized, "/gpu-")
+}
+
+type deviceClassResolver struct {
+	reader client.Reader
+	cache  map[string]*resourcev1.DeviceClass
+}
+
+func newDeviceClassResolver(reader client.Reader) *deviceClassResolver {
+	return &deviceClassResolver{
+		reader: reader,
+		cache:  map[string]*resourcev1.DeviceClass{},
+	}
+}
+
+func (r *deviceClassResolver) isGPU(ctx context.Context, name string, requestSelectors []resourcev1.DeviceSelector) (bool, error) {
+	deviceClass, ok := r.cache[name]
+	if !ok {
+		deviceClass = &resourcev1.DeviceClass{}
+		if err := r.reader.Get(ctx, types.NamespacedName{Name: name}, deviceClass); err != nil {
+			return false, fmt.Errorf("failed to get DeviceClass %q: %w", name, err)
+		}
+		r.cache[name] = deviceClass
+	}
+
+	isGPU, known, err := classifyDeviceRequest(deviceClass, requestSelectors)
+	if err != nil {
+		return false, err
+	}
+	if !known {
+		return false, fmt.Errorf(
+			"cannot determine whether DeviceClass %q provides GPUs: set spec.extendedResourceName or constrain device.driver in a DeviceClass or request CEL selector",
+			name,
+		)
+	}
+	return isGPU, nil
+}
+
+func classifyDeviceRequest(deviceClass *resourcev1.DeviceClass, requestSelectors []resourcev1.DeviceSelector) (bool, bool, error) {
+	// Kubernetes requires both DeviceClass and request selectors to match.
+	selectors := make([]resourcev1.DeviceSelector, 0, len(deviceClass.Spec.Selectors)+len(requestSelectors))
+	selectors = append(selectors, deviceClass.Spec.Selectors...)
+	selectors = append(selectors, requestSelectors...)
+	var isGPU, hasDriver bool
+	for _, selector := range selectors {
+		if selector.CEL == nil || strings.Contains(selector.CEL.Expression, "||") {
+			continue
+		}
+		matches := deviceDriverEqualityPattern.FindAllStringSubmatch(selector.CEL.Expression, -1)
+		for _, match := range matches {
+			candidateIsGPU := looksLikeGPUIdentifier(match[1])
+			if hasDriver && candidateIsGPU != isGPU {
+				return false, false, fmt.Errorf("DeviceClass %q and its request selectors constrain device.driver to both GPU and non-GPU drivers", deviceClass.Name)
+			}
+			isGPU = candidateIsGPU
+			hasDriver = true
+		}
+	}
+	if hasDriver {
+		return isGPU, true, nil
+	}
+	if deviceClass.Spec.ExtendedResourceName != nil {
+		return isGPUResourceName(corev1.ResourceName(*deviceClass.Spec.ExtendedResourceName)), true, nil
+	}
+	// Keep canonical GPU class names working only when the class has no selectors.
+	// A present but unsupported class or request selector must remain unclassified
+	// instead of being overridden by a suggestive class name.
+	if len(selectors) == 0 && looksLikeGPUIdentifier(deviceClass.Name) {
+		return true, true, nil
+	}
+	return false, false, nil
+}
+
+// RemoveGPUResources deletes all scalar GPU resource entries from a resource list.
+func RemoveGPUResources(resources corev1.ResourceList) {
+	for _, name := range gpuResourceNames(resources) {
+		delete(resources, name)
+	}
+}
+
+func gpuResourceQuantity(resources corev1.ResourceList) (corev1.ResourceName, resource.Quantity, bool) {
+	names := gpuResourceNames(resources)
+	if len(names) == 0 {
+		return "", resource.Quantity{}, false
+	}
+	return names[0], resources[names[0]], true
+}
+
+func gpuCountFromQuantity(name corev1.ResourceName, q resource.Quantity) (int, error) {
+	value := q.Value()
+	if q.CmpInt64(value) != 0 {
+		return 0, fmt.Errorf("GPU resource %q quantity %q must be a whole number", name, q.String())
+	}
+	return int(value), nil
+}
+
+func isGPUResourceName(name corev1.ResourceName) bool {
+	normalized := strings.ToLower(string(name))
+	return normalized == commonconsts.KubeResourceGPUNvidia ||
+		normalized == "gpu" ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, "/mig-") ||
+		strings.HasPrefix(normalized, "gpu.")
+}
+
+func gpuResourceNames(resources corev1.ResourceList) []corev1.ResourceName {
+	matches := make([]string, 0)
+	for name := range resources {
+		if isGPUResourceName(name) {
+			matches = append(matches, string(name))
+		}
+	}
+	sort.Strings(matches)
+	result := make([]corev1.ResourceName, 0, len(matches))
+	for _, name := range matches {
+		result = append(result, corev1.ResourceName(name))
+	}
+	return result
 }
 
 // GenerateResourceClaimTemplate builds the ResourceClaimTemplate that provides

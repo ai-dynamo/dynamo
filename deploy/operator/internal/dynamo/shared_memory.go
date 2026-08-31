@@ -21,19 +21,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
-func buildSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
+func buildSharedMemoryVolumeAndMount(sizeSpec *resource.Quantity) (*corev1.Volume, *corev1.VolumeMount) {
 	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
-	if spec != nil {
-		if spec.Disabled {
+	if sizeSpec != nil {
+		if sizeSpec.Sign() == 0 {
 			return nil, nil
 		}
-		if !spec.Size.IsZero() {
-			size = spec.Size
-		}
+		size = sizeSpec.DeepCopy()
 	}
 
 	volume := &corev1.Volume{
@@ -53,8 +50,8 @@ func buildSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.V
 	return volume, volumeMount
 }
 
-func ApplySharedMemoryVolumeAndMount(podSpec *corev1.PodSpec, mainContainer *corev1.Container, spec *v1alpha1.SharedMemorySpec) {
-	volume, volumeMount := buildSharedMemoryVolumeAndMount(spec)
+func ApplySharedMemoryVolumeAndMount(podSpec *corev1.PodSpec, mainContainer *corev1.Container, sizeSpec *resource.Quantity) {
+	volume, volumeMount := buildSharedMemoryVolumeAndMount(sizeSpec)
 	if volume == nil || volumeMount == nil {
 		return
 	}

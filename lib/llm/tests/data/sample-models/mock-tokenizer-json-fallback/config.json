@@ -1,0 +1,5 @@
+{
+  "architectures": ["JinaEmbeddingsV5OmniModel"],
+  "model_type": "jina_embeddings_v5_omni",
+  "special_token_ids": [151652, 151653, 151655, 151656, 151669, 151670, 151671]
+}

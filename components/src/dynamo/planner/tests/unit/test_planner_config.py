@@ -6,6 +6,7 @@
 import pytest
 from pydantic import ValidationError
 
+from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 
 pytestmark = [
@@ -45,24 +46,157 @@ def test_invalid_environment():
         )
 
 
+# ---------------------------------------------------------------------------
+# Power-awareness validator (DGD-owned caps; read-only)
+# ---------------------------------------------------------------------------
+
+
+def test_power_awareness_disabled_by_default_needs_no_budget():
+    """The feature is off by default, so an otherwise-minimal config is valid
+    with the power fields left unset."""
+    config = PlannerConfig(namespace="test-ns")
+    assert config.enable_power_awareness is False
+    assert config.total_gpu_power_limit is None
+
+
+def test_power_awareness_requires_total_gpu_power_limit():
+    """enable_power_awareness=True without total_gpu_power_limit must fail —
+    there is no safe default for the deployment-wide budget."""
+    with pytest.raises(ValidationError, match="total_gpu_power_limit is required"):
+        PlannerConfig(
+            namespace="test-ns",
+            enable_power_awareness=True,
+        )
+
+
+def test_power_awareness_requires_kubernetes_environment():
+    """Per-GPU caps are read from the DGD, so power awareness is only valid on
+    the Kubernetes connector."""
+    with pytest.raises(ValidationError, match="requires environment='kubernetes'"):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="virtual",
+            enable_power_awareness=True,
+            total_gpu_power_limit=5000,
+        )
+
+
+def test_power_awareness_rejects_agg_mode():
+    """Power awareness is not supported with mode='agg': the Kubernetes
+    validate_deployment and GPU-count paths use the typed decode resolver, which
+    does not follow the generic type:worker fallback used by the power parser."""
+    with pytest.raises(ValidationError, match="not supported with mode='agg'"):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="agg",
+            enable_power_awareness=True,
+            total_gpu_power_limit=5000,
+        )
+
+
+def test_power_awareness_enabled_with_required_fields_ok():
+    """Budget present and environment=kubernetes (default): config validates."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        enable_power_awareness=True,
+        total_gpu_power_limit=5000,
+    )
+    assert config.enable_power_awareness is True
+    assert config.total_gpu_power_limit == 5000
+    assert config.environment == "kubernetes"
+
+
+def test_total_gpu_power_limit_rejects_non_positive():
+    """total_gpu_power_limit carries a ge=1 constraint (fires regardless of the
+    awareness flag)."""
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", total_gpu_power_limit=0)
+
+
 def test_all_fields_work():
     """Test that PlannerConfig accepts all fields."""
     config = PlannerConfig(
         namespace="test-ns",
         backend="vllm",
         environment="kubernetes",
-        ttft=200,
-        itl=50,
+        ttft_ms=200,
+        itl_ms=50,
         max_gpu_budget=16,
-        throughput_adjustment_interval=60,
+        throughput_adjustment_interval_seconds=60,
     )
     assert config.namespace == "test-ns"
     assert config.backend == "vllm"
     assert config.environment == "kubernetes"
-    assert config.ttft == 200
-    assert config.itl == 50
+    assert config.ttft_ms == 200
+    assert config.itl_ms == 50
     assert config.max_gpu_budget == 16
-    assert config.throughput_adjustment_interval == 60
+    assert config.throughput_adjustment_interval_seconds == 60
+
+
+def test_min_endpoint_sets_both_component_minimums():
+    config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=2)
+
+    assert config.effective_prefill_min_endpoint == 2
+    assert config.effective_decode_min_endpoint == 2
+    assert config.active_min_endpoints() == (2, 2)
+    assert config.control_api_port == 9086
+
+
+def test_component_min_endpoints_override_independently():
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="disagg",
+        min_endpoint=2,
+        prefill_min_endpoint=3,
+        decode_min_endpoint=4,
+        control_api_port=0,
+    )
+
+    assert config.active_min_endpoints() == (3, 4)
+    assert config.control_api_port == 0
+
+
+@pytest.mark.parametrize(
+    "mode,field",
+    [
+        ("prefill", "decode_min_endpoint"),
+        ("decode", "prefill_min_endpoint"),
+        ("agg", "prefill_min_endpoint"),
+        ("agg", "decode_min_endpoint"),
+    ],
+)
+def test_component_min_endpoints_reject_inactive_static_fields(mode, field):
+    with pytest.raises(ValidationError, match=field):
+        PlannerConfig(namespace="test-ns", mode=mode, **{field: 2})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("min_endpoint", -1),
+        ("prefill_min_endpoint", 0),
+        ("decode_min_endpoint", 0),
+        ("control_api_port", -1),
+        ("control_api_port", 65536),
+    ],
+)
+def test_min_endpoint_and_control_port_ranges(field, value):
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", mode="disagg", **{field: value})
+
+
+def test_agg_active_min_endpoint_uses_min_endpoint_field():
+    config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=5)
+
+    assert config.active_min_endpoints() == (None, 5)
+
+
+def test_min_endpoint_allows_zero_for_scale_to_zero():
+    agg_config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=0)
+    disagg_config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=0)
+
+    assert agg_config.active_min_endpoints() == (None, 0)
+    assert disagg_config.active_min_endpoints() == (0, 0)
 
 
 def test_throughput_metrics_source_default():
@@ -89,6 +223,40 @@ def test_throughput_metrics_source_invalid():
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
 
 
+def test_prometheus_request_timeout_defaults_to_ten_seconds(monkeypatch):
+    monkeypatch.delenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
+
+
+def test_prometheus_request_timeout_uses_environment_default(monkeypatch):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
+
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
+    with pytest.raises(ValidationError):
+        PlannerConfig(
+            namespace="test-ns",
+            metric_pulling_prometheus_request_timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1"])
+def test_prometheus_request_timeout_rejects_non_positive_environment_values(
+    monkeypatch, timeout
+):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns")
+
+
 @pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])
 def test_fpm_sample_bucket_size_accepts_perfect_squares(bucket_size):
     """fpm_sample_bucket_size must be a perfect square (valid values)."""
@@ -109,6 +277,19 @@ def test_max_num_fpm_samples_field():
     assert config.max_num_fpm_samples == 100
 
 
+def test_speculative_nextn_default_and_positive_value():
+    config = PlannerConfig(namespace="test-ns")
+    assert config.speculative_nextn == 0
+
+    config = PlannerConfig(namespace="test-ns", speculative_nextn=3)
+    assert config.speculative_nextn == 3
+
+
+def test_speculative_nextn_rejects_negative_value():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", speculative_nextn=-1)
+
+
 def test_agg_mode_supports_throughput_scaling():
     """Agg mode supports throughput-based scaling."""
     config = PlannerConfig(
@@ -121,3 +302,35 @@ def test_agg_mode_supports_throughput_scaling():
     assert config.mode == "agg"
     assert config.enable_throughput_scaling is True
     assert config.scaling_enabled() is True
+
+
+def test_aic_perf_model_requires_prefill_pick_for_prefill_mode():
+    with pytest.raises(ValidationError, match="prefill_pick"):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="prefill",
+            optimization_target="sla",
+            aic_perf_model={
+                "hf_id": "model",
+                "system": "h200_sxm",
+                "backend": "vllm",
+            },
+        )
+
+
+def test_aic_perf_model_accepts_mode_required_picks():
+    pick = PickedParallelConfig(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1)
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="decode",
+        optimization_target="sla",
+        aic_perf_model={
+            "hf_id": "model",
+            "system": "h200_sxm",
+            "backend": "vllm",
+            "decode_pick": pick.model_dump(),
+        },
+    )
+
+    assert config.aic_perf_model is not None
+    assert config.aic_perf_model.decode_pick == pick

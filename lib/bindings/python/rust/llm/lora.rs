@@ -6,7 +6,8 @@
 //! Provides a single unified interface (LoRADownloader) for all LoRA operations.
 
 use dynamo_llm::lora::{
-    LoRACache as RsLoRACache, LoRADownloader as RsLoRADownloader, LocalLoRASource, S3LoRASource,
+    HuggingFaceLoRASource, LoRACache as RsLoRACache, LoRADownloader as RsLoRADownloader,
+    LocalLoRASource, S3LoRASource,
 };
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 /// Unified Python interface for LoRA downloading and caching.
 ///
-/// Handles local file:// URIs (zero-copy) and S3 s3:// URIs with automatic caching.
+/// Handles local file://, S3 s3://, and Hugging Face hf:// URIs with automatic caching.
 #[pyclass(name = "LoRADownloader")]
 pub struct LoRADownloader {
     inner: Arc<RsLoRADownloader>,
@@ -34,8 +35,10 @@ impl LoRADownloader {
             })?,
         };
 
-        let mut sources: Vec<Arc<dyn dynamo_llm::lora::LoRASource>> =
-            vec![Arc::new(LocalLoRASource::new())];
+        let mut sources: Vec<Arc<dyn dynamo_llm::lora::LoRASource>> = vec![
+            Arc::new(LocalLoRASource::new()),
+            Arc::new(HuggingFaceLoRASource::from_env()),
+        ];
 
         if let Ok(s3_source) = S3LoRASource::from_env() {
             sources.push(Arc::new(s3_source));
@@ -52,6 +55,7 @@ impl LoRADownloader {
     ///
     /// - file:// URIs: Returns original path (no copy)
     /// - s3:// URIs: Downloads to cache, returns cache path
+    /// - hf:// URIs: Downloads to the Hugging Face cache, returns snapshot path
     fn download_if_needed<'p>(
         &self,
         py: Python<'p>,
@@ -74,9 +78,11 @@ impl LoRADownloader {
         self.cache.get_cache_path(cache_key).display().to_string()
     }
 
-    /// Check if LoRA is cached (by cache key).
-    fn is_cached(&self, cache_key: &str) -> bool {
-        self.cache.is_cached(cache_key)
+    /// Check if a LoRA URI is cached in its source-owned or Dynamo cache.
+    fn is_cached(&self, lora_uri: &str) -> PyResult<bool> {
+        self.inner.is_cached(lora_uri).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Cache lookup failed: {}", e))
+        })
     }
 
     /// Validate cached LoRA has required files.

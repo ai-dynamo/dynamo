@@ -1,21 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dynamo.common.lora.manager import LoRAInfo
+
 try:
     from PIL import Image
-    from vllm.sampling_params import SamplingParams
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.lora_state import LoRAState
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+    from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
-    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
+    from dynamo.vllm.omni.utils import (
+        build_original_prompt,
+        parse_omni_request,
+        streaming_sampling_params,
+    )
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -23,6 +34,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
     pytest.mark.pre_merge,
 ]
 
@@ -37,6 +49,8 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.enable_lora = False  # Disable LoRA for tests unless explicitly set
+    config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
 
     defaults = []
@@ -50,10 +64,30 @@ def _make_handler(stage_types=("diffusion",)):
 
     engine_client = MagicMock()
     engine_client.default_sampling_params_list = defaults
-    engine_client.engine.get_stage_metadata.side_effect = lambda i: {
-        "stage_type": stage_types[i]
-    }
+    engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
+        stage_type=stage_types[i]
+    )
     handler.engine_client = engine_client
+
+    # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
+    # expected by BaseWorkerHandler helpers called by OmniHandler.
+    handler._lora_state = LoRAState()
+    handler.loaded_loras = handler._lora_state.loaded_loras
+    handler._lora_load_locks = handler._lora_state.lora_load_locks
+    handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
+    handler._lora_capacity = None
+    handler._lora_capacity_guard = (
+        asyncio.Lock()
+    )  # Shared capacity guard for concurrent loads
+    handler._engine_loaded_loras = set()
+
+    # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
+    handler._served_model_name = config.served_model_name or config.model
+    handler._served_model_aliases = tuple(
+        getattr(config, "served_model_aliases", ()) or ()
+    )
+    handler.engine_args = SimpleNamespace(model=config.model)
+
     return handler
 
 
@@ -65,6 +99,41 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
+        assert ei.output_format is None
+        assert ei.stream_audio is False
+
+
+def test_streaming_sampling_params_preserves_request_overrides():
+    engine_client = SimpleNamespace(
+        default_sampling_params_list=[SamplingParams(temperature=0.1, max_tokens=8)]
+    )
+    requested = SamplingParams(temperature=0.7, max_tokens=42, top_p=0.8)
+
+    result = streaming_sampling_params(engine_client, [requested])
+
+    assert result[0].temperature == 0.7
+    assert result[0].max_tokens == 42
+    assert result[0].top_p == 0.8
+    assert result[0].output_kind == RequestOutputKind.DELTA
+    assert requested.output_kind == RequestOutputKind.CUMULATIVE
+
+
+def test_streaming_sampling_params_preserves_explicit_empty_list():
+    engine_client = SimpleNamespace(
+        default_sampling_params_list=[SamplingParams(temperature=0.1)]
+    )
+
+    result = streaming_sampling_params(engine_client, [])
+
+    assert result == []
+
+
+def test_streaming_sampling_params_preserves_empty_engine_defaults():
+    engine_client = SimpleNamespace(default_sampling_params_list=[])
+
+    result = streaming_sampling_params(engine_client)
+
+    assert result == []
 
 
 class TestBuildEngineInputs:
@@ -86,9 +155,38 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.request_type == RequestType.IMAGE_GENERATION
         assert inputs.prompt["prompt"] == "a cat"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
         assert len(inputs.sampling_params_list) == 1
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
+        assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_image_chat_completion_uses_multimodal_prompt(self):
+        """Image chat requests must use vLLM-Omni multimodal preprocessing."""
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        raw = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "seed": 123},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "a glass teapot"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 512,
+        }
+        assert len(inputs.sampling_params_list) == 2
+        sp = inputs.sampling_params_list[1]
+        assert sp.height == 768
         assert sp.width == 512
 
     @pytest.mark.asyncio
@@ -96,7 +194,7 @@ class TestBuildEngineInputs:
         """Video request parses prompt, size, seconds, and sets fps."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
         inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert inputs.request_type == RequestType.VIDEO_GENERATION
@@ -133,7 +231,7 @@ class TestI2VEngineInputs:
         """T2V has no multi_modal_data; I2V attaches image to prompt."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
 
         # T2V: no image
@@ -153,7 +251,7 @@ class TestI2VEngineInputs:
         handler = _make_handler()
         req = NvCreateVideoRequest(
             prompt="bear",
-            model="test",
+            model="test-model",
             size="832x480",
             nvext=VideoNvExt(
                 boundary_ratio=0.875, guidance_scale_2=1.0, num_inference_steps=40
@@ -215,6 +313,184 @@ class TestBuildSamplingParamsList:
         handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
 
 
+class TestLoraEngineRouteRegistration:
+    @pytest.mark.asyncio
+    async def test_register_lora_engine_routes_dispatches_each_handler(self):
+        runtime = MagicMock()
+        handler = SimpleNamespace(
+            load_lora=MagicMock(),
+            unload_lora=MagicMock(),
+            list_loras=MagicMock(),
+        )
+
+        async def _yield_once(payload):
+            yield {"status": "ok", "payload": payload}
+
+        handler.load_lora.side_effect = _yield_once
+        handler.unload_lora.side_effect = _yield_once
+        handler.list_loras.side_effect = _yield_once
+
+        _register_lora_engine_routes(runtime, handler)
+
+        registered = {
+            call.args[0]: call.args[1]
+            for call in runtime.register_engine_route.call_args_list
+        }
+
+        # Routes use the update/ engine-management prefix.
+        assert set(registered) == {
+            "update/load_lora",
+            "update/unload_lora",
+            "update/list_loras",
+        }
+
+        body = {"lora_name": "adapterA"}
+        assert await registered["update/load_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["update/unload_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["update/list_loras"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+
+
+class TestLoraRequestParsing:
+    def test_extract_lora_name_accepts_delete_route_alias_shape(self):
+        handler = _make_handler()
+
+        assert (
+            handler._extract_lora_name_from_request({"name": "adapterA"}) == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"adapter_name": "adapterA"})
+            == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"model": "adapterA"}) == "adapterA"
+        )
+
+
+class TestLoraEnablement:
+    def test_resolve_lora_request_unknown_adapter_raises_when_enabled(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+                handler._resolve_lora_request("ghost-adapter")
+
+    def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
+            assert handler._resolve_lora_request("ghost-adapter") is None
+
+    def test_resolve_lora_request_served_alias_is_treated_as_base_model(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler.config.served_model_aliases = ["test-model-alias"]
+        handler._served_model_aliases = tuple(handler.config.served_model_aliases)
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            assert handler._resolve_lora_request("test-model-alias") is None
+
+
+class TestLoraCapacity:
+    def test_resolve_lora_capacity_uses_configured_max_loras(self):
+        """Omni Base handler should defer LoRA capacity to configured max_loras."""
+        from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+        config = SimpleNamespace(
+            engine_args=SimpleNamespace(enable_lora=True, max_loras=4)
+        )
+
+        assert handler._resolve_lora_capacity(config) == 4
+
+    @pytest.mark.asyncio
+    async def test_second_distinct_adapter_load_is_rejected_at_capacity_one(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        results = [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+            )
+        ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_new_adapter_still_rejected_at_capacity_when_hot_swap_enabled(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        with patch.dict("os.environ", {"DYN_LORA_HOTSWAP_ENABLED": "true"}):
+            results = [
+                result
+                async for result in handler.load_lora(
+                    {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+                )
+            ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
+
+
+class TestDiffusionLoraAttachment:
+    def test_apply_lora_to_diffusion_sampling_params_sets_lora_request(self):
+        diffusion_sp = OmniDiffusionSamplingParams()
+        llm_sp = SamplingParams()
+        lora_request = MagicMock()
+
+        OmniHandler._apply_lora_to_sampling_params(
+            [llm_sp, diffusion_sp],
+            lora_request,
+        )
+
+        assert diffusion_sp.lora_request is lora_request
+
+    def test_apply_lora_to_diffusion_sampling_params_raises_when_attr_missing(self):
+        class _NoLoraRequestSamplingParams(OmniDiffusionSamplingParams):
+            def __setattr__(self, name, value):
+                if name == "lora_request" and value is not None:
+                    raise AttributeError("lora_request is not supported")
+                super().__setattr__(name, value)
+
+        diffusion_sp = _NoLoraRequestSamplingParams()
+        lora_request = MagicMock()
+
+        with pytest.raises(
+            RuntimeError,
+            match="OmniDiffusionSamplingParams no longer exposes 'lora_request'",
+        ):
+            OmniHandler._apply_lora_to_sampling_params([diffusion_sp], lora_request)
+
+
 class TestBuildOriginalPrompt:
     """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.
 
@@ -261,8 +537,7 @@ class TestBuildOriginalPrompt:
 
 
 class TestParseOmniRequest:
-    """parse_omni_request: original_prompt only has prompt/negative_prompt,
-    geometry goes into sampling_params_list dict."""
+    """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):
@@ -277,17 +552,56 @@ class TestParseOmniRequest:
         assert sp["width"] == 512
 
     @pytest.mark.asyncio
-    async def test_image_original_prompt_no_geometry(self):
+    async def test_image_prompt_uses_multimodal_preprocessor_kwargs(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
         result = await parse_omni_request(request, ["image"])
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a sunset"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
         op = result["original_prompt"]
         assert op["prompt"] == "a sunset"
         assert "height" not in op
         assert "width" not in op
+        assert op["modalities"] == ["image"]
+        assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
+    def test_image_request_uses_nvext_negative_prompt(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "1024x1024",
+            "nvext": {"negative_prompt": "blurry, low quality"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
+
+    def test_image_request_uses_nvext_dimensions_consistently(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "512x512",
+            "nvext": {"height": 640, "width": 768},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["sampling_params_list"]["height"] == 640
+        assert result["sampling_params_list"]["width"] == 768
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+        assert result["original_prompt"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
 
     @pytest.mark.asyncio
     async def test_nvext_params_go_into_sampling_params_not_prompt(self):
@@ -303,3 +617,107 @@ class TestParseOmniRequest:
         op = result["original_prompt"]
         assert "num_inference_steps" not in op
         assert "guidance_scale" not in op
+
+    @pytest.mark.asyncio
+    async def test_image_chat_request_uses_multimodal_preprocessor_kwargs(self):
+        request = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "guidance_scale": 1.5},
+        }
+
+        result = await parse_omni_request(request, ["image"])
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a glass teapot"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 768, "target_w": 512}
+        assert result["original_prompt"] == prompt
+        assert result["sampling_params_list"] == {
+            "height": 768,
+            "width": 512,
+            "guidance_scale": 1.5,
+        }
+
+
+# ---------------------------------------------------------------------------
+# AudioGenerationHandler — data_source / response_format field mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_audio_handler():
+    config = MagicMock()
+    config.tts_max_instructions_length = 200
+    config.tts_max_new_tokens_min = 1
+    config.tts_max_new_tokens_max = 4096
+    config.tts_ref_audio_timeout = 10
+    config.tts_ref_audio_max_bytes = 1024 * 1024
+    engine_client = MagicMock()
+    engine_client.model_config.hf_config.talker_config = None
+    return AudioGenerationHandler(config, engine_client, None, None)
+
+
+class TestAudioHandlerFieldMapping:
+    """AudioGenerationHandler maps data_source→response_format and response_format→output_format."""
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_to_response_format(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="url", response_format="mp3"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"  # data_source → response_format
+        assert result.output_format == "mp3"  # response_format → output_format
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_b64_json(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="b64_json", response_format="opus"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "b64_json"
+        assert result.output_format == "opus"
+
+    @pytest.mark.asyncio
+    async def test_generic_path_no_data_source_passes_none(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        # No data_source → response_format in EngineInputs will be None
+        req = NvCreateAudioSpeechRequest(input="hello", response_format="wav")
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format is None
+        assert result.output_format == "wav"
+
+    @pytest.mark.asyncio
+    async def test_tts_path_applies_same_field_mapping(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=True)
+        handler._validate_tts_request = MagicMock()
+        handler._estimate_tts_prompt_len = MagicMock(return_value=10)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hi", data_source="url", response_format="flac"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"
+        assert result.output_format == "flac"
+
+    @pytest.mark.asyncio
+    async def test_request_type_is_audio_generation(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        result = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hi")
+        )
+        assert result.request_type == RequestType.AUDIO_GENERATION

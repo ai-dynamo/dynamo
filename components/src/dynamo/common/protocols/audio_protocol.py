@@ -17,6 +17,17 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class AudioNvExt(BaseModel):
+    """NVIDIA extensions for audio generation requests."""
+
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
+
+
 class NvCreateAudioSpeechRequest(BaseModel):
     """Request for audio speech generation (/v1/audio/speech endpoint).
 
@@ -33,9 +44,13 @@ class NvCreateAudioSpeechRequest(BaseModel):
     voice: Optional[str] = None
     """Voice/speaker name (e.g., 'vivian', 'ryan', 'aiden')."""
 
-    response_format: Optional[
-        Literal["wav", "pcm", "flac", "mp3", "aac", "opus"]
-    ] = "wav"
+    data_source: Optional[Literal["url", "b64_json"]] = None
+    """How the generated data should be returned: 'url' or 'b64_json'.
+    If unset, handlers default to 'b64_json'.
+    Note: image and video generation use 'response_format' for this; audio uses a
+    separate field because OpenAI's audio API already uses 'response_format' for codec."""
+
+    response_format: Optional[str] = "wav"
     """Output format."""
 
     speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
@@ -60,15 +75,21 @@ class NvCreateAudioSpeechRequest(BaseModel):
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
 
+    nvext: Optional[AudioNvExt] = None
+    """NVIDIA extensions."""
+
 
 class AudioData(BaseModel):
     """Audio data in response."""
 
+    output_format: str
+    """Actual codec used for this audio."""
+
     url: Optional[str] = None
-    """URL of the generated audio (if response_format is 'url')."""
+    """URL of the generated audio (if data_source is 'url')."""
 
     b64_json: Optional[str] = None
-    """Base64-encoded audio data."""
+    """Base64-encoded audio data (if data_source is 'b64_json')."""
 
 
 class NvAudioSpeechResponse(BaseModel):

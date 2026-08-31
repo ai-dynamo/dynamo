@@ -4,19 +4,23 @@
 """Single-stage omni worker for disaggregated pipelines."""
 
 import asyncio
+import atexit
 import importlib
+import inspect
 import logging
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
+import torch
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -25,8 +29,15 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
+from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
-from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
+from dynamo.vllm.omni.utils import (
+    _build_sampling_params,
+    ensure_awaited,
+    is_empty_payload,
+    parse_omni_request,
+    unwrap_connector_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +103,9 @@ class OmniStageWorker:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
             try:
-                stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
+                stage_list = await ensure_awaited(
+                    self._fetch_stage_inputs(stage_connector_refs, request_id)
+                )
             except RuntimeError as e:
                 yield {"error": str(e), "finished": True}
                 return
@@ -108,12 +121,7 @@ class OmniStageWorker:
                 )
 
             if self._processor is not None:
-                prompt = self._processor(
-                    stage_list,
-                    self._engine_input_source,
-                    [original_prompt],
-                    self._requires_mm,
-                )
+                prompt = self._process_stage_inputs(stage_list, original_prompt)
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
             else:
@@ -173,6 +181,8 @@ class OmniStageWorker:
             yield {"error": str(e), "finished": True}
             return
 
+        _ensure_cumulative_token_ids(last_result)
+
         # --- Write output ---
         # Check for a downstream connector first, regardless of final_output.
         # In vllm-omni's native mode, multiple stages can set final_output=True
@@ -183,9 +193,19 @@ class OmniStageWorker:
         connector = self.connectors.get((from_s, to_s))
         if connector is not None:
             try:
-                ok, _, metadata = connector.put(  # type: ignore[arg-type]
-                    from_s, to_s, request_id, last_result
+                put_result = await ensure_awaited(
+                    connector.put(  # type: ignore[arg-type]
+                        from_s,
+                        to_s,
+                        request_id,
+                        _prepare_connector_payload(
+                            last_result,
+                            from_stage=self.stage_id,
+                            to_stage=self.stage_id + 1,
+                        ),
+                    )
                 )
+                ok, _, metadata = put_result
             except Exception as e:
                 logger.error(
                     "Stage %d: connector.put() raised %s: %s",
@@ -212,13 +232,46 @@ class OmniStageWorker:
             yield out
             return
 
-        # Final stage → router: write output to shared memory and return the SHM handle.
-        # The router reads it back via shm_deserialize() to format the response.
-        #
-        # NOTE: This is a single-node-only workaround — SHM requires the final stage
-        # worker and the router to reside on the same machine. A proper multi-node
-        # solution would use a connector edge (like inter-stage connectors) instead.
-        # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
+        # Final stage -> router: check for a YAML-configured connector for the
+        # (stage_id -> "router") edge before falling back to SHM.  A connector
+        # here enables multi-node deployments where the router and final stage
+        # worker reside on different machines (SHM requires same host).
+        router_connector = self.connectors.get(_connector_key(self.stage_id, "router"))
+        if router_connector is not None:
+            try:
+                rput_result = await ensure_awaited(
+                    router_connector.put(  # type: ignore[arg-type]
+                        from_s,
+                        "router",
+                        request_id,
+                        _prepare_connector_payload(
+                            last_result,
+                            from_stage=self.stage_id,
+                            to_stage="router",
+                        ),
+                    )
+                )
+                ok, _, metadata = rput_result
+            except Exception as e:
+                logger.error(
+                    "Stage %d: router connector.put() raised %s: %s",
+                    self.stage_id,
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                yield {"error": f"router connector.put() raised: {e}", "finished": True}
+                return
+            if not ok:
+                yield {"error": "router connector.put() failed", "finished": True}
+                return
+            yield {
+                "stage_connector_refs": {str(self.stage_id): metadata},
+                "finished": True,
+            }
+            return
+
+        # SHM fallback -- only works when router and final stage are on the same node.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
         yield {"shm_meta": shm_meta, "finished": True}
 
@@ -276,7 +329,80 @@ class OmniStageWorker:
         )
         return prompt
 
+    def _process_stage_inputs(self, stage_list: list[_Proxy], original_prompt: Any):
+        """Call vLLM-Omni stage processors using the v0.20 transition API."""
+        if self._processor is None:
+            raise RuntimeError(f"Stage {self.stage_id}: no processor configured")
+
+        signature = inspect.signature(self._processor)
+        positional_params = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        parameter_names = [parameter.name for parameter in positional_params]
+
+        if parameter_names[:2] == ["stage_list", "engine_input_source"]:
+            logger.debug(
+                "Stage %d: processor dispatch branch=stage_list parameters=%s",
+                self.stage_id,
+                parameter_names,
+            )
+            return self._processor(
+                stage_list,
+                self._engine_input_source,
+                [original_prompt],
+                self._requires_mm,
+            )
+
+        source_outputs = [
+            output
+            for stage_input in stage_list
+            for output in (stage_input.engine_outputs or [])
+        ]
+        if _accepts_source_outputs_processor(parameter_names):
+            logger.debug(
+                "Stage %d: processor dispatch branch=source_outputs parameters=%s",
+                self.stage_id,
+                parameter_names,
+            )
+            if len(parameter_names) >= 4:
+                return self._processor(
+                    source_outputs,
+                    original_prompt,
+                    self._requires_mm,
+                    None,
+                )
+            return self._processor(
+                source_outputs,
+                original_prompt,
+                self._requires_mm,
+            )
+
+        raise TypeError(
+            f"Stage {self.stage_id}: unsupported processor signature for "
+            f"{self._processor!r}; expected stage-list parameters "
+            "('stage_list', 'engine_input_source', ...) or source-output "
+            "parameters ('source_outputs', 'original_prompt', ...), got "
+            f"{parameter_names}"
+        )
+
     def _fetch_stage_inputs(
+        self, stage_connector_refs: dict[int, Any], request_id: str
+    ) -> list[_Proxy]:
+        """Backward-compatible synchronous wrapper for unit tests/callers.
+
+        Runtime pipeline code should use ``_fetch_stage_inputs_async``.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self._fetch_stage_inputs_async(stage_connector_refs, request_id)
+            )
+        return self._fetch_stage_inputs_async(stage_connector_refs, request_id)  # type: ignore[return-value]
+
+    async def _fetch_stage_inputs_async(
         self, stage_connector_refs: dict[int, Any], request_id: str
     ) -> list[_Proxy]:
         """Fetch previous stage outputs from connectors for the processor/engine.
@@ -299,23 +425,32 @@ class OmniStageWorker:
                     f"Stage {self.stage_id}: no connector for edge ({stage_k}→{self.stage_id})"
                 )
             try:
-                payload = connector.get(
-                    str(stage_k), str(self.stage_id), request_id, metadata=meta_k
+                get_result = await ensure_awaited(
+                    connector.get(
+                        str(stage_k),
+                        str(self.stage_id),
+                        request_id,
+                        metadata=meta_k,
+                    )
                 )
             except Exception as e:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: connector.get() failed: {e}"
                 ) from e
-            payload_data = payload[0] if isinstance(payload, tuple) else payload
-            if not payload_data:
+            payload_data = unwrap_connector_payload(get_result)
+            if is_empty_payload(payload_data):
                 raise RuntimeError(
                     f"Stage {self.stage_id}: empty payload from connector ({stage_k}→{self.stage_id})"
                 )
-            engine_inputs = (
-                payload_data.get("engine_inputs")
-                if isinstance(payload_data, dict)
-                else payload_data
-            )
+            if isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+                engine_inputs = payload_data["engine_inputs"]
+                _restore_completion_output_attrs(
+                    engine_inputs,
+                    payload_data.get("_dynamo_completion_output_attrs"),
+                )
+            else:
+                engine_inputs = payload_data
+            _ensure_cumulative_token_ids(engine_inputs)
             stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
         return stage_list
 
@@ -333,7 +468,31 @@ async def init_omni_stage(
     if config.stage_id is None:
         raise ValueError("--stage-id is required for stage worker initialization")
     stage_id: int = config.stage_id
-    stage_configs = load_stage_configs_from_yaml(config.stage_configs_path)  # type: ignore[arg-type]
+
+    (
+        resolved_stage_configs_path,
+        stage_configs,
+        _omni_lb_policy,
+    ) = load_and_resolve_stage_configs(
+        config.model,
+        config.stage_configs_path,
+        kwargs={},
+        trust_remote_code=getattr(
+            getattr(config, "engine_args", None), "trust_remote_code", False
+        ),
+    )
+    connector_configs_path = _ensure_stage_connectors(
+        resolved_stage_configs_path,
+        stage_configs,
+    )
+    # Only register NixlConnector if it's actually used in stage configs
+    if _uses_nixl_connector(connector_configs_path, stage_configs):
+        try:
+            register_dynamoomni_nixl_connector()
+        except Exception as e:
+            logger.error("Stage %d: failed to register NixlConnector: %s", stage_id, e)
+            raise
+
     if stage_id >= len(stage_configs):
         raise ValueError(
             f"--stage-id {stage_id} out of range (YAML has {len(stage_configs)} stages)"
@@ -352,7 +511,7 @@ async def init_omni_stage(
 
     # Connectors for inter-stage output transfer — type determined by YAML config
     # (SharedMemoryConnector, MooncakeConnector, etc.)
-    _, connectors = initialize_orchestrator_connectors(config.stage_configs_path)  # type: ignore[arg-type]
+    _, connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
 
     worker = OmniStageWorker(
         engine=engine,
@@ -405,9 +564,54 @@ async def init_omni_stage(
         raise
 
 
-def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
+def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str]:
     """Build the connector dict key used by initialize_orchestrator_connectors."""
     return (str(from_stage), str(to_stage))
+
+
+def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
+    """Check if any stage connector uses NixlConnector."""
+    try:
+        with open(stage_configs_path) as f:
+            raw = f.read()
+    except OSError:
+        return False
+
+    try:
+        deploy_config = yaml.safe_load(raw) or {}
+    except Exception as exc:
+        logger.error(
+            "_uses_nixl_connector: failed to parse %s: %s", stage_configs_path, exc
+        )
+        raise
+
+    if not isinstance(deploy_config, dict):
+        raise ValueError(
+            f"_uses_nixl_connector: {stage_configs_path} did not yield a mapping "
+            f"(got {type(deploy_config).__name__})"
+        )
+
+    # Check both root-level connectors and runtime.connectors (YAML structure varies)
+    connectors_list = []
+
+    # Root-level connectors (synthesized by _ensure_stage_connectors)
+    if isinstance(deploy_config.get("connectors"), dict):
+        connectors_list.append(deploy_config["connectors"])
+
+    # Runtime.connectors (user-defined in stage config YAML)
+    runtime = deploy_config.get("runtime")
+    if isinstance(runtime, dict) and isinstance(runtime.get("connectors"), dict):
+        connectors_list.append(runtime["connectors"])
+
+    for connectors in connectors_list:
+        for connector_config in connectors.values():
+            if not isinstance(connector_config, dict):
+                continue
+            connector_type = connector_config.get("name", "")
+            if connector_type == "NixlConnector":
+                return True
+
+    return False
 
 
 def _load_processor(func_path: str | None) -> Any:
@@ -418,10 +622,199 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
+def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+    """Add default SHM connector edges for stage configs that omit them."""
+    try:
+        with open(stage_configs_path) as f:
+            deploy_config = yaml.safe_load(f) or {}
+    except OSError:
+        logger.warning(
+            "Could not read stage config %s; using it without connector synthesis",
+            stage_configs_path,
+        )
+        return stage_configs_path
+
+    if not isinstance(deploy_config, dict):
+        return stage_configs_path
+
+    stages = deploy_config.get("stages")
+    if not isinstance(stages, list):
+        return stage_configs_path
+
+    stages_by_id = {
+        int(stage.get("stage_id", idx)): stage
+        for idx, stage in enumerate(stages)
+        if isinstance(stage, dict)
+    }
+    connector_name = "connector_of_shared_memory"
+    changed = False
+
+    for stage_config in stage_configs:
+        to_stage = int(getattr(stage_config, "stage_id", -1))
+        if to_stage < 0:
+            continue
+        stage = stages_by_id.get(to_stage)
+        if stage is None:
+            continue
+        input_connectors = stage.setdefault("input_connectors", {})
+        if not isinstance(input_connectors, dict):
+            continue
+        for from_stage in getattr(stage_config, "engine_input_source", []) or []:
+            connector_key = f"from_stage_{int(from_stage)}"
+            if connector_key not in input_connectors:
+                input_connectors[connector_key] = connector_name
+                changed = True
+
+    if not changed:
+        return stage_configs_path
+
+    connectors = deploy_config.setdefault("connectors", {})
+    if not isinstance(connectors, dict):
+        raise ValueError(
+            f"'connectors' in {stage_configs_path} must be a mapping to "
+            f"synthesize {connector_name}; got {type(connectors).__name__}"
+        )
+    connectors.setdefault(
+        connector_name,
+        {
+            "name": "SharedMemoryConnector",
+            "extra": {},
+        },
+    )
+
+    tmp_dir = tempfile.mkdtemp(prefix=f"dynamo_omni_stage_{os.getpid()}_")
+    tmp_path = os.path.join(tmp_dir, "stage_config.yaml")
+    with open(tmp_path, "w") as tmp:
+        yaml.safe_dump(deploy_config, tmp, sort_keys=False)
+
+    atexit.register(_cleanup_temp_stage_config, tmp_dir)
+    logger.info(
+        "Synthesized default SharedMemoryConnector edges in %s from %s",
+        tmp_path,
+        stage_configs_path,
+    )
+    return tmp_path
+
+
+def _cleanup_temp_stage_config(path: str) -> None:
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def _prepare_connector_payload(
+    engine_inputs: Any,
+    from_stage: int | None = None,
+    to_stage: int | str | None = None,
+) -> Any:
+    """Build connector payload for inter-stage transfer.
+
+    Connector payloads are regular Python objects. Connectors that advertise
+    raw-data support (including NIXL) can serialize/deserialize these payloads
+    directly
+    """
+    _ = (from_stage, to_stage)
+    # Preserve completion-only fields that some serializers may drop.
+    _promote_request_multimodal_output(engine_inputs)
+    output_attrs = _collect_completion_output_attrs(engine_inputs)
+    if len(output_attrs) == 0:
+        return engine_inputs
+    return {
+        "engine_inputs": engine_inputs,
+        "_dynamo_completion_output_attrs": output_attrs,
+    }
+
+
+def _collect_completion_output_attrs(engine_inputs: Any) -> list[dict[str, Any]]:
+    output_attrs: list[dict[str, Any]] = []
+    for output in _iter_completion_outputs(engine_inputs):
+        attrs: dict[str, Any] = {}
+        cumulative_token_ids = getattr(output, "cumulative_token_ids", None)
+        if cumulative_token_ids is not None:
+            attrs["cumulative_token_ids"] = list(cumulative_token_ids)
+        multimodal_output = getattr(output, "multimodal_output", None)
+        if multimodal_output is not None and not is_empty_payload(multimodal_output):
+            attrs["multimodal_output"] = multimodal_output
+        output_attrs.append(attrs)
+    return output_attrs
+
+
+def _promote_request_multimodal_output(engine_inputs: Any) -> None:
+    """Expose request-level multimodal payloads on the sole completion output."""
+    request_multimodal_output = getattr(engine_inputs, "multimodal_output", None)
+    if request_multimodal_output is None or is_empty_payload(request_multimodal_output):
+        return
+
+    outputs = _iter_completion_outputs(engine_inputs)
+    if len(outputs) != 1:
+        return
+
+    completion = outputs[0]
+    completion_mm = getattr(completion, "multimodal_output", None)
+    if completion_mm is None or is_empty_payload(completion_mm):
+        completion.multimodal_output = request_multimodal_output
+
+
+def _restore_completion_output_attrs(
+    engine_inputs: Any, output_attrs: Any | None
+) -> None:
+    if not isinstance(output_attrs, list):
+        return
+    for output, attrs in zip(
+        _iter_completion_outputs(engine_inputs), output_attrs, strict=False
+    ):
+        if not isinstance(attrs, dict):
+            continue
+        if "cumulative_token_ids" in attrs:
+            output.cumulative_token_ids = list(attrs["cumulative_token_ids"])
+        if "multimodal_output" in attrs:
+            output.multimodal_output = attrs["multimodal_output"]
+
+
+def _ensure_cumulative_token_ids(engine_inputs: Any) -> None:
+    """Bridge vLLM 0.20 CompletionOutput into vLLM-Omni stage processors."""
+    for output in _iter_completion_outputs(engine_inputs):
+        if not hasattr(output, "cumulative_token_ids") and hasattr(output, "token_ids"):
+            output.cumulative_token_ids = list(output.token_ids)
+
+
+def _iter_completion_outputs(engine_inputs: Any):
+    outputs = getattr(engine_inputs, "outputs", None)
+    if outputs is None:
+        request_output = getattr(engine_inputs, "request_output", None)
+        outputs = getattr(request_output, "outputs", None)
+    if outputs is None:
+        return []
+    if isinstance(outputs, (list, tuple)):
+        return list(outputs)
+    if isinstance(outputs, torch.Tensor):
+        return []
+    try:
+        return list(outputs)
+    except TypeError:
+        return []
+
+
+def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
+    if len(parameter_names) < 3:
+        return False
+    return (
+        parameter_names[0] == "source_outputs"
+        and (parameter_names[1] in {"original_prompt", "prompt"})
+        and (parameter_names[2] in {"requires_mm", "requires_multimodal_data"})
+    )
+
+
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
+    stage_arg = _stage_config_to_dict(stage_config, stage_type)
+    _normalize_single_stage_runtime_devices(stage_arg)
     single_stage_config = {
-        "stage_args": [_stage_config_to_dict(stage_config, stage_type)],
+        "stage_args": [stage_arg],
         "runtime": {"edges": []},
     }
 
@@ -459,13 +852,59 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
         if val is not None:
             result[key] = _to_plain(val)
 
+    engine_input_source = getattr(stage_config, "engine_input_source", None)
+    if engine_input_source is not None:
+        result["engine_input_source"] = _to_plain(engine_input_source)
+
     runtime = getattr(stage_config, "runtime", None)
     if runtime is not None:
         rt = _to_plain(runtime)
-        rt["devices"] = "0"
+        rt.setdefault("devices", "0")
         result["runtime"] = rt
 
     return result
+
+
+def _normalize_single_stage_runtime_devices(stage_arg: dict) -> None:
+    """Map stage-local device visibility to vLLM-Omni logical device IDs."""
+    runtime = stage_arg.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+
+    devices = runtime.get("devices")
+    visible_devices = _get_visible_devices()
+    if devices in (None, "cpu") or not visible_devices:
+        return
+
+    requested_devices = _parse_runtime_devices(devices)
+    if requested_devices != visible_devices:
+        return
+
+    # Dynamo starts each stage worker with the process visibility already
+    # narrowed to that stage's devices. vLLM-Omni then interprets runtime.devices
+    # as logical indexes inside that visible set.
+    runtime["devices"] = ",".join(str(i) for i in range(len(requested_devices)))
+
+
+def _get_visible_devices() -> list[str]:
+    for env_var in (
+        "CUDA_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "ZE_AFFINITY_MASK",
+    ):
+        if devices := os.environ.get(env_var):
+            return _parse_runtime_devices(devices)
+    return []
+
+
+def _parse_runtime_devices(devices: Any) -> list[str]:
+    if isinstance(devices, int):
+        return [str(devices)]
+    if isinstance(devices, str):
+        return [device.strip() for device in devices.split(",") if device.strip()]
+    if isinstance(devices, (list, tuple)):
+        return [str(device).strip() for device in devices if str(device).strip()]
+    return []
 
 
 def _resolve_model_type(final_output_type: str) -> ModelType:

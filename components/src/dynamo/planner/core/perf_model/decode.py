@@ -88,11 +88,13 @@ class DecodeRegressionModel(_BaseRegressionModel):
         osl: float,
         max_kv_tokens: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
+        accept_length: float = 1.0,
     ) -> tuple[float, float]:
         """Find the maximum decode engine request rate within an ITL target.
 
         Binary searches over batch_size at the given context_length for the
-        maximum batch_size where predicted wall_time * 1000 <= itl.  If even
+        maximum batch_size where predicted per-forward wall time, discounted by
+        speculative accept length, satisfies the ITL target.  If even
         batch_size=1 violates the target, warns but returns the best
         achievable rate at batch_size=1 so the caller can still scale.
 
@@ -106,12 +108,14 @@ class DecodeRegressionModel(_BaseRegressionModel):
         neither capability is provided.
 
         Returns:
-            (engine_rps, actual_itl_ms) -- 0 rps signals an error
+            (engine_rps, actual_itl_ms) -- actual ITL is wall_time/accept_length.
+            0 rps signals an error
             (model not fitted or invalid input); positive rps is
             the best achievable rate with the predicted ITL.
         """
         if not self._ensure_fitted() or context_length <= 0 or osl <= 0 or itl <= 0:
             return (0.0, 0.0)
+        accept_length = max(1.0, float(accept_length))
 
         if max_kv_tokens and max_kv_tokens > 0:
             kv_cap = max(1, int(max_kv_tokens / context_length))
@@ -124,22 +128,23 @@ class DecodeRegressionModel(_BaseRegressionModel):
         lo, hi = 1, max_batch
         best_bs, best_wt = 1, self._predict_2d(1, context_length)
 
-        if best_wt * 1000.0 > itl:
+        best_itl_ms = best_wt * 1000.0 / accept_length
+        if best_itl_ms > itl:
             logger.warning(
-                f"ITL SLA unreachable: predicted {best_wt * 1000.0:.1f}ms "
+                f"ITL SLA unreachable: predicted {best_itl_ms:.1f}ms "
                 f"> target {itl:.1f}ms at batch_size=1, ctx_len={context_length:.0f}"
             )
-            return (best_bs / (osl * best_wt), best_wt * 1000.0)
+            return (best_bs / (osl * (best_wt / accept_length)), best_itl_ms)
 
         while lo <= hi:
             mid = (lo + hi) // 2
             kv = mid * context_length
             wt = self._predict_2d(mid, kv)
-            if wt * 1000.0 <= itl:
+            if wt * 1000.0 / accept_length <= itl:
                 best_bs, best_wt = mid, wt
                 lo = mid + 1
             else:
                 hi = mid - 1
 
-        engine_rps = best_bs / (osl * best_wt)
-        return (engine_rps, best_wt * 1000.0)
+        engine_rps = best_bs / (osl * (best_wt / accept_length))
+        return (engine_rps, best_wt * 1000.0 / accept_length)

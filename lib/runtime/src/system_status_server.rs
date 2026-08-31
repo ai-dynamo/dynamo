@@ -152,9 +152,8 @@ pub async fn spawn_system_status_server(
         .to_string();
 
     // Check if LoRA feature is enabled
-    let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
+    let lora_enabled =
+        crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);
 
     let mut app = Router::new()
         .route(
@@ -215,6 +214,18 @@ pub async fn spawn_system_status_server(
                 }),
             );
     }
+
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // The endpoint triple disambiguates multi-LocalModel-per-DRT; the
+    // suffix segment (LoRA slug or `_base`) scopes per-registration so
+    // detaching one doesn't wipe another's entries.
+    app = app.route(
+        "/v1/metadata/{namespace}/{component}/{endpoint}/{model_slug}/{model_suffix}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
 
     let app = app
         .fallback(|| async {
@@ -476,10 +487,76 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
     }
 }
 
-/// Helper function to call a LoRA management endpoint locally via in-process registry
+/// `GET /v1/metadata/{namespace}/{component}/{endpoint}/{slug}/{suffix}/{filename}`
+/// — 404 on miss, 500 on read error, raw bytes on hit. Consumer blake3-verifies.
+async fn metadata_file_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path((namespace, component, endpoint, model_slug, model_suffix, filename)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+) -> impl IntoResponse {
+    let path = match state.drt().metadata_artifacts().get(
+        &namespace,
+        &component,
+        &endpoint,
+        &model_slug,
+        &model_suffix,
+        &filename,
+    ) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                namespace,
+                component,
+                endpoint,
+                model_slug,
+                model_suffix,
+                filename,
+                "metadata artifact not registered for self-host"
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(err) => {
+            tracing::error!(
+                namespace,
+                component,
+                endpoint,
+                model_slug,
+                model_suffix,
+                filename,
+                path = %path.display(),
+                %err,
+                "failed to read self-hosted metadata file"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
+        }
+    }
+}
+
+/// Helper function to call a LoRA management endpoint for the local worker.
 ///
-/// This function ONLY uses the local endpoint registry for direct in-process calls.
-/// It does NOT fall back to network discovery if the endpoint is not found.
+/// Resolution order (both are in-process, never network discovery):
+/// 1. The legacy local endpoint registry, populated by non-unified workers via
+///    `.register_local_engine()`.
+/// 2. The generic engine-route registry (`/engine/*`). Unified-backend workers
+///    advertise LoRA lifecycle ops (`load_lora`/`unload_lora`/`list_loras`) as
+///    engine *updates*, registered under `update/<name>`; this fallback maps the
+///    bare LoRA name onto that key so the legacy `/v1/loras` surface forwards to
+///    them (the `/v1/loras` compatibility shim).
+///
+/// Because legacy workers populate the local registry, they never reach the
+/// fallback — their `/v1/loras` behavior is unchanged. If neither registry
+/// holds the name, returns an explicit "LoRA management not available" error
+/// rather than an opaque "endpoint not found".
 async fn call_lora_endpoint(
     drt: &crate::DistributedRuntime,
     endpoint_name: &str,
@@ -487,40 +564,50 @@ async fn call_lora_endpoint(
 ) -> anyhow::Result<LoraResponse> {
     use crate::engine::AsyncEngine;
 
-    tracing::debug!("Calling local endpoint: '{endpoint_name}'");
+    tracing::debug!("Calling LoRA endpoint: '{endpoint_name}'");
 
-    // Get the endpoint from the local registry (in-process call only)
-    let local_registry = drt.local_endpoint_registry();
-    let engine = local_registry
-        .get(endpoint_name)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Endpoint '{}' not found in local registry. Make sure it's registered with .register_local_engine()",
-                endpoint_name
-            )
-        })?;
+    // 1. Legacy local registry (in-process call only).
+    if let Some(engine) = drt.local_endpoint_registry().get(endpoint_name) {
+        tracing::debug!(
+            "Found endpoint '{}' in local registry, calling directly",
+            endpoint_name
+        );
 
-    tracing::debug!(
-        "Found endpoint '{}' in local registry, calling directly",
-        endpoint_name
-    );
+        let request = crate::pipeline::SingleIn::new(request_body);
+        let mut stream = engine.generate(request).await?;
 
-    // Call the engine directly without going through the network stack
-    let request = crate::pipeline::SingleIn::new(request_body);
-    let mut stream = engine.generate(request).await?;
+        if let Some(response) = stream.next().await {
+            let response_data = response.data.unwrap_or_default();
+            let lora_response = serde_json::from_value::<LoraResponse>(response_data.clone())
+                .unwrap_or_else(|_| parse_lora_response(&response_data));
+            return Ok(lora_response);
+        }
 
-    // Get the first response
-    if let Some(response) = stream.next().await {
-        let response_data = response.data.unwrap_or_default();
+        anyhow::bail!("No response received from endpoint '{}'", endpoint_name)
+    }
 
-        // Try structured deserialization first, fall back to manual field extraction
+    // 2. Unified-backend engine-update registry fallback. The unified Worker
+    //    registers LoRA ops as engine updates under `update/<name>`, so map the
+    //    bare LoRA endpoint name onto that namespaced key.
+    let update_key = format!("update/{endpoint_name}");
+    if let Some(callback) = drt.engine_routes().get(&update_key) {
+        tracing::debug!(
+            "Found '{}' in engine routes registry, invoking update callback",
+            update_key
+        );
+        let response_data = callback(request_body).await?;
         let lora_response = serde_json::from_value::<LoraResponse>(response_data.clone())
             .unwrap_or_else(|_| parse_lora_response(&response_data));
-
         return Ok(lora_response);
     }
 
-    anyhow::bail!("No response received from endpoint '{}'", endpoint_name)
+    anyhow::bail!(
+        "LoRA management not available: no '{}' handler is registered \
+         (neither a local LoRA endpoint nor an engine update). This worker \
+         either has LoRA disabled or its backend does not support LoRA \
+         management.",
+        endpoint_name
+    )
 }
 
 /// Helper to parse response data into LoraResponse
@@ -1093,6 +1180,97 @@ mod integration_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_payloadless_endpoint_is_healthy_with_canary_enabled() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    Some("notready"),
+                ),
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::new(
+                        runtime,
+                        crate::distributed::DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started")
+                    .socket_addr;
+
+                use crate::pipeline::{
+                    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn, async_trait,
+                    network::Ingress,
+                };
+                use crate::protocols::annotated::Annotated;
+
+                struct PayloadlessHandler;
+
+                #[async_trait]
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error>
+                    for PayloadlessHandler
+                {
+                    async fn generate(
+                        &self,
+                        input: SingleIn<String>,
+                    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
+                        let (data, ctx) = input.into_parts();
+                        Ok(crate::pipeline::ResponseStream::new(
+                            Box::pin(crate::stream::iter(vec![Annotated::from_data(data)])),
+                            ctx.context(),
+                        ))
+                    }
+                }
+
+                let namespace = drt.namespace("test").unwrap();
+                let component = namespace.component("backend").unwrap();
+                let ingress = Ingress::for_engine(Arc::new(PayloadlessHandler)).unwrap();
+                tokio::spawn(async move {
+                    // Unified decode workers deliberately follow this path: the
+                    // endpoint is registered without a canary payload.
+                    let _ = component
+                        .endpoint("generate")
+                        .endpoint_builder()
+                        .handler(ingress)
+                        .start()
+                        .await;
+                });
+
+                let client = reqwest::Client::new();
+                for path in ["/health", "/live"] {
+                    let url = format!("http://{addr}{path}");
+                    let mut last_response = None;
+                    for _ in 0..50 {
+                        let response = client.get(&url).send().await.unwrap();
+                        let status = response.status();
+                        let body = response.text().await.unwrap();
+                        if status == 200 && body.contains("\"status\":\"ready\"") {
+                            last_response = Some((status, body));
+                            break;
+                        }
+                        last_response = Some((status, body));
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let (status, body) = last_response.unwrap();
+                    assert_eq!(status, 200, "{path} response: {body}");
+                    assert!(
+                        body.contains("\"status\":\"ready\""),
+                        "{path} response: {body}"
+                    );
+                }
+            },
+        )
+        .await;
+    }
+
     #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_health_check_with_payload_and_timeout() {
@@ -1148,6 +1326,7 @@ mod integration_tests {
                             instance_id: 1,
                             transport: crate::component::TransportType::Nats(endpoint.to_string()),
                             device_type: None,
+                            request_plane_codec: None,
                         },
                         health_check_payload.clone(),
                     );
@@ -1191,6 +1370,96 @@ mod integration_tests {
                 );
             },
         )
+        .await;
+    }
+
+    /// `/v1/loras` compat shim: with the legacy local registry empty, a LoRA
+    /// update registered in `engine_routes()` under `update/<name>` resolves via
+    /// the fallback and its JSON response is parsed into a `LoraResponse`. This
+    /// is the path unified-backend workers take for `/v1/loras`.
+    #[tokio::test]
+    async fn test_call_lora_endpoint_resolves_via_engine_routes() {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+            let drt = create_test_drt_async().await;
+
+            let callback: crate::engine_routes::EngineRouteCallback = Arc::new(|_body| {
+                Box::pin(async move {
+                    Ok(serde_json::json!({
+                        "status": "success",
+                        "lora_name": "adapterA",
+                        "lora_id": 42,
+                    }))
+                })
+            });
+            // Unified Worker registers LoRA ops under the `update/` namespace.
+            drt.engine_routes().register("update/load_lora", callback);
+
+            // Local registry is empty, so resolution must fall through to
+            // engine_routes.
+            assert!(drt.local_endpoint_registry().get("load_lora").is_none());
+
+            let response = call_lora_endpoint(
+                &drt,
+                "load_lora",
+                serde_json::json!({"lora_name": "adapterA"}),
+            )
+            .await
+            .expect("engine_routes fallback should resolve the control");
+
+            assert_eq!(response.status, "success");
+            assert_eq!(response.lora_name.as_deref(), Some("adapterA"));
+            assert_eq!(response.lora_id, Some(42));
+        })
+        .await;
+    }
+
+    /// When neither the local registry nor `engine_routes()` holds the name,
+    /// the caller gets an explicit "LoRA management not available" error
+    /// rather than an opaque "endpoint not found".
+    #[tokio::test]
+    async fn test_call_lora_endpoint_missing_returns_clean_error() {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+            let drt = create_test_drt_async().await;
+
+            let err = call_lora_endpoint(&drt, "load_lora", serde_json::json!({}))
+                .await
+                .expect_err("missing handler must error");
+
+            assert!(
+                err.to_string().contains("LoRA management not available"),
+                "expected explicit unavailable message, got: {err}"
+            );
+        })
+        .await;
+    }
+
+    /// An update callback that returns `{"status":"error",...}` (rather than
+    /// raising) surfaces as a `LoraResponse{status:"error"}`. The `/v1/loras`
+    /// load/unload handlers map this to HTTP 500, preserving legacy semantics;
+    /// the direct `/engine/*` route would instead return HTTP 200 + this JSON.
+    #[tokio::test]
+    async fn test_call_lora_endpoint_propagates_error_status() {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+            let drt = create_test_drt_async().await;
+
+            let callback: crate::engine_routes::EngineRouteCallback = Arc::new(|_body| {
+                Box::pin(async move {
+                    Ok(serde_json::json!({
+                        "status": "error",
+                        "message": "adapter not found",
+                    }))
+                })
+            });
+            // Unified Worker registers LoRA ops under the `update/` namespace.
+            drt.engine_routes().register("update/unload_lora", callback);
+
+            let response = call_lora_endpoint(&drt, "unload_lora", serde_json::json!({}))
+                .await
+                .expect("a non-raising callback returns Ok even on logical error");
+
+            assert_eq!(response.status, "error");
+            assert_eq!(response.message.as_deref(), Some("adapter not found"));
+        })
         .await;
     }
 }

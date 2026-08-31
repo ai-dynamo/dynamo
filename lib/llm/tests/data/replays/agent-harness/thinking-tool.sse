@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-harness-thinking-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"I should inspect the directory."}}]}
+
+data: {"id":"chatcmpl-harness-thinking-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"I will list it."}}]}
+
+data: {"id":"chatcmpl-harness-thinking-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_list_directory","type":"function","function":{"name":"list_directory","arguments":"{\"path\":\"/tmp\"}"}}]}}]}
+
+data: {"id":"chatcmpl-harness-thinking-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-harness-thinking-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":30,"completion_tokens":18,"total_tokens":48}}
+
+data: [DONE]

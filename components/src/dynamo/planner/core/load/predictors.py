@@ -254,7 +254,7 @@ class ProphetPredictor(BasePredictor):
         self._use_log1p = config.load_predictor_log1p
         self.window_size = config.prophet_window_size
         self.curr_step = 0
-        self.step_size = config.throughput_adjustment_interval
+        self.step_size = config.throughput_adjustment_interval_seconds
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
         self.data_buffer = []  # Override to store dicts instead of values
         self._seen_nonzero_since_idle_reset = False
@@ -373,6 +373,8 @@ class KalmanPredictor(BasePredictor):
 
     def predict_next(self) -> float:
         if not self._initialized:
+            return self.get_last_value()
+        if len(self.data_buffer) < self.minimum_data_points:
             return self.get_last_value()
         if self._has_cached_pred:
             return (

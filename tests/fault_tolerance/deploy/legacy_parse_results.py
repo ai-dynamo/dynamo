@@ -234,12 +234,6 @@ def parse_process_log(log_dir, process_name):
         "TRTLLMWorker": re.compile(
             r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
         ),
-        "TRTLLMDecodeWorker": re.compile(
-            r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-        ),
-        "TRTLLMPrefillWorker": re.compile(
-            r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-        ),
     }
 
     if not os.path.isdir(log_dir):
@@ -333,8 +327,6 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
         "decode",
         "prefill",
         "TRTLLMWorker",
-        "TRTLLMDecodeWorker",
-        "TRTLLMPrefillWorker",
     ]
 
     process_start = {}

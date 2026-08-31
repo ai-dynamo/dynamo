@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+global:
+  secretName: batch-gateway-secrets
+  dbClient:
+    type: redis
+  fileClient:
+    type: fs
+    fs:
+      basePath: /var/lib/batch-gateway/files
+      pvcName: batch-gateway-files
+
+apiserver:
+  image:
+    repository: ghcr.io/llm-d/batch-gateway-apiserver
+    pullPolicy: IfNotPresent
+    tag: v0.3.0
+  config:
+    inputHeaders:
+      tenant: X-MaaS-Username
+    batchAPI:
+      passThroughHeaders:
+        - Authorization
+
+processor:
+  image:
+    repository: ghcr.io/llm-d/batch-gateway-processor
+    pullPolicy: IfNotPresent
+    tag: v0.3.0
+  config:
+    numWorkers: 1
+    concurrency:
+      global: 1
+      perEndpoint: 1
+      recovery: 1
+      aimd:
+        enabled: true
+        min: 1
+        backoffFactor: 0.5
+        additiveIncrease: 1
+    modelGateways:
+      "Qwen/Qwen3-0.6B":
+        url: http://qwen3-0-6b-batch-frontend:8000
+        requestTimeout: 5m
+        maxRetries: 3
+        initialBackoff: 1s
+        maxBackoff: 60s
+
+gc:
+  enabled: false
+  image:
+    repository: ghcr.io/llm-d/batch-gateway-gc
+    pullPolicy: IfNotPresent
+    tag: v0.3.0

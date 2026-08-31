@@ -3,7 +3,24 @@
 
 use std::time::{Duration, Instant};
 
-use crate::common::protocols::{MockEngineArgs, WorkerType};
+use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
+
+use crate::common::handoff::HandoffTransferTiming;
+use crate::common::protocols::{KvTransferTimingMode, MockEngineArgs, WorkerType};
+
+pub fn prefill_handoff_transfer_timing(
+    num_input_tokens: usize,
+    kv_transfer_bandwidth: Option<f64>,
+    kv_bytes_per_token: Option<usize>,
+    mode: KvTransferTimingMode,
+) -> HandoffTransferTiming {
+    HandoffTransferTiming {
+        mode,
+        full_prompt_tokens: num_input_tokens,
+        kv_bytes_per_token,
+        bandwidth_gb_s: kv_transfer_bandwidth,
+    }
+}
 
 /// Compute the modeled handoff delay after a prefill worker emits its terminal token.
 ///
@@ -18,25 +35,27 @@ pub fn compute_prefill_handoff_delay_ms(
     kv_transfer_bandwidth: Option<f64>,
     kv_bytes_per_token: Option<usize>,
 ) -> Option<f64> {
-    if worker_type != WorkerType::Prefill || !completed {
-        return None;
+    let worker_type = match worker_type {
+        WorkerType::Aggregated => EngineWorkerType::Aggregated,
+        WorkerType::Prefill => EngineWorkerType::Prefill,
+        WorkerType::Decode => EngineWorkerType::Decode,
+    };
+    let delay_ms = prefill_handoff_delay_ms(
+        worker_type,
+        completed,
+        num_input_tokens,
+        kv_transfer_bandwidth,
+        kv_bytes_per_token,
+    );
+    if let Some(delay_ms) = delay_ms {
+        tracing::debug!(
+            num_input_tokens,
+            bandwidth_gb_s = kv_transfer_bandwidth,
+            delay_ms = format!("{delay_ms:.2}"),
+            "KV handoff delay for prefill completion"
+        );
     }
-
-    match (kv_transfer_bandwidth, kv_bytes_per_token) {
-        (Some(bw), Some(bpt)) if bw > 0.0 => {
-            let kv_bytes = num_input_tokens as f64 * bpt as f64;
-            let delay_ms = kv_bytes / (bw * 1e9) * 1000.0;
-            tracing::debug!(
-                num_input_tokens,
-                kv_bytes,
-                bandwidth_gb_s = bw,
-                delay_ms = format!("{delay_ms:.2}"),
-                "KV handoff delay for prefill completion"
-            );
-            Some(delay_ms)
-        }
-        _ => None,
-    }
+    delay_ms
 }
 
 /// Compute the KV transfer delay duration for a given number of input tokens.
@@ -67,6 +86,14 @@ pub async fn sleep_precise(duration: Duration) {
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
 pub async fn sleep_until_precise(deadline: Instant) {
+    // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
+    // allocating and registering a timerfd when there is no remaining time to sleep. Preserve
+    // the scheduler loop's cooperative yield so other tasks on the runtime can make progress.
+    if deadline <= Instant::now() {
+        tokio::task::yield_now().await;
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Ok(delay) = tokio_timerfd::Delay::new(deadline) {
@@ -84,6 +111,18 @@ pub async fn sleep_until_precise(deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Poll;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_expired_precise_sleep_yields_to_runtime() {
+        let sleep = sleep_until_precise(Instant::now());
+        tokio::pin!(sleep);
+
+        let first_poll = futures::poll!(sleep.as_mut());
+
+        assert!(matches!(first_poll, Poll::Pending));
+        sleep.await;
+    }
 
     #[test]
     fn test_prefill_handoff_delay_only_applies_to_completed_prefill() {

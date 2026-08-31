@@ -5,8 +5,8 @@
 //!
 //! The busy thresholds control when workers are marked as "busy" based on their
 //! KV cache block utilization and prefill token utilization. When all workers
-//! for a model exceed their thresholds, new requests are rejected with a 503
-//! Service Unavailable response.
+//! for a model exceed their thresholds, new requests are rejected with a 529
+//! response.
 //!
 //! ## Endpoints
 //!
@@ -143,37 +143,23 @@ async fn busy_threshold_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
     Json(request): Json<BusyThresholdRequest>,
 ) -> impl IntoResponse {
-    // Validate active decode blocks threshold range if provided (must be 0.0-1.0)
-    if let Some(threshold) = request.active_decode_blocks_threshold
-        && !(0.0..=1.0).contains(&threshold)
-    {
+    let requested_config = LoadThresholdConfig {
+        active_decode_blocks_threshold: request.active_decode_blocks_threshold,
+        active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac: request.active_prefill_tokens_threshold_frac,
+    };
+    if let Err(error) = requested_config.validate() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!(ErrorResponse {
-                error: format!(
-                    "active_decode_blocks_threshold must be between 0.0 and 1.0, got {}",
-                    threshold
-                ),
-            })),
+            Json(serde_json::json!(ErrorResponse { error })),
         );
     }
 
     let manager = state.manager();
 
     // Build LoadThresholdConfig from request if any threshold is being set
-    let is_setting = request.active_decode_blocks_threshold.is_some()
-        || request.active_prefill_tokens_threshold.is_some()
-        || request.active_prefill_tokens_threshold_frac.is_some();
-
-    let update_config = if is_setting {
-        Some(LoadThresholdConfig {
-            active_decode_blocks_threshold: request.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac: request.active_prefill_tokens_threshold_frac,
-        })
-    } else {
-        None
-    };
+    let is_setting = requested_config.is_configured();
+    let update_config = is_setting.then_some(requested_config);
 
     // Get or set the thresholds via the model's worker monitor
     let config = manager.load_threshold_config(&request.model, update_config.as_ref());

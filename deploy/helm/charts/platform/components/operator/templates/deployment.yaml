@@ -42,9 +42,15 @@ spec:
       labels:
         control-plane: controller-manager
       {{- include "dynamo-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.controllerManager.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         kubectl.kubernetes.io/default-container: manager
         checksum/config: {{ include (print $.Template.BasePath "/operator-config.yaml") . | sha256sum }}
+        {{- with .Values.controllerManager.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -58,7 +64,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.upgradeCRD }}
+      {{- if and (not .Values.namespaceRestriction.enabled) .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
@@ -68,11 +74,18 @@ spec:
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
+          - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
+          - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
       {{- end }}
       containers:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
+        - {{ printf "--operator-image=%s:%s" .Values.controllerManager.manager.image.repository (.Values.controllerManager.manager.image.tag | default .Chart.AppVersion) | quote }}
+        - {{ printf "--operator-image-pull-policy=%s" (.Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent") | quote }}
+        {{- with .Values.controllerManager.manager.dgdrDefaultImage }}
+        - {{ printf "--dgdr-default-image=%s" . | quote }}
+        {{- end }}
         command:
         - /manager
         env:
@@ -111,6 +124,7 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 5
         resources: {{- toYaml .Values.controllerManager.manager.resources | nindent
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext

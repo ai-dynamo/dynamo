@@ -21,7 +21,7 @@ ARG DEVICE
 # with --chown=dynamo:0 --chmod=775), so no re-copy needed here.
 ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
 ENV CARGO_HOME=/home/${USERNAME}/.cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
+ENV PATH=${VIRTUAL_ENV}/bin:/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Configure user with sudo access for Dev Container workflows
@@ -41,6 +41,14 @@ RUN mkdir -p /etc/sudoers.d \
     && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
     && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
     && chown $USERNAME:$USER_GID /home/$USERNAME \
+    # Ensure user-writable XDG dirs. Upstream base images (e.g. vLLM CPU/XPU) may pre-create
+    # /home/dynamo/.local as root:root, which breaks `python3 -c 'site.getusersitepackages()'`
+    # and other user-site installs after we switch to the non-root user below.
+    # These dirs are small (a few KB), so a shallow chown is acceptable and does NOT
+    # violate the "no recursive chown on large mounts" rule.
+    && mkdir -p /home/$USERNAME/.local/lib /home/$USERNAME/.local/bin /home/$USERNAME/.local/share \
+    && chown -R $USERNAME:$USER_GID /home/$USERNAME/.local \
+    && [ ! -e /home/$USERNAME/.gitconfig ] || chown $USERNAME:$USER_GID /home/$USERNAME/.gitconfig \
     && chsh -s /bin/bash $USERNAME
 
 # Set workspace directory variable
@@ -54,7 +62,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR}
 ENV HOME=/home/$USERNAME
 ENV DYNAMO_HOME=${WORKSPACE_DIR}
 ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
-ENV PATH=${CARGO_HOME}/bin:$PATH
+ENV PATH=${VIRTUAL_ENV}/bin:${CARGO_HOME}/bin:$PATH
 
 # Switch to dynamo user (dev stage has umask 002, so files should already be group-writable)
 USER $USERNAME
@@ -73,13 +81,50 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
-RUN mkdir -p /home/$USERNAME/.cache/ \
-    && mkdir -p /home/$USERNAME/.cache/pre-commit \
-    && chmod g+w /home/$USERNAME/.cache/ \
-    && chmod g+w /home/$USERNAME/.cache/pre-commit
+# Framework runtime bases bake their own uv cache location into the image env
+# (vllm/vllm-openai sets UV_CACHE_DIR=/opt/uv/cache), and its entries are root-owned
+# 0755. That works while the image runs as root, but this stage remaps to a non-root
+# user, so afterwards every uv call dies with:
+#   error: Failed to initialize cache at `/opt/uv/cache`
+#   Caused by: failed to open file `/opt/uv/cache/sdists-v9/.git`: Permission denied
+# which breaks the two commands the dev docs tell you to run (`maturin develop --uv`
+# and `uv pip install --no-deps -e /workspace`).
+#
+# Point the cache at the user's own cache dir — the same /home/dynamo/.cache/uv path
+# the runtime, frontend and planner stages already use. `chmod -R g+w /opt/uv/cache`
+# would also work but copies a ~780MB tree into a new layer, which the permissions
+# memo above rules out.
+# Use a cache path this stage owns outright rather than an inherited one. uv does not
+# only create new entries — it OPENS existing cache metadata on init, which is the exact
+# original failure (`failed to open file .../sdists-v9/.git: Permission denied`). So a
+# shallow chown of the cache root is not enough: any root-owned file nested inside an
+# inherited cache re-breaks it. trtllm already ships ~27MB of root-owned content under
+# /home/dynamo/.cache/uv, group-writable today but not guaranteed to stay that way.
+# Recursively chmod-ing instead would copy a 781MB tree into a new layer, which the
+# permissions memo above rules out.
+ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv-local-dev
 
-{% if device == "xpu" %}
+# Prepare the dirs while we are still root. `usermod -u` above re-chowns only files owned
+# by the OLD uid, so whatever the base left root-owned survives the remap; as the remapped
+# user we could neither chmod such a dir nor mkdir inside a root-owned parent, which turns
+# any base that ships 0755 into a hard build failure.
+USER root
+RUN set -eux; \
+    for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit "$UV_CACHE_DIR"; do \
+        mkdir -p "$d"; \
+        chown "$USERNAME:$USER_GID" "$d"; \
+        chmod g+rwx "$d"; \
+    done
+USER $USERNAME
+
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+# The upstream vllm/vllm-openai images do not ship the generic NVIDIA
+# entrypoint path used by some CUDA bases. Keep local-dev aligned with the
+# vLLM runtime template, which resets ENTRYPOINT for arbitrary commands.
+ENTRYPOINT []
 CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

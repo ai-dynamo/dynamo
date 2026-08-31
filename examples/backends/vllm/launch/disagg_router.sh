@@ -23,8 +23,7 @@ print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$H
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # two decode workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

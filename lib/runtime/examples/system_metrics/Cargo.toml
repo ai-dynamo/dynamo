@@ -26,6 +26,7 @@ prometheus = { version = "0.14" }
 [dev-dependencies]
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 
 [[test]]
 name = "integration_test"

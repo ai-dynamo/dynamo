@@ -13,9 +13,9 @@ from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
-from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -38,7 +38,7 @@ class GlobalPlannerConnector(PlannerConnector):
     """
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
 
-    This connector wraps RemotePlannerClient and implements the PlannerConnector
+    This connector wraps RemotePlannerClient and implements the InfraScaler
     interface, allowing planner_core.py to treat global-planner environment mode
     consistently with kubernetes and virtual modes.
     """
@@ -78,7 +78,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self._local_k8s_connector: Optional[KubernetesConnector] = None
         self._local_k8s_init_attempted: bool = False
 
-    async def _async_init(self):
+    async def async_init(self):
         """Async initialization - creates RemotePlannerClient"""
         self.remote_client = RemotePlannerClient(
             self.runtime,
@@ -117,14 +117,17 @@ class GlobalPlannerConnector(PlannerConnector):
 
         Raises:
             EmptyTargetReplicasError: If target_replicas is empty
-            RuntimeError: If remote_client is not initialized or response indicates error
+            RuntimeError: If remote_client is not initialized or the response
+                indicates a hard error (e.g., authorization denied, K8s
+                exception). A REJECTED response is NOT raised — it is logged
+                as a warning and treated as a no-op for this tick.
         """
         if not target_replicas:
             raise EmptyTargetReplicasError()
 
         if self.remote_client is None:
             raise RuntimeError(
-                "GlobalPlannerConnector not initialized. Call _async_init() first."
+                "GlobalPlannerConnector not initialized. Call async_init() first."
             )
 
         # Get DGD info from environment variables
@@ -165,6 +168,9 @@ class GlobalPlannerConnector(PlannerConnector):
         # Check response status
         if response.status == ScaleStatus.SUCCESS:
             logger.info(f"GlobalPlanner scaling successful: {response.message}")
+        elif response.status == ScaleStatus.REJECTED:
+            # Over-budget rejection is a legitimate business outcome — keep running.
+            logger.warning(f"GlobalPlanner rejected scale request: {response.message}")
         elif response.status == ScaleStatus.ERROR:
             logger.error(f"GlobalPlanner scaling failed: {response.message}")
             raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")
@@ -203,8 +209,9 @@ class GlobalPlannerConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        **kwargs,
-    ):
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> None:
         """
         Validate deployment (no-op for GlobalPlanner).
 
@@ -272,6 +279,55 @@ class GlobalPlannerConnector(PlannerConnector):
             )
         return self._local_k8s_connector
 
+    async def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Read ready replica counts and rollout stability from the pool's own DGD.
+
+        GlobalPlanner orchestrates scaling, but the pool Planner pod has direct
+        access to its own DGD status. Mirror KubernetesConnector by delegating
+        to the pool-local connector so ``_scaling_in_progress`` observes real
+        rollouts instead of always seeing ``is_stable=True``.
+
+        Returns ``(0, 0, True)`` when no local KubernetesConnector is available
+        (e.g. running out-of-cluster), matching the existing capability-discovery
+        fallback path so out-of-cluster callers aren't blocked.
+        """
+        local = self._get_local_k8s_connector()
+        if local is None:
+            logger.debug(
+                "GlobalPlannerConnector: no local KubernetesConnector; "
+                "reporting (0, 0, stable=True) for out-of-cluster usage."
+            )
+            return 0, 0, True
+        return await local.get_actual_worker_counts(
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
+
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Resolve the pool-local worker runtime namespace when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return base_dynamo_namespace
+        return local.get_worker_runtime_namespace(base_dynamo_namespace)
+
+    def get_gpu_counts(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Resolve pool-local GPU shape when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None, None
+        return local.get_gpu_counts(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
     def get_worker_info(
         self,
         sub_component_type: SubComponentType,
@@ -290,7 +346,11 @@ class GlobalPlannerConnector(PlannerConnector):
             return local.get_worker_info(sub_component_type, backend)
         return build_worker_info_from_defaults(backend, sub_component_type)
 
-    def get_model_name(self, **kwargs) -> str:
+    def get_model_name(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
         """
         Get model name.
 
@@ -304,7 +364,10 @@ class GlobalPlannerConnector(PlannerConnector):
         local = self._get_local_k8s_connector()
         if local is not None:
             try:
-                return local.get_model_name(**kwargs)
+                return local.get_model_name(
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                )
             except (
                 ModelNameNotFoundError,
                 DeploymentModelNameMismatchError,

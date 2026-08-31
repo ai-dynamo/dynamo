@@ -12,6 +12,7 @@ import pytest
 
 from dynamo._core import DistributedRuntime, VirtualConnectorClient
 from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
+from dynamo.planner.monitoring.worker_info import build_worker_info_from_defaults
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -23,6 +24,11 @@ pytestmark = [
 logger = logging.getLogger(__name__)
 
 NAMESPACE = "test_virtual_connector"
+
+
+class DefaultWorkerInfoProvider:
+    def get_worker_info(self, sub_component_type, backend="vllm"):
+        return build_worker_info_from_defaults(backend, sub_component_type)
 
 
 def get_runtime():
@@ -64,8 +70,13 @@ async def next_scaling_decision(c):
 
 async def async_internal(distributed_runtime):
     # This is Dynamo Planner
-    c = VirtualConnector(distributed_runtime, NAMESPACE, "sglang")
-    await c._async_init()
+    c = VirtualConnector(
+        distributed_runtime,
+        NAMESPACE,
+        worker_info_provider=DefaultWorkerInfoProvider(),
+        model_name="sglang",
+    )
+    await c.async_init()
     replicas = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=1),
         TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2),

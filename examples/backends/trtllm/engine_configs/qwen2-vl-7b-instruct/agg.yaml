@@ -23,10 +23,22 @@ enable_chunked_prefill: true
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.3
-  enable_block_reuse: false
+  # Enable prefix-block reuse to match `trtllm-serve`'s default. Without this,
+  # repeated multimodal requests re-prefill the visual tokens every time and
+  # TTFT is dominated by vision-encoder + LLM-prefill cost on every request.
+  # See https://github.com/ai-dynamo/dynamo/issues/5086 for the measured impact.
+  enable_block_reuse: true
 
 cache_transceiver_config:
   backend: DEFAULT
+
+# Capture CUDA graphs for steady-state prefill/decode kernels. Required to
+# amortize per-launch overhead; without this, enabling `enable_block_reuse`
+# alone is pathological (cache-management work pays on every cold launch and
+# never recoups).
+cuda_graph_config:
+  max_batch_size: 8
+
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed
 # config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':

@@ -21,15 +21,16 @@ from dynamo.common.multimodal.embedding_transfer import (
     RingBuffer,
 )
 
-logger = logging.getLogger(__name__)
-
 # GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
 # for NIXL which requires CUDA).  Total runtime ~1.6s for gpu_0 subset — no
 # need for parallel marker.
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
+    pytest.mark.multimodal,
 ]
+
+logger = logging.getLogger(__name__)
 
 EMBEDDING_SIZE = 8 * 1024
 

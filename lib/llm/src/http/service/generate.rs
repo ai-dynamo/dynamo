@@ -1,0 +1,2980 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! HTTP handler for the token-in/token-out `Generate` API
+//! (`POST /inference/v1/generate`).
+//!
+//! This is an experimental engine-native endpoint, **disabled by default**;
+//! opt in via the `enable_engine_apis` builder flag or the
+//! `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` env var. When enabled it registers
+//! a frontend-native handler that preserves the complete request in an opaque
+//! backend envelope. Streaming (`stream=true`) remains unimplemented.
+
+use std::sync::Arc;
+
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    middleware,
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
+use futures::StreamExt;
+use serde::Serialize;
+use tracing::Instrument;
+
+use super::disconnect::create_connection_monitor;
+use super::metrics::{
+    CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
+};
+use super::openai::{
+    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
+    get_or_create_request_id, smart_json_error_middleware,
+};
+use super::{RouteDoc, service_v2};
+use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
+use crate::protocols::common::timing::RequestTracker;
+use crate::protocols::common::{SamplingOptions, StopConditions};
+use crate::protocols::openai::generate::{
+    GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
+};
+use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
+const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
+
+fn canonical_generate_models(
+    manager: &crate::discovery::ModelManager,
+    models: Vec<String>,
+) -> Vec<String> {
+    models
+        .into_iter()
+        .map(|model| manager.resolve_canonical_name(&model))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn generate_metric_error_type(status: StatusCode) -> ErrorType {
+    match status {
+        StatusCode::BAD_REQUEST => ErrorType::Validation,
+        StatusCode::NOT_FOUND => ErrorType::NotFound,
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable,
+        _ if status.as_u16() == 499 => ErrorType::Cancelled,
+        _ if status.as_u16() == 529 => ErrorType::Overload,
+        _ if status.is_client_error() => ErrorType::Validation,
+        _ => ErrorType::Internal,
+    }
+}
+
+#[derive(Debug)]
+struct GenerateRequestContext {
+    request_id: String,
+    data_parallel_rank: Option<u32>,
+}
+
+/// vLLM-style nested error body: `{"error": {"message", "type", "code"}}`.
+#[derive(Serialize, Debug)]
+struct GenerateError {
+    error: GenerateErrorBody,
+}
+
+#[derive(Serialize, Debug)]
+struct GenerateErrorBody {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+    code: u16,
+}
+
+/// Create an Axum [`Router`] for the token-in/token-out `Generate` endpoint.
+/// If no path is provided, the default path is `/inference/v1/generate`.
+pub fn generate_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/inference/v1/generate".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(handler_generate))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Build a vLLM-style nested-`error` response.
+fn generate_error_response(code: StatusCode, error_type: &str, message: String) -> Response {
+    (
+        code,
+        Json(GenerateError {
+            error: GenerateErrorBody {
+                message,
+                error_type: error_type.to_string(),
+                code: code.as_u16(),
+            },
+        }),
+    )
+        .into_response()
+}
+
+/// Resolve the request metadata that vLLM keeps outside the public JSON body.
+fn resolve_generate_request_context(
+    headers: &HeaderMap,
+    body_request_id: Option<&str>,
+) -> GenerateRequestContext {
+    let request_id = headers
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .or_else(|| body_request_id.map(ToOwned::to_owned))
+        .unwrap_or_else(|| get_or_create_request_id(headers));
+    let data_parallel_rank = headers
+        .get(X_DATA_PARALLEL_RANK_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok());
+
+    GenerateRequestContext {
+        request_id,
+        data_parallel_rank,
+    }
+}
+
+/// Convert vLLM's lower-is-higher priority to Dynamo's higher-is-higher scale.
+fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
+    vllm_priority.saturating_neg()
+}
+
+fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+    tracing::info_span!(
+        target: "request_span",
+        "generate",
+        request_id = %request_id,
+        model = %model,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
+    )
+}
+
+async fn run_until_killed<T>(
+    context: &dyn AsyncEngineContext,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+
+        // Preserve an ownership-bearing result if it completes concurrently;
+        // callers re-check the context before using it.
+        result = &mut operation => Some(result),
+        _ = context.killed() => None,
+    }
+}
+
+fn generate_cancelled_response() -> Response {
+    generate_error_response(
+        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+        "request_cancelled",
+        "request was cancelled".to_string(),
+    )
+}
+
+fn generate_internal_error_response() -> Response {
+    generate_error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal server error".to_string(),
+    )
+}
+
+/// Borrowed worker envelope for vLLM-specific request fields.
+///
+/// `token_ids` are intentionally absent: `PreprocessedRequest.token_ids` is
+/// the canonical routing and wire representation, and the worker reconstructs
+/// the vLLM request from that field.
+#[derive(Serialize)]
+struct VllmTitoEnvelope<'a> {
+    request_id: &'a str,
+    sampling_params: &'a SamplingParams,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<&'a StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<&'a str>,
+    priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(flatten)]
+    passthrough: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'a> VllmTitoEnvelope<'a> {
+    fn new(request: &'a GenerateRequest, request_id: &'a str) -> Self {
+        let GenerateRequest {
+            request_id: _,
+            token_ids: _,
+            sampling_params,
+            model,
+            stream,
+            stream_options,
+            cache_salt,
+            priority,
+            kv_transfer_params,
+            passthrough,
+        } = request;
+        Self {
+            request_id,
+            sampling_params,
+            model: model.as_deref(),
+            stream: *stream,
+            stream_options: stream_options.as_ref(),
+            cache_salt: cache_salt.as_deref(),
+            priority: *priority,
+            kv_transfer_params: kv_transfer_params.as_ref(),
+            passthrough,
+        }
+    }
+}
+
+type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
+
+#[derive(Debug)]
+struct GenerateMmRoutingProjection {
+    info: MmRoutingInfo,
+    /// Frontend-approved hashes in the marker form understood by the KV-event
+    /// decoder. The worker applies these only to the vLLM prompt it builds;
+    /// the caller's opaque `features` payload remains unchanged.
+    marked_image_hashes: Vec<String>,
+}
+
+struct GenerateRoutingMetadata {
+    kv_cache_block_size: u32,
+    tower_connector_lora_enabled: bool,
+    lora_name: Option<String>,
+}
+
+#[inline]
+fn intersecting_mm_ranges<'a>(
+    ranges: &'a [MmPlaceholderRange],
+    block_start: usize,
+    block_end: usize,
+    first_intersecting: &mut usize,
+) -> &'a [MmPlaceholderRange] {
+    while *first_intersecting < ranges.len() {
+        if ranges[*first_intersecting].1 > block_start {
+            break;
+        }
+        *first_intersecting += 1;
+    }
+
+    let start = *first_intersecting;
+    let mut end = start;
+    while end < ranges.len() {
+        if ranges[end].0 >= block_end {
+            break;
+        }
+        end += 1;
+    }
+
+    &ranges[start..end]
+}
+
+/// Build the routing-only token sequence used by vLLM KV events for multimodal
+/// prompts. The caller-provided `features` object remains opaque to execution;
+/// this projection reads only the hashes and placeholder ranges required to
+/// make request-side KV hashes match worker-side event hashes.
+fn generate_mm_routing_info(
+    request: &GenerateRequest,
+    kv_cache_block_size: u32,
+) -> Result<Option<GenerateMmRoutingProjection>, &'static str> {
+    let Some(features) = request.passthrough.get("features") else {
+        return Ok(None);
+    };
+    if features.is_null() {
+        return Ok(None);
+    }
+
+    let features = features
+        .as_object()
+        .ok_or("features must be a JSON object")?;
+    let Some(mm_hashes) = features.get("mm_hashes") else {
+        return Ok(None);
+    };
+    let mm_hashes = mm_hashes
+        .as_object()
+        .ok_or("features.mm_hashes must be a JSON object")?;
+    let mm_placeholders = features
+        .get("mm_placeholders")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.mm_placeholders must be a JSON object")?;
+
+    if mm_hashes
+        .keys()
+        .chain(mm_placeholders.keys())
+        .any(|modality| modality != "image")
+    {
+        return Err("exact /generate MM routing currently supports image placeholders only");
+    }
+    if kv_cache_block_size == 0 {
+        return Err("KV cache block size must be non-zero");
+    }
+
+    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
+        (None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders)) => (
+            hashes
+                .as_array()
+                .ok_or("features.mm_hashes.image must be an array")?,
+            placeholders
+                .as_array()
+                .ok_or("features.mm_placeholders.image must be an array")?,
+        ),
+        _ => return Err("image hashes and placeholders must both be present"),
+    };
+    if hashes.len() != placeholders.len() {
+        return Err("image hashes and placeholders must have equal lengths");
+    }
+
+    let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
+    for (hash, placeholder) in hashes.iter().zip(placeholders) {
+        let hash = hash
+            .as_str()
+            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .ok_or("multimodal hashes must be non-empty strings")?;
+        let placeholder = placeholder
+            .as_object()
+            .ok_or("multimodal placeholders must be JSON objects")?;
+        let offset = placeholder
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("multimodal placeholder offsets must be non-negative integers")?;
+        let length = placeholder
+            .get("length")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or("multimodal placeholder lengths must be positive integers")?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= request.token_ids.len())
+            .ok_or("multimodal placeholder range exceeds token_ids")?;
+        let is_embed = match placeholder.get("is_embed") {
+            None | Some(serde_json::Value::Null) => {
+                // vLLM 0.24 render responses omit sparse masks. A uniform
+                // placeholder span is safely dense; a mixed span is ambiguous
+                // and must retain token-only routing rather than over-substitute.
+                if request.token_ids[offset..end]
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+                {
+                    return Err("mixed multimodal placeholder spans require is_embed");
+                }
+                None
+            }
+            Some(value) => {
+                let mask = value
+                    .as_array()
+                    .ok_or("multimodal placeholder is_embed must be an array")?;
+                if mask.len() != length {
+                    return Err(
+                        "multimodal placeholder is_embed length must match placeholder length",
+                    );
+                }
+                let mut parsed = Vec::with_capacity(mask.len());
+                for entry in mask {
+                    parsed.push(
+                        entry
+                            .as_bool()
+                            .ok_or("multimodal placeholder is_embed entries must be booleans")?,
+                    );
+                }
+                Some(parsed)
+            }
+        };
+        ranges.push((offset, end, hash, is_embed));
+    }
+
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    if ranges.windows(2).any(|pair| pair[0].0 > pair[1].0) {
+        return Err("multimodal placeholders must be ordered by offset");
+    }
+    for pair in ranges.windows(2) {
+        let (_, previous_end, previous_hash, _) = &pair[0];
+        let (next_offset, _, next_hash, _) = &pair[1];
+        if previous_end > next_offset {
+            return Err("multimodal placeholder ranges must not overlap");
+        }
+        if previous_end == next_offset && previous_hash != next_hash {
+            return Err("adjacent multimodal placeholders must share an identifier");
+        }
+    }
+
+    // The worker discovers multimodal runs by scanning for its resolved image
+    // token. Infer that token from the declared embed positions and require the
+    // declarations to cover every occurrence. Otherwise an undeclared image
+    // token can shift the worker's run-to-object alignment away from the
+    // request-side projection.
+    let mut image_token_id = None;
+    let mut declared_image_tokens = 0;
+    for (offset, end, _, is_embed) in &ranges {
+        for position in *offset..*end {
+            let should_embed = is_embed
+                .as_ref()
+                .is_none_or(|mask| mask[position - *offset]);
+            if !should_embed {
+                continue;
+            }
+
+            let token_id = request.token_ids[position];
+            if image_token_id.is_some_and(|expected| expected != token_id) {
+                return Err("multimodal embed positions must share an image token");
+            }
+            image_token_id = Some(token_id);
+            declared_image_tokens += 1;
+        }
+    }
+    let image_token_id = image_token_id.ok_or("multimodal placeholders contain no embed tokens")?;
+    if request
+        .token_ids
+        .iter()
+        .filter(|token_id| **token_id == image_token_id)
+        .count()
+        != declared_image_tokens
+    {
+        return Err("image tokens must be covered by multimodal placeholder ranges");
+    }
+
+    // Apply the same per-block run-order normalization as vLLM KV events, then
+    // compare it with the renderer-declared positions. A sparse mask can split
+    // one object into multiple runs, so exact routing is enabled only when the
+    // shared worker normalization produces the same token projection.
+    let block_size = kv_cache_block_size as usize;
+    let mut first_intersecting = 0;
+    let mut worker_objects = Vec::new();
+    let mut routing_token_ids = Vec::with_capacity(request.token_ids.len());
+    for block_start in (0..request.token_ids.len()).step_by(block_size) {
+        let block_end = (block_start + block_size).min(request.token_ids.len());
+        let block_tokens = &request.token_ids[block_start..block_end];
+        let block_ranges =
+            intersecting_mm_ranges(&ranges, block_start, block_end, &mut first_intersecting);
+        if block_ranges.is_empty() {
+            routing_token_ids.extend_from_slice(block_tokens);
+            continue;
+        }
+
+        worker_objects.clear();
+        let mut expected_tokens = block_tokens.to_vec();
+        for (offset, end, hash, is_embed) in block_ranges {
+            let intersection_start = (*offset).max(block_start);
+            let intersection_end = (*end).min(block_end);
+            worker_objects.push(*hash);
+            for global_position in intersection_start..intersection_end {
+                let should_embed = is_embed
+                    .as_ref()
+                    .is_none_or(|mask| mask[global_position - *offset]);
+                if should_embed {
+                    expected_tokens[global_position - block_start] =
+                        dynamo_kv_router::protocols::pad_value_for_mm_hash(*hash);
+                }
+            }
+        }
+
+        let normalized_tokens = dynamo_kv_router::zmq_wire::normalize_mm_token_runs(
+            block_tokens,
+            image_token_id,
+            &worker_objects,
+        )
+        .map(|(tokens, _)| tokens)
+        .ok_or("multimodal block must contain a routing hash")?;
+        if normalized_tokens != expected_tokens {
+            return Err("sparse multimodal layout cannot be normalized exactly by worker events");
+        }
+        routing_token_ids.extend(normalized_tokens);
+    }
+
+    let padded_len = routing_token_ids
+        .len()
+        .div_ceil(block_size)
+        .checked_mul(block_size)
+        .ok_or("multimodal routing token length overflow")?;
+    routing_token_ids.resize(padded_len, 0);
+
+    Ok(Some(GenerateMmRoutingProjection {
+        info: MmRoutingInfo {
+            routing_token_ids,
+            // vLLM events are normalized to the same pad-value token scheme, so
+            // MM identity is already present in the alternate routing tokens.
+            block_mm_infos: Vec::new(),
+            expanded_prompt_len: request.token_ids.len(),
+        },
+        marked_image_hashes: ranges
+            .iter()
+            .map(|(_, _, hash, _)| dynamo_kv_router::zmq_wire::mark_mm_hash_for_extra_key(*hash))
+            .collect(),
+    }))
+}
+
+/// Project routing controls while retaining all engine-owned fields in
+/// `extra_args.vllm_tito`. The backend remains the authority for interpreting
+/// every vLLM-specific field.
+#[cfg(test)]
+fn preprocessed_from_generate(
+    request: GenerateRequest,
+    model: &str,
+    data_parallel_rank: Option<u32>,
+    request_id: &str,
+    routing_metadata: GenerateRoutingMetadata,
+) -> anyhow::Result<PreprocessedRequest> {
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(request.token_ids.len(), None);
+    preprocessed_from_generate_with_tracker(
+        request,
+        model,
+        data_parallel_rank,
+        request_id,
+        routing_metadata,
+        tracker,
+    )
+}
+
+fn preprocessed_from_generate_with_tracker(
+    request: GenerateRequest,
+    model: &str,
+    data_parallel_rank: Option<u32>,
+    request_id: &str,
+    routing_metadata: GenerateRoutingMetadata,
+    tracker: Arc<RequestTracker>,
+) -> anyhow::Result<PreprocessedRequest> {
+    let GenerateRoutingMetadata {
+        kv_cache_block_size,
+        tower_connector_lora_enabled,
+        lora_name,
+    } = routing_metadata;
+    let sampling = &request.sampling_params;
+    let max_tokens = sampling.max_tokens();
+    let min_tokens = sampling.min_tokens();
+    let ignore_eos = sampling.ignore_eos();
+    let routing_priority = dynamo_routing_priority(request.priority);
+    // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
+    // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
+    // tower/connector LoRA is enabled for an adapter request, fall back to
+    // token-only routing because vLLM scopes the MM identity by that adapter.
+    let mm_routing = if tower_connector_lora_enabled && lora_name.is_some() {
+        tracing::debug!(
+            target: "mm_routing",
+            "tower/connector LoRA is active; using token-only multimodal routing"
+        );
+        None
+    } else {
+        match generate_mm_routing_info(&request, kv_cache_block_size) {
+            Ok(info) => info,
+            Err(reason) => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    reason,
+                    "invalid /generate multimodal routing metadata; using token-only routing"
+                );
+                None
+            }
+        }
+    };
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let mut extra_args = serde_json::Map::new();
+    extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(projection) = &mm_routing {
+        extra_args.insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            serde_json::to_value(&projection.marked_image_hashes)?,
+        );
+    }
+    let mm_routing_info = mm_routing.map(|projection| projection.info);
+    let GenerateRequest {
+        token_ids,
+        cache_salt,
+        ..
+    } = request;
+
+    PreprocessedRequest::builder()
+        .model(model.to_string())
+        .token_ids(token_ids)
+        .stop_conditions(StopConditions {
+            max_tokens,
+            min_tokens,
+            ignore_eos: Some(ignore_eos),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions {
+            n: Some(1),
+            ..Default::default()
+        })
+        .output_options(Default::default())
+        .mm_routing_info(mm_routing_info)
+        .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
+            dp_rank: data_parallel_rank,
+            expected_output_tokens: max_tokens,
+            lora_name,
+            cache_namespace: cache_salt,
+            // `priority_jump` is a boost-only scheduler input. Preserve penalties
+            // in signed `priority`, matching the standard preprocessor projection.
+            priority_jump: Some(routing_priority.max(0) as f64),
+            priority: Some(routing_priority),
+            ..Default::default()
+        }))
+        // Do not copy token_ids into this envelope. The worker must rebuild
+        // that field from PreprocessedRequest.token_ids after routing.
+        .extra_args(Some(serde_json::Value::Object(extra_args)))
+        .tracker(Some(tracker))
+        .build()
+        .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+/// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
+///
+/// Unlike the OpenAI text endpoints, Generate deliberately bypasses the
+/// tokenizer/postprocessor pipeline that emits `LLMMetricAnnotation`. Its
+/// token IDs are already rendered, so observe the same response metrics from
+/// the raw token deltas while leaving tokenizer and media metrics untouched.
+struct GenerateMetricCollector {
+    response: ResponseMetricCollector,
+    http_queue: Option<HttpQueueGuard>,
+    tracker: Arc<RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+    worker_info_observed: bool,
+}
+
+struct GenerateMetricLifecycle {
+    metric_model: String,
+    inflight: InflightGuard,
+    collector: GenerateMetricCollector,
+}
+
+impl GenerateMetricLifecycle {
+    fn new(
+        state: &service_v2::State,
+        metric_model: String,
+        request_id: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        let metrics = state.metrics_clone();
+        Self {
+            inflight: metrics.clone().create_inflight_guard(
+                &metric_model,
+                super::metrics::Endpoint::Generate,
+                false,
+                request_id,
+            ),
+            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            metric_model,
+        }
+    }
+
+    fn mark_error(&mut self, error_type: ErrorType) {
+        self.inflight.mark_error(error_type);
+    }
+}
+
+impl GenerateMetricCollector {
+    fn new(
+        metrics: Arc<super::metrics::Metrics>,
+        model: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        Self {
+            response: metrics.clone().create_response_collector(model),
+            http_queue: Some(metrics.create_http_queue_guard(model)),
+            tracker,
+            input_tokens,
+            output_tokens: 0,
+            worker_info_observed: false,
+        }
+    }
+
+    /// Copy routed worker labels once, after the tracker has populated them.
+    fn observe_worker_info(&mut self) {
+        if self.worker_info_observed {
+            return;
+        }
+
+        let Some(worker) = self.tracker.get_worker_info() else {
+            return;
+        };
+        self.response.set_worker_info(
+            worker.prefill_worker_id,
+            worker.prefill_dp_rank,
+            self.tracker.prefill_worker_type().map(String::from),
+            worker.decode_worker_id,
+            worker.decode_dp_rank,
+            self.tracker.decode_worker_type().map(String::from),
+        );
+        self.worker_info_observed = true;
+    }
+
+    fn observe(&mut self, annotated: &mut Annotated<LLMEngineOutput>) {
+        let Some(output) = annotated.data.as_mut() else {
+            return;
+        };
+
+        if let Some(routing_data) = output.routing_data.take() {
+            if let Some(timing) = routing_data.timing {
+                self.tracker.set_external_timing(timing);
+            }
+            if let Some(worker_id) = routing_data.worker_id {
+                self.tracker.set_external_worker_info(worker_id);
+            }
+            if let Some(token_ids) = routing_data.token_ids {
+                self.tracker.set_external_query_token_ids(token_ids);
+            }
+        }
+
+        self.observe_worker_info();
+
+        let cached_tokens = output
+            .completion_usage
+            .as_ref()
+            // A migrated attempt includes already-delivered output tokens in
+            // its prompt. Ignore that attempt-local usage for this logical
+            // request and let the RequestTracker fallback run on drop.
+            .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            .and_then(|details| details.cached_tokens)
+            .map(|tokens| tokens as usize);
+        self.response.observe_cached_tokens(cached_tokens);
+
+        // RetryManager appends delivered tokens to the retried request and only
+        // yields newly generated deltas, so this remains exact across migration.
+        let chunk_tokens = output.token_ids.len();
+        self.output_tokens += chunk_tokens;
+        self.response.observe_current_osl(self.output_tokens);
+        if self.response.is_first_token()
+            && chunk_tokens > 0
+            && let Some(guard) = self.http_queue.take()
+        {
+            drop(guard);
+        }
+        self.response
+            .observe_response(self.input_tokens, chunk_tokens);
+    }
+}
+
+impl Drop for GenerateMetricCollector {
+    fn drop(&mut self) {
+        // Matching backend usage is authoritative when present. The response
+        // collector latches it during streaming; this logical-request router
+        // estimate fills missing or migration-expanded attempt usage.
+        self.response
+            .observe_cached_tokens(self.tracker.cached_tokens());
+    }
+}
+
+/// Resolve, route, and dispatch a frontend-native token-in/token-out request.
+async fn handler_generate(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<GenerateRequest>,
+) -> Response {
+    let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
+    let implicit_models = if request.model.is_none() {
+        canonical_generate_models(
+            state.manager(),
+            state
+                .manager()
+                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        )
+    } else {
+        Vec::new()
+    };
+    let resolved_model = request
+        .model
+        .as_deref()
+        .map(|model| state.manager().resolve_canonical_name(model))
+        .or_else(|| (implicit_models.len() == 1).then(|| implicit_models[0].clone()));
+    let metric_model = resolved_model
+        .as_deref()
+        .map(|model| state.manager().metric_model_for(model))
+        .unwrap_or(crate::discovery::UNKNOWN_METRIC_MODEL)
+        .to_string();
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(request.token_ids.len(), None);
+    let dispatch_span = generate_dispatch_span(&request_context.request_id, &metric_model);
+    let mut metric_lifecycle = dispatch_span.in_scope(|| {
+        GenerateMetricLifecycle::new(
+            state.as_ref(),
+            metric_model,
+            &request_context.request_id,
+            tracker.clone(),
+            request.token_ids.len(),
+        )
+    });
+
+    if let Err(response) = check_ready(&state) {
+        metric_lifecycle.mark_error(generate_metric_error_type(response.0));
+        return response.into_response();
+    }
+
+    if let Err(message) = request.validate() {
+        metric_lifecycle.mark_error(ErrorType::Validation);
+        return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+    }
+
+    if request.stream {
+        metric_lifecycle.mark_error(ErrorType::NotImplemented);
+        return generate_error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_implemented",
+            "streaming (stream=true) is not implemented for /inference/v1/generate yet".to_string(),
+        );
+    }
+    let response_options = request.response_options();
+
+    let model = match resolved_model {
+        Some(model) => model,
+        None if implicit_models.is_empty() => {
+            metric_lifecycle.mark_error(ErrorType::NotFound);
+            return generate_error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no generate-capable model is registered".to_string(),
+            );
+        }
+        None => {
+            metric_lifecycle.mark_error(ErrorType::Validation);
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "multiple models are registered; specify `model` in the request".to_string(),
+            );
+        }
+    };
+    if request.model.is_some() {
+        request.model = Some(model.clone());
+    }
+
+    if let Err(response) = check_model_serving_ready(&state, &model) {
+        metric_lifecycle.mark_error(generate_metric_error_type(response.0));
+        return response.into_response();
+    }
+
+    let selection = match state
+        .manager()
+        .get_generate_engine_for_capability_with_routing(
+            &model,
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let (status, error_type) = match error {
+                crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+                }
+                _ => (StatusCode::NOT_FOUND, "not_found"),
+            };
+            metric_lifecycle.mark_error(generate_metric_error_type(status));
+            return generate_error_response(status, error_type, error.to_string());
+        }
+    };
+    let routing_metadata = GenerateRoutingMetadata {
+        kv_cache_block_size: selection.kv_cache_block_size,
+        tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
+        lora_name: selection.lora_name,
+    };
+    let engine = selection.engine;
+
+    let preprocessed = match preprocessed_from_generate_with_tracker(
+        request,
+        &model,
+        request_context.data_parallel_rank,
+        &request_context.request_id,
+        routing_metadata,
+        tracker,
+    ) {
+        Ok(preprocessed) => preprocessed,
+        Err(error) => {
+            metric_lifecycle.mark_error(ErrorType::Validation);
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                error.to_string(),
+            );
+        }
+    };
+
+    let request_id = request_context.request_id;
+    let context: Context<PreprocessedRequest> =
+        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+            Ok(context) => context,
+            Err(response) => {
+                metric_lifecycle.mark_error(generate_metric_error_type(response.0));
+                return response.into_response();
+            }
+        };
+    let engine_context = context.context();
+    let cancellation_labels = CancellationLabels {
+        model: metric_lifecycle.metric_model.clone(),
+        endpoint: super::metrics::Endpoint::Generate.to_string(),
+        request_type: "unary".to_string(),
+    };
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+        engine_context,
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
+
+    // Unary work must outlive the Axum handler so dropping the handler can signal
+    // the armed connection monitor. The detached dispatch observes that kill at
+    // each backend await point and then exits promptly.
+    let response = match tokio::spawn(
+        generate_dispatch(
+            engine,
+            context,
+            request_id,
+            state.clone(),
+            response_options,
+            metric_lifecycle,
+        )
+        .instrument(dispatch_span),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "generate dispatch task panicked");
+            generate_internal_error_response()
+        }
+    };
+
+    connection_handle.disarm();
+    response
+}
+
+async fn generate_dispatch(
+    engine: crate::types::openai::generate::GenerateStreamingEngine,
+    context: Context<PreprocessedRequest>,
+    request_id: String,
+    state: Arc<service_v2::State>,
+    response_options: GenerateResponseOptions,
+    metric_lifecycle: GenerateMetricLifecycle,
+) -> Response {
+    let GenerateMetricLifecycle {
+        metric_model,
+        inflight: mut inflight_guard,
+        collector: mut metric_collector,
+    } = metric_lifecycle;
+    let request_context = context.context();
+    let generate_result =
+        match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
+            Some(result) => result,
+            None => {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return generate_cancelled_response();
+            }
+        };
+    if request_context.is_killed() {
+        inflight_guard.mark_error(ErrorType::Cancelled);
+        return generate_cancelled_response();
+    }
+    let stream = match generate_result {
+        Ok(stream) => stream,
+        Err(error) => {
+            let was_cancelled = request_context.is_killed()
+                || super::metrics::request_was_cancelled(error.as_ref());
+            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            inflight_guard.mark_error(if was_cancelled {
+                ErrorType::Cancelled
+            } else if was_rejected {
+                ErrorType::Unavailable
+            } else {
+                ErrorType::Internal
+            });
+            if was_cancelled {
+                return generate_cancelled_response();
+            }
+            if was_rejected {
+                tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
+                state
+                    .metrics_clone()
+                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    "engine rejected the request".to_string(),
+                );
+            }
+            tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
+            return generate_internal_error_response();
+        }
+    };
+
+    let engine_context = stream.context();
+    let stream = stream.map(move |mut annotated| {
+        metric_collector.observe(&mut annotated);
+        annotated
+    });
+    let response_result = match run_until_killed(
+        request_context.as_ref(),
+        GenerateResponse::from_annotated_stream_with_options(
+            stream,
+            request_id.clone(),
+            response_options,
+        ),
+    )
+    .await
+    {
+        Some(result) => result,
+        None => {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            return generate_cancelled_response();
+        }
+    };
+    match response_result {
+        Ok(response) => {
+            if request_context.is_killed() || engine_context.is_killed() {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return generate_cancelled_response();
+            }
+            if !response.is_complete_unary() {
+                inflight_guard.mark_error(ErrorType::Internal);
+                tracing::error!(%request_id, "generate stream ended without a complete choice");
+                return generate_internal_error_response();
+            }
+            inflight_guard.mark_ok();
+            Json(response).into_response()
+        }
+        Err(error) => {
+            if request_context.is_killed()
+                || engine_context.is_killed()
+                || super::metrics::request_was_cancelled(error.as_ref())
+            {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return generate_cancelled_response();
+            }
+            inflight_guard.mark_error(ErrorType::Internal);
+            tracing::error!(%request_id, %error, "failed to fold generate stream");
+            generate_internal_error_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicU32, Ordering},
+        },
+        task::{Context as TaskContext, Poll},
+        time::Duration,
+    };
+
+    use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
+    use super::*;
+    use crate::http::service::metrics::{Endpoint, RequestType, Status};
+    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use dynamo_runtime::{
+        engine::{AsyncEngine, ResponseStream},
+        pipeline::{Error, ManyOut, Operator, ServerStreamingEngine, SingleIn},
+        protocols::maybe_error::MaybeError,
+    };
+    use futures::Stream;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+    use tracing::field::{Field, Visit};
+    use tracing::{Subscriber, span};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::prelude::*;
+
+    fn routing_metadata(
+        kv_cache_block_size: u32,
+        tower_connector_lora_enabled: bool,
+        lora_name: Option<&str>,
+    ) -> GenerateRoutingMetadata {
+        GenerateRoutingMetadata {
+            kv_cache_block_size,
+            tower_connector_lora_enabled,
+            lora_name: lora_name.map(str::to_string),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PendingPhase {
+        Generate,
+        Stream,
+    }
+
+    struct PendingOperation {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+        polled: bool,
+    }
+
+    impl PendingOperation {
+        fn new(started: Arc<Notify>, dropped: Arc<AtomicBool>) -> Self {
+            Self {
+                started,
+                dropped,
+                polled: false,
+            }
+        }
+
+        fn mark_started(&mut self) {
+            if !self.polled {
+                self.polled = true;
+                self.started.notify_one();
+            }
+        }
+    }
+
+    impl Future for PendingOperation {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            self.get_mut().mark_started();
+            Poll::Pending
+        }
+    }
+
+    impl Stream for PendingOperation {
+        type Item = Annotated<LLMEngineOutput>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+            self.get_mut().mark_started();
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingOperation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct PendingEngine {
+        phase: PendingPhase,
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct TerminalEngine(crate::protocols::common::FinishReason);
+
+    struct CancelledEngine;
+
+    struct MetricEngine;
+
+    struct MigrationMetricBackend {
+        calls: AtomicU32,
+    }
+
+    struct MigrationMetricEngine {
+        migration: Arc<crate::migration::Migration>,
+        backend: Arc<MigrationMetricBackend>,
+    }
+
+    struct TokenThenPendingEngine {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CancelledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Cancelled)
+                .message("backend cancelled before opening a stream")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for TerminalEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                index: Some(0),
+                finish_reason: Some(self.0.clone()),
+                ..Default::default()
+            })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MetricEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let first = futures::stream::once(async {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                })
+            });
+            let second = futures::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![11],
+                    index: Some(0),
+                    finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                    completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                        prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                            audio_tokens: None,
+                            cached_tokens: Some(2),
+                        }),
+                        completion_tokens_details: None,
+                    }),
+                    ..Default::default()
+                })
+            });
+            let stream = first.chain(second);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MigrationMetricBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let prompt_tokens = request.token_ids.len() as u32;
+            let context = request.context();
+            let stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> =
+                if call == 0 {
+                    assert_eq!(prompt_tokens, 3);
+                    Box::pin(futures::stream::iter([
+                        Annotated::from_data(LLMEngineOutput {
+                            token_ids: vec![10],
+                            index: Some(0),
+                            ..Default::default()
+                        }),
+                        Annotated::from_err(
+                            dynamo_runtime::error::DynamoError::builder()
+                                .error_type(dynamo_runtime::error::ErrorType::Disconnected)
+                                .message("migrate after one delivered token")
+                                .build(),
+                        ),
+                    ]))
+                } else {
+                    assert_eq!(call, 1);
+                    assert_eq!(prompt_tokens, 4);
+                    Box::pin(futures::stream::iter([Annotated::from_data(
+                        LLMEngineOutput {
+                            token_ids: vec![11],
+                            index: Some(0),
+                            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                            completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                                prompt_tokens,
+                                completion_tokens: 1,
+                                total_tokens: prompt_tokens + 1,
+                                prompt_tokens_details: Some(
+                                    dynamo_protocols::types::PromptTokensDetails {
+                                        audio_tokens: None,
+                                        cached_tokens: Some(prompt_tokens),
+                                    },
+                                ),
+                                completion_tokens_details: None,
+                            }),
+                            ..Default::default()
+                        },
+                    )]))
+                };
+            Ok(ResponseStream::new(stream, context))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MigrationMetricEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let backend: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                self.backend.clone();
+            self.migration.generate(request, backend).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for TokenThenPendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let first = futures::stream::once(async {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                })
+            });
+            let pending = PendingOperation::new(self.started.clone(), self.dropped.clone());
+            let stream = first.chain(pending);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for PendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let operation = PendingOperation::new(self.started.clone(), self.dropped.clone());
+            match self.phase {
+                PendingPhase::Generate => {
+                    operation.await;
+                    unreachable!("pending generate operation completed")
+                }
+                PendingPhase::Stream => {
+                    Ok(ResponseStream::new(Box::pin(operation), request.context()))
+                }
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct RequestIdCaptureLayer(Arc<Mutex<Option<String>>>);
+
+    impl<S: Subscriber> Layer<S> for RequestIdCaptureLayer {
+        fn on_new_span(
+            &self,
+            attrs: &span::Attributes<'_>,
+            _id: &span::Id,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = RequestIdVisitor::default();
+            attrs.record(&mut visitor);
+            if visitor.request_id.is_some() {
+                *self.0.lock().unwrap() = visitor.request_id;
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RequestIdVisitor {
+        request_id: Option<String>,
+    }
+
+    impl Visit for RequestIdVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "request_id" {
+                self.request_id = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "request_id" {
+                self.request_id = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    /// Spin up an `HttpService` bound to an ephemeral port and return the port
+    /// plus the run handle. Mirrors the reqwest-based router tests in
+    /// `service_v2`.
+    async fn serve(enable_generate: Option<bool>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let builder = HttpService::builder().port(port);
+        let builder = match enable_generate {
+            Some(enabled) => builder.enable_engine_apis(enabled),
+            None => builder,
+        };
+        let service = builder.build().unwrap();
+        let cancel_token = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            service.run_with_listener(cancel_token, listener).await.ok();
+        });
+        // Give the server a moment to start listening.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn generate_route_no_model_returns_structured_404() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "application/json")
+            .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+            .send()
+            .await
+            .expect("generate request failed");
+        assert_eq!(resp.status().as_u16(), StatusCode::NOT_FOUND.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["type"], "not_found");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_streaming_returns_501() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "application/json")
+            .body(r#"{"token_ids":[1,2,3],"sampling_params":{},"stream":true}"#)
+            .send()
+            .await
+            .expect("generate request failed");
+        assert_eq!(resp.status().as_u16(), StatusCode::NOT_IMPLEMENTED.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["type"], "not_implemented");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_rejects_empty_token_ids() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "application/json")
+            .body(r#"{"token_ids":[],"sampling_params":{}}"#)
+            .send()
+            .await
+            .expect("generate request failed");
+
+        assert_eq!(resp.status().as_u16(), StatusCode::BAD_REQUEST.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(
+            body["error"]["message"].as_str().is_some_and(
+                |message| message.contains("token_ids must contain at least one token")
+            )
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_enforces_vllm_rust_request_rules() {
+        let (port, handle) = serve(Some(true)).await;
+        let client = reqwest::Client::new();
+        let invalid = [
+            r#"{"token_ids":[1],"sampling_params":{},"stream_options":{"include_usage":true}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"max_tokens":0}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"prompt_logprobs":-2}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"min_tokens":3,"max_tokens":2}}"#,
+        ];
+
+        for body in invalid {
+            let resp = client
+                .post(format!("http://localhost:{port}/inference/v1/generate"))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("generate request failed");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = resp.json().await.expect("json body");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_alias_uses_primary_model_for_routing_and_metrics() {
+        const PRIMARY: &str = "generate-primary-model";
+        const ALIAS: &str = "generate-alias-model";
+
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MetricEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model(PRIMARY, "generate-alias-test", engine)
+            .unwrap();
+        assert!(state.manager().register_alias(ALIAS, PRIMARY));
+        assert_eq!(
+            canonical_generate_models(
+                state.manager(),
+                vec![PRIMARY.to_string(), ALIAS.to_string()],
+            ),
+            vec![PRIMARY.to_string()]
+        );
+
+        let request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-alias-request",
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "model": ALIAS
+        }))
+        .unwrap();
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                PRIMARY,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_early_failures_are_counted() {
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = crate::discovery::UNKNOWN_METRIC_MODEL;
+
+        let invalid_request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-invalid-request",
+            "token_ids": [],
+            "sampling_params": {},
+            "model": "missing-generate-model"
+        }))
+        .unwrap();
+        let invalid_response = handler_generate(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(invalid_request),
+        )
+        .await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+        let missing_model_request = serde_json::from_value(serde_json::json!({
+            "request_id": "generate-missing-model-request",
+            "token_ids": [1],
+            "sampling_params": {},
+            "model": "missing-generate-model"
+        }))
+        .unwrap();
+        let missing_model_response = handler_generate(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(missing_model_request),
+        )
+        .await;
+        assert_eq!(missing_model_response.status(), StatusCode::NOT_FOUND);
+
+        let metrics = state.metrics_clone();
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Validation,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::NotFound,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let families = registry.gather();
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_requests_started_total",
+                &[("model", metric_model), ("endpoint", "generate")],
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_request_duration_seconds",
+                &[("model", metric_model)],
+            )
+            .get_histogram()
+            .get_sample_count(),
+            2
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_queued_requests",
+                &[("model", metric_model)],
+            )
+            .get_gauge()
+            .value(),
+            0.0
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn generate_route_404_by_default() {
+        temp_env::async_with_vars(
+            [(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>)],
+            async {
+                let (port, handle) = serve(None).await;
+                let resp = reqwest::Client::new()
+                    .post(format!("http://localhost:{}/inference/v1/generate", port))
+                    .header("content-type", "application/json")
+                    .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+                    .send()
+                    .await
+                    .expect("generate request failed");
+                assert_eq!(resp.status().as_u16(), StatusCode::NOT_FOUND.as_u16());
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn generate_route_is_registered_when_enabled_by_env() {
+        temp_env::async_with_vars(
+            [(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"))],
+            async {
+                let (port, handle) = serve(None).await;
+                let resp = reqwest::Client::new()
+                    .post(format!("http://localhost:{}/inference/v1/generate", port))
+                    .header("content-type", "application/json")
+                    .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+                    .send()
+                    .await
+                    .expect("generate request failed");
+                assert_eq!(resp.status().as_u16(), StatusCode::NOT_FOUND.as_u16());
+                let body: serde_json::Value = resp.json().await.expect("json body");
+                assert_eq!(body["error"]["type"], "not_found");
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn engine_fields_reach_envelope_with_resolved_id_and_cache_namespace() {
+        let raw = serde_json::json!({
+            "request_id": "req-forward",
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "max_tokens": 8,
+                "future_sampling_field": {"nested": true}
+            },
+            "model": "test-model",
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "cache_salt": "tenant-a",
+            "features": {"future_feature": [1, 2, 3]},
+            "priority": 7,
+            "kv_transfer_params": {"remote": "worker-a"},
+            "future_top_level_field": {"anything": "works"}
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, None);
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.expected_output_tokens),
+            Some(8)
+        );
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.priority),
+            Some(-7),
+            "vLLM lower-is-higher priority must be inverted for Dynamo routing"
+        );
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.priority_jump),
+            Some(0.0)
+        );
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("tenant-a")
+        );
+        let envelope = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+
+        let mut expected_envelope = raw;
+        expected_envelope["request_id"] = serde_json::json!("resolved-request");
+        let expected_token_ids = expected_envelope
+            .as_object_mut()
+            .and_then(|object| object.remove("token_ids"))
+            .expect("token_ids in client request");
+        assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(
+            preprocessed
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.isl_tokens()),
+            Some(2)
+        );
+        assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
+        assert_eq!(envelope, &expected_envelope);
+        assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let raw = serde_json::json!({
+            "token_ids": [10, 11, 12, 12, 12, 15, 16, 12, 12, 19],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [hash_a, hash_b]},
+                "mm_placeholders": {"image": [
+                    {"offset": 2, "length": 3},
+                    {"offset": 7, "length": 2}
+                ]},
+                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+            }
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(4, false, None),
+        )
+        .expect("build request");
+
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let mm = preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("multimodal routing projection");
+        assert_eq!(
+            mm.routing_token_ids,
+            vec![10, 11, pad_a, pad_a, pad_a, 15, 16, pad_b, pad_b, 19, 0, 0]
+        );
+        assert!(mm.block_mm_infos.is_empty());
+        assert_eq!(mm.expanded_prompt_len, 10);
+
+        assert_eq!(
+            preprocessed.token_ids,
+            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
+        );
+        let envelope = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
+            Some(&serde_json::json!([
+                format!("{}{}", "a".repeat(16), "0".repeat(48)),
+                format!("{}{}", "b".repeat(16), "0".repeat(48))
+            ]))
+        );
+
+        // A frontend-approved, marker-form hash must produce the same KV hash
+        // on the request and event paths, including ordinary language-only LoRA.
+        let mm_identifier = "1234567890abcdef".repeat(4);
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier.clone()]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "adapter-a",
+            None,
+            "resolved-request",
+            routing_metadata(4, false, Some("adapter-a")),
+        )
+        .expect("build LoRA request");
+        let routing = preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("language-only LoRA keeps exact MM routing");
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            Some("adapter-a")
+        );
+        let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            &routing.routing_token_ids,
+            4,
+            dynamo_kv_router::protocols::BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let marked_identifier = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|hashes| hashes.first())
+            .and_then(serde_json::Value::as_str)
+            .expect("frontend-approved marked MM hash")
+            .to_string();
+        let event_mm_info =
+            dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+                dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+                    marked_identifier,
+                    1,
+                )),
+            ])]))
+            .expect("parse canonical offset-bearing MM extra key")
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("block MM metadata");
+        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+            4,
+            7,
+            &[10, 99, 99, 20],
+            dynamo_kv_router::zmq_wire::StoredBlockOptions {
+                lora_name: Some("adapter-a"),
+                mm_extra_info: Some(event_mm_info),
+                image_token_id: Some(99),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(request_hashes[0], event_block.tokens_hash);
+    }
+
+    #[test]
+    fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
+        let mm_identifier = "opaque-renderer-image-0";
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 42, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier]},
+                "mm_placeholders": {"image": [{
+                    "offset": 1,
+                    "length": 3,
+                    "is_embed": [true, false, true]
+                }]}
+            }
+        }))
+        .expect("deserialize request");
+        let routing = generate_mm_routing_info(&request, 5)
+            .expect("valid sparse MM routing metadata")
+            .expect("MM routing projection");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
+            .expect("non-empty identifier");
+        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
+        assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
+
+        for (name, token_ids, features, expected_error) in [
+            (
+                "missing sparse mask",
+                serde_json::json!([10, 99, 42, 99, 20]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                }),
+                "mixed multimodal placeholder spans require is_embed",
+            ),
+            (
+                "undeclared image token",
+                serde_json::json!([99, 10, 99, 99, 20]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+                }),
+                "image tokens must be covered by multimodal placeholder ranges",
+            ),
+            (
+                "ambiguous sparse object order",
+                serde_json::json!([10, 99, 42, 99, 20, 99, 30]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-a", "image-b"]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 1, "length": 3, "is_embed": [true, false, true]},
+                        {"offset": 5, "length": 1}
+                    ]}
+                }),
+                "sparse multimodal layout cannot be normalized exactly by worker events",
+            ),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "features": features,
+            }))
+            .expect("deserialize request");
+
+            assert_eq!(
+                generate_mm_routing_info(&request, 7)
+                    .expect_err("ambiguous layout must disable exact routing"),
+                expected_error,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
+        for (name, token_ids, features) in [
+            (
+                "unrelated features",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({"future_feature": [1, 2, 3]}),
+            ),
+            (
+                "malformed hashes",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({"mm_hashes": ["not-an-object"]}),
+            ),
+            (
+                "empty identifier",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": [""]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                    "kwargs_data": {"image": ["opaque"]}
+                }),
+            ),
+            (
+                "overlapping placeholders",
+                serde_json::json!([9, 9, 9, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["a".repeat(64), "b".repeat(64)]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 0, "length": 2},
+                        {"offset": 1, "length": 2}
+                    ]}
+                }),
+            ),
+            (
+                "unsupported modality",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"audio": ["audio-0"]},
+                    "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]}
+                }),
+            ),
+            (
+                "unpaired image metadata",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {}
+                }),
+            ),
+            (
+                "unequal item counts",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0", "image-1"]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                }),
+            ),
+            (
+                "out-of-order placeholders",
+                serde_json::json!([99, 99, 3, 99]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["late", "early"]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 3, "length": 1},
+                        {"offset": 0, "length": 2}
+                    ]}
+                }),
+            ),
+        ] {
+            let raw = serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "features": features,
+            });
+            let request: GenerateRequest =
+                serde_json::from_value(raw.clone()).expect("deserialize request");
+            let expected_token_ids = request.token_ids.clone();
+
+            let preprocessed = preprocessed_from_generate(
+                request,
+                "test-model",
+                None,
+                "resolved-request",
+                routing_metadata(4, false, None),
+            )
+            .expect("invalid routing metadata must not reject execution");
+
+            assert!(preprocessed.mm_routing_info.is_none(), "{name}");
+            assert_eq!(preprocessed.token_ids, expected_token_ids, "{name}");
+            let envelope = preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope");
+            assert_eq!(envelope["features"], raw["features"], "{name}");
+            assert!(
+                preprocessed
+                    .extra_args
+                    .as_ref()
+                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .is_none(),
+                "{name}"
+            );
+        }
+
+        let raw = serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-0"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        });
+        let base_request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize base request");
+        let base = preprocessed_from_generate(
+            base_request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(4, true, None),
+        )
+        .expect("build base request");
+        assert!(
+            base.mm_routing_info.is_some(),
+            "the worker setting alone does not activate adapter-scoped MM identity"
+        );
+
+        let adapter_request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize adapter request");
+        let adapter = preprocessed_from_generate(
+            adapter_request,
+            "adapter-a",
+            None,
+            "resolved-request",
+            routing_metadata(4, true, Some("adapter-a")),
+        )
+        .expect("build adapter request");
+        assert!(adapter.mm_routing_info.is_none());
+        assert_eq!(
+            adapter
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            Some("adapter-a")
+        );
+        let envelope = adapter
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+    }
+
+    #[test]
+    fn omitted_max_tokens_stays_omitted_in_control_shadow() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {},
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+        assert_eq!(preprocessed.stop_conditions.max_tokens, None);
+        assert_eq!(preprocessed.stop_conditions.min_tokens, None);
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.expected_output_tokens),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_zero_min_tokens_stays_explicit_in_control_shadow() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"min_tokens": 0},
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
+    }
+
+    #[test]
+    fn generate_request_context_matches_vllm_header_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
+        headers.insert(X_DATA_PARALLEL_RANK_HEADER, "3".parse().unwrap());
+
+        let context = resolve_generate_request_context(&headers, Some("body-request"));
+
+        assert_eq!(context.request_id, "header-request");
+        assert_eq!(context.data_parallel_rank, Some(3));
+    }
+
+    #[test]
+    fn generate_request_context_falls_back_and_ignores_invalid_dp_rank() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_DATA_PARALLEL_RANK_HEADER, "invalid".parse().unwrap());
+
+        let context = resolve_generate_request_context(&headers, Some("body-request"));
+
+        assert_eq!(context.request_id, "body-request");
+        assert_eq!(context.data_parallel_rank, None);
+    }
+
+    #[test]
+    fn generate_dispatch_span_uses_resolved_request_id() {
+        let captured_request_id = Arc::new(Mutex::new(None));
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
+        );
+
+        let dispatch_span = generate_dispatch_span("header-request", "test-model");
+
+        assert_eq!(
+            captured_request_id.lock().unwrap().as_deref(),
+            Some("header-request")
+        );
+        let fields = dispatch_span
+            .metadata()
+            .expect("dispatch span metadata")
+            .fields();
+        for field in [
+            "request_id",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "ttft_ms",
+            "avg_itl_ms",
+            "prefill_worker_id",
+            "decode_worker_id",
+        ] {
+            assert!(fields.field(field).is_some(), "missing span field {field}");
+        }
+    }
+
+    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .expect("build dispatch test request"),
+        )
+    }
+
+    async fn generate_dispatch_for_test(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        context: Context<PreprocessedRequest>,
+        request_id: String,
+        model: String,
+        state: Arc<service_v2::State>,
+        response_options: GenerateResponseOptions,
+    ) -> Response {
+        let input_tokens = context.content().token_ids.len();
+        let tracker = context.content().tracker.clone().unwrap_or_else(|| {
+            let tracker = Arc::new(RequestTracker::new());
+            tracker.record_isl(input_tokens, None);
+            tracker
+        });
+        let metric_lifecycle = GenerateMetricLifecycle::new(
+            state.as_ref(),
+            state.manager().metric_model_for(&model).to_string(),
+            &request_id,
+            tracker,
+            input_tokens,
+        );
+        generate_dispatch(
+            engine,
+            context,
+            request_id,
+            state,
+            response_options,
+            metric_lifecycle,
+        )
+        .await
+    }
+
+    fn metric_value<'a>(
+        families: &'a [prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a prometheus::proto::Metric {
+        let family = families
+            .iter()
+            .find(|family| family.name() == name)
+            .unwrap_or_else(|| panic!("missing metric family {name}"));
+        family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                labels.iter().all(|(expected_name, expected_value)| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == *expected_name && label.value() == *expected_value
+                    })
+                })
+            })
+            .unwrap_or_else(|| panic!("missing {name} series with labels {labels:?}"))
+    }
+
+    fn histogram_sample_count_or_zero(
+        families: &[prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> u64 {
+        families
+            .iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    labels.iter().all(|(expected_name, expected_value)| {
+                        metric.get_label().iter().any(|label| {
+                            label.name() == *expected_name && label.value() == *expected_value
+                        })
+                    })
+                })
+            })
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0)
+    }
+
+    fn assert_cancelled_dispatch_metrics(
+        state: &service_v2::State,
+        expected_ttft_samples: u64,
+        expected_osl_samples: u64,
+    ) {
+        let metric_model = state.manager().metric_model_for("test-model");
+        let metrics = state.metrics_clone();
+        assert_eq!(metrics.get_inflight_count(metric_model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            expected_ttft_samples
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            expected_osl_samples
+        );
+    }
+
+    async fn await_cancelled_dispatch(
+        task: tokio::task::JoinHandle<Response>,
+        dropped: &AtomicBool,
+        state: &service_v2::State,
+    ) {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("dispatch did not stop promptly after request kill")
+            .expect("dispatch task panicked");
+        assert_eq!(response.status().as_u16(), 499);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_cancelled_dispatch_metrics(state, 0, 0);
+    }
+
+    async fn assert_request_kill_interrupts_pending(phase: PendingPhase) {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(PendingEngine {
+                phase,
+                started: started.clone(),
+                dropped: dropped.clone(),
+            });
+        let context = dispatch_test_context();
+        let request_context = context.context();
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let task = tokio::spawn(generate_dispatch_for_test(
+            engine,
+            context,
+            "req-pending-dispatch".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        ));
+
+        started.notified().await;
+        assert_eq!(
+            state
+                .metrics_clone()
+                .get_inflight_count(state.manager().metric_model_for("test-model")),
+            1
+        );
+        request_context.kill();
+
+        await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
+    }
+
+    async fn dispatch_terminal_finish_reason(
+        finish_reason: crate::protocols::common::FinishReason,
+    ) -> (Response, Arc<service_v2::State>) {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(finish_reason));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-terminal-dispatch".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+        (response, state)
+    }
+
+    #[tokio::test]
+    async fn request_kill_interrupts_pending_engine_generate() {
+        assert_request_kill_interrupts_pending(PendingPhase::Generate).await;
+    }
+
+    #[tokio::test]
+    async fn request_kill_interrupts_pending_response_stream() {
+        assert_request_kill_interrupts_pending(PendingPhase::Stream).await;
+    }
+
+    #[tokio::test]
+    async fn backend_error_finish_returns_sanitized_500() {
+        let secret = "sensitive backend failure";
+        let (response, _state) = dispatch_terminal_finish_reason(
+            crate::protocols::common::FinishReason::Error(secret.to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "internal server error");
+        assert!(!body.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn backend_cancelled_finish_returns_499() {
+        let (response, state) =
+            dispatch_terminal_finish_reason(crate::protocols::common::FinishReason::Cancelled)
+                .await;
+
+        assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_engine_cancellation_returns_499() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(CancelledEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-immediate-cancel".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn request_kill_after_first_token_records_partial_metrics() {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TokenThenPendingEngine {
+                started: started.clone(),
+                dropped: dropped.clone(),
+            });
+        let context = dispatch_test_context();
+        let request_context = context.context();
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let task = tokio::spawn(generate_dispatch_for_test(
+            engine,
+            context,
+            "req-token-then-pending".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        ));
+
+        started.notified().await;
+        request_context.kill();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("dispatch did not stop promptly after request kill")
+            .expect("dispatch task panicked");
+        assert_eq!(response.status().as_u16(), 499);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_cancelled_dispatch_metrics(state.as_ref(), 1, 1);
+    }
+
+    #[tokio::test]
+    async fn zero_token_success_drains_queue_without_output_metrics() {
+        let (response, state) =
+            dispatch_terminal_finish_reason(crate::protocols::common::FinishReason::Stop).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_generate_populates_frontend_metrics() {
+        const MODEL: &str = "generate-metric-test-model";
+        const WORKER_ID: &str = "987654321";
+        const DP_RANK: &str = "3";
+
+        let tracker = Arc::new(RequestTracker::new());
+        // Backend-reported usage must take precedence over this router estimate.
+        tracker.record_isl(3, Some(1));
+        tracker.record_worker(
+            WORKER_ID.parse().unwrap(),
+            Some(DP_RANK.parse().unwrap()),
+            crate::discovery::WORKER_TYPE_DECODE,
+        );
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build metric test request"),
+        );
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MetricEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            context,
+            "req-generate-metrics".to_string(),
+            MODEL.to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.metrics_clone().get_inflight_count(&metric_model), 0);
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                &metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let families = registry.gather();
+        let model_labels = [("model", metric_model.as_str())];
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_requests_started_total",
+                &[("model", metric_model.as_str()), ("endpoint", "generate")],
+            )
+            .get_counter()
+            .value(),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_active_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_request_duration_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_input_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            3.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_tokens_total",
+                &model_labels,
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_inter_token_latency_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels,)
+                .get_histogram()
+                .get_sample_sum(),
+            2.0
+        );
+
+        let worker_labels = [WORKER_ID, DP_RANK, crate::discovery::WORKER_TYPE_DECODE];
+        assert_eq!(
+            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(&worker_labels)
+                .get(),
+            3
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn split_router_worker_metadata_populates_generate_metrics() {
+        const MODEL: &str = "generate-split-router-metric-test-model";
+        const PREFILL_WORKER_ID: &str = "8765432101";
+        const DECODE_WORKER_ID: &str = "8765432102";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, None);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let mut collector =
+            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let mut first = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![10],
+            index: Some(0),
+            routing_data: Some(crate::protocols::common::timing::RoutingData {
+                worker_id: Some(crate::protocols::common::extensions::WorkerIdInfo {
+                    prefill_worker_id: Some(8_765_432_101),
+                    prefill_dp_rank: Some(4),
+                    decode_worker_id: Some(8_765_432_102),
+                    decode_dp_rank: Some(5),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        collector.observe(&mut first);
+        std::thread::sleep(Duration::from_millis(1));
+        let mut second = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![11],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            ..Default::default()
+        });
+        collector.observe(&mut second);
+
+        assert!(first.data.unwrap().routing_data.is_none());
+        let prefill_labels = [
+            PREFILL_WORKER_ID,
+            "4",
+            crate::discovery::WORKER_TYPE_PREFILL,
+        ];
+        assert_eq!(
+            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(&prefill_labels)
+                .get(),
+            3
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(&prefill_labels)
+                .get()
+                > 0.0
+        );
+        let decode_labels = [DECODE_WORKER_ID, "5", crate::discovery::WORKER_TYPE_DECODE];
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(&decode_labels)
+                .get()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn generate_metrics_fall_back_to_tracker_cached_tokens() {
+        const MODEL: &str = "generate-tracker-cache-test-model";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, Some(2));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+
+        {
+            let mut collector =
+                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            let mut annotated = Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![10],
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                ..Default::default()
+            });
+            collector.observe(&mut annotated);
+        }
+
+        let families = registry.gather();
+        let cached_tokens = metric_value(
+            &families,
+            "dynamo_frontend_cached_tokens",
+            &[("model", metric_model.as_str())],
+        )
+        .get_histogram();
+        assert_eq!(cached_tokens.get_sample_count(), 1);
+        assert_eq!(cached_tokens.get_sample_sum(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn migrated_generate_uses_logical_request_cache_metrics() {
+        const MODEL: &str = "generate-migration-metric-test-model";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, Some(1));
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(crate::protocols::common::StopConditions {
+                    max_tokens: Some(2),
+                    ..Default::default()
+                })
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build migration metric test request"),
+        );
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let backend = Arc::new(MigrationMetricBackend {
+            calls: AtomicU32::new(0),
+        });
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MigrationMetricEngine {
+                migration: crate::migration::Migration::new(
+                    1,
+                    None,
+                    MODEL.to_string(),
+                    state.metrics_clone(),
+                ),
+                backend: backend.clone(),
+            });
+
+        let response = generate_dispatch_for_test(
+            engine,
+            context,
+            "req-generate-migration-metrics".to_string(),
+            MODEL.to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state
+                .metrics_clone()
+                .get_migration_ongoing_request_count(MODEL),
+            1
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read Generate response");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse Generate response");
+        assert_eq!(body["choices"][0]["token_ids"], serde_json::json!([10, 11]));
+
+        let families = registry.gather();
+        let model_labels = [("model", metric_model.as_str())];
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_tokens_total",
+                &model_labels,
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        let cached_tokens =
+            metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        assert_eq!(cached_tokens.get_sample_count(), 1);
+        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+    }
+
+    #[test]
+    fn generate_control_shadow_carries_dp_rank_and_inverted_priority() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {},
+            "priority": -7
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            Some(3),
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+        let routing = preprocessed.routing.as_ref().expect("routing hints");
+
+        assert_eq!(routing.dp_rank, Some(3));
+        assert_eq!(routing.priority, Some(7));
+        assert_eq!(routing.priority_jump, Some(7.0));
+    }
+
+    #[test]
+    fn priority_inversion_saturates_at_i32_min() {
+        assert_eq!(dynamo_routing_priority(i32::MIN), i32::MAX);
+    }
+}

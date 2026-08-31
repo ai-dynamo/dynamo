@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/hex"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -188,4 +189,27 @@ func TestComputeIdentityHash(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewCheckpointID(t *testing.T) {
+	id1, err := NewCheckpointID()
+	require.NoError(t, err)
+	id2, err := NewCheckpointID()
+	require.NoError(t, err)
+
+	assert.Regexp(t, "^[0-9a-f]{32}$", id1)
+	assert.Regexp(t, "^[0-9a-f]{32}$", id2)
+	assert.NotEqual(t, id1, id2)
+	_, err = hex.DecodeString(id1)
+	require.NoError(t, err)
+}
+
+func TestDGDCheckpointID(t *testing.T) {
+	id := DGDCheckpointID("ns", "dgd", "uid-1", "worker", "hash-1")
+	assert.Regexp(t, "^[0-9a-f]{32}$", id)
+	assert.Equal(t, id, DGDCheckpointID("ns", "dgd", "uid-1", "worker", "hash-1"))
+
+	assert.NotEqual(t, id, DGDCheckpointID("ns", "dgd", "uid-2", "worker", "hash-1"), "DGD UID must prevent cross-DGD reuse")
+	assert.NotEqual(t, id, DGDCheckpointID("ns", "dgd", "uid-1", "worker", "hash-2"), "worker hash must isolate worker generations")
+	assert.NotEqual(t, id, DGDCheckpointID("ns", "dgd", "uid-1", "prefill", "hash-1"), "component name must isolate components")
 }

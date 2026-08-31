@@ -106,6 +106,7 @@ class GMSModelLoader:
 
         materialize_module_from_gms(allocator, model, device_index=device_index)
         impl.imported_weights_bytes = allocator.total_bytes
+        impl.preloaded_weights_bytes = allocator.total_bytes
 
         logger.info(
             "[GMS] READ mode: imported %.2f GiB from metadata",

@@ -380,6 +380,9 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
                 })
             });
 
+            // Always tag dedup'd stores as Device: the indexer dispatches by
+            // tier, and a non-device tag here would route the block to the
+            // lower-tier indexer, orphaning every subsequent device-tier child.
             self.event_queue.push(ConsolidatedEvent::Store {
                 block_hash: block_hash.clone(),
                 parent_hash: resolved_parent_hash,
@@ -387,7 +390,7 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
                 block_size,
                 lora_name,
                 source: source.to_str().to_string(),
-                tier,
+                tier: Some(StorageTier::Device),
             });
 
             tracing::debug!(
@@ -403,10 +406,13 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
     }
 
     fn handle_remove(&mut self, event: RemoveEventInput) -> bool {
+        // The source's tier is intentionally discarded: dedup mode collapses
+        // every source/tier into a unified Device-tagged stream (see the STORE
+        // path), and the REMOVE must match that tagging.
         let RemoveEventInput {
             block_hash,
             source,
-            tier,
+            tier: _,
         } = event;
 
         let sequence_hash = match self.hash_mapping.get(&block_hash) {
@@ -432,36 +438,28 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
                 return false;
             }
 
-            self.hash_mapping.remove(&block_hash);
-
-            tracing::debug!(
-                "Removed hash_mapping entry for {} (hash_mapping size: {})",
-                block_hash,
-                self.hash_mapping.len()
-            );
+            // Don't drop hash_mapping[block_hash] on per-source removes: when
+            // sources share the same external block_hash (e.g. KVBM publishing
+            // TRT-LLM's hash chain), removing it now would orphan the next
+            // source's REMOVE lookup. The retain() below cleans every entry
+            // pointing at this sequence_hash once the last source releases.
 
             if !metadata.exists_in_any_source() {
                 let first_block_hash = metadata.first_block_hash.clone();
                 self.blocks.remove(&sequence_hash);
 
-                let stray_count_before = self.hash_mapping.len();
                 self.hash_mapping
                     .retain(|_ext_hash, seq_hash| *seq_hash != sequence_hash);
-                let stray_count = stray_count_before - self.hash_mapping.len();
 
-                if stray_count > 0 {
-                    tracing::warn!(
-                        "Found {} stray hash_mapping entries for seq_hash={} after all sources removed - cleaned up (hash_mapping size now: {})",
-                        stray_count,
-                        sequence_hash,
-                        self.hash_mapping.len()
-                    );
-                }
-
+                // Mirror the dedup STORE: tag the unified REMOVE as Device so
+                // it routes to the same indexer the STORE landed in. Otherwise
+                // a non-device last-source release (e.g. KVBM holding a block
+                // longer than the engine) would deliver the REMOVE to the
+                // lower-tier indexer that never saw the corresponding STORE.
                 self.event_queue.push(ConsolidatedEvent::Remove {
                     block_hash: first_block_hash.clone(),
                     source: source.to_str().to_string(),
-                    tier,
+                    tier: Some(StorageTier::Device),
                 });
 
                 tracing::debug!(
@@ -709,6 +707,90 @@ mod tests {
         assert_eq!(sources.len(), 2); // vllm and kvbm
     }
 
+    /// Dedup mode must emit a Device-tagged store even when the first source
+    /// to register a block did so on a lower tier (e.g. KVBM offloading
+    /// host-pinned ahead of the engine's device store). Otherwise the
+    /// downstream indexer would dispatch the unified view to its lower-tier
+    /// indexer and orphan every subsequent device-tier child.
+    #[test]
+    fn test_dedup_normalizes_tier_to_device() {
+        let mut tracker = TestTracker::new();
+
+        tracker.handle_store(
+            "kvbm_hash1".to_string(),
+            EventSource::Kvbm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::HostPinned),
+            None,
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1, "first store from any source must publish");
+        match &events[0] {
+            ConsolidatedEvent::Store { tier, .. } => {
+                assert_eq!(
+                    *tier,
+                    Some(StorageTier::Device),
+                    "dedup must collapse the source tier to Device on the wire"
+                );
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
+
+        // A subsequent Trtllm device-tier store for the same block deduplicates,
+        // so no further events are emitted — the unified Device view is already
+        // in flight from the first publication.
+        let should_publish = tracker.handle_store(
+            "trtllm_hash1".to_string(),
+            EventSource::Trtllm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
+        assert!(!should_publish);
+        assert_eq!(tracker.drain_events().len(), 0);
+
+        // The unified REMOVE must also be Device-tagged, even when the
+        // last-source release is on a lower tier (e.g. KVBM holding the
+        // block longer than the engine). Otherwise the REMOVE would route
+        // to the lower-tier indexer that never received the Device STORE.
+        tracker.handle_remove(
+            "trtllm_hash1",
+            EventSource::Trtllm,
+            Some(StorageTier::Device),
+        );
+        assert_eq!(
+            tracker.drain_events().len(),
+            0,
+            "trtllm release must not publish: KVBM still owns the block"
+        );
+
+        let kvbm_remove = tracker.handle_remove(
+            "kvbm_hash1",
+            EventSource::Kvbm,
+            Some(StorageTier::HostPinned),
+        );
+        assert!(kvbm_remove, "last-source release must publish");
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Remove { tier, .. } => {
+                assert_eq!(
+                    *tier,
+                    Some(StorageTier::Device),
+                    "dedup must collapse the source tier to Device on the REMOVE wire"
+                );
+            }
+            other => panic!("expected Remove event, got: {:?}", other),
+        }
+    }
+
     #[test]
     fn test_remove_from_single_source_publishes() {
         let mut tracker = TestTracker::new();
@@ -738,6 +820,61 @@ mod tests {
             }
             other => panic!("expected Remove event, got: {:?}", other),
         }
+    }
+
+    /// When sources publish events using the same external block_hash (e.g.
+    /// KVBM forwards TRT-LLM's sequence-hash chain so engine and KVBM events
+    /// agree on the wire), each source's REMOVE must still resolve through
+    /// `hash_mapping`. Dropping the entry on the first remove would orphan
+    /// the second remove and produce a spurious "not in hash_mapping" warn.
+    #[test]
+    fn test_shared_block_hash_across_sources_two_removes_succeed() {
+        let mut tracker = TestTracker::new();
+        let shared = "shared_hash".to_string();
+
+        tracker.handle_store(
+            shared.clone(),
+            EventSource::Trtllm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
+        tracker.handle_store(
+            shared.clone(),
+            EventSource::Kvbm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::HostPinned),
+            None,
+        );
+        tracker.drain_events();
+
+        let trtllm_remove =
+            tracker.handle_remove(&shared, EventSource::Trtllm, Some(StorageTier::Device));
+        assert!(
+            !trtllm_remove,
+            "first remove must not publish: KVBM still owns the block"
+        );
+
+        let kvbm_remove =
+            tracker.handle_remove(&shared, EventSource::Kvbm, Some(StorageTier::HostPinned));
+        assert!(
+            kvbm_remove,
+            "second remove must resolve via the still-present hash_mapping entry and publish"
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one REMOVE published at end-of-life"
+        );
+        assert_eq!(tracker.num_blocks(), 0);
     }
 
     #[test]

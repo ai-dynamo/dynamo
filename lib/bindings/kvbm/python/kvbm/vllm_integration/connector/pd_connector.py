@@ -12,10 +12,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlConnector,
-    NixlHandshakePayload,
-)
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnector,
+        NixlHandshakePayload,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector":
+        raise
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        NixlConnector,
+        NixlHandshakePayload,
+    )
+
 from vllm.v1.core.sched.output import SchedulerOutput
 
 # Optional import for LMCache support
@@ -26,6 +36,17 @@ try:
     )
 
     _LMCacheConnectorV1 = LMCacheConnectorV1
+except ImportError:
+    pass
+
+# Optional import for FlexKV support
+_FlexKVConnectorV1: Optional[Type] = None
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (
+        FlexKVConnectorV1,
+    )
+
+    _FlexKVConnectorV1 = FlexKVConnectorV1
 except ImportError:
     pass
 
@@ -46,10 +67,10 @@ class PdConnectorMetadata(MultiKVConnectorMetadata):
 
 class PdConnector(MultiConnector):
     """
-    A wrapper for using KV offloading Connectors (e.g. KVBM or LMCache) and NIXL Connector for PD disaggregated serving.
+    A wrapper for using KV offloading Connectors (e.g. KVBM, LMCache, or FlexKV) and NIXL Connector for PD disaggregated serving.
 
     The current logic is:
-    - The first connector must be KVBM or LMCache and would be used by prefill worker to offload and onboard KV blocks.
+    - The first connector must be KVBM, LMCache, or FlexKV and would be used by prefill worker to offload and onboard KV blocks.
     - The second connector must be NIXL and will be used by decode worker to get KV blocks from prefill worker.
     """
 
@@ -71,11 +92,15 @@ class PdConnector(MultiConnector):
         allowed_first_types: list[Type] = [DynamoConnector]
         if _LMCacheConnectorV1 is not None:
             allowed_first_types.append(_LMCacheConnectorV1)
+        if _FlexKVConnectorV1 is not None:
+            allowed_first_types.append(_FlexKVConnectorV1)
 
         if not isinstance(self._connectors[0], tuple(allowed_first_types)):
             allowed_names = ["DynamoConnector"]
             if _LMCacheConnectorV1 is not None:
                 allowed_names.append("LMCacheConnectorV1")
+            if _FlexKVConnectorV1 is not None:
+                allowed_names.append("FlexKVConnectorV1")
             raise TypeError(
                 f"Expected first connector to be {' or '.join(allowed_names)}, "
                 f"got {type(self._connectors[0]).__name__}"

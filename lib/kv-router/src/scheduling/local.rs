@@ -5,79 +5,227 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
+use super::config::RouterQueuePolicy;
+use super::overlap::OverlapSignals;
+use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
+use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
-use super::queue::SchedulerQueue;
+use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::RoutingConstraints;
+use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
+    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
+    SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
-pub struct LocalScheduler<P, C, S = RouterSchedulingPolicy, Sel = DefaultWorkerSelector>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerConfigReconcileOutcome {
+    Unchanged,
+    Applied,
+    Rejected,
+}
+
+pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     P: SequencePublisher,
     C: WorkerConfigLike,
-    S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh,
 {
     slots: Arc<ActiveSequencesMultiWorker<P>>,
-    queue: Arc<SchedulerQueue<P, C, S, Sel>>,
+    queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
 
-impl<P, C, S, Sel> LocalScheduler<P, C, S, Sel>
+impl<P, C, Sel, RF> LocalScheduler<P, C, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    S: SchedulingPolicy + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
+    RF: OverlapScoresRefresh + 'static,
 {
-    fn worker_dp_range(workers: &HashMap<WorkerId, C>) -> HashMap<WorkerId, (u32, u32)> {
+    fn make_scheduling_request(
+        &self,
+        request: ScheduleRequest,
+        resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
+    ) -> (SchedulingRequest, Option<Vec<LocalBlockHash>>) {
+        let track_prefill_tokens = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.track_prefill_tokens_default);
+        let ScheduleRequest {
+            mode,
+            token_seq,
+            block_hashes,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context,
+            overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
+            shared_cache_hits,
+        } = request;
+        let request = SchedulingRequest {
+            mode,
+            token_seq,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            track_prefill_tokens,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context,
+            overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
+            shared_cache_hits,
+            worker_loads: FxHashMap::default(),
+            resp_tx,
+        };
+
+        (request, block_hashes)
+    }
+
+    fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
         workers
             .iter()
             .map(|(&id, cfg)| {
-                (
-                    id,
-                    (cfg.data_parallel_start_rank(), cfg.data_parallel_size()),
-                )
+                WorkerDpRange::new(id, cfg.data_parallel_start_rank(), cfg.data_parallel_size())
             })
             .collect()
     }
 
+    fn reconcile_worker_configs(
+        slots: &ActiveSequencesMultiWorker<P>,
+        current_workers: HashMap<WorkerId, C>,
+        last_workers: &mut Option<HashMap<WorkerId, C>>,
+    ) -> WorkerConfigReconcileOutcome {
+        if last_workers.as_ref() == Some(&current_workers) {
+            return WorkerConfigReconcileOutcome::Unchanged;
+        }
+
+        let dp_ranges = Self::worker_dp_ranges(&current_workers);
+        if let Err(error) = slots.reconcile_workers(dp_ranges) {
+            tracing::error!(%error, "Invalid worker topology update");
+            return WorkerConfigReconcileOutcome::Rejected;
+        }
+        *last_workers = Some(current_workers);
+        WorkerConfigReconcileOutcome::Applied
+    }
+
+    /// Construct a scheduler with dequeue-time overlap refresh.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_with_overlap_refresh(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
         block_size: u32,
         selector: Sel,
-        policy: S,
+        queue_policy: RouterQueuePolicy,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
     ) -> Self {
+        let profile = PolicyProfile::synthetic(threshold_frac, queue_policy);
+        Self::new_with_policy_profile(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+        .expect("synthetic policy profile is valid")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_profile(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Result<Self, KvSchedulerError> {
+        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
+            Arc::clone(&slots),
+            workers_with_configs.clone(),
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+        )?);
+
+        let (queue_updates, _) = watch::channel(());
+
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
+            let queue_config_updates = Arc::clone(&queue);
+            let queue_updates_config = queue_updates.clone();
             let mut monitor_rx = workers_with_configs.clone();
-            let mut last_workers = monitor_rx.borrow().clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
+                let mut last_workers = None;
+                Self::reconcile_worker_configs(
+                    &slots_monitor,
+                    monitor_rx.borrow_and_update().clone(),
+                    &mut last_workers,
+                );
 
                 loop {
                     tokio::select! {
@@ -94,27 +242,19 @@ where
                     }
 
                     let current_workers = monitor_rx.borrow_and_update().clone();
-                    if current_workers == last_workers {
-                        continue;
+                    if Self::reconcile_worker_configs(
+                        &slots_monitor,
+                        current_workers,
+                        &mut last_workers,
+                    ) == WorkerConfigReconcileOutcome::Applied
+                    {
+                        queue_config_updates.update().await;
+                        let _ = queue_updates_config.send(());
                     }
-
-                    let dp_range = Self::worker_dp_range(&current_workers);
-                    slots_monitor.update_workers(&dp_range);
-                    last_workers = current_workers;
                 }
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new(
-            Arc::clone(&slots),
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            policy,
-            prefill_load_estimator,
-        ));
-        let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
         let queue_periodic_updates = Arc::clone(&queue);
         let mut remote_state_updates = slots.subscribe_remote_state_changes();
@@ -159,13 +299,56 @@ where
             }
         });
 
-        Self {
+        Ok(Self {
             slots,
             queue,
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
+        })
+    }
+
+    pub async fn schedule_request(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let lifecycle_lease = self
+            .queue
+            .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
+
+        let mut lifecycle_lease = self
+            .queue
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
+            .await;
+
+        let response = resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        if let Some(lease) = lifecycle_lease.as_mut() {
+            lease.disarm();
         }
+        response
+    }
+
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        let (request, _block_hashes) = self.make_scheduling_request(request, None);
+        self.queue.select_without_admission(request).await
+    }
+
+    /// Install the observer for admitted selections that sacrifice KV overlap.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_non_max_overlap_selection_observer(
+        &self,
+        observer: NonMaxOverlapSelectionObserver,
+    ) -> bool {
+        self.queue.set_non_max_overlap_selection_observer(observer)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -177,47 +360,135 @@ where
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-        tree_sizes: HashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let track_prefill_tokens = router_config_override
-            .and_then(|cfg| cfg.track_prefill_tokens)
-            .unwrap_or(self.track_prefill_tokens_default);
-        let request = SchedulingRequest {
+        self.schedule_with_block_hashes(
             maybe_request_id,
-            token_seq,
             isl_tokens,
+            token_seq,
+            None,
             tier_overlap_blocks,
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes,
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
-            track_prefill_tokens,
-            router_config_override: router_config_override.cloned(),
+            router_config_override,
             update_states,
             lora_name,
             priority_jump,
+            strict_priority,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        )
+        .await
+    }
+
+    /// Like [`schedule`](Self::schedule) but also forwards the block hashes used to compute
+    /// the initial overlap scores. When the scheduler was constructed with an
+    /// [`OverlapScoresRefresh`], queued requests can be re-scored at dequeue time using
+    /// these hashes.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn schedule_with_block_hashes(
+        &self,
+        maybe_request_id: Option<String>,
+        isl_tokens: usize,
+        token_seq: Option<Vec<SequenceHash>>,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        router_config_override: Option<&super::config::RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        shared_cache_hits: Option<crate::SharedCacheHits>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_with_policy_class_and_block_hashes(
+            maybe_request_id,
+            isl_tokens,
+            token_seq,
+            block_hashes,
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            router_config_override,
+            update_states,
+            lora_name,
+            priority_jump,
+            strict_priority,
+            None,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub async fn schedule_with_policy_class_and_block_hashes(
+        &self,
+        maybe_request_id: Option<String>,
+        isl_tokens: usize,
+        token_seq: Option<Vec<SequenceHash>>,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        router_config_override: Option<&super::config::RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        shared_cache_hits: Option<crate::SharedCacheHits>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
+        self.schedule_request(ScheduleRequest {
+            mode,
+            token_seq,
+            block_hashes,
+            isl_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
+            routing_constraints,
+            router_config_override: router_config_override.cloned(),
+            lora_name,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
-            resp_tx: Some(resp_tx),
-        };
-
-        self.queue.enqueue(request).await;
-
-        resp_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+        })
+        .await
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
@@ -228,16 +499,66 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request only when its worker is already registered, so a request
+    /// racing worker removal cannot lazily recreate the removed worker/rank.
+    pub async fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
+        let outcome = self
+            .slots
+            .mark_prefill_completed(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        self.slots.publish_prefill_completed(&request_id);
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
+        }
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
+        let outcome = self.slots.free(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
+        }
+        Ok(())
+    }
+
+    /// Release a booking only if it still belongs to `worker`.
+    ///
+    /// An ownership mismatch is a harmless no-op, which makes this safe for
+    /// delayed cleanup that captured the worker when it acquired the booking.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        let outcome = self
+            .slots
+            .free_if_worker(&request_id, worker, Instant::now())?;
+        if outcome.is_applied() {
+            self.queue.update_worker(worker).await;
+        }
         Ok(())
     }
 
@@ -247,6 +568,14 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.queue.pending_isl_tokens()
+    }
+
+    pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
+        self.queue.class_queue_stats(class_index)
+    }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.queue.supports_overlap_refresh()
     }
 
     pub fn worker_type(&self) -> &'static str {
@@ -274,22 +603,29 @@ where
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         let decay_now = Instant::now();
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
+        let prefill_token_deltas = if track_prefill_tokens {
+            let by_worker = effective_cached_tokens
+                .iter()
+                .map(|(worker, cached_tokens)| {
+                    let delta =
+                        super::prefill_load::effective_prefill_tokens(isl_tokens, *cached_tokens);
+                    (*worker, delta)
+                })
+                .collect();
+            PrefillTokenDeltas::new(isl_tokens, by_worker)
+        } else {
+            PrefillTokenDeltas::none()
+        };
+        let (decode_blocks, prefill_tokens, active_requests) =
+            self.slots.potential_blocks_and_tokens_at::<true>(
                 token_seq.as_deref(),
-                isl_tokens,
-                effective_cached_tokens,
-                track_prefill_tokens,
+                &prefill_token_deltas,
                 decay_now,
             );
+        let active_requests = active_requests.expect("active request projection should be present");
 
-        let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        workers.extend(decode_blocks.keys().copied());
-        workers.extend(prefill_tokens.keys().copied());
-
-        let mut loads = Vec::with_capacity(workers.len());
-        for worker in workers {
+        let mut loads = Vec::with_capacity(decode_blocks.len());
+        for (worker, potential_decode_blocks) in decode_blocks {
             loads.push(PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -297,7 +633,8 @@ where
                     .get(&worker)
                     .copied()
                     .unwrap_or(isl_tokens),
-                potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                potential_decode_blocks,
+                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             });
         }
 
@@ -306,6 +643,149 @@ where
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.slots.get_active_lora_counts()
+    }
+}
+
+impl<P, C, Sel> LocalScheduler<P, C, Sel, NoopOverlapScoresRefresh>
+where
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_without_overlap_refresh_with_policy_profile(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Result<Self, KvSchedulerError> {
+        Self::new_with_policy_profile(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            None,
+            overloaded_worker_provider,
+            available_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Construct a scheduler without dequeue-time overlap refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        queue_policy: RouterQueuePolicy,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overload_provider(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            queue_policy,
+            prefill_load_estimator,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Construct a scheduler without dequeue-time overlap refresh but with an overload
+    /// provider consulted during worker selection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        queue_policy: RouterQueuePolicy,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overlap_refresh(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            queue_policy,
+            prefill_load_estimator,
+            None,
+            overloaded_worker_provider,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Backwards-compatible alias for callers that spell out the no-refresh path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_without_overlap_refresh(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        queue_policy: RouterQueuePolicy,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            queue_policy,
+            prefill_load_estimator,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
     }
 }
 
@@ -320,7 +800,6 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
-    use crate::scheduling::policy::FcfsPolicy;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -357,7 +836,29 @@ mod tests {
         monitor_worker_configs: bool,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
-        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy>>,
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+        CancellationToken,
+    ) {
+        make_scheduler_with_replica_sync(
+            workers,
+            threshold_frac,
+            monitor_worker_configs,
+            prefill_load_estimator,
+            false,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_scheduler_with_replica_sync(
+        workers: HashMap<WorkerId, SimpleWorkerConfig>,
+        threshold_frac: Option<f64>,
+        monitor_worker_configs: bool,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        replica_sync: bool,
+    ) -> (
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
@@ -370,19 +871,19 @@ mod tests {
             NoopSequencePublisher,
             64,
             dp_range,
-            false,
+            replica_sync,
             0,
             "test",
         ));
         let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
+        let scheduler = Arc::new(LocalScheduler::new_without_overlap_refresh(
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
             64,
             DefaultWorkerSelector::new(None, "test"),
-            FcfsPolicy,
+            RouterQueuePolicy::Fcfs,
             prefill_load_estimator,
             Duration::from_secs(60),
             true,
@@ -403,7 +904,7 @@ mod tests {
     }
 
     async fn wait_for_pending_count(
-        scheduler: &Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy>>,
+        scheduler: &Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
         expected: usize,
     ) {
         tokio::time::timeout(Duration::from_millis(250), async {
@@ -418,6 +919,29 @@ mod tests {
         .unwrap();
     }
 
+    fn request(mode: ScheduleMode) -> ScheduleRequest {
+        ScheduleRequest {
+            mode,
+            token_seq: Some(vec![1, 2, 3, 4]),
+            block_hashes: None,
+            isl_tokens: 64,
+            lora_name: None,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            router_config_override: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            overlap: OverlapSignals::default(),
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
+            shared_cache_hits: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_schedule_books_request_into_active_sequences() {
         let mut workers = HashMap::new();
@@ -430,33 +954,72 @@ mod tests {
         );
         let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
-        let response = scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                None,
-                true,
-                Some("adapter-a".to_string()),
-                0.0,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let mut request = request(ScheduleMode::Tracked {
+            request_id: "req-1".to_string(),
+        });
+        request.lora_name = Some("adapter-a".to_string());
+        let response = scheduler.schedule_request(request).await.unwrap();
 
         assert_eq!(response.best_worker.worker_id, 0);
         assert_eq!(
             scheduler.get_active_lora_counts(),
             HashMap::from([(String::from("adapter-a"), 1)])
         );
+        let loads = scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
+        let worker_load = loads
+            .iter()
+            .find(|load| load.worker_id == response.best_worker.worker_id && load.dp_rank == 0)
+            .expect("scheduled worker should appear in potential loads");
+        assert_eq!(worker_load.active_requests, 1);
 
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn query_only_without_id_never_books_state() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+
+        scheduler
+            .schedule_request(request(ScheduleMode::QueryOnly { request_id: None }))
+            .await
+            .unwrap();
+
+        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
+        assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn legacy_tracked_request_without_id_fails_before_enqueue() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.0), true, None);
+
+        let error = scheduler
+            .schedule(
+                None,
+                64,
+                None,
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                crate::protocols::RoutingConstraints::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, KvSchedulerError::BookingFailed(_)));
+        assert_eq!(scheduler.pending_count(), 0);
         cancel_token.cancel();
     }
 
@@ -480,7 +1043,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 Some(&crate::config::RouterConfigOverride {
                     track_prefill_tokens: Some(false),
                     ..Default::default()
@@ -488,9 +1050,11 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -528,14 +1092,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::from([(worker, 0.75)]),
                 HashMap::from([(worker, 48)]),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -574,14 +1139,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -598,14 +1164,15 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -632,7 +1199,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler
@@ -643,14 +1210,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -667,14 +1235,15 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -714,7 +1283,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
         let mut queue_updates = scheduler.subscribe_queue_updates();
 
@@ -726,14 +1295,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -750,14 +1320,15 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -797,7 +1368,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler
@@ -808,14 +1379,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -832,14 +1404,15 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -888,14 +1461,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -930,10 +1504,10 @@ mod tests {
         );
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let token_seq = vec![11, 22, 33, 44];
-        let cached_tokens = HashMap::new();
 
-        let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, cached_tokens.clone());
+        let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
+        let (decode_blocks, prefill_tokens, _) =
+            slots.potential_blocks_and_tokens::<false>(Some(&token_seq), &prefill_token_deltas);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
@@ -941,11 +1515,12 @@ mod tests {
                 dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens.get(worker).copied().unwrap_or(128),
                 potential_decode_blocks: decode_blocks.get(worker).copied().unwrap_or(0),
+                active_requests: 0,
             })
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, cached_tokens, true);
+        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, HashMap::new(), true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -960,6 +1535,7 @@ mod tests {
                 actual.potential_decode_blocks,
                 expected.potential_decode_blocks
             );
+            assert_eq!(actual.active_requests, expected.active_requests);
         }
 
         cancel_token.cancel();
@@ -989,14 +1565,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -1069,6 +1646,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_worker_watch_reconciles_current_snapshot_on_start() {
+        let mut initial_workers = HashMap::new();
+        initial_workers.insert(0, SimpleWorkerConfig::default());
+        let dp_range = initial_workers
+            .iter()
+            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
+            .collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let (cfg_tx, cfg_rx) = watch::channel(initial_workers);
+
+        let mut updated_workers = HashMap::new();
+        updated_workers.insert(0, SimpleWorkerConfig::default());
+        updated_workers.insert(1, SimpleWorkerConfig::default());
+        cfg_tx.send(updated_workers).unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            64,
+            DefaultWorkerSelector::new(None, "test"),
+            RouterQueuePolicy::Fcfs,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel_token.clone(),
+            "test",
+            true,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler
+                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .iter()
+                    .any(|load| load.worker_id == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_watch_reconciles_empty_snapshot_on_start() {
+        let mut initial_workers = HashMap::new();
+        initial_workers.insert(0, SimpleWorkerConfig::default());
+        let dp_range = initial_workers
+            .iter()
+            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
+            .collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let (cfg_tx, cfg_rx) = watch::channel(initial_workers);
+        cfg_tx.send(HashMap::new()).unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            64,
+            DefaultWorkerSelector::new(None, "test"),
+            RouterQueuePolicy::Fcfs,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel_token.clone(),
+            "test",
+            true,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler
+                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_watch_disabled_freezes_slot_ranges() {
+        let mut workers = HashMap::new();
+        workers.insert(0, SimpleWorkerConfig::default());
+        let (scheduler, _slots, cfg_tx, cancel_token) = make_scheduler(workers, None, false, None);
+
+        assert_eq!(
+            scheduler
+                .get_potential_loads(None, 64, HashMap::new(), true)
+                .len(),
+            1
+        );
+
+        let mut updated_workers = HashMap::new();
+        updated_workers.insert(0, SimpleWorkerConfig::default());
+        updated_workers.insert(1, SimpleWorkerConfig::default());
+        cfg_tx.send(updated_workers).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].worker_id, 0);
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn test_get_potential_loads_can_ignore_prefill_tokens() {
         let mut workers = HashMap::new();
         workers.insert(
@@ -1088,14 +1801,15 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -1104,6 +1818,65 @@ mod tests {
         let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), false);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 64);
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn worker_taint_update_wakes_constrained_pending_request() {
+        let fast = HashSet::from(["capacity/fast".to_string()]);
+        let workers = HashMap::from([
+            (
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    taints: fast.clone(),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    taints: HashSet::from(["capacity/slow".to_string()]),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let (scheduler, _slots, cfg_tx, cancel_token) =
+            make_scheduler(workers.clone(), Some(0.5), true, None);
+
+        let mut first = request(ScheduleMode::Tracked {
+            request_id: "req-1".to_string(),
+        });
+        first.routing_constraints.required_taints = fast.clone();
+        let first_response = scheduler.schedule_request(first).await.unwrap();
+        assert_eq!(first_response.best_worker.worker_id, 0);
+
+        let queued = {
+            let scheduler = Arc::clone(&scheduler);
+            let fast = fast.clone();
+            tokio::spawn(async move {
+                let mut request = request(ScheduleMode::Tracked {
+                    request_id: "req-2".to_string(),
+                });
+                request.routing_constraints.required_taints = fast;
+                scheduler.schedule_request(request).await
+            })
+        };
+        wait_for_pending_count(&scheduler, 1).await;
+
+        let mut updated_workers = workers;
+        updated_workers.get_mut(&1).unwrap().taints = fast;
+        cfg_tx.send(updated_workers).unwrap();
+
+        let response = tokio::time::timeout(Duration::from_millis(250), queued)
+            .await
+            .expect("taint update should wake the pending request")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.best_worker.worker_id, 1);
+        assert_eq!(scheduler.pending_count(), 0);
 
         cancel_token.cancel();
     }

@@ -37,9 +37,7 @@ backend::trtllm:
   - changed-files:
       - any-glob-to-any-file:
           - components/src/dynamo/trtllm/**
-          - container/Dockerfile.trtllm
-          - container/deps/trtllm/**
-          - container/build_trtllm_wheel.sh
+          - container/templates/trtllm_runtime.Dockerfile
           - examples/backends/trtllm/**
 
 # Component labels

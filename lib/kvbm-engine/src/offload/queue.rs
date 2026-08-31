@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_queue::SegQueue;
 use dashmap::DashSet;
+use tokio::sync::Notify;
 
 use super::handle::TransferId;
 
@@ -53,6 +54,8 @@ pub struct CancellableQueue<T> {
     cancelled: DashSet<TransferId>,
     /// Approximate length for monitoring (not exact due to concurrent access)
     len: AtomicUsize,
+    /// Wakes consumers without waiting for a wall-clock poll interval.
+    notify: Notify,
 }
 
 impl<T> CancellableQueue<T> {
@@ -62,6 +65,7 @@ impl<T> CancellableQueue<T> {
             inner: SegQueue::new(),
             cancelled: DashSet::new(),
             len: AtomicUsize::new(0),
+            notify: Notify::new(),
         }
     }
 
@@ -77,7 +81,13 @@ impl<T> CancellableQueue<T> {
 
         self.inner.push(QueueItem::new(transfer_id, data));
         self.len.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
         true
+    }
+
+    /// Wait until a producer pushes new work or cancellation changes.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
     }
 
     /// Pop an item from the queue.
@@ -121,6 +131,7 @@ impl<T> CancellableQueue<T> {
     /// - Skipped by `pop_valid()` if dequeued
     pub fn mark_cancelled(&self, transfer_id: TransferId) {
         self.cancelled.insert(transfer_id);
+        self.notify.notify_waiters();
     }
 
     /// Check if a transfer has been cancelled.

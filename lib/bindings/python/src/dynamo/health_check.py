@@ -13,14 +13,19 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+# Single source of truth for the canary marker is `HEALTH_CHECK_KEY` in
+# `lib/backend-common/src/engine.rs`, re-exported via the PyO3 binding.
+# The literal fallback keeps `import dynamo.health_check` working in
+# environments that haven't rebuilt `_core` yet (CI pre-commit, stale
+# editable installs); the const must match the Rust definition.
+try:
+    from dynamo._core.backend import (  # type: ignore[import-not-found,import-untyped]
+        HEALTH_CHECK_KEY,
+    )
+except ImportError:
+    HEALTH_CHECK_KEY = "_HEALTH_CHECK"
 
-# Marker key set on health-check probe requests. Backend payloads layer it
-# onto their default_payload via a to_dict() override so the marker survives
-# DYN_HEALTH_CHECK_PAYLOAD overrides. Handlers may inspect it to branch
-# probe-specific behavior (e.g. skip a synthetic first-yield that would
-# mask a hung engine rank).
-HEALTH_CHECK_KEY = "_HEALTH_CHECK"
+logger = logging.getLogger(__name__)
 
 __all__ = ["HealthCheckPayload", "HEALTH_CHECK_KEY", "load_health_check_from_env"]
 

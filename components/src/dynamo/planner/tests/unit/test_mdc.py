@@ -46,55 +46,45 @@ class TestIsModelCard:
 
 
 class TestIsPrefillCard:
-    def test_int_prefill_bit_set(self):
-        # ModelType::Prefill = 1 << 4 = 16
-        assert is_prefill_card({"model_type": 16})
+    # The prefill role is carried by the card's `worker_type` field.
 
-    def test_int_prefill_bit_unset(self):
-        # Chat | Completions = 1 | 2 = 3
-        assert not is_prefill_card({"model_type": 3})
+    def test_worker_type_prefill(self):
+        assert is_prefill_card({"worker_type": "prefill"})
 
-    def test_int_prefill_combined_with_other_bits(self):
-        # Prefill | Chat = 16 | 1 = 17
-        assert is_prefill_card({"model_type": 17})
+    def test_worker_type_decode(self):
+        assert not is_prefill_card({"worker_type": "decode"})
 
-    def test_bitflags_dict_with_prefill(self):
-        assert is_prefill_card({"model_type": {"bits": 16}})
+    def test_worker_type_aggregated(self):
+        assert not is_prefill_card({"worker_type": "aggregated"})
 
-    def test_bitflags_dict_without_prefill(self):
-        assert not is_prefill_card({"model_type": {"bits": 2}})
+    def test_worker_type_case_insensitive(self):
+        assert is_prefill_card({"worker_type": "Prefill"})
+        assert is_prefill_card({"worker_type": "PREFILL"})
 
-    def test_string_prefill(self):
-        assert is_prefill_card({"model_type": "Prefill"})
-
-    def test_string_prefill_combined(self):
-        assert is_prefill_card({"model_type": "Prefill|Chat"})
-
-    def test_string_no_prefill(self):
-        assert not is_prefill_card({"model_type": "Chat|Completions"})
-
-    def test_missing_model_type_defaults_to_decode(self):
+    def test_missing_worker_type_defaults_to_not_prefill(self):
         assert not is_prefill_card({})
 
-    def test_unparseable_model_type_defaults_to_decode(self):
-        assert not is_prefill_card({"model_type": "not-a-thing"})
-        assert not is_prefill_card({"model_type": None})
+    def test_null_worker_type_is_not_prefill(self):
+        # A missing/legacy card serializes worker_type as null -> Python None.
+        assert not is_prefill_card({"worker_type": None})
 
 
 # ── worker_info_from_mdc ──────────────────────────────────────────
 
 
-def _card(**runtime_config_overrides) -> dict:
+def _card(worker_type: str = "decode", **runtime_config_overrides) -> dict:
     """Build a minimal realistic card_json payload."""
     return {
         "display_name": "meta-llama/Llama-3.1-8B",
-        "model_type": 2,  # Completions (not prefill)
+        "model_type": 2,  # Completions
+        "worker_type": worker_type,
         "kv_cache_block_size": 16,
-        "context_length": 8192,
+        "architectural_max_context_length": 32768,
         "runtime_config": {
             "total_kv_blocks": 1024,
             "max_num_seqs": 256,
             "max_num_batched_tokens": 8192,
+            "context_length": 8192,
             **runtime_config_overrides,
         },
     }
@@ -117,6 +107,37 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
+        entry = MdcEntry(
+            card_json=_card(
+                runtime_data={
+                    "spec_decode": {
+                        "nextn": 2,
+                        "method": "eagle3",
+                        "source": "backend_config",
+                    }
+                }
+            ),
+            component="backend",
+            endpoint="generate",
+        )
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.speculative_nextn == 2
+
+    @pytest.mark.parametrize(
+        "runtime_data",
+        [
+            {},
+            {"spec_decode": {}},
+            {"spec_decode": {"nextn": 0}},
+            {"spec_decode": {"nextn": "bad"}},
+        ],
+    )
+    def test_invalid_spec_decode_nextn_is_ignored(self, runtime_data):
+        entry = MdcEntry(card_json=_card(runtime_data=runtime_data))
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.speculative_nextn is None
+
     def test_missing_wrapper_fields_fall_back_to_defaults(self):
         entry = MdcEntry(card_json=_card())
         info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
@@ -126,7 +147,7 @@ class TestWorkerInfoFromMdc:
         assert info.k8s_name == "VllmDecodeWorker"
 
     def test_prefill_defaults(self):
-        entry = MdcEntry(card_json=_card())
+        entry = MdcEntry(card_json=_card(worker_type="prefill"))
         info = worker_info_from_mdc(entry, SubComponentType.PREFILL, backend="vllm")
         assert info.component_name == "prefill"
         assert info.k8s_name == "VllmPrefillWorker"
@@ -184,7 +205,7 @@ class TestWorkerInfoFromMdc:
         assert info.total_kv_blocks is None
         # Non-runtime_config fields still populate
         assert info.kv_cache_block_size == 16
-        assert info.context_length == 8192
+        assert info.context_length == 32768
 
     def test_non_dict_runtime_config_treated_as_missing(self):
         card = _card()
@@ -194,13 +215,17 @@ class TestWorkerInfoFromMdc:
         assert info.max_num_batched_tokens is None
         assert info.total_kv_blocks is None
         assert info.max_num_seqs is None
+        assert info.context_length == 32768
+
+    def test_runtime_context_zero_does_not_fall_back(self):
+        entry = MdcEntry(card_json=_card(context_length=0))
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.context_length == 0
 
     def test_empty_card_json(self):
         entry = MdcEntry(card_json={})
         info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
-        # Component/endpoint/k8s_name from defaults
         assert info.component_name == "backend"
-        # Runtime fields all None
         assert info.max_num_batched_tokens is None
         assert info.model_name is None
 
@@ -228,7 +253,7 @@ class TestSelectEntry:
     def test_selects_prefill_entry(self):
         entries = [
             MdcEntry(card_json={**_card(), "model_type": 2}, component="backend"),
-            MdcEntry(card_json={**_card(), "model_type": 16}, component="prefill"),
+            MdcEntry(card_json=_card(worker_type="prefill"), component="prefill"),
         ]
         hit = select_entry(entries, SubComponentType.PREFILL)
         assert hit is not None
@@ -237,7 +262,7 @@ class TestSelectEntry:
     def test_selects_decode_entry(self):
         entries = [
             MdcEntry(card_json={**_card(), "model_type": 2}, component="backend"),
-            MdcEntry(card_json={**_card(), "model_type": 16}, component="prefill"),
+            MdcEntry(card_json=_card(worker_type="prefill"), component="prefill"),
         ]
         hit = select_entry(entries, SubComponentType.DECODE)
         assert hit is not None

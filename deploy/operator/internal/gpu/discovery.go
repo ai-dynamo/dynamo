@@ -31,6 +31,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,6 +60,10 @@ const (
 	CloudProviderAKS                = "aks"
 	CloudProviderOther              = "other"
 	CloudProviderUnknown            = "unknown"
+	LabelNVIDIARDMAPresent          = "nvidia.com/rdma.present"
+	LabelNFDRDMAAvailable           = "feature.node.kubernetes.io/rdma.available"
+	LabelNFDNetworkSRIOVCapable     = "feature.node.kubernetes.io/network-sriov.capable"
+	labelValueTrue                  = "true"
 )
 
 // --- Normalization helpers ---
@@ -73,6 +78,7 @@ const (
 	tokenSXM       = "SXM"
 	tokenHGX       = "HGX"
 	tokenDGX       = "DGX"
+	tokenHBM3      = "HBM3"
 	tokenPCIE      = "PCIE"
 	formFactorSXM  = "sxm"
 	formFactorPCIe = "pcie"
@@ -81,10 +87,12 @@ const (
 // --- GPU model tokens ---
 const (
 	tokenGB200  = "GB200"
+	tokenGB10   = "GB10"
 	tokenB200   = "B200"
 	tokenH200   = "H200"
 	tokenH100   = "H100"
 	tokenA100   = "A100"
+	tokenA30    = "A30"
 	tokenL40S   = "L40S"
 	tokenL40    = "L40"
 	tokenL4     = "L4"
@@ -121,6 +129,7 @@ type gpuRule struct {
 var gpuRules = []gpuRule{
 	// Blackwell
 	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
 
 	// Hopper
@@ -129,6 +138,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -171,7 +181,7 @@ type gpuCacheEntry struct {
 }
 
 // GPUDiscoveryCache caches discovery results keyed by SKU filter.
-// Bounded by the GPUSKUType enum (≤7 values incl. empty for unfiltered).
+// Bounded by the GPUSKUType enum plus empty for unfiltered discovery.
 type GPUDiscoveryCache struct {
 	mu      sync.RWMutex
 	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
@@ -179,6 +189,7 @@ type GPUDiscoveryCache struct {
 
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
+	group   singleflight.Group
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
@@ -266,12 +277,52 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
 func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
 	if cache != nil {
 		if cached, ok := cache.Get(filterSKU); ok {
+			logger.V(1).Info("GPU discovery cache hit", "gpuSku", filterSKU)
 			return cached, nil
 		}
 	}
 
+	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.Get(filterSKU); ok {
+				logger.V(1).Info("GPU discovery cache hit after waiting for in-flight request", "gpuSku", filterSKU)
+				return cached, nil
+			}
+		}
+
+		logger.V(1).Info("GPU discovery cache miss; scraping DCGM exporter pods", "gpuSku", filterSKU)
+		info, err := g.discoverGPUsFromDCGMFilteredUncached(ctx, k8sClient, filterSKU)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.Set(filterSKU, info, 60*time.Second)
+		}
+		return info, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Shared {
+			logger.V(1).Info("GPU discovery shared in-flight result", "gpuSku", filterSKU)
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
+	}
+}
+
+func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -340,7 +391,9 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	}
 
 	// Count only nodes with the same SKU as the selected best node,
-	// and detect RDMA on matching nodes only.
+	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// cluster, this performs one Node read per matching node; that keeps a
+	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
@@ -358,7 +411,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 		}
 	}
 
-	// Detect InfiniBand presence
+	// InfiniBand operator pods are a stronger cluster-wide RDMA signal than
+	// generic node labels, so they intentionally refine the transport type.
 	ib := detectIBPods(ctx, k8sClient)
 	if ib {
 		rdmaType = "infiniband"
@@ -375,9 +429,6 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
-	if cache != nil {
-		cache.Set(filterSKU, bestNode, 60*time.Second)
-	}
 	return bestNode, nil
 }
 func buildDCGMEndpoint(podIP string) string {
@@ -796,22 +847,47 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes with the same SKU as the selected best node.
+	// Count only nodes with the same SKU as the selected best node,
+	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// cluster, this performs one Node read per matching node; that keeps a
+	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	var rdmaDetected bool
+	var rdmaType string
 	for _, n := range allNodes {
 		if n.sku == bestSKU {
 			nodesWithGPUs++
+			if !rdmaDetected {
+				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
+				if rdma {
+					rdmaDetected = true
+					rdmaType = rType
+				}
+			}
 		}
 	}
+
+	// InfiniBand operator pods are a stronger cluster-wide RDMA signal than
+	// generic node labels, so they intentionally refine the transport type.
+	ib := detectIBPods(ctx, k8sClient)
+	if ib {
+		rdmaType = "infiniband"
+		rdmaDetected = true
+	}
+
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.RDMAEnabled = rdmaDetected
+	bestNode.RDMAType = rdmaType
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestNode.GPUsPerNode,
 		"nodesWithGPUs", bestNode.NodesWithGPUs,
 		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
 		"model", bestNode.Model,
 		"vram", bestNode.VRAMPerGPU,
-		"system", bestNode.System)
+		"system", bestNode.System,
+		"rdma", bestNode.RDMAEnabled,
+		"rdmaType", bestNode.RDMAType)
 	return bestNode, nil
 }
 
@@ -878,6 +954,9 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
+		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+			continue
+		}
 		if strings.Contains(normalized, rule.token) {
 			if rule.singleSKU != "" {
 				return rule.singleSKU
@@ -911,6 +990,28 @@ func normalize(input string) string {
 	return strings.ReplaceAll(s, " ", "")
 }
 
+func containsModelToken(input, token string) bool {
+	upper := strings.ToUpper(input)
+	for start := 0; start < len(upper); {
+		idx := strings.Index(upper[start:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(token)
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isASCIIAlphaNum(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+}
+
 // detectFormFactor determines the GPU form factor (e.g. SXM or PCIe)
 // from a normalized product string.
 //
@@ -922,7 +1023,8 @@ func detectFormFactor(normalized string) string {
 	switch {
 	case strings.Contains(normalized, tokenSXM),
 		strings.Contains(normalized, tokenHGX),
-		strings.Contains(normalized, tokenDGX):
+		strings.Contains(normalized, tokenDGX),
+		strings.Contains(normalized, tokenHBM3):
 		return formFactorSXM
 	case strings.Contains(normalized, tokenPCIE):
 		return formFactorPCIe
@@ -1038,6 +1140,7 @@ func isAWSInstanceType(instanceType string) bool {
 // Detection logic:
 //   - Checks node labels:
 //   - "nvidia.com/rdma.present" = "true" → RDMA detected
+//   - "feature.node.kubernetes.io/rdma.available" = "true" → RDMA detected
 //   - "feature.node.kubernetes.io/network-sriov.capable" = "true" → SR-IOV detected
 //
 // Parameters:
@@ -1054,10 +1157,13 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 		return false, strNone
 	}
 	labels := node.Labels
-	if labels["nvidia.com/rdma.present"] == "true" {
+	if labels[LabelNVIDIARDMAPresent] == labelValueTrue {
 		return true, "rdma"
 	}
-	if labels["feature.node.kubernetes.io/network-sriov.capable"] == "true" {
+	if labels[LabelNFDRDMAAvailable] == labelValueTrue {
+		return true, "rdma"
+	}
+	if labels[LabelNFDNetworkSRIOVCapable] == labelValueTrue {
 		return true, "sriov"
 	}
 	return false, strNone

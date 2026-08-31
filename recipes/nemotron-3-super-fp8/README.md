@@ -20,7 +20,7 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** -- See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** -- See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GPU cluster** with 4x H100 80GB (or H200) GPUs
 3. **HuggingFace token** with access to NVIDIA models
 
@@ -117,7 +117,7 @@ Approximate (hash-based) routing is used for the vLLM and SGLang variants becaus
 
 ### vLLM
 - No connector flags needed in 1.0 (default is no connector)
-- Requires `--is-decode-worker` to skip KV event publisher setup
+- Omits `--kv-events-config` to keep KV event publishing disabled for approximate routing
 - Requires `--mamba-cache-mode align` to work around [vllm#34865](https://github.com/vllm-project/vllm/issues/34865): prefix caching with the default `mamba_cache_mode="all"` produces NaN logprobs and garbage tokens for Nemotron-H. Fixed in vLLM 0.17.0 ([vllm#34874](https://github.com/vllm-project/vllm/pull/34874)); the 1.0 container ships vLLM 0.16.0, so the workaround is needed.
 - **Attention backend**: On Hopper the default (`FLASH_ATTN`) is safe. On Blackwell, vLLM defaults to FlashInfer, which has a [stale NaN bug](https://github.com/vllm-project/vllm/issues/35138) with hybrid Mamba models ([vllm#35219](https://github.com/vllm-project/vllm/pull/35219)). For Blackwell, specify `--attention-backend FLASH_ATTN` or `--attention-backend TRITON_ATTN` to avoid the issue.
 - Sets `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm` to avoid a [hang during CUDA graph capture](https://github.com/vllm-project/vllm/issues/35772) with TP>1. This is the [new default](https://github.com/vllm-project/vllm/pull/35793) in later vLLM versions but must be set explicitly in 0.16.0.
@@ -136,17 +136,17 @@ Approximate (hash-based) routing is used for the vLLM and SGLang variants becaus
 
 ## Dynamo 0.9.1 Compatibility
 
-These recipes target Dynamo 1.0. To run on 0.9.1 containers, the following changes are needed:
+These recipes target Dynamo v1.0.0. To run on v0.9.1 containers, the following changes are needed:
 
 ### vLLM (`vllm-runtime:0.9.1`)
-- Change image tags from `:1.0.0` to `:0.9.1`
+- Change image tags from `:1.1.1` to `:0.9.1`
 - **Add** `--connector none` to worker args (required in 0.9.1 to disable nixl KV connector; rejected in 1.0)
 - Change `--dyn-reasoning-parser` from `nemotron_nano` to `deepseek_r1` (nemotron_nano reasoning parser is broken in 0.9.1)
 - `enable_thinking: false` will **not work** with `deepseek_r1` parser (response content goes to `reasoning_content`, `content` is null)
 - `--mamba-cache-mode align` is still needed (0.9.1 ships vLLM 0.14.1, also affected by [vllm#34865](https://github.com/vllm-project/vllm/issues/34865))
 
 ### TensorRT-LLM (`tensorrtllm-runtime:0.9.1`)
-- Change image tags from `:1.0.0` to `:0.9.1`
+- Change image tags from `:1.1.1` to `:0.9.1`
 - Change `--dyn-reasoning-parser` from `nemotron_nano` to `deepseek_r1`
 - Same `enable_thinking: false` caveat as vLLM above
 - Keep `enable_block_reuse: false` in `kv_cache_config` in the ConfigMap. This is still the effective setting for Nemotron-H on current TRT-LLM builds; omitting the field can appear to work only because TRT-LLM silently applies the same model default later.

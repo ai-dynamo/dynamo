@@ -3,13 +3,18 @@
 
 """Unit tests for AudioGenerationHandler."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 try:
-    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+    from dynamo.common.protocols.audio_protocol import (
+        AudioNvExt,
+        NvCreateAudioSpeechRequest,
+    )
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni import audio_handler as audio_handler_module
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -17,6 +22,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -158,6 +164,58 @@ class TestIsTtsModel:
         assert handler._is_tts_model() is False
 
 
+def test_tts_prompt_len_uses_prompt_embeds_builder(monkeypatch):
+    estimator = MagicMock(return_value=37)
+    monkeypatch.setattr(
+        audio_handler_module,
+        "Qwen3TTSPromptEmbedsBuilder",
+        SimpleNamespace(estimate_prompt_len_from_additional_information=estimator),
+    )
+
+    handler = _make_audio_handler()
+    tokenizer = MagicMock(return_value={"input_ids": [1, 2]})
+    handler._tts_tokenizer = tokenizer
+    codec_language_id = {"english": 1}
+    spk_is_dialect = {"vivian": "english"}
+    handler.engine_client.model_config.hf_config = SimpleNamespace(
+        talker_config=SimpleNamespace(
+            codec_language_id=codec_language_id,
+            spk_is_dialect=spk_is_dialect,
+        )
+    )
+    tts_params = {"task_type": ["CustomVoice"], "input": "hello"}
+
+    assert handler._estimate_tts_prompt_len(tts_params) == 37
+
+    kwargs = estimator.call_args.kwargs
+    assert kwargs["additional_information"] is tts_params
+    assert kwargs["task_type"] == "CustomVoice"
+    assert kwargs["codec_language_id"] is codec_language_id
+    assert kwargs["spk_is_dialect"] is spk_is_dialect
+    assert kwargs["tokenize_prompt"]("hello") == [1, 2]
+    tokenizer.assert_called_once_with("hello", padding=False)
+
+
+def test_tts_prompt_len_falls_back_when_builder_is_unavailable(monkeypatch):
+    monkeypatch.setattr(audio_handler_module, "Qwen3TTSPromptEmbedsBuilder", None)
+
+    assert _make_audio_handler()._estimate_tts_prompt_len({}) == 2048
+
+
+def test_tts_prompt_len_propagates_estimator_errors(monkeypatch):
+    estimator = MagicMock(side_effect=RuntimeError("estimator failed"))
+    monkeypatch.setattr(
+        audio_handler_module,
+        "Qwen3TTSPromptEmbedsBuilder",
+        SimpleNamespace(estimate_prompt_len_from_additional_information=estimator),
+    )
+    handler = _make_audio_handler()
+    handler._tts_tokenizer = MagicMock(return_value={"input_ids": [1, 2]})
+
+    with pytest.raises(RuntimeError, match="estimator failed"):
+        handler._estimate_tts_prompt_len({})
+
+
 class TestEngineInputsFromAudio:
     """Tests for build_engine_inputs."""
 
@@ -169,11 +227,27 @@ class TestEngineInputsFromAudio:
         stage.model_stage = "diffusion"
         handler.engine_client.stage_list = [stage]
 
-        req = NvCreateAudioSpeechRequest(input="Hello world")
+        req = NvCreateAudioSpeechRequest(
+            input="Hello world",
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
         assert inputs.sampling_params_list is None
+        assert inputs.stream_audio is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_frontend_gets_complete_response(self):
+        """Workers aggregate audio unless the frontend advertises that it accepts chunks."""
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hello")
+        )
+
+        assert inputs.stream_audio is False
 
     @pytest.mark.asyncio
     async def test_empty_input_rejected(self):
@@ -187,6 +261,33 @@ class TestEngineInputsFromAudio:
         """Speed from request is stored in EngineInputs."""
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None  # non-TTS path
-        req = NvCreateAudioSpeechRequest(input="hello", speed=2.0)
+        req = NvCreateAudioSpeechRequest(
+            input="hello",
+            speed=2.0,
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
+        assert inputs.stream_audio is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_args",
+        [
+            {"response_format": "mp3"},
+            {"response_format": "pcm", "data_source": "url"},
+        ],
+    )
+    async def test_non_streaming_eligibility(self, request_args):
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(
+                input="hello",
+                nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+                **request_args,
+            )
+        )
+
+        assert inputs.stream_audio is False

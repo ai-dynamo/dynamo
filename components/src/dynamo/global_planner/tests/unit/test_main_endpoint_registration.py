@@ -62,6 +62,8 @@ async def test_main_registers_both_endpoints_concurrently():
     args.managed_namespaces = None
     args.no_operation = False
     args.max_total_gpus = -1
+    args.min_total_gpus = -1
+    args.intent_cache_ttl_seconds = 120.0
 
     with patch.dict(
         os.environ, {"DYN_NAMESPACE": "gp-ns", "POD_NAMESPACE": "default"}

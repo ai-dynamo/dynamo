@@ -28,6 +28,19 @@ class EngineResponseError(Exception):
     pass
 
 
+class ResponseValidationError(EngineResponseError):
+    """Validation/assertion failure during process_response.
+
+    Subset of EngineResponseError raised only when payload.process_response
+    asserts on response content (the case the in-process retry was designed
+    for). Status (non-200) and handler errors continue to raise the parent
+    EngineResponseError so they surface immediately and aren't masked by
+    payload.max_attempts.
+    """
+
+    pass
+
+
 class EngineLogError(Exception):
     """Custom exception for engine log validation errors"""
 
@@ -51,6 +64,12 @@ class EngineConfig:
     timeout: int = 600
     delayed_start: int = 0
     health_check_workers: bool = False
+    # How many worker system ports (DYN_SYSTEM_PORT1..N) the launch script
+    # actually binds. The port fixture may allocate more than the script uses
+    # (num_system_ports is sized for the largest config in the module), so the
+    # health check must not probe beyond this count.
+    health_check_worker_count: int = 2
+    health_check_funcs: List[Any] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
 
@@ -64,6 +83,33 @@ class EngineConfig:
 
 class EngineProcess(ManagedProcess):
     """Base class for LLM engine processes (vLLM, TRT-LLM, etc.)"""
+
+    @staticmethod
+    def worker_health_check_urls(env: Dict[str, str], count: int) -> List[str]:
+        """Build /health URLs for the worker system ports a launch script binds.
+
+        The dynamic-port fixture may inject more DYN_SYSTEM_PORT* env vars than
+        the script uses (num_system_ports is sized for the largest config in
+        the module), so probe exactly DYN_SYSTEM_PORT1..count. A missing or
+        malformed value inside the declared range is a configuration error —
+        skipping it would silently weaken the readiness gate.
+        """
+        if count < 1:
+            raise ValueError(
+                "health_check_worker_count must be >= 1 when "
+                f"health_check_workers is enabled, got {count}"
+            )
+        urls = []
+        for idx in range(1, count + 1):
+            key = f"DYN_SYSTEM_PORT{idx}"
+            val = env.get(key, "")
+            if not val.isdigit():
+                raise ValueError(
+                    f"health_check_workers declares {count} worker(s) but "
+                    f"{key} is not a valid port: {val!r}"
+                )
+            urls.append(f"http://localhost:{val}/health")
+        return urls
 
     def check_response(
         self,
@@ -110,7 +156,7 @@ class EngineProcess(ManagedProcess):
                 else content,
             )
         except AssertionError as e:
-            raise EngineResponseError(str(e))
+            raise ResponseValidationError(str(e))
         except Exception as e:
             raise EngineResponseError(f"Failed to handle response: {e}")
 
@@ -192,14 +238,21 @@ class EngineProcess(ManagedProcess):
         # fixtures for ALL tests, so we gate on health_check_workers (only
         # set by same-gpu disagg configs) to avoid health-checking ports
         # that don't serve /health in regular multi-GPU tests.
+        #
+        # Only probe DYN_SYSTEM_PORT1..health_check_worker_count: the fixture
+        # allocates num_system_ports for the largest config in the module
+        # (e.g. 4 for disaggregated_router), so a greedy scan of every
+        # DYN_SYSTEM_PORT* var would wait forever on ports no process binds.
         delayed = config.delayed_start
         worker_checks: list[tuple] = []
         if config.health_check_workers:
-            for key, val in sorted(env.items()):
-                if key.startswith("DYN_SYSTEM_PORT") and val.isdigit():
-                    worker_checks.append((f"http://localhost:{val}/health", None))
-            if worker_checks:
-                delayed = 0
+            worker_checks = [
+                (url, None)
+                for url in cls.worker_health_check_urls(
+                    env, config.health_check_worker_count
+                )
+            ]
+            delayed = 0
 
         health_urls = worker_checks + frontend_checks
 
@@ -211,6 +264,7 @@ class EngineProcess(ManagedProcess):
             working_dir=config.directory,
             health_check_ports=[],
             health_check_urls=health_urls,
+            health_check_funcs=list(config.health_check_funcs),
             delayed_start=delayed,
             # Must stay False: command[0] is "bash", so True would kill every
             # bash process system-wide.  Stale cleanup relies on stragglers list

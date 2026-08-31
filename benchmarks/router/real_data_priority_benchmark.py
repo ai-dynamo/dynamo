@@ -72,6 +72,27 @@ def offset_hash_ids(tier_requests):
     return shifted
 
 
+def tag_requests_with_priority(requests, priority):
+    """Return request copies with nvext.agent_hints.priority merged in."""
+    tagged_requests = []
+    for request in requests:
+        tagged_request = copy.deepcopy(request)
+
+        nvext = tagged_request.get("nvext")
+        if not isinstance(nvext, dict):
+            nvext = {}
+            tagged_request["nvext"] = nvext
+
+        agent_hints = nvext.get("agent_hints")
+        if not isinstance(agent_hints, dict):
+            agent_hints = {}
+            nvext["agent_hints"] = agent_hints
+
+        agent_hints["priority"] = priority
+        tagged_requests.append(tagged_request)
+    return tagged_requests
+
+
 def write_trace_file(requests, path):
     """Write a list of request dicts to a JSONL file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -95,7 +116,10 @@ def run_concurrent_streams(
         os.makedirs(tier_dir, exist_ok=True)
 
         trace_path = os.path.join(tier_dir, "trace.jsonl")
-        write_trace_file(tier_requests[tier], trace_path)
+        requests = tier_requests[tier]
+        if tag_priority:
+            requests = tag_requests_with_priority(requests, priority)
+        write_trace_file(requests, trace_path)
 
         artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
         os.makedirs(artifact_dir, exist_ok=True)
@@ -110,13 +134,6 @@ def run_concurrent_streams(
             args.url,
         )
         cmd.extend(["--log-level", "WARNING", "--ui-type", "none"])
-        if tag_priority:
-            cmd.extend(
-                [
-                    "--extra-inputs",
-                    json.dumps({"nvext": {"agent_hints": {"priority": priority}}}),
-                ]
-            )
 
         log_path = os.path.join(tier_dir, "aiperf.log")
         log_file = open(log_path, "w")

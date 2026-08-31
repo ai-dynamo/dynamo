@@ -30,6 +30,8 @@ def mock_handler():
 
     handler = MockHandler()
     handler.model_config = Mock(enable_prompt_embeds=True)
+    handler.model_config.dtype = torch.float32
+    handler.model_config.get_hidden_size.return_value = 4096
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
@@ -59,6 +61,7 @@ class TestPromptEmbedsDecode:
         """Test decoding embeddings with various shapes and dtypes."""
         embeddings = torch.randn(*shape, dtype=dtype)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = shape[1]
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
@@ -96,6 +99,28 @@ class TestPromptEmbedsDecode:
         with pytest.raises(ValueError, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
 
+    def test_missing_model_config_is_server_error(self, mock_handler):
+        mock_handler.model_config = None
+
+        with pytest.raises(RuntimeError, match="ModelConfig is unavailable"):
+            mock_handler._decode_prompt_embeds("unused")
+
+    @pytest.mark.parametrize(
+        "error",
+        [MemoryError("host allocation failed"), torch.OutOfMemoryError("OOM")],
+        ids=["memory-error", "torch-oom"],
+    )
+    def test_decode_resource_errors_propagate(self, mock_handler, monkeypatch, error):
+        monkeypatch.setattr(
+            "dynamo.vllm.handlers.safe_load_prompt_embeds",
+            Mock(side_effect=error),
+        )
+
+        with pytest.raises(type(error)) as exc_info:
+            mock_handler._decode_prompt_embeds("unused")
+
+        assert exc_info.value is error
+
     def test_decode_numpy_format_rejected(self, mock_handler):
         """Test that NumPy format is rejected (PyTorch format required)."""
         embeddings = np.random.randn(10, 768).astype(np.float32)
@@ -130,12 +155,13 @@ class TestEmbeddingsDataFormats:
     @pytest.mark.parametrize("size", [128, 384, 768, 1024, 2048, 4096])
     def test_various_embedding_sizes(self, mock_handler, size):
         """Test decoding embeddings of various sizes."""
-        embeddings = torch.randn(size, dtype=torch.float32)
+        embeddings = torch.randn(1, size, dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = size
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
-        assert result.shape == (size,), f"Failed for size {size}"
+        assert result.shape == (1, size), f"Failed for size {size}"
         torch.testing.assert_close(result, embeddings, rtol=1e-5, atol=1e-5)
 
     @pytest.mark.parametrize(
@@ -151,8 +177,9 @@ class TestEmbeddingsDataFormats:
     )
     def test_embedding_value_ranges_preserved(self, mock_handler, values):
         """Test that various value ranges are preserved with float32 precision."""
-        embeddings = torch.tensor(values, dtype=torch.float32)
+        embeddings = torch.tensor([values], dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = len(values)
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
@@ -163,23 +190,17 @@ class TestUsageStatistics:
     """Tests for usage statistics calculation."""
 
     @pytest.mark.parametrize(
-        "prompt_token_ids,embedding_seq_len,completion_tokens,expected_prompt,expected_total",
+        "prompt_token_ids,completion_tokens,expected_prompt,expected_total",
         [
-            # Embeddings: use embedding_sequence_length
-            ([], 10, 5, 10, 15),
-            # Text: use len(prompt_token_ids)
-            ([1, 2, 3, 4, 5, 6, 7], None, 3, 7, 10),
-            # Embeddings override token_ids
-            ([1, 2, 3], 20, 2, 20, 22),
-            # Zero sequence length edge case
-            ([], 0, 2, 0, 2),
+            ([0] * 10, 5, 10, 15),
+            ([1, 2, 3, 4, 5, 6, 7], 3, 7, 10),
+            ([], 2, None, None),
         ],
-        ids=["embeddings", "text", "embeddings-override", "zero-seq-len"],
+        ids=["embeddings", "text", "empty-token-ids"],
     )
     def test_build_completion_usage(
         self,
         prompt_token_ids,
-        embedding_seq_len,
         completion_tokens,
         expected_prompt,
         expected_total,
@@ -190,9 +211,7 @@ class TestUsageStatistics:
         mock_output.outputs = [Mock(token_ids=list(range(completion_tokens)))]
         mock_output.num_cached_tokens = 0
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=embedding_seq_len
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] == expected_prompt
         assert result["completion_tokens"] == completion_tokens
@@ -205,25 +224,31 @@ class TestUsageStatistics:
         mock_output.outputs = [Mock(token_ids=[1, 2, 3])]
         mock_output.num_cached_tokens = 0
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=None
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] is None
         assert result["completion_tokens"] == 3
         assert result["total_tokens"] is None
 
-    def test_build_completion_usage_with_cached_tokens(self):
-        """Test that cached tokens are reported in prompt_tokens_details."""
+    @pytest.mark.parametrize(
+        ("num_cached_tokens", "expected_prompt_tokens_details"),
+        [
+            (None, None),
+            (0, {"cached_tokens": 0}),
+            (3, {"cached_tokens": 3}),
+        ],
+    )
+    def test_build_completion_usage_with_cached_tokens(
+        self, num_cached_tokens, expected_prompt_tokens_details
+    ):
+        """Test that cached-token availability and counts remain distinct."""
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4, 5]
         mock_output.outputs = [Mock(token_ids=[6, 7])]
-        mock_output.num_cached_tokens = 3
+        mock_output.num_cached_tokens = num_cached_tokens
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=None
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
-        assert result["prompt_tokens_details"] == {"cached_tokens": 3}
+        assert result["prompt_tokens_details"] == expected_prompt_tokens_details

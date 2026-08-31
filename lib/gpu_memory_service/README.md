@@ -65,7 +65,7 @@ The GMS server runs as an independent process that manages GPU memory without ev
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and eagerly exports one shareable file descriptor (`cuMemExportToShareableHandle`) per allocation. Later export RPCs `dup()` that cached FD instead of calling back into CUDA again. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`). It treats shareable file descriptors as ephemeral client connection handles: each export RPC calls `cuMemExportToShareableHandle` lazily and transfers the resulting FD to that client instead of retaining a server-owned FD. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
@@ -106,15 +106,14 @@ sequenceDiagram
         C->>S: AllocateRequest(size, tag)
         S->>GPU: cuMemCreate(size)
         GPU-->>S: handle
-        S->>GPU: cuMemExportToShareableHandle(handle)
-        GPU-->>S: cached fd
         S-->>C: AllocateResponse(allocation_id)
     end
 
     %% Export/Import (Both Writer and Reader)
     Note over C,GPU: Both Writer and Reader: Export and map
     C->>S: ExportAllocationRequest(allocation_id)
-    S->>S: dup(cached fd)
+    S->>GPU: cuMemExportToShareableHandle(handle)
+    GPU-->>S: fresh fd
     S-->>C: Response + fd (via SCM_RIGHTS)
 
     C->>GPU: cuMemImportFromShareableHandle(fd)
@@ -579,14 +578,14 @@ The integration patches `torch_memory_saver` to route both weight and KV-cache o
 - Other tags are not supported in GMS mode
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
-### Shadow Engine Failover (Sleep / Wake)
+### Shadow Engine Failover (Pause / Resume)
 
 Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
 
-- **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
+- **vLLM**: `sleep` / `wake_up` (via `/engine/control/sleep` and `/engine/control/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
-Under the hood, sleeping calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
+Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Resuming is tag-specific:
 
 - **weights**: `connect(RO)` + `remap_all_vas()`
 - **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
@@ -604,3 +603,11 @@ To force read-only mode (import only, never load from disk), pass `gms_read_only
 ```
 
 This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+
+To bound how long a restored engine waits for the published weights layout before remapping, pass `gms_ro_connect_timeout_ms`:
+
+```bash
+--model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
+```
+
+The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.

@@ -17,7 +17,7 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"llava-v1.6-mistral-7b-hf"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/decode.yaml"}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
-export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
+export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
@@ -57,7 +57,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
   --extra-engine-args "$PD_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --encode-endpoint "$ENCODE_ENDPOINT" \
-  --disaggregation-mode prefill_and_decode \
+  --disaggregation-mode pd \
   --custom-jinja-template "$CUSTOM_TEMPLATE" \
   "${EXTRA_PD_ARGS[@]}" &
 PD_PID_1=$!

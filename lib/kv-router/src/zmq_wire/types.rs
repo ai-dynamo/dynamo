@@ -1,0 +1,241 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::protocols::BlockExtraInfo;
+
+use super::filter::{KvCacheEventMetadata, KvCacheSpecKind};
+
+#[derive(Debug, Serialize)]
+pub struct KvEventBatch {
+    pub ts: f64,
+    pub events: Vec<RawKvEvent>,
+    #[serde(alias = "dp_rank")]
+    pub data_parallel_rank: Option<i32>,
+}
+
+impl<'de> Deserialize<'de> for KvEventBatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize from array format: [timestamp, [events], data_parallel_rank]
+        let arr: (f64, Vec<RawKvEvent>, Option<i32>) = Deserialize::deserialize(deserializer)?;
+        Ok(KvEventBatch {
+            ts: arr.0,
+            events: arr.1,
+            data_parallel_rank: arr.2,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(untagged)]
+pub enum BlockHashValue {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl BlockHashValue {
+    pub fn into_u64(self) -> u64 {
+        match self {
+            BlockHashValue::Signed(v) => v.cast_unsigned(),
+            BlockHashValue::Unsigned(v) => v,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum KvTokenIds {
+    Single(Vec<u32>),
+    Bigram(Vec<(u32, u32)>),
+}
+
+/// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
+/// legacy events; vLLM never infers it. `Unknown` captures any future value so
+/// deserialization stays forward-compatible and unrecognized values fail closed
+/// downstream.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Locality {
+    Local,
+    Remote,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Ownership domain of one vLLM-enriched placement event.
+///
+/// Missing on the wire is deliberately interpreted as `Framework`; an
+/// explicit unrecognized value remains distinguishable at the state-agent
+/// boundary so CacheOwner routing can fail closed without failing the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvEventOwnership {
+    Framework,
+    Kvcr,
+}
+
+impl KvEventOwnership {
+    pub fn from_wire(value: Option<&str>) -> Result<Self, &str> {
+        match value {
+            None => Ok(Self::Framework),
+            Some("kvcr") => Ok(Self::Kvcr),
+            Some(unknown) => Err(unknown),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
+pub enum RawKvEvent {
+    BlockStored {
+        /// Block hashes may be emitted as either signed or unsigned 64-bit values.
+        /// We normalize them to `u64` while deserializing to support both producers.
+        block_hashes: Vec<BlockHashValue>,
+        parent_block_hash: Option<BlockHashValue>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
+        /// LoRA adapter name for adapter-aware block hashing
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+        /// Cache namespace for salted block hashing. The wire field remains `cache_salt`
+        /// to match backend event schemas.
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<String>,
+        /// Multimodal extra info for each block (length should match block_hashes)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_eagle: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_idx: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_kind: Option<KvCacheSpecKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ownership: Option<String>,
+    },
+    BlockRemoved {
+        block_hashes: Vec<BlockHashValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_idx: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_kind: Option<KvCacheSpecKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ownership: Option<String>,
+    },
+    AllBlocksCleared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ownership: Option<String>,
+    },
+    Ignored,
+}
+
+impl RawKvEvent {
+    pub fn event_type_label(&self) -> &'static str {
+        match self {
+            Self::BlockStored { .. } => "stored",
+            Self::BlockRemoved { .. } => "removed",
+            Self::AllBlocksCleared { .. } => "cleared",
+            Self::Ignored => "ignored",
+        }
+    }
+
+    pub fn is_ignored(&self) -> bool {
+        matches!(self, Self::Ignored)
+    }
+
+    /// Wire `medium` string for store/remove events, if present. Lets the
+    /// normalizer and consolidator ingress gate on the storage tier without
+    /// re-matching every variant.
+    pub fn medium(&self) -> Option<&str> {
+        match self {
+            Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
+                medium.as_deref()
+            }
+            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
+    }
+
+    /// Per-event locality, if present. Absent or `Local` is worker-local;
+    /// `Remote` or an unrecognized value is treated as non-local.
+    pub fn locality(&self) -> Option<Locality> {
+        match self {
+            Self::BlockStored { locality, .. } | Self::BlockRemoved { locality, .. } => *locality,
+            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
+    }
+
+    pub fn ownership(&self) -> Result<KvEventOwnership, &str> {
+        KvEventOwnership::from_wire(self.ownership_wire())
+    }
+
+    pub fn ownership_wire(&self) -> Option<&str> {
+        match self {
+            Self::BlockStored { ownership, .. }
+            | Self::BlockRemoved { ownership, .. }
+            | Self::AllBlocksCleared { ownership } => ownership.as_deref(),
+            Self::Ignored => None,
+        }
+    }
+
+    pub fn block_size(&self) -> Option<usize> {
+        match self {
+            Self::BlockStored { block_size, .. } => Some(*block_size),
+            Self::BlockRemoved { .. } | Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
+    }
+
+    pub(crate) fn metadata(&self) -> KvCacheEventMetadata {
+        match self {
+            Self::BlockStored {
+                group_idx,
+                kv_cache_spec_kind,
+                kv_cache_spec_sliding_window,
+                ..
+            }
+            | Self::BlockRemoved {
+                group_idx,
+                kv_cache_spec_kind,
+                kv_cache_spec_sliding_window,
+                ..
+            } => KvCacheEventMetadata {
+                group_idx: *group_idx,
+                kv_cache_spec_kind: *kv_cache_spec_kind,
+                kv_cache_spec_sliding_window: *kv_cache_spec_sliding_window,
+            },
+            Self::AllBlocksCleared { .. } | Self::Ignored => KvCacheEventMetadata::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ExtraKeyItem {
+    Hash(String),
+    HashWithSignedOffset((String, i64)),
+    HashWithUnsignedOffset((String, u64)),
+    Bytes(Vec<u8>),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+    Bool(bool),
+}

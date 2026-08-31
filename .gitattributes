@@ -1,15 +1,22 @@
 *                   text  eol=lf
 *.sln               text  eol=crlf
+*.[Gg][Ii][Ff]      binary
 *.[Ii][Cc][Oo]      binary
 *.[Jj][Pp][Ee][Gg]  binary
 *.[Jj][Pp][Gg]      binary
 *.[Pp][Dd][Ff]      binary
 *.[Pp][Nn][Gg]      binary
+*.[Ww][Ee][Bb][Pp]  binary
 *.[Zz][Ii][Pp]      binary
 *.[Tt][Gg][Zz]      binary
 *.[Gg][Zz]          binary
 *.fatbin            binary
+*.mp4               binary
+*.woff2             binary -eol
 
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored
 lib/llm/tests/snapshots/** linguist-vendored
+
+# Preserve the released vLLM proto byte-for-byte, including its trailing blank line.
+lib/backend/vllm-sidecar/proto/vllm_grpc.proto -text diff whitespace=-blank-at-eof

@@ -11,17 +11,27 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClassifyPayload,
+    ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    ElasticEPScalePayload,
     EmbeddingPayload,
+    GuidedDecodingChatPayload,
+    ImagesPayload,
+    ImageTokenMetricsPayload,
+    KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
+    PoolingPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
+    RouterNvextChatPayload,
     SGLangMetricsPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
+from tests.utils.router_nvext import RouterNvextExpectation, router_nvext_extra_body
 
 # Common default text prompt used across tests
 TEXT_PROMPT = "Tell me a knock knock joke about AI."
@@ -37,6 +47,17 @@ will take you through treacherous deserts, enchanted forests, and across perilou
 Your Task: Character Background: Develop a detailed background for your character. Describe their motivations \
 for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends."""
 
+# Deliberately distinct from other cache-test prompts and long enough to span
+# multiple vLLM cache blocks.
+CLEAR_KV_BLOCKS_PROMPT = """This is the vLLM block-clearing verification prompt, identified by the unique \
+phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
+catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
+records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
+astronomer, systems engineer, data archivist, and safety coordinator. Explain why repeatable procedures matter when a \
+faint signal could be caused by weather, hardware drift, software timing, or a genuine astronomical event. Then give a \
+brief account of the team's morning review, including how they preserve raw measurements, annotate anomalies, and plan \
+the next observation window. Keep the answer factual and concise while retaining the cobalt-orchid-riverstone marker."""
+
 
 def chat_payload_default(
     repeat_count: int = 3,
@@ -45,24 +66,38 @@ def chat_payload_default(
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
+    extra_body: Optional[Dict[str, Any]] = None,
+    router_nvext_expectation: RouterNvextExpectation | None = None,
 ) -> ChatPayload:
-    return ChatPayload(
-        body={
-            "messages": [
-                {
-                    "role": "user",
-                    "content": TEXT_PROMPT,
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        },
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": TEXT_PROMPT,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    if extra_body:
+        body.update(extra_body)
+
+    common_args = {
+        "body": body,
+        "repeat_count": repeat_count,
+        "expected_log": expected_log or [],
         # Accept any of these keywords in the response (case-insensitive)
-        expected_response=expected_response
+        "expected_response": expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    }
+    if router_nvext_expectation:
+        return RouterNvextChatPayload(
+            **common_args,
+            router_nvext_expectation=router_nvext_expectation,
+        )
+    return ChatPayload(
+        **common_args,
     )
 
 
@@ -73,6 +108,8 @@ def cached_tokens_chat_payload(
     max_tokens: int = 100,
     temperature: float = 0.0,
     min_cached_tokens: int = 64,
+    extra_body: Optional[Dict[str, Any]] = None,
+    router_nvext_expectation: RouterNvextExpectation | None = None,
 ) -> CachedTokensChatPayload:
     """Create a chat payload that validates cached tokens in usage field.
 
@@ -94,23 +131,110 @@ def cached_tokens_chat_payload(
     Returns:
         CachedTokensChatPayload configured for testing prefix caching
     """
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": LONG_PROMPT_FOR_CACHING,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return CachedTokensChatPayload(
-        body={
-            "messages": [
-                {
-                    "role": "user",
-                    "content": LONG_PROMPT_FOR_CACHING,
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
+        router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def clear_kv_blocks_payload(
+    max_tokens: int = 16,
+    timeout: int = 60,
+) -> ClearKVBlocksPayload:
+    """Create an admin-then-infer payload for vLLM cache clearing."""
+    return ClearKVBlocksPayload(
+        body={
+            "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        timeout=timeout,
+    )
+
+
+def router_selection_chat_payload_default(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 1000,
+    temperature: float = 0.0,
+    stream: bool = False,
+) -> ChatPayload:
+    return chat_payload_default(
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        expected_log=expected_log,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
+        extra_body=router_nvext_extra_body(["worker_id"]),
+        router_nvext_expectation=RouterNvextExpectation(worker_id=True),
+    )
+
+
+def router_cached_tokens_chat_payload(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+    min_cached_tokens: int = 64,
+) -> CachedTokensChatPayload:
+    return cached_tokens_chat_payload(
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        min_cached_tokens=min_cached_tokens,
+    )
+
+
+def guided_decoding_chat_payload_default(
+    repeat_count: int = 1,
+    max_tokens: int = 32,
+    temperature: float = 0.0,
+) -> GuidedDecodingChatPayload:
+    """Create a json_schema guided decoding chat payload."""
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    return GuidedDecodingChatPayload(
+        body={
+            "messages": [
+                {"role": "user", "content": "What is 2+2? Return only JSON."},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer_schema", "schema": schema},
+            },
+        },
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=[],
+        required_keys=["answer"],
     )
 
 
@@ -185,6 +309,7 @@ def metric_payload_default(
     expected_log: Optional[List[str]] = None,
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
+    check_lifecycle_gauges: bool = False,
 ) -> MetricsPayload:
     """Create a metrics payload for the specified backend.
 
@@ -194,6 +319,10 @@ def metric_payload_default(
         expected_log: Expected log messages
         backend: Backend type ('vllm', 'sglang', 'trtllm', 'lmcache')
         port: Port to use for metrics endpoint
+        check_lifecycle_gauges: Assert the unified-only lifecycle gauges
+            (``cleanup_time_seconds``, ``drain_time_seconds``,
+            ``kv_cache_hit_rate``) are registered. Default False because
+            legacy entry points don't emit them.
 
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
@@ -205,6 +334,7 @@ def metric_payload_default(
         "expected_response": [],
         "min_num_requests": min_num_requests,
         "port": port,
+        "check_lifecycle_gauges": check_lifecycle_gauges,
     }
 
     # Return backend-specific payload class
@@ -221,6 +351,42 @@ def metric_payload_default(
         return MetricsPayload(**common_args)
 
 
+def image_token_metrics_payload(
+    min_num_requests: int = 1,
+    expected_log: Optional[List[str]] = None,
+) -> ImageTokenMetricsPayload:
+    """Create a frontend image-token aggregate metrics check."""
+    return ImageTokenMetricsPayload(
+        body={},
+        repeat_count=1,
+        expected_log=expected_log or [],
+        expected_response=[],
+        min_num_requests=min_num_requests,
+    )
+
+
+def kv_events_metrics_payload(
+    *,
+    event_type: str = "stored",
+    min_received: int = 1,
+    min_accepted: int = 1,
+    port: int = DefaultPort.SYSTEM1.value,
+    system_ports: Optional[List[int]] = None,
+    settle_seconds: float = 0.5,
+) -> KvEventMetricsPayload:
+    return KvEventMetricsPayload(
+        body={},
+        expected_response=[],
+        expected_log=[],
+        port=port,
+        system_ports=system_ports or [],
+        event_type=event_type,
+        min_received=min_received,
+        min_accepted=min_accepted,
+        settle_seconds=settle_seconds,
+    )
+
+
 def chat_payload(
     content: Union[str, List[Dict[str, Any]]],
     repeat_count: int = 1,
@@ -232,6 +398,9 @@ def chat_payload(
     logprobs: bool = False,
     top_logprobs: Optional[int] = None,
     extra_body: Optional[Dict[str, Any]] = None,
+    expected_num_choices: Optional[int] = None,
+    max_attempts: int = 1,
+    timeout: int = 60,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -263,6 +432,9 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
+            max_attempts=max_attempts,
+            timeout=timeout,
         )
     else:
         return ChatPayload(
@@ -270,6 +442,9 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
+            max_attempts=max_attempts,
+            timeout=timeout,
         )
 
 
@@ -310,11 +485,15 @@ def embedding_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
+    body: Dict[str, Any] = {
+        "input": ["The sky is blue.", "Machine learning is fascinating."],
+    }
+    if extra_body:
+        body.update(extra_body)
     return EmbeddingPayload(
-        body={
-            "input": ["The sky is blue.", "Machine learning is fascinating."],
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
@@ -327,6 +506,7 @@ def embedding_payload(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
     # Normalize input to list for consistent processing
     if isinstance(input_text, str):
@@ -336,14 +516,76 @@ def embedding_payload(
         input_list = input_text
         expected_count = len(input_text)
 
+    body: Dict[str, Any] = {
+        "input": input_list,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return EmbeddingPayload(
-        body={
-            "input": input_list,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
         or [f"Generated {expected_count} embeddings with dimension"],
+    )
+
+
+PoolingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+def _pooling_input_count(input_data: PoolingInput) -> int:
+    if isinstance(input_data, str):
+        return 1
+    if input_data and isinstance(input_data[0], int):
+        return 1
+    return len(input_data)
+
+
+def classify_payload(
+    input_data: PoolingInput,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ClassifyPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return ClassifyPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Classified {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
+    )
+
+
+def pooling_payload(
+    input_data: PoolingInput,
+    task: Optional[str] = None,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> PoolingPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if task is not None:
+        body["task"] = task
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return PoolingPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Pooled {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
     )
 
 
@@ -404,6 +646,49 @@ def make_completions_health_check(port: int, model: str):
             return False
 
     return _check_completions_endpoint
+
+
+def images_payload_default(
+    repeat_count: int = 1,
+    timeout: int = 60,
+) -> ImagesPayload:
+    """Default image-generation request for the raw-media (DiffusionEngine)
+    path. The sample diffusion engine returns a fixed 1x1 PNG whose base64
+    begins with the PNG signature ``iVBOR`` — the validation anchor."""
+    return ImagesPayload(
+        body={
+            "prompt": "a red balloon over green hills",
+            "n": 1,
+            "response_format": "b64_json",
+        },
+        expected_response=["iVBOR"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        timeout=timeout,
+    )
+
+
+def make_images_health_check(port: int, model: str):
+    def _check_images_endpoint(remaining_timeout: float = 30.0) -> bool:
+        payload = images_payload_default(repeat_count=1).with_model(model)
+        payload.expected_response = []
+        payload.port = port
+        try:
+            resp = send_request(
+                payload.url(),
+                payload.body,
+                timeout=min(max(1.0, remaining_timeout), 5.0),
+                method=payload.method,
+                log_level=10,
+            )
+            out = payload.response_handler(resp)
+            if not out:
+                raise ValueError("")
+            return True
+        except Exception:
+            return False
+
+    return _check_images_endpoint
 
 
 def chat_payload_with_logprobs(
@@ -585,4 +870,28 @@ def anthropic_messages_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def elastic_ep_scale_payload(
+    new_data_parallel_size: int,
+    content: str = TEXT_PROMPT,
+    max_tokens: int = 64,
+    expected_response: Optional[List[str]] = None,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    timeout: int = 300,
+) -> ElasticEPScalePayload:
+    """Scale the live data-parallel size, then verify a chat still completes."""
+    return ElasticEPScalePayload(
+        body={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        new_data_parallel_size=new_data_parallel_size,
+        system_port=system_port,
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+        timeout=timeout,
     )

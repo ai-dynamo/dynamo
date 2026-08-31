@@ -10,6 +10,8 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    nullable_float,
+    parse_bool,
 )
 
 pytestmark = [
@@ -17,6 +19,28 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("on", True),
+        ("yes", True),
+        ("false", False),
+        ("0", False),
+        ("off", False),
+        ("no", False),
+    ],
+)
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+def test_parse_bool_rejects_invalid_value():
+    with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+        parse_bool("flase")
 
 
 class TestEnvOrDefault:
@@ -38,7 +62,7 @@ class TestEnvOrDefault:
 
     def test_bool_conversion_true(self, monkeypatch):
         """Test bool conversion for true values."""
-        test_cases = ["true", "True", "1", "yes", "YES", "on", "ON"]
+        test_cases = ["true", "True", "1", "yes", "YES", "on", "ON", " true "]
 
         for value in test_cases:
             monkeypatch.setenv("TEST_BOOL", value)
@@ -47,7 +71,7 @@ class TestEnvOrDefault:
 
     def test_bool_conversion_false(self, monkeypatch):
         """Test bool conversion for false values."""
-        test_cases = ["false", "False", "0", "no", "NO", "off", "OFF"]
+        test_cases = ["false", "False", "0", "no", "NO", "off", "OFF", " off "]
 
         for value in test_cases:
             monkeypatch.setenv("TEST_BOOL", value)
@@ -158,17 +182,32 @@ class TestAddArgument:
                 raise argparse.ArgumentTypeError("model-name must be non-empty")
             return value.strip()
 
+        with pytest.raises(argparse.ArgumentTypeError, match="model-name"):
+            add_argument(
+                parser,
+                flag_name="--model-name",
+                env_var="TEST_MODEL_NAME",
+                default=None,
+                help="Model name",
+                arg_type=validate_model_name,
+            )
+
+    def test_callable_type_with_non_none_default_coerces_env(self, monkeypatch):
+        """Test callable arg_type validates env values when the default has a type."""
+        monkeypatch.setenv("TEST_THRESHOLD", "None")
+        parser = argparse.ArgumentParser()
+
         add_argument(
             parser,
-            flag_name="--model-name",
-            env_var="TEST_MODEL_NAME",
-            default=None,
-            help="Model name",
-            arg_type=validate_model_name,
+            flag_name="--threshold",
+            env_var="TEST_THRESHOLD",
+            default=16.0,
+            help="Threshold",
+            arg_type=nullable_float,
         )
 
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
+        args = parser.parse_args([])
+        assert args.threshold is None
 
 
 class TestAddNegatableBool:
@@ -234,6 +273,20 @@ class TestAddNegatableBool:
 
         args = parser.parse_args([])
         assert args.enable_feature is False
+
+    def test_strict_env_parser_rejects_invalid_value(self, monkeypatch):
+        monkeypatch.setenv("TEST_ENABLE", "flase")
+        parser = argparse.ArgumentParser()
+
+        with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+            add_negatable_bool_argument(
+                parser,
+                flag_name="--enable-feature",
+                env_var="TEST_ENABLE",
+                default=True,
+                help="Enable feature",
+                env_value_type=parse_bool,
+            )
 
     def test_converts_hyphens_to_underscores(self):
         """Test that flag name with hyphens converts to underscores in dest."""

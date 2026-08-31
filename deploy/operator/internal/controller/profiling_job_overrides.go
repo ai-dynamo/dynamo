@@ -18,8 +18,12 @@
 package controller
 
 import (
+	"errors"
+	"fmt"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -44,6 +48,198 @@ func applyProfilingJobOverrides(job *batchv1.Job, overrides *batchv1.JobSpec) {
 	}
 	applyJobSpecOverrides(&job.Spec, overrides)
 	applyPodTemplateOverrides(&job.Spec.Template, &overrides.Template)
+}
+
+// ensureOutputCopierKubeAPIAccess preserves the user's pod-level
+// automountServiceAccountToken=false setting while keeping the controller-owned
+// output-copier sidecar able to update the DGDR output ConfigMap.
+func ensureOutputCopierKubeAPIAccess(job *batchv1.Job) {
+	spec := &job.Spec.Template.Spec
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		return
+	}
+
+	spec.Volumes = mergeNamedSlice(
+		spec.Volumes,
+		[]corev1.Volume{outputCopierKubeAPIAccessVolume()},
+		func(v corev1.Volume) string { return v.Name },
+	)
+
+	for i := range spec.Containers {
+		spec.Containers[i].VolumeMounts = removeVolumeMountByName(
+			spec.Containers[i].VolumeMounts,
+			VolumeNameOutputCopierKubeAPIAccess,
+		)
+		if spec.Containers[i].Name == ContainerNameOutputCopier {
+			spec.Containers[i].VolumeMounts = append(spec.Containers[i].VolumeMounts, corev1.VolumeMount{
+				Name:      VolumeNameOutputCopierKubeAPIAccess,
+				MountPath: ServiceAccountTokenPath,
+				ReadOnly:  true,
+			})
+		}
+	}
+}
+
+// ensureDGDOverrideTool delivers the operator-owned override CLI to the profiler
+// through an emptyDir. It runs after user overrides so reserved delivery fields
+// always describe the binary from the configured operator image.
+func ensureDGDOverrideTool(
+	job *batchv1.Job,
+	operatorImage string,
+	pullPolicy corev1.PullPolicy,
+) error {
+	if operatorImage == "" {
+		return errors.New("operator image must be configured when a DGD override is present")
+	}
+	if pullPolicy == "" {
+		pullPolicy = corev1.PullIfNotPresent
+	}
+
+	spec := &job.Spec.Template.Spec
+	spec.Volumes = mergeNamedSlice(
+		spec.Volumes,
+		[]corev1.Volume{{
+			Name: VolumeNameDGDOverrideTool,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}},
+		func(volume corev1.Volume) string { return volume.Name },
+	)
+	for i := range spec.InitContainers {
+		spec.InitContainers[i].VolumeMounts = removeVolumeMountByNameOrPath(
+			spec.InitContainers[i].VolumeMounts,
+			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
+		)
+	}
+	installer := corev1.Container{
+		Name:            ContainerNameDGDOverrideInstaller,
+		Image:           operatorImage,
+		ImagePullPolicy: pullPolicy,
+		Command:         []string{"/dgd-apply-overrides"},
+		Args:            []string{"--install-to", DGDOverrideToolPath},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			RunAsNonRoot:             ptr.To(true),
+			RunAsUser:                ptr.To[int64](1000),
+			RunAsGroup:               ptr.To[int64](1000),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      VolumeNameDGDOverrideTool,
+			MountPath: DGDOverrideToolMountPath,
+		}},
+	}
+	spec.InitContainers = mergeNamedSlice(
+		spec.InitContainers,
+		[]corev1.Container{installer},
+		func(container corev1.Container) string { return container.Name },
+	)
+
+	foundProfiler := false
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		container.VolumeMounts = removeVolumeMountByNameOrPath(
+			container.VolumeMounts,
+			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
+		)
+		if container.Name != ContainerNameProfiler {
+			continue
+		}
+		foundProfiler = true
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      VolumeNameDGDOverrideTool,
+			MountPath: DGDOverrideToolMountPath,
+			ReadOnly:  true,
+		})
+		container.Env = mergeNamedSlice(
+			container.Env,
+			[]corev1.EnvVar{{Name: EnvDGDOverrideToolPath, Value: DGDOverrideToolPath}},
+			func(env corev1.EnvVar) string { return env.Name },
+		)
+	}
+
+	if !foundProfiler {
+		return fmt.Errorf("profiling Job has no %q container", ContainerNameProfiler)
+	}
+	return nil
+}
+
+func outputCopierKubeAPIAccessVolume() corev1.Volume {
+	expirationSeconds := int64(ServiceAccountTokenExpirationSeconds)
+	return corev1.Volume{
+		Name: VolumeNameOutputCopierKubeAPIAccess,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: &expirationSeconds,
+						},
+					},
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: ConfigMapNameKubeRootCA,
+							},
+							Items: []corev1.KeyToPath{{
+								Key:  "ca.crt",
+								Path: "ca.crt",
+							}},
+						},
+					},
+					{
+						DownwardAPI: &corev1.DownwardAPIProjection{
+							Items: []corev1.DownwardAPIVolumeFile{{
+								Path: "namespace",
+								FieldRef: &corev1.ObjectFieldSelector{
+									APIVersion: "v1",
+									FieldPath:  "metadata.namespace",
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func removeVolumeMountByName(mounts []corev1.VolumeMount, name string) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return mounts
+	}
+
+	result := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Name != name {
+			result = append(result, mount)
+		}
+	}
+	return result
+}
+
+func removeVolumeMountByNameOrPath(mounts []corev1.VolumeMount, name, path string) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return mounts
+	}
+
+	result := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Name != name && mount.MountPath != path {
+			result = append(result, mount)
+		}
+	}
+	return result
 }
 
 // applyJobSpecOverrides merges JobSpec-level scalar fields.
@@ -173,12 +369,54 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	spec.Volumes = mergeNamedSlice(spec.Volumes, overrides.Volumes, func(v corev1.Volume) string { return v.Name })
 	spec.InitContainers = mergeNamedSlice(spec.InitContainers, overrides.InitContainers, func(c corev1.Container) string { return c.Name })
 
-	if len(overrides.Containers) > 0 && len(spec.Containers) > 0 {
-		applyContainerOverrides(&spec.Containers[0], &overrides.Containers[0])
+	if profilerOverride := profilerContainerOverride(overrides.Containers); profilerOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameProfiler); idx >= 0 {
+			applyContainerOverrides(&spec.Containers[idx], profilerOverride)
+		}
+	}
+	if outputCopierOverride := findContainerOverride(overrides.Containers, ContainerNameOutputCopier); outputCopierOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameOutputCopier); idx >= 0 {
+			applyOutputCopierOverrides(&spec.Containers[idx], outputCopierOverride)
+		}
 	}
 }
 
-// applyContainerOverrides merges fields from the user's first container override
+// findContainerOverride returns the first override container with the given name.
+func findContainerOverride(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+// findContainerIndex returns the index of the container with the given name, or -1.
+func findContainerIndex(containers []corev1.Container, name string) int {
+	for i := range containers {
+		if containers[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// profilerContainerOverride selects the override entry for the profiler container.
+// Prefers an entry named "profiler"; otherwise the first entry that is not the
+// output-copier sidecar (preserving backward compatibility for unnamed overrides).
+func profilerContainerOverride(overrides []corev1.Container) *corev1.Container {
+	if override := findContainerOverride(overrides, ContainerNameProfiler); override != nil {
+		return override
+	}
+	for i := range overrides {
+		if overrides[i].Name == "" || overrides[i].Name != ContainerNameOutputCopier {
+			return &overrides[i]
+		}
+	}
+	return nil
+}
+
+// applyContainerOverrides merges fields from the user's container override
 // into the controller-generated profiler container.
 func applyContainerOverrides(container *corev1.Container, overrides *corev1.Container) {
 	if overrides.Image != "" {
@@ -196,6 +434,19 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 
 	if len(overrides.EnvFrom) > 0 {
 		container.EnvFrom = append(container.EnvFrom, overrides.EnvFrom...)
+	}
+}
+
+// applyOutputCopierOverrides merges a narrow allowlist into the output-copier
+// sidecar: only image and resources. Other fields (env, envFrom, volumeMounts,
+// securityContext, command/args) are ignored so controller-owned mounts and
+// script wiring stay intact.
+func applyOutputCopierOverrides(container *corev1.Container, overrides *corev1.Container) {
+	if overrides.Image != "" {
+		container.Image = overrides.Image
+	}
+	if len(overrides.Resources.Requests) > 0 || len(overrides.Resources.Limits) > 0 || len(overrides.Resources.Claims) > 0 {
+		container.Resources = overrides.Resources
 	}
 }
 

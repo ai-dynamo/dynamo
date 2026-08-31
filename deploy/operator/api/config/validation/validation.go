@@ -19,6 +19,7 @@ package validation
 
 import (
 	"net/url"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -40,6 +41,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
+	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
 
 	return allErrs
 }
@@ -113,6 +115,87 @@ func validateInfrastructure(infra *configv1alpha1.InfrastructureConfiguration, f
 		}
 	}
 
+	// TLS client identity pairs must be set together (both or neither).
+	if (infra.TCPTLSClientCertPath != "") != (infra.TCPTLSClientKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCertPath"), infra.TCPTLSClientCertPath,
+			"tcpTLSClientCertPath and tcpTLSClientKeyPath must be set together"))
+	}
+	if (infra.NATSTLSClientCertPath != "") != (infra.NATSTLSClientKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("natsTLSClientCertPath"), infra.NATSTLSClientCertPath,
+			"natsTLSClientCertPath and natsTLSClientKeyPath must be set together"))
+	}
+
+	// TCP server certificate and key must be set together (both or neither).
+	if (infra.TCPTLSCertPath != "") != (infra.TCPTLSKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSCertPath"), infra.TCPTLSCertPath,
+			"tcpTLSCertPath and tcpTLSKeyPath must be set together"))
+	}
+
+	// TCP server cert/key require a server CA so the client side also uses TLS.
+	// The operator does not expose DYN_TCP_TLS_INSECURE, so without a CA the
+	// TCP client stays plaintext while the server is TLS, and connections fail.
+	if infra.TCPTLSCertPath != "" && infra.TCPTLSKeyPath != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("tcpTLSCAPath"),
+			"tcpTLSCAPath is required when tcpTLSCertPath and tcpTLSKeyPath are set"))
+	}
+
+	// TCP client-side TLS (CA or client identity) requires the server certificate
+	// and key. The operator injects the same config into every DGD pod, each of
+	// which is both a TCP client and server, so enabling client-side TLS without
+	// server-side TLS leaves peer servers plaintext and handshakes fail.
+	tcpClientTLS := infra.TCPTLSCAPath != "" || infra.TCPTLSClientCertPath != "" || infra.TCPTLSClientKeyPath != ""
+	if tcpClientTLS && (infra.TCPTLSCertPath == "" || infra.TCPTLSKeyPath == "") {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("tcpTLSCertPath"),
+			"tcpTLSCertPath and tcpTLSKeyPath are required when any client-side TCP TLS field is set"))
+	}
+
+	// TCP client-CA (mTLS) requires the server certificate and key.
+	if infra.TCPTLSClientCAPath != "" && (infra.TCPTLSCertPath == "" || infra.TCPTLSKeyPath == "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCAPath"), infra.TCPTLSClientCAPath,
+			"tcpTLSClientCAPath requires tcpTLSCertPath and tcpTLSKeyPath to also be set"))
+	}
+
+	// TCP client identity requires a server CA (the operator does not expose insecure mode).
+	if infra.TCPTLSClientCertPath != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCertPath"), infra.TCPTLSClientCertPath,
+			"tcpTLSClientCertPath requires tcpTLSCAPath to also be set"))
+	}
+
+	// NATS client identity requires a server CA.
+	if infra.NATSTLSClientCertPath != "" && infra.NATSTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("natsTLSClientCertPath"), infra.NATSTLSClientCertPath,
+			"natsTLSClientCertPath requires natsTLSCAPath to also be set"))
+	}
+
+	// tcpTLSServerName is inert without a TLS connector (which requires a CA).
+	if infra.TCPTLSServerName != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSServerName"), infra.TCPTLSServerName,
+			"tcpTLSServerName requires tcpTLSCAPath to also be set"))
+	}
+
+	// NATS TLS requires a tls:// server address (the runtime fails closed otherwise).
+	natsTLS := infra.NATSTLSCAPath != "" || infra.NATSTLSClientCertPath != "" || infra.NATSTLSClientKeyPath != ""
+	if natsTLS {
+		if infra.NATSAddress == "" {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("natsAddress"),
+				"natsAddress is required when NATS TLS is configured"))
+		} else if !strings.HasPrefix(infra.NATSAddress, "tls://") {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("natsAddress"), infra.NATSAddress,
+				"natsAddress must use the tls:// scheme when NATS TLS is configured"))
+		}
+	}
+
 	return allErrs
 }
 
@@ -164,4 +247,60 @@ func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *fiel
 	_ = fldPath
 	_ = ingress
 	return nil
+}
+
+// validateServiceMesh validates the service mesh configuration. The most
+// important guard is that "MUTUAL" TLS mode requires a client certificate and
+// private key (and optionally a CA certificates file); without them Istio's
+// validation webhook rejects the EPP DestinationRule and the operator can
+// never finish reconciling the DGD.
+func validateServiceMesh(sm *configv1alpha1.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if !sm.IsEnabled() {
+		return allErrs
+	}
+
+	// IsEnabled() only checks Provider. If the user set provider="istio" but
+	// omitted the istio block, the controller still treats the mesh as
+	// enabled and GenerateEPPDestinationRule (graph.go) silently emits a
+	// stub DestinationRule with no Host/TrafficPolicy — useless and
+	// confusing. Fail fast here instead of letting reconcile proceed with
+	// an incomplete mesh config. Defaulting normally populates this block,
+	// but validation must not depend on the defaulter having run (e.g.,
+	// hand-written configs, programmatic loaders).
+	istioPath := fldPath.Child("istio")
+	if sm.Istio == nil {
+		allErrs = append(allErrs, field.Required(
+			istioPath,
+			`istio configuration is required when serviceMesh.provider is "istio"`,
+		))
+		return allErrs
+	}
+
+	switch sm.Istio.TLSMode {
+	case "", "SIMPLE", "DISABLE", "ISTIO_MUTUAL":
+		// No additional fields required.
+	case "MUTUAL":
+		if sm.Istio.ClientCertificate == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("clientCertificate"),
+				`clientCertificate is required when tlsMode is "MUTUAL"`,
+			))
+		}
+		if sm.Istio.PrivateKey == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("privateKey"),
+				`privateKey is required when tlsMode is "MUTUAL"`,
+			))
+		}
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			istioPath.Child("tlsMode"),
+			sm.Istio.TLSMode,
+			[]string{"DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL"},
+		))
+	}
+
+	return allErrs
 }

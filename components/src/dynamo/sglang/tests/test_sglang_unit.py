@@ -3,25 +3,50 @@
 
 """Unit tests for SGLang backend components."""
 
+import logging
+import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang.args as sglang_args
+from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
+from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
-    ensure_sglang_top_level_exports,
+    ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
+    override_server_args,
+    require_reasoning_kwargs,
 )
-from dynamo.sglang.args import parse_args
+from dynamo.sglang.args import (
+    _diffusion_generator_kwargs,
+    _forward_pass_metrics_source,
+    _normalize_multimodal_disaggregation_args,
+    parse_args,
+    should_fetch_model,
+    use_modelexpress_remote_instance,
+)
+from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from dynamo.sglang import register as sglang_register
+except ImportError:
+    sglang_register = None
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -34,7 +59,8 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
+    pytest.mark.core,
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
 ]
@@ -43,38 +69,359 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
-def test_compat_restores_sglang_top_level_exports():
-    """Dynamo supports SGLang builds that omit top-level Engine/ServerArgs."""
-    import sglang as sgl
-    from sglang.srt.entrypoints.engine import Engine
-    from sglang.srt.server_args import ServerArgs
+def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(
+            model_path="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            tp_size=2,
+            dp_size=1,
+            dist_timeout=120,
+            nccl_port=23456,
+        )
+    )
 
-    missing = object()
-    original_engine = getattr(sgl, "Engine", missing)
-    original_server_args = getattr(sgl, "ServerArgs", missing)
+    assert kwargs == {
+        "model_path": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "num_gpus": 2,
+        "tp_size": 2,
+        "dp_size": 1,
+        "dist_timeout": 120,
+        "master_port": 23456,
+    }
 
+
+def test_diffusion_generator_kwargs_omits_unset_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(model_path="Tongyi-MAI/Z-Image-Turbo")
+    )
+
+    assert kwargs["num_gpus"] == 1
+    assert "master_port" not in kwargs
+
+
+def test_override_server_args_supports_sglang_0_5_17():
+    calls = []
+
+    class ServerArgs:
+        def override(self, source, **fields):
+            calls.append((source, fields))
+            for name, value in fields.items():
+                object.__setattr__(self, name, value)
+
+    server_args = ServerArgs()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [("dynamo.test", {"enable_memory_saver": True})]
+    assert server_args.enable_memory_saver is True
+
+
+def test_override_server_args_supports_legacy_xpu_pin():
+    server_args = SimpleNamespace(enable_memory_saver=False)
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+        load_format="legacy-loader",
+    )
+
+    assert server_args.enable_memory_saver is True
+    assert server_args.load_format == "legacy-loader"
+
+
+@pytest.fixture(autouse=True)
+def _cpu_engine_when_no_accelerator(monkeypatch):
+    """Honor the file's gpu_0 contract on hosts with no accelerator.
+
+    Many tests here run parse_args, and SGLang's ServerArgs.__post_init__
+    auto-detects a device only when --device is not given; on a host with no
+    accelerator the detection walks every platform and ends in
+    NotImplementedError (get_device -> SRTPlatform(unknown), verified on the
+    amd64 image with the GPU masked). SGLANG_USE_CPU_ENGINE=1 is SGLang's
+    public knob that makes the detection return "cpu". Set it only when CUDA
+    is absent so GPU hosts keep exercising the real detection path, and clear
+    the lru_caches on both probes so a worker that cached the no-env result
+    while running another file's tests cannot poison this one (and vice
+    versa on teardown, via the second clear).
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        yield
+        return
+    from sglang.srt.utils import common as _sgl_common
+
+    monkeypatch.setenv("SGLANG_USE_CPU_ENGINE", "1")
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
+    yield
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "reserved_path", ["control/start_profile", "update/model_taints"]
+)
+def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace(custom_method=lambda: None)
+    handler.config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(engine_routes=[f"{reserved_path}=custom_method"])
+    )
+
+    registered_routes = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"Configured SGLang engine route /engine/{reserved_path} "
+            r"collides with a built-in route"
+        ),
+    ):
+        handler.register_engine_routes(Runtime())
+
+    assert registered_routes == []
+
+
+@pytest.mark.parametrize(
+    ("input_name", "output_name", "worker_name", "expected"),
+    [
+        ("Tokens", "Prefill", "Prefill", True),
+        ("Tokens", "Chat", "Decode", True),
+        ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Empty", "Prefill", False),
+        ("Tokens", "Empty", "Decode", False),
+        ("Text", "Chat", "Aggregated", False),
+        ("Tokens", "Embedding", "Aggregated", False),
+    ],
+)
+def test_engine_generate_capability_registration_gate(
+    input_name, output_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    assert (
+        sglang_register._supports_engine_generate(
+            getattr(sglang_register.ModelInput, input_name),
+            getattr(sglang_register.ModelType, output_name),
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
+
+    registered_routes = []
+    taint_route_endpoints = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda candidate_runtime, endpoint: taint_route_endpoints.append(
+            (candidate_runtime, endpoint)
+        ),
+    )
+
+    handler.register_engine_routes(runtime)
+
+    assert taint_route_endpoints == [(runtime, handler.generate_endpoint)]
+    assert {path for path, _ in registered_routes} >= {
+        "control/start_profile",
+        "control/stop_profile",
+    }
+
+
+def _make_sglang_config(**overrides):
+    config = DynamoSGLangConfig()
+    config.use_sglang_tokenizer = False
+    config.multimodal_encode_worker = False
+    config.multimodal_worker = False
+    config.enable_multimodal = False
+    config.dedicated_mm_encoder = False
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    config.embedding_worker = False
+    config.image_diffusion_worker = False
+    config.video_generation_worker = False
+    config.enable_rl = False
+    config.frontend_decoding = False
+    config.sglang_trace_level = 2
+    config.fpm_trace = False
+    config.disagg_config = None
+    config.disagg_config_key = None
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
+def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
+    from sglang.srt.multimodal.processors.base_processor import (
+        BaseMultimodalProcessor,
+        BaseMultiModalProcessorOutput,
+        MultimodalSpecialTokens,
+    )
+
+    class Processor:
+        image_sizes = None
+
+        def _get_num_multimodal_tokens(self, *, image_sizes):
+            self.image_sizes = image_sizes
+            return SimpleNamespace(num_image_tokens=[4])
+
+    class ConcreteMultimodalProcessor(BaseMultimodalProcessor):
+        async def process_mm_data_async(self, *args, **kwargs):
+            raise NotImplementedError
+
+    original = BaseMultimodalProcessor.resolve_image_token_counts
     try:
-        if hasattr(sgl, "Engine"):
-            delattr(sgl, "Engine")
-        if hasattr(sgl, "ServerArgs"):
-            delattr(sgl, "ServerArgs")
+        ensure_sglang_tensor_image_size()
+        installed = BaseMultimodalProcessor.resolve_image_token_counts
+        ensure_sglang_tensor_image_size()
 
-        ensure_sglang_top_level_exports()
+        processor = object.__new__(ConcreteMultimodalProcessor)
+        processor._processor = Processor()
+        # SGLang 0.5.17 resolves the processor and tokenizer together before
+        # handling raw multimodal items. This test stubs the processing path,
+        # so a tokenizer is not exercised, but the attribute must exist.
+        processor._tokenizer = None
+        processor.use_cuda_ipc = False
+        image_token_id = 99
+        processor._process_and_collect_mm_items = lambda **kwargs: (
+            [],
+            torch.tensor(
+                [20, image_token_id, image_token_id, image_token_id, image_token_id, 21]
+            ),
+            {},
+        )
+        base_output = BaseMultiModalProcessorOutput(
+            input_text="decoded prompt",
+            input_ids=[10, image_token_id, 11],
+            images=[torch.empty((3, 48, 80), dtype=torch.uint8)],
+        )
+        mm_tokens = MultimodalSpecialTokens(image_token_id=image_token_id)
+        # SGLang defaults this on to preserve caller token IDs and expand only
+        # image placeholders instead of decoding and retokenizing the prompt.
+        monkeypatch.setenv("SGLANG_MM_AVOID_RETOKENIZE", "1")
 
-        assert sgl.Engine is Engine
-        assert sgl.ServerArgs is ServerArgs
+        with caplog.at_level(
+            logging.WARNING,
+            logger="sglang.srt.multimodal.processors.base_processor",
+        ):
+            _, input_ids, _ = processor.process_and_combine_mm_data(
+                base_output, mm_tokens
+            )
+
+        assert installed is BaseMultimodalProcessor.resolve_image_token_counts
+        assert processor._processor.image_sizes == [(48, 80)]
+        assert input_ids.tolist() == [
+            10,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            11,
+        ]
+        assert not any(
+            "falling back to decode+retokenize" in record.message
+            for record in caplog.records
+        )
     finally:
-        if original_engine is missing:
-            if hasattr(sgl, "Engine"):
-                delattr(sgl, "Engine")
-        else:
-            sgl.Engine = original_engine
+        BaseMultimodalProcessor.resolve_image_token_counts = original
 
-        if original_server_args is missing:
-            if hasattr(sgl, "ServerArgs"):
-                delattr(sgl, "ServerArgs")
-        else:
-            sgl.ServerArgs = original_server_args
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_multimodal", [False, True])
+async def test_tensor_image_size_compat_uses_resolved_model_capability(
+    monkeypatch, mock_sglang_cli, is_multimodal
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=is_multimodal),
+    )
+    install_calls = []
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ensure_sglang_tensor_image_size",
+        lambda: install_calls.append(True),
+    )
+    mock_sglang_cli(model="/tmp")
+
+    await parse_args(sys.argv[1:])
+
+    assert install_calls == ([True] if is_multimodal else [])
+
+
+@pytest.mark.asyncio
+async def test_parse_args_enables_incremental_streaming_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.incremental_streaming_output is True
+        server_args.incremental_streaming_output = (
+            parsed_args.incremental_streaming_output
+        )
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model="/tmp")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.incremental_streaming_output is True
+
+
+@pytest.mark.asyncio
+async def test_parse_args_applies_dynamo_defaults_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm="dream",
+        enable_forward_pass_metrics=True,
+        kv_events_config=None,
+        max_running_requests=8,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is True
+        assert parsed_args.max_running_requests == 8
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
+
+    await parse_args(sys.argv[1:])
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():
@@ -112,6 +459,117 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
 
 
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({"require_reasoning": True}, {"require_reasoning": True}),
+        ({"require_reasoning": False}, {"require_reasoning": False}),
+        ({}, {"require_reasoning": False}),
+    ],
+)
+def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected):
+    """The internal reasoning intent reaches SGLang, including explicit false."""
+
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            return None
+
+    assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
+
+
+def test_require_reasoning_kwarg_warns_once_when_dropped(caplog):
+    """A dropped true reasoning requirement is visible without log spam."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+
+    assert caplog.text.count("Dropping require_reasoning=true") == 1
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+
+
+def test_require_reasoning_kwarg_silently_drops_false(caplog):
+    """A dropped false value preserves the quiet compatibility fallback."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": False}) == {}
+
+    assert "Dropping require_reasoning=true" not in caplog.text
+
+
+def test_routed_experts_kwarg_omitted_when_flag_off():
+    """Default config (no enable_return_routed_experts) → empty dict."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace()  # flag absent → treated as False
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(NewEngine(), server_args)
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_dropped_on_deepseek_v4_engine():
+    """Opt-in + sglang deepseek_v4-shaped engine (no kwarg, no **kwargs) → empty dict.
+
+    Mirrors the deepseek_v4 branch of sglang/srt/entrypoints/engine.py:
+    async_generate has explicit named params and no return_routed_experts.
+    The compat layer must drop the kwarg even when the user opted in.
+    """
+
+    class DeepSeekV4Engine:
+        async def async_generate(
+            self,
+            prompt=None,
+            sampling_params=None,
+            input_ids=None,
+            stream=False,
+            bootstrap_host=None,
+            bootstrap_port=None,
+            bootstrap_room=None,
+            data_parallel_rank=None,
+            external_trace_header=None,
+            rid=None,
+        ):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(
+            DeepSeekV4Engine(), server_args
+        )
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_forwarded_when_flag_on_and_supported():
+    """Opt-in + engine with kwarg in signature → kwarg forwarded as True."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert DecodeWorkerHandler._resolve_routed_experts_kwargs(
+        NewEngine(), server_args
+    ) == {"return_routed_experts": True}
+
+
 def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     class CachedEngine:
         async def async_generate(self, return_routed_experts=False):
@@ -134,6 +592,55 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     assert calls == 1
 
     sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_start_profile_forwards_profile_request():
+    class TokenizerManager:
+        request = None
+
+        async def start_profile(self, request):
+            self.request = request
+
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
+    body = {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5}
+
+    response = await BaseWorkerHandler.start_profile(handler, body)
+
+    assert isinstance(tokenizer_manager.request, ProfileReq)
+    assert tokenizer_manager.request.output_dir == body["output_dir"]
+    assert tokenizer_manager.request.start_step == body["start_step"]
+    assert tokenizer_manager.request.num_steps == body["num_steps"]
+    assert response == {"status": "ok", "message": "Profiling started"}
+
+
+@pytest.mark.asyncio
+async def test_update_weight_version_uses_tokenizer_manager_control_api():
+    class TokenizerManager:
+        updated_version = None
+
+        def _update_weight_version_if_provided(self, version):
+            self.updated_version = version
+
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
+
+    response = await BaseWorkerHandler.update_weight_version(
+        handler,
+        {"new_version": "step-42", "abort_all_requests": False},
+    )
+
+    assert tokenizer_manager.updated_version == "step-42"
+    assert response == {
+        "success": True,
+        "message": "Weight version updated to step-42",
+        "new_version": "step-42",
+    }
 
 
 @pytest.mark.asyncio
@@ -182,6 +689,24 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
     )
 
 
+@pytest.mark.asyncio
+async def test_multiple_served_model_names_register_primary_and_aliases(
+    mock_sglang_cli,
+):
+    """SGLang packed served names split into primary + Dynamo aliases."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--served-model-name",
+        "primary,alias-one alias-two",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.served_model_name == "primary"
+    assert config.dynamo_args.served_model_aliases == ["alias-one", "alias-two"]
+
+
 # --- Tool Call Parser Validation Tests ---
 
 
@@ -228,6 +753,24 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
 
 @pytest.mark.asyncio
+async def test_reasoning_parser_both_flags_are_allowed(mock_sglang_cli):
+    """Native gating and Dynamo response parsing may use separate reasoners."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "qwen3",
+        "--reasoning-parser",
+        "qwen3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.dyn_reasoning_parser == "qwen3"
+    assert config.server_args.reasoning_parser == "qwen3"
+
+
+@pytest.mark.asyncio
 async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli):
     """CLI namespace should be used for auto-derived endpoint."""
     mock_sglang_cli(
@@ -239,6 +782,275 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "expected_encode_worker",
+        "expected_mm_worker",
+        "expected_args",
+    ),
+    [
+        ("encode", True, False, []),
+        ("prefill", False, False, ["--disaggregation-mode", "prefill"]),
+        ("decode", False, False, ["--disaggregation-mode", "decode"]),
+        ("agg", False, False, ["--disaggregation-mode", "null"]),
+        ("pd", False, False, ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
+    mode,
+    expected_encode_worker,
+    expected_mm_worker,
+    expected_args,
+):
+    """Canonical multimodal roles map to SGLang's current worker flags."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is expected_encode_worker
+    assert config.multimodal_worker is expected_mm_worker
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_args"),
+    [
+        ("prefill", ["--disaggregation-mode", "prefill"]),
+        ("decode", ["--disaggregation-mode", "decode"]),
+        ("pd", ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_dedicated_mm_encoder_selects_internal_multimodal_worker(mode, expected_args):
+    """Dedicated-mm-encoder selects internal E/PD or E/P/D workers."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is False
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_rejects_standalone_modes():
+    """The dedicated encoder flag must not silently turn agg/encode into a different topology."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="--dedicated-mm-encoder only applies"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "agg"], config
+        )
+
+
+def test_dedicated_mm_encoder_rejects_encode_worker_mode():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="Do not combine"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "encode"], config
+        )
+
+
+def test_dedicated_mm_encoder_requires_explicit_worker_role():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --disaggregation-mode"):
+        _normalize_multimodal_disaggregation_args([], config)
+
+
+def test_multimodal_disaggregation_mode_uses_last_cli_value_with_dedicated_mm_encoder():
+    """Config-merged args precede CLI args, so the last explicit value must win."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", "prefill", "--disaggregation-mode", "pd"],
+        config,
+    )
+
+    assert normalized == ["--disaggregation-mode", "null"]
+    assert config.multimodal_worker is True
+
+
+def test_enable_multimodal_without_role_keeps_standalone_worker():
+    """Capability-only SGLang serving should not select the internal EPD worker."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args([], config)
+
+    assert normalized == []
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is False
+    assert config.multimodal_encode_worker is False
+
+
+@pytest.mark.parametrize("flag", ["--multimodal-encode-worker", "--multimodal-worker"])
+@pytest.mark.asyncio
+async def test_removed_multimodal_role_flags_are_rejected(flag, mock_sglang_cli):
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", flag)
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.parametrize(
+    "env_var", ["DYN_SGL_MULTIMODAL_ENCODE_WORKER", "DYN_SGL_MULTIMODAL_WORKER"]
+)
+def test_removed_multimodal_env_vars_are_rejected(env_var, monkeypatch):
+    # The removed role flags fail at argparse, but a leftover env var would be
+    # silently ignored and start the worker in the wrong role — validate()
+    # rejects it with the migration path instead.
+    monkeypatch.setenv(env_var, "1")
+    config = _make_sglang_config()
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        config.validate()
+
+
+def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
+    # A falsy value was a no-op with the old flags too; keep it harmless.
+    monkeypatch.setenv("DYN_SGL_MULTIMODAL_WORKER", "false")
+    config = _make_sglang_config()
+
+    config.validate()
+
+
+def test_dedicated_mm_encoder_requires_enable_multimodal():
+    """Dedicated-mm-encoder is a topology modifier, not a multimodal enable switch."""
+    config = _make_sglang_config(dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --enable-multimodal"):
+        config.validate()
+
+
+@pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
+    """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_fpm_port_takes_precedence_over_trace(
+    monkeypatch, mock_sglang_cli, caplog
+):
+    """The legacy explicit port remains authoritative even if trace is invalid."""
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    monkeypatch.setenv("DYN_FPM_TRACE", "sometimes")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    with caplog.at_level(logging.INFO):
+        config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_forward_pass_metrics is True
+    assert (
+        "Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT" in caplog.text
+    )
+    assert "Invalid DYN_FPM_TRACE value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_trace(monkeypatch, mock_sglang_cli):
+    """DYN_FPM_TRACE should enable SGLang's existing FPM publisher."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "on")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_cli_flag(monkeypatch, mock_sglang_cli):
+    """The shared CLI flag should enable both Python and Rust trace handling."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
+    mock_sglang_cli("--fpm-trace", "--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.fpm_trace is True
+    assert config.server_args.enable_forward_pass_metrics is True
+    assert os.environ["DYN_FPM_TRACE"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_false_fpm_trace_does_not_enable_metrics(monkeypatch, mock_sglang_cli):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "off")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert not config.server_args.enable_forward_pass_metrics
+
+
+@pytest.mark.asyncio
+async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
+    monkeypatch, mock_sglang_cli
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "sometimes")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert not config.server_args.enable_forward_pass_metrics
+    assert os.environ["DYN_FPM_TRACE"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "role"),
+    [
+        ({"embedding_worker": True}, "embedding"),
+        ({"multimodal_encode_worker": True}, "dedicated multimodal"),
+        ({"multimodal_worker": True}, "dedicated multimodal"),
+        ({"image_diffusion_worker": True}, "image diffusion"),
+        ({"video_generation_worker": True}, "video generation"),
+    ],
+)
+def test_trace_does_not_activate_fpm_without_relay(
+    monkeypatch, caplog, overrides, role
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    dynamo_config = _make_sglang_config(fpm_trace=True, **overrides)
+
+    with caplog.at_level(logging.WARNING):
+        source = _forward_pass_metrics_source(dynamo_config)
+
+    assert source is None
+    assert f"SGLang {role} workers do not create a Dynamo FPM relay" in caplog.text
+
+
+def test_explicit_port_preserves_legacy_activation_without_relay(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    dynamo_config = _make_sglang_config(embedding_worker=True, fpm_trace=True)
+
+    with caplog.at_level(logging.WARNING):
+        source = _forward_pass_metrics_source(dynamo_config)
+
+    assert source == "DYN_FORWARDPASS_METRIC_PORT"
+    assert "do not create a Dynamo FPM relay" not in caplog.text
+
+
+def test_trace_does_not_activate_fpm_during_snapshot_startup(
+    monkeypatch, caplog, tmp_path
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+
+    with caplog.at_level(logging.WARNING):
+        source = _forward_pass_metrics_source(_make_sglang_config(fpm_trace=True))
+
+    assert source is None
+    assert "SGLang snapshot workers do not create a Dynamo FPM relay" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -348,12 +1160,15 @@ async def test_disagg_config_preserves_bootstrap_port(tmp_path, mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capfd):
+async def test_disagg_config_rejects_dynamo_keys(
+    tmp_path, mock_sglang_cli, capfd, monkeypatch
+):
     """Disagg config should only accept SGLang-native keys."""
     config_path = tmp_path / "disagg.yaml"
     config_path.write_text(
         yaml.safe_dump({"prefill": {"store-kv": "mem"}}), encoding="utf-8"
     )
+    monkeypatch.setattr(sglang_args.tempfile, "tempdir", str(tmp_path))
 
     mock_sglang_cli(
         "--model",
@@ -369,6 +1184,7 @@ async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capf
 
     out, err = capfd.readouterr()
     assert "unrecognized arguments: --store-kv mem" in err
+    assert not list(tmp_path.glob("dynamo_config_*.yaml"))
 
 
 def test_disagg_health_check_payload_includes_bootstrap_info():
@@ -386,3 +1202,287 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     assert "request" not in payload
     assert payload["bootstrap_info"]["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
     assert payload["stop_conditions"]["max_tokens"] == 1
+
+
+def test_use_modelexpress_remote_instance_for_sglang_remote_instance():
+    args = SimpleNamespace(
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+
+    assert use_modelexpress_remote_instance(args) is True
+
+
+@pytest.mark.parametrize(
+    "load_format, backend",
+    [
+        ("auto", "modelexpress"),
+        ("remote_instance", "nccl"),
+        ("remote_instance", None),
+    ],
+)
+def test_use_modelexpress_remote_instance_rejects_other_load_paths(
+    load_format, backend
+):
+    args = SimpleNamespace(
+        load_format=load_format,
+        remote_instance_weight_loader_backend=backend,
+    )
+
+    assert use_modelexpress_remote_instance(args) is False
+
+
+def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
+    args = SimpleNamespace(
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+
+    assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "s3://bucket/model/",
+        "gs://bucket/model/",
+        "az://container/model/",
+    ],
+)
+def test_should_fetch_model_skips_object_storage_paths(model_path):
+    args = SimpleNamespace(load_format="runai_streamer")
+
+    assert should_fetch_model(args, model_path) is False
+
+
+def test_should_fetch_model_keeps_default_non_local_fetch():
+    args = SimpleNamespace(load_format="auto")
+
+    assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is True
+
+
+@pytest.mark.asyncio
+async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeypatch):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    captured: dict = {}
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return None
+
+    async def fake_register_model(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="Qwen/Qwen3-0.6B",
+        context_length=4096,
+        page_size=64,
+        dcp_size=8,
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False,
+        frontend_decoding=False,
+        custom_jinja_template=None,
+    )
+
+    result = await sglang_register._register_model_with_runtime_config(
+        engine=SimpleNamespace(),
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+
+    assert result is True
+    assert captured["kwargs"]["ignore_weights"] is True
+    assert captured["kwargs"]["kv_cache_block_size"] == 512
+
+
+@pytest.mark.asyncio
+async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
+    monkeypatch,
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    captured: dict = {}
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return None
+
+    async def fake_register_model(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        if args[3].startswith("s3://"):
+            raise AssertionError("object-storage path used as a normal model_path")
+
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+
+    server_args = SimpleNamespace(
+        model_path="s3://bucket/model",
+        served_model_name="bucket-model",
+        context_length=4096,
+        page_size=1,
+        load_format="runai_streamer",
+        remote_instance_weight_loader_backend=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False,
+        frontend_decoding=False,
+        custom_jinja_template=None,
+    )
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(
+                model_weights="s3://bucket/model",
+                model_path="/tmp/runai-model-metadata",
+            )
+        )
+    )
+
+    result = await sglang_register._register_model_with_runtime_config(
+        engine=engine,
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+
+    assert result is True
+    assert captured["args"][3] == "/tmp/runai-model-metadata"
+    assert "skip_model_path_fetch" not in captured["kwargs"]
+    assert captured["kwargs"]["ignore_weights"] is False
+
+
+# ---------------------------------------------------------------------------
+# LoRA registration model_type + worker_type gate
+# ---------------------------------------------------------------------------
+# Pins the serving_mode → (model_type, worker_type) selection in
+# LoraMixin.load_lora. A refactor that flips prefill back to Chat|Completions
+# (or drops the explicit worker_type) cannot silently land: it would
+# re-introduce the disagg hang where the frontend routes
+# /v1/chat/completions directly to the prefill worker.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serving_mode, endpoint_types, expected_model_type_str, expected_worker_type",
+    [
+        # Prefill workers register the legacy ModelType.Prefill marker bit
+        # (no OpenAI surface, dual-emitted for old-frontend compat) and
+        # worker_type=Prefill.
+        ("prefill", "chat,completions", "prefill", "prefill"),
+        ("decode", "chat,completions", "chat,completions", "decode"),
+        ("agg", "chat,completions", "chat,completions", "aggregated"),
+        ("decode", "completions", "completions", "decode"),
+        ("agg", "chat", "chat", "aggregated"),
+    ],
+)
+async def test_lora_registration_model_type_gate(
+    monkeypatch,
+    serving_mode,
+    endpoint_types,
+    expected_model_type_str,
+    expected_worker_type,
+):
+    """LoraMixin.load_lora must select (model_type, worker_type) based on serving_mode.
+
+    PREFILL → (ModelType.Prefill, WorkerType.Prefill). The prefill router
+    activates off worker_type; ModelType carries the legacy Prefill marker bit
+    (no OpenAI surface, dual-emitted for old-frontend compat). Otherwise
+    model_type follows parse_endpoint_types and worker_type follows the serving
+    mode.
+    """
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from dynamo.sglang.request_handlers import handler_base
+    from dynamo.sglang.request_handlers.handler_base import LoraMixin
+
+    # Capture the kwargs passed to register_llm.
+    captured: dict = {}
+
+    async def fake_register_llm(**kw):
+        captured.update(kw)
+
+    lora_runtime_config = SimpleNamespace(
+        runtime_data={
+            "token_budget": (
+                '{"combined_limit":4096,"reject_prompt_overflow":true,'
+                '"reject_total_overflow":true}'
+            )
+        }
+    )
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return lora_runtime_config
+
+    # Fake LoRA manager that returns a successful download.
+    fake_lora_manager = MagicMock()
+    fake_lora_manager.download_lora = AsyncMock(
+        return_value={"status": "success", "local_path": "/tmp/fake_lora"}
+    )
+
+    monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
+    monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
+    monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+
+    # Fake SGLang engine — only the LoRA load path is exercised.
+    fake_load_result = SimpleNamespace(success=True, error_message=None)
+    fake_engine = MagicMock()
+    fake_engine.tokenizer_manager = MagicMock()
+    fake_engine.tokenizer_manager.load_lora_adapter = AsyncMock(
+        return_value=fake_load_result
+    )
+
+    # Exercise the mixin in isolation — avoids needing a concrete subclass
+    # with abstract methods, real publisher, runtime, etc. The mixin only
+    # touches engine, config, generate_endpoint, and its own LoRA tracking.
+    class _Host(LoraMixin):
+        pass
+
+    handler = _Host()
+    handler.engine = fake_engine
+    handler.generate_endpoint = MagicMock()
+
+    config = MagicMock()
+    config.serving_mode = DisaggregationMode(serving_mode)
+    config.server_args.model_path = "/models/base"
+    config.server_args.page_size = 16
+    config.server_args.dcp_size = 2
+    config.dynamo_args.endpoint_types = endpoint_types
+    handler.config = config
+
+    handler._init_lora_tracking()
+
+    # Drain the async generator.
+    results = [
+        chunk
+        async for chunk in handler.load_lora(
+            {"lora_name": "test_lora", "source": {"uri": "s3://x/y"}}
+        )
+    ]
+
+    assert results and results[-1]["status"] == "success", results
+    assert captured, "register_llm was not invoked"
+    assert (
+        str(captured["model_type"]) == expected_model_type_str
+    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert (
+        str(captured["worker_type"]) == expected_worker_type
+    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
+    assert captured["lora_name"] == "test_lora"
+    assert captured["kv_cache_block_size"] == 32
+    assert captured["runtime_config"] is lora_runtime_config
+    assert "token_budget" in captured["runtime_config"].runtime_data

@@ -13,41 +13,98 @@ Policy: support current SGLang release + 1 version back (N and N-1). Each
 fallback branch must document which version it covers and when it can be
 removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
+
+Runtime data-contract notes (not code-level shims):
+
+* ``meta_info["routed_experts"]`` is a base64 UTF-8 string from sglang
+  >= 0.5.11. Pass through; do not re-encode.
 """
 
 import inspect
-import ipaddress
 import logging
-import socket
-from functools import lru_cache
+from collections.abc import Mapping
+from functools import lru_cache, wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Top-level sglang exports: Engine, ServerArgs
-#
-# Some SGLang dev builds (including 0.5.x snapshots) do not re-export these
-# from sglang/__init__.py, while Dynamo historically uses `import sglang as sgl`
-# followed by `sgl.Engine(...)` throughout this backend.
-# ---------------------------------------------------------------------------
-def ensure_sglang_top_level_exports() -> None:
-    """Restore top-level SGLang exports omitted by some install flavors."""
-    import sglang as sgl
-
-    if not hasattr(sgl, "Engine"):
-        from sglang.srt.entrypoints.engine import Engine
-
-        sgl.Engine = Engine
-
-    if not hasattr(sgl, "ServerArgs"):
-        from sglang.srt.server_args import ServerArgs
-
-        sgl.ServerArgs = ServerArgs
+@lru_cache(maxsize=1)
+def _warn_require_reasoning_unsupported() -> None:
+    logger.warning(
+        "Dropping require_reasoning=true because SGLang Engine.async_generate "
+        "does not support it; reasoning-aware guided decoding may fail. "
+        "Upgrade SGLang to enable this request mode."
+    )
 
 
-ensure_sglang_top_level_exports()
+def ensure_sglang_tensor_image_size() -> None:
+    """Allow SGLang's image-token resolver to handle decoded image tensors.
+
+    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
+    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
+    CHW tensor, causing multimodal requests to fall back to retokenization.
+
+    Remove this compatibility override once the minimum supported SGLang
+    release handles tensor image dimensions itself.
+    """
+    import torch
+    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
+    if original is None or getattr(
+        original, "_dynamo_tensor_image_size_support", False
+    ):
+        return
+
+    @wraps(original)
+    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
+        if not any(isinstance(image, torch.Tensor) for image in images):
+            return original(self, images)
+
+        image_sizes: list[tuple[int, int]] = []
+        for image in images:
+            if isinstance(image, torch.Tensor):
+                if image.ndim < 2:
+                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
+                height, width = image.shape[-2:]
+            else:
+                height, width = image.height, image.width
+            image_sizes.append((int(height), int(width)))
+
+        token_counts = self._processor._get_num_multimodal_tokens(
+            image_sizes=image_sizes
+        ).num_image_tokens
+        return [int(count) for count in token_counts]
+
+    resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
+    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
+
+
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Apply a post-resolution, pre-publish SGLang configuration update.
+
+    SGLang 0.5.18 replaced ``ServerArgs.override`` with
+    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
+    of the instance must observe. SGLang 0.5.17 exposes the former API. The
+    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
+    preserve its legacy assignment behavior until its engine pin is upgraded.
+    """
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
+    # upgraded to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
 
 
 @lru_cache(maxsize=32)
@@ -82,10 +139,12 @@ def filter_supported_async_generate_kwargs(
 ) -> dict[str, Any]:
     """Return only async_generate kwargs accepted by this SGLang engine.
 
-    SGLang occasionally adds optional Engine.async_generate kwargs before every
-    supported install flavor has them. Keep the compatibility boundary narrow:
-    callers decide which kwargs are optional, and this helper only drops those
-    optional kwargs when the installed engine cannot accept them.
+    Both supported CUDA releases accept Dynamo's optional kwargs. The separately
+    pinned XPU image still uses SGLang 0.5.11, which predates ``mm_hashes`` and
+    ``require_reasoning``. Keep the compatibility boundary narrow: callers
+    decide which kwargs are optional, and this helper only drops those optional
+    kwargs when the installed engine cannot accept them. Remove this filtering
+    when the XPU SGLang pin is upgraded to 0.5.16+.
     """
     async_generate = engine.async_generate
     signature_source = getattr(async_generate, "__func__", async_generate)
@@ -105,189 +164,21 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-# ---------------------------------------------------------------------------
-# Network utilities: NetworkAddress, get_local_ip_auto, get_zmq_socket
-#
-# 0.5.10+: sglang.srt.utils.network (canonical)
-# 0.5.9:   sglang.srt.utils (get_local_ip_auto, get_zmq_socket only;
-#           NetworkAddress did not exist)
-# ---------------------------------------------------------------------------
-try:
-    from sglang.srt.utils.network import (  # noqa: F401
-        NetworkAddress,
-        get_local_ip_auto,
-        get_zmq_socket,
+def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request reasoning-gate argument."""
+    require_reasoning = bool(request.get("require_reasoning", False))
+    kwargs = filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": require_reasoning},
     )
-except ImportError:
-    # Fallback for sglang 0.5.9. Remove when min supported version is 0.5.10+
-    from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
-        get_local_ip_auto,
-        get_zmq_socket,
-    )
-
-    logger.info(
-        "sglang.srt.utils.network not found (sglang 0.5.9); "
-        "using compatibility shim for NetworkAddress"
-    )
-
-    class NetworkAddress:  # type: ignore[no-redef]
-        """Minimal polyfill for sglang.srt.utils.network.NetworkAddress."""
-
-        def __init__(self, host: str, port: int) -> None:
-            self.host = host
-            self.port = port
-
-        @property
-        def is_ipv6(self) -> bool:
-            try:
-                ipaddress.IPv6Address(self.host)
-                return True
-            except ValueError:
-                return False
-
-        @classmethod
-        def parse(cls, addr: str) -> "NetworkAddress":
-            """Parse 'host:port', '[IPv6]:port', or bare host."""
-            addr = addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host = addr[1:end] if end != -1 else addr.strip("[]")
-                rest = addr[end + 1 :] if end != -1 else ""
-                if rest.startswith(":") and rest[1:].isdigit():
-                    return cls(host, int(rest[1:]))
-                return cls(host, 0)
-            if addr.count(":") == 1:
-                host_part, port_part = addr.rsplit(":", 1)
-                if port_part.isdigit():
-                    return cls(host_part, int(port_part))
-            return cls(addr, 0)
-
-        def resolved(self) -> "NetworkAddress":
-            """DNS-resolve the host, preserving port."""
-            try:
-                infos = socket.getaddrinfo(
-                    self.host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
-                )
-                resolved_ip = infos[0][4][0]
-                return NetworkAddress(resolved_ip, self.port)
-            except socket.gaierror:
-                return self
-
-        def to_host_port_str(self) -> str:
-            """Return '[IPv6]:port' or 'host:port'."""
-            if self.is_ipv6:
-                return f"[{self.host}]:{self.port}"
-            return f"{self.host}:{self.port}"
-
-        def to_tcp(self) -> str:
-            """Return 'tcp://[IPv6]:port' or 'tcp://host:port'."""
-            if self.is_ipv6:
-                return f"tcp://[{self.host}]:{self.port}"
-            return f"tcp://{self.host}:{self.port}"
-
-
-# ---------------------------------------------------------------------------
-# MMEncoder._encode() adapter
-#
-# 0.5.10+: _encode(mm_items, modality) -> (grid_dim, embedding, aux_data)
-# 0.5.9:   _encode(mm_items)           -> (grid_dim, embedding)
-#
-# Imports are deferred to avoid pulling sgl_kernel (CUDA-only) at module
-# level, which breaks test collection on arm64 CPU-only CI nodes.
-# ---------------------------------------------------------------------------
-
-
-async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
-    """Version-safe wrapper around MMEncoder._encode().
-
-    Always returns (grid_dim, embedding, aux_data). On sglang 0.5.9
-    _encode takes no modality arg and returns a 2-tuple; on 0.5.10+ it
-    takes modality and returns a 3-tuple. We try the new signature first
-    and fall back to the old one.
-    """
-    try:
-        result = await encoder._encode(mm_items, modality)
-    except TypeError:
-        # sglang 0.5.9: _encode(mm_items) -> (grid_dim, embedding)
-        result = await encoder._encode(mm_items)
-
-    if len(result) == 2:
-        return (*result, None)
-    return result
-
-
-def get_scheduler_info(engine: Any) -> dict:
-    """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
-
-    SGLang exposes per-rank scheduler stats (``max_total_num_tokens``,
-    ``max_req_input_len``, ...) on the ``Engine`` via ``_scheduler_init_result``.
-    We return the rank-0 dict, or ``{}`` if it is not reachable on this build.
-
-    Covers:
-      - sglang 0.5.10+: ``engine._scheduler_init_result.scheduler_infos[0]``
-        (canonical; also what ``Engine.get_server_info`` reads internally).
-      - Older probed attributes (``engine.scheduler_info``,
-        ``engine.tokenizer_manager.scheduler_info``) as a best-effort fallback
-        for forks/experimental branches that surfaced the dict directly.
-    """
-    result = getattr(engine, "_scheduler_init_result", None)
-    if result is not None:
-        infos = getattr(result, "scheduler_infos", None)
-        if infos:
-            return infos[0]
-
-    direct = getattr(engine, "scheduler_info", None)
-    if direct:
-        return direct
-
-    tm = getattr(engine, "tokenizer_manager", None)
-    tm_info = getattr(tm, "scheduler_info", None) if tm is not None else None
-    if tm_info:
-        return tm_info
-
-    return {}
-
-
-def enable_disjoint_streaming_output(server_args: Any) -> None:
-    """
-    Enable SGLang's disjoint streaming output across ServerArgs field renames.
-
-    Covers sglang <= 0.5.x (`stream_output`) and newer releases
-    (`incremental_streaming_output`).
-    """
-    fields = getattr(type(server_args), "__dataclass_fields__", None)
-    if isinstance(fields, dict):
-        if "incremental_streaming_output" in fields:
-            server_args.incremental_streaming_output = True
-            return
-        if "stream_output" in fields:
-            server_args.stream_output = True
-            return
-        raise AttributeError(
-            "SGLang ServerArgs has neither 'incremental_streaming_output' nor "
-            "'stream_output'"
-        )
-
-    if hasattr(server_args, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
-        return
-    if hasattr(server_args, "stream_output"):
-        server_args.stream_output = True
-        return
-
-    logger.debug(
-        "Skipping streaming output compatibility for non-ServerArgs object: %s",
-        type(server_args).__name__,
-    )
+    if require_reasoning and "require_reasoning" not in kwargs:
+        _warn_require_reasoning_unsupported()
+    return kwargs
 
 
 __all__ = [
-    "NetworkAddress",
-    "enable_disjoint_streaming_output",
-    "ensure_sglang_top_level_exports",
+    "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
-    "get_local_ip_auto",
-    "get_scheduler_info",
-    "get_zmq_socket",
-    "mm_encode",
+    "override_server_args",
+    "require_reasoning_kwargs",
 ]

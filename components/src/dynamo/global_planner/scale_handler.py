@@ -1,36 +1,48 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Handler for scale_request endpoint in GlobalPlanner."""
+"""API layer for the GlobalPlanner ``scale_request`` endpoint.
 
-import asyncio
+Thin *driving adapter* over the capacity control loop. It owns the
+dynamo-runtime endpoint contract, caller authorization, no-operation mode, and
+translation between the wire DTOs (``ScaleRequest`` / ``ScaleResponse``) and the
+orchestrator. All budget arbitration and execution live below it:
+
+- :class:`~dynamo.global_planner.orchestrator.Orchestrator` — participants,
+  authorization, GPU-budget arbitration, and observe -> decide -> scale
+- :class:`~dynamo.global_planner.capacity_manager.CapacityManager` — Kubernetes
+  observe/scale backend
+
+Behavior is unchanged from the pre-refactor monolithic handler.
+"""
+
 import logging
 
-from dynamo.planner import KubernetesConnector
-from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
+from dynamo.global_planner.orchestrator import Orchestrator
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
 
 
 class ScaleRequestHandler:
-    """Handles incoming scale requests in GlobalPlanner.
+    """Handles incoming scale requests in GlobalPlanner (API layer).
 
-    This handler:
-    1. Receives scale requests from Planners
-    2. Validates caller authorization (optional)
-    3. Caches KubernetesConnector per DGD for efficiency
-    4. Executes scaling via Kubernetes API
-    5. Returns current replica counts
+    Receives scale requests from Planners, validates caller authorization, and
+    delegates budget arbitration and Kubernetes execution to an
+    :class:`Orchestrator`. Returns current replica counts.
 
     Management modes:
-    - **Explicit** (``--managed-namespaces`` set): Only DGDs whose Dynamo
-      namespaces are listed are managed. Authorization rejects requests from
-      unlisted namespaces, and GPU budget only counts these DGDs.
-    - **Implicit** (no ``--managed-namespaces``): All DGDs in the Kubernetes
-      namespace are managed. Any caller is accepted, and GPU budget counts
-      every DGD discovered in the namespace.
+    - **Explicit** (``managed_namespaces`` set): only listed Dynamo namespaces
+      are authorized, and only their DGDs count toward the GPU budget.
+    - **Implicit** (no ``managed_namespaces``): any caller is accepted and every
+      DGD in the namespace counts toward the budget.
+
+    Budget enforcement (``max_total_gpus`` ceiling, ``min_total_gpus`` floor with
+    cross-pool pairing) is performed by the :class:`Orchestrator`; see it for the
+    full semantics.
     """
 
     def __init__(
@@ -40,6 +52,8 @@ class ScaleRequestHandler:
         k8s_namespace: str,
         no_operation: bool = False,
         max_total_gpus: int = -1,
+        min_total_gpus: int = -1,
+        intent_cache_ttl_seconds: float = 360.0,
     ):
         """Initialize the scale request handler.
 
@@ -47,23 +61,31 @@ class ScaleRequestHandler:
             runtime: Dynamo runtime instance
             managed_namespaces: List of authorized namespaces (None = accept all)
             k8s_namespace: Kubernetes namespace where GlobalPlanner is running
-            no_operation: If True, log scale requests without executing K8s scaling
+            no_operation: If True, log scale requests without executing scaling
             max_total_gpus: Maximum total GPUs across all managed pools (-1 = unlimited)
+            min_total_gpus: Minimum total GPUs across all managed pools (-1 = no floor)
+            intent_cache_ttl_seconds: How long a cached scale intent from a pool
+                is considered fresh for pairing
         """
         self.runtime = runtime
-        # If managed_namespaces is None, accept all namespaces
-        self.managed_namespaces = (
-            set(managed_namespaces) if managed_namespaces else None
-        )
-        self.k8s_namespace = k8s_namespace
         self.no_operation = no_operation
-        self.max_total_gpus = max_total_gpus
-        self.connectors: dict[str, KubernetesConnector] = {}  # Cache per DGD
-        # Serializes budget-check + scale-execution so concurrent requests from
-        # different pools cannot both pass against the same pre-scale state.
-        self._scale_lock = asyncio.Lock()
 
-        if self.managed_namespaces:
+        # TODO(global-planner): Separate the caller authorization allowlist from
+        # the Kubernetes backend's discovery scope instead of deriving both from
+        # managed_namespaces and a namespace-prefix convention.
+        # The wire vocabulary (K8s namespace / DGD name) is mapped here onto the
+        # orchestrator's neutral vocabulary; the orchestrator is a no-K8s zone.
+        capacity_manager = KubernetesCapacityManager(namespace=k8s_namespace)
+        self.orchestrator = Orchestrator(
+            capacity_manager=capacity_manager,
+            managed_deployments=managed_namespaces,
+            max_total_gpus=max_total_gpus,
+            min_total_gpus=min_total_gpus,
+            intent_cache_ttl_seconds=intent_cache_ttl_seconds,
+            use_lock=True,
+        )
+
+        if managed_namespaces:
             logger.info(
                 f"ScaleRequestHandler initialized for namespaces: {managed_namespaces}"
             )
@@ -76,121 +98,41 @@ class ScaleRequestHandler:
                 "scale requests will be logged but not executed"
             )
 
-        if self.max_total_gpus >= 0:
-            logger.info(
-                f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
-            )
-            self._populate_k8s_connectors()
+        if max_total_gpus >= 0:
+            logger.info(f"GPU budget ceiling ENABLED: max {max_total_gpus} total GPUs")
         else:
-            logger.info("GPU budget enforcement DISABLED (unlimited)")
+            logger.info("GPU budget ceiling DISABLED (unlimited)")
 
-    def _managed_dgd_names(self) -> set[str] | None:
-        """Derive the DGD names that this GlobalPlanner manages.
+        if min_total_gpus >= 0:
+            logger.info(
+                f"GPU budget floor ENABLED: min {min_total_gpus} total GPUs, "
+                f"intent cache TTL {intent_cache_ttl_seconds}s"
+            )
+        else:
+            logger.info("GPU budget floor DISABLED")
 
-        Returns:
-            A set of DGD names when in explicit mode, or None in implicit mode.
+        # Discover existing DGDs (and warn if below floor) when a budget is
+        # active, so the initial GPU total accounts for pre-existing pools.
+        self.orchestrator.startup()
 
-        The Dynamo operator convention is:
-            DYN_NAMESPACE = "{k8s_namespace}-{dgd_name}"
-        so the DGD name is the Dynamo namespace with the k8s prefix stripped.
-        """
-        if self.managed_namespaces is None:
-            return None
+    # ------------------------------------------------------------------ #
+    # Compatibility accessors (handler-level config)                     #
+    # ------------------------------------------------------------------ #
 
-        prefix = f"{self.k8s_namespace}-"
-        names = set()
-        for ns in self.managed_namespaces:
-            if ns.startswith(prefix):
-                names.add(ns[len(prefix) :])
-            else:
-                logger.warning(
-                    f"Managed namespace '{ns}' does not start with "
-                    f"expected prefix '{prefix}'; cannot derive DGD name"
-                )
-        return names
+    # TODO(global-planner): Preserve the pre-refactor writable handler API
+    # with forwarding setters for max_total_gpus, min_total_gpus, and
+    # managed_namespaces (including its previous shape), or document the break.
+    @property
+    def max_total_gpus(self) -> int:
+        return self.orchestrator.max_total_gpus
 
-    def _populate_k8s_connectors(self):
-        """Pre-populate connectors for DGDs managed by this GlobalPlanner.
+    @property
+    def min_total_gpus(self) -> int:
+        return self.orchestrator.min_total_gpus
 
-        This ensures the GPU budget calculation accounts for DGDs that already
-        exist at startup, even if they haven't sent a scale request yet.
-
-        In explicit mode (--managed-namespaces set), only DGDs whose names
-        match the managed Dynamo namespaces are discovered.
-        In implicit mode, all DGDs in the k8s namespace are discovered.
-        """
-        try:
-            kube_api = KubernetesAPI(self.k8s_namespace)
-            managed_names = self._managed_dgd_names()
-            dgds = kube_api.list_graph_deployments()
-            discovered = []
-            for dgd in dgds:
-                name = dgd.get("metadata", {}).get("name", "")
-                if not name:
-                    continue
-                # In explicit mode, skip DGDs not in the managed set
-                if managed_names is not None and name not in managed_names:
-                    continue
-                connector_key = f"{self.k8s_namespace}/{name}"
-                if connector_key not in self.connectors:
-                    connector = KubernetesConnector(
-                        dynamo_namespace="discovered",
-                        k8s_namespace=self.k8s_namespace,
-                        parent_dgd_name=name,
-                    )
-                    self.connectors[connector_key] = connector
-                discovered.append(name)
-            logger.info(f"Discovered {len(discovered)} existing DGDs: {discovered}")
-        except Exception as e:
-            logger.warning(f"Failed to discover existing DGDs: {e}")
-
-    def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
-        """Calculate total GPUs across all managed DGDs if this request is granted.
-
-        For the requesting DGD, uses the desired replica counts from the request.
-        For all other known DGDs, uses their current replica counts.
-
-        NOTE: GPU count is read from spec.services[].resources.limits.gpu only.
-        GPUs specified via resources.requests.gpu or extraPodSpec resource
-        overrides are not counted.
-        """
-        total_gpus = 0
-        requesting_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
-
-        for key, connector in self.connectors.items():
-            try:
-                deployment = connector.kube_api.get_graph_deployment(
-                    connector.parent_dgd_name
-                )
-            except Exception as e:
-                logger.warning(f"Failed to read DGD for {key}: {e}")
-                continue
-
-            services = deployment.get("spec", {}).get("services", {})
-
-            for svc_spec in services.values():
-                sub_type = svc_spec.get("subComponentType", "")
-                if not sub_type:
-                    continue
-
-                gpu_per_replica = int(
-                    svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
-                )
-                if gpu_per_replica == 0:
-                    continue
-
-                replicas = svc_spec.get("replicas", 0)
-
-                # For the requesting DGD, use desired replicas from the request
-                if key == requesting_key:
-                    for target in request.target_replicas:
-                        if target.sub_component_type.value == sub_type:
-                            replicas = target.desired_replicas
-                            break
-
-                total_gpus += replicas * gpu_per_replica
-
-        return total_gpus
+    @property
+    def managed_namespaces(self):
+        return self.orchestrator.managed_deployments
 
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
@@ -204,10 +146,10 @@ class ScaleRequestHandler:
         """
         try:
             # Validate caller namespace (if authorization is enabled)
-            if (
-                self.managed_namespaces is not None
-                and request.caller_namespace not in self.managed_namespaces
-            ):
+            # TODO(global-planner): Authenticate a trusted runtime principal
+            # instead of relying on payload-claimed caller_namespace, and bind
+            # authorization to the requested Kubernetes namespace and DGD.
+            if not self.orchestrator.is_authorized(request.caller_namespace):
                 yield {
                     "status": ScaleStatus.ERROR.value,
                     "message": f"Namespace {request.caller_namespace} not authorized",
@@ -215,7 +157,7 @@ class ScaleRequestHandler:
                 }
                 return
 
-            # No-operation mode: log and return success without touching K8s
+            # No-operation mode: log and return success without touching the backend
             if self.no_operation:
                 replicas_summary = {
                     r.sub_component_type.value: r.desired_replicas
@@ -239,69 +181,37 @@ class ScaleRequestHandler:
                 f"in K8s namespace {request.k8s_namespace}"
             )
 
-            # Get or create connector for this DGD
-            connector_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
-            if connector_key not in self.connectors:
-                connector = KubernetesConnector(
-                    dynamo_namespace=request.caller_namespace,
-                    k8s_namespace=request.k8s_namespace,
-                    parent_dgd_name=request.graph_deployment_name,
-                )
-                self.connectors[connector_key] = connector
-                logger.debug(f"Created new connector for {connector_key}")
-            else:
-                connector = self.connectors[connector_key]
-                logger.debug(f"Reusing cached connector for {connector_key}")
-
-            # Lock ensures the budget check and scale execution are atomic
-            # so concurrent requests from different pools cannot both pass
-            # against the same pre-scale replica counts.
-            async with self._scale_lock:
-                # Check GPU budget before scaling
-                if self.max_total_gpus >= 0:
-                    total_gpus = self._calculate_total_gpus_after_request(request)
-                    if total_gpus > self.max_total_gpus:
-                        logger.warning(
-                            f"Rejecting scale request from {request.caller_namespace}: "
-                            f"would use {total_gpus} GPUs, exceeding max of {self.max_total_gpus}"
-                        )
-                        yield {
-                            "status": ScaleStatus.ERROR.value,
-                            "message": (
-                                f"GPU budget exceeded: request would use {total_gpus} total GPUs, "
-                                f"max allowed is {self.max_total_gpus}"
-                            ),
-                            "current_replicas": {},
-                        }
-                        return
-                    logger.info(
-                        f"GPU budget check passed: {total_gpus}/{self.max_total_gpus} GPUs"
-                    )
-
-                # Execute scaling (request.target_replicas is already List[TargetReplica])
-                await connector.set_component_replicas(
-                    request.target_replicas, blocking=request.blocking
-                )
-
-            # Get current replica counts
-            current_replicas = {}
-            deployment = connector.kube_api.get_graph_deployment(
-                connector.parent_dgd_name
+            # Register the participant (idempotent) so it can be observed and
+            # scaled and counts toward the budget. Map the wire fields onto the
+            # orchestrator's neutral vocabulary.
+            participant_id = f"{request.k8s_namespace}/{request.graph_deployment_name}"
+            self.orchestrator.register(
+                participant_id,
+                caller_name=request.caller_namespace,
+                namespace=request.k8s_namespace,
+                deployment_name=request.graph_deployment_name,
             )
-            for service_name, service_spec in deployment["spec"]["services"].items():
-                sub_type = service_spec.get("subComponentType", "")
-                if sub_type:
-                    current_replicas[sub_type] = service_spec.get("replicas", 0)
 
-            logger.info(
-                f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"
+            outcome = await self.orchestrator.submit(
+                participant_id,
+                request.target_replicas,
+                blocking=request.blocking,
+                deployment_name=request.graph_deployment_name,
+                caller_name=request.caller_namespace,
             )
             yield {
-                "status": ScaleStatus.SUCCESS.value,
-                "message": f"Scaled {request.graph_deployment_name} successfully",
-                "current_replicas": current_replicas,
+                "status": outcome.status.value,
+                "message": outcome.message,
+                "current_replicas": outcome.current_replicas,
             }
 
+        except DynamoGraphDeploymentNotReadyError as e:
+            logger.warning("Rejected scale request: %s", e)
+            yield {
+                "status": ScaleStatus.REJECTED.value,
+                "message": str(e),
+                "current_replicas": {},
+            }
         except Exception as e:
             logger.exception(f"Error processing scale request: {e}")
             yield {

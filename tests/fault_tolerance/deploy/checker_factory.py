@@ -143,7 +143,7 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
         # TensorRT-LLM uses different names for agg vs disagg
         # Check test name to determine deployment type
         if "disagg" in test_name:
-            worker_service_name = "TRTLLMDecodeWorker"
+            worker_service_name = "decode"
         else:
             # Agg deployment uses TRTLLMWorker
             worker_service_name = "TRTLLMWorker"

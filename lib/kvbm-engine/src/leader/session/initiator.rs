@@ -928,7 +928,7 @@ impl InitiatorSession {
             // Sort (block_id, seq_hash) pairs by position to ensure correct transfer order
             // This is a safety net in case responder sent blocks in wrong order
             let mut pairs: Vec<(BlockId, SequenceHash)> =
-                block_ids.into_iter().zip(seq_hashes.into_iter()).collect();
+                block_ids.into_iter().zip(seq_hashes).collect();
             pairs.sort_by_key(|(_, hash)| hash.position());
 
             let block_ids: Vec<BlockId> = pairs.iter().map(|(id, _)| *id).collect();
@@ -1259,10 +1259,8 @@ impl InitiatorSession {
             let mut blocks = Vec::new();
 
             // Iterate over results alongside the dst_blocks and hashes
-            for ((result, dst_block), seq_hash) in results
-                .into_iter()
-                .zip(dst_blocks.into_iter())
-                .zip(hashes.iter())
+            for ((result, dst_block), seq_hash) in
+                results.into_iter().zip(dst_blocks).zip(hashes.iter())
             {
                 match result {
                     Ok(hash) => {

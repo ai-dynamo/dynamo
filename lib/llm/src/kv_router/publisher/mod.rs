@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -14,29 +13,49 @@ use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
-use dynamo_runtime::config::environment_names::nats as env_nats;
-use dynamo_runtime::metrics::MetricsHierarchy;
-use dynamo_runtime::metrics::prometheus_names::kv_publisher;
+use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::{
-    component::Component,
-    transports::nats::{NatsQueue, Slug},
-};
 
+use crate::discovery::KvEventSource as DiscoveredKvEventSource;
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
+    metrics::KvPublisherMetrics,
 };
 
+mod attachment_owner;
+mod batching;
+mod dedup;
 mod event_processor;
+mod multimodal_embedding_cache;
+mod sinks;
+mod state_agent;
+mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
+pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
+
+pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
-use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
-use event_processor::{
-    EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
+use dedup::{EventDedupFilter, EventDedupPolicy};
+#[cfg(test)]
+use event_processor::run_event_processor_loop;
+use event_processor::start_event_processor;
+pub use multimodal_embedding_cache::{
+    MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+    MultimodalEmbeddingCacheUpdate,
+};
+use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
+pub use state_agent_host::{
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -45,91 +64,56 @@ const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None;
 const DEFAULT_MAX_BATCH_BLOCKS: usize = 128;
 
-/// Helper function to create a KV stream name from a component and subject.
-///
-/// Generates a slugified stream name in the format:
-/// `namespace-{namespace}-component-{component}-{subject}`
-fn create_kv_stream_name(component: &Component, subject: &str) -> String {
-    Slug::slugify(&format!(
-        "namespace.{}.component.{}.{}",
-        component.namespace().name(),
-        component.name(),
-        subject
-    ))
-    .to_string()
-    .replace("_", "-")
-}
-
-/// Metrics for the KV publisher, created via the MetricsHierarchy API.
-/// This provides automatic `dynamo_namespace`, `dynamo_component`, and other
-/// hierarchy labels for free.
-pub(super) struct KvPublisherMetrics {
-    /// Total number of raw events dropped by engines before reaching publisher
-    pub engines_dropped_events_total: prometheus::IntCounter,
-}
-
-static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
-
-impl KvPublisherMetrics {
-    /// Create from a Component, memoized in a static OnceLock.
-    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
-    /// injects hierarchy labels (including `worker_id`), and registers with the
-    /// DRT `MetricsRegistry`.
-    pub fn from_component(component: &Component) -> Arc<Self> {
-        KV_PUBLISHER_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                match metrics.create_intcounter(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                    &[],
-                ) {
-                    Ok(engines_dropped_events_total) => {
-                        Arc::new(Self { engines_dropped_events_total })
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.", e);
-                        Arc::new(Self::new_unregistered())
-                    }
-                }
-            })
-            .clone()
-    }
-
-    /// Creates unregistered metrics for use when registration fails.
-    /// Increments still work in-process but are not exposed on `/metrics`.
-    pub fn new_unregistered() -> Self {
-        Self {
-            engines_dropped_events_total: prometheus::IntCounter::with_opts(
-                prometheus::Opts::new(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                ),
-            )
-            .expect("failed to create engines_dropped_events_total counter"),
-        }
-    }
-
-    /// Increment the engines dropped events counter by the given amount.
-    pub fn increment_engines_dropped_events(&self, count: u64) {
-        self.engines_dropped_events_total.inc_by(count);
-    }
-}
-
-fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
-    KV_PUBLISHER_METRICS.get().cloned()
-}
-
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// Model image-placeholder token id, used by the normalizer to rewrite
+        /// vLLM BlockStored events to the canonical pad_value scheme. `None`
+        /// for text-only / non-MM deployments (normalization is a no-op).
+        image_token_id: Option<u32>,
+    },
 }
 
 enum KvEventSource {
     Zmq {
-        zmq_handle: tokio::task::JoinHandle<()>,
+        listener_abort_handle: tokio::task::AbortHandle,
+        supervisor_handle: tokio::task::JoinHandle<bool>,
     },
+}
+
+async fn supervise_zmq_listener(
+    listener_handle: tokio::task::JoinHandle<()>,
+    endpoint: String,
+    topic: String,
+    cancellation_token: CancellationToken,
+) -> bool {
+    let result = listener_handle.await;
+    if cancellation_token.is_cancelled() {
+        return false;
+    }
+
+    match result {
+        Ok(()) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                "ZMQ listener terminated unexpectedly; stopping KV event publisher"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                %error,
+                "ZMQ listener task failed unexpectedly; stopping KV event publisher"
+            );
+        }
+    }
+    cancellation_token.cancel();
+    true
 }
 
 impl KvEventSource {
@@ -139,64 +123,95 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<PlacementEvent>,
+        tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
-                let zmq_handle = component
-                    .drt()
-                    .runtime()
-                    .secondary()
-                    .spawn(start_zmq_listener(
-                        endpoint,
-                        topic,
-                        worker_id,
-                        tx,
-                        cancellation_token.clone(),
-                        kv_block_size,
-                        next_event_id,
-                    ));
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                image_token_id,
+            } => {
+                let listener_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(start_zmq_listener(
+                            endpoint.clone(),
+                            topic.clone(),
+                            worker_id,
+                            tx,
+                            cancellation_token.clone(),
+                            kv_block_size,
+                            next_event_id,
+                            image_token_id,
+                        ));
+                let listener_abort_handle = listener_handle.abort_handle();
+                let supervisor_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(supervise_zmq_listener(
+                            listener_handle,
+                            endpoint,
+                            topic,
+                            cancellation_token,
+                        ));
 
-                Ok(KvEventSource::Zmq { zmq_handle })
+                Ok(KvEventSource::Zmq {
+                    listener_abort_handle,
+                    supervisor_handle,
+                })
             }
         }
     }
 
     fn shutdown(&self) {
         match self {
-            KvEventSource::Zmq { zmq_handle } => {
-                zmq_handle.abort();
+            KvEventSource::Zmq {
+                listener_abort_handle,
+                supervisor_handle,
+            } => {
+                listener_abort_handle.abort();
+                supervisor_handle.abort();
             }
         }
     }
 }
 
 /// A publisher of KV events.
+///
+/// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
+/// publisher ID. Restarting the engine publisher independently while this value survives is not
+/// supported. Future independent restart support must either emit an ordered rank-scoped
+/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,
     /// The source of KV events.
-    /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
+    /// Can be `None` if all events are provided through
+    /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
     source: Option<KvEventSource>,
     /// The cancellation token.
     cancellation_token: CancellationToken,
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
 }
 
 impl KvEventPublisher {
     pub fn new(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         Self::new_with_local_indexer(
-            component,
+            endpoint,
             kv_block_size,
             source_config,
             false,
@@ -206,13 +221,80 @@ impl KvEventPublisher {
     }
 
     pub fn new_with_local_indexer(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        let kv_state_endpoint = endpoint.id();
+        Self::new_with_local_indexer_at(
+            endpoint,
+            kv_state_endpoint,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_at(
+        endpoint: Endpoint,
+        kv_state_endpoint: EndpointId,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        Self::new_with_local_indexer_and_worker_id_at(
+            endpoint,
+            kv_state_endpoint,
+            None,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_and_worker_id(
+        endpoint: Endpoint,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        let kv_state_endpoint = endpoint.id();
+        Self::new_with_local_indexer_and_worker_id_at(
+            endpoint,
+            kv_state_endpoint,
+            worker_id,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_local_indexer_and_worker_id_at(
+        endpoint: Endpoint,
+        kv_state_endpoint: EndpointId,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        let component = endpoint.component().clone();
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -227,19 +309,20 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let worker_id = component.drt().connection_id();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
-        KvPublisherMetrics::from_component(&component);
+        let _ = KvPublisherMetrics::from_component(&component);
 
-        let component_name = component.name();
+        let endpoint_id = endpoint.id();
         tracing::info!(
-            "Initializing KvEventPublisher for worker {worker_id} in component {component_name}"
+            %kv_state_endpoint,
+            "Initializing KvEventPublisher for worker {worker_id} on serving endpoint {endpoint_id}"
         );
 
         if enable_local_indexer {
             tracing::info!(
-                "LocalKvIndexer enabled for worker {worker_id} in component {component_name}"
+                "LocalKvIndexer enabled for worker {worker_id} on endpoint {endpoint_id}"
             );
         }
 
@@ -270,79 +353,121 @@ impl KvEventPublisher {
             None
         };
 
-        let _local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
-            let component = component.clone();
-            let local_indexer = local_indexer_ref.clone();
-
-            component
-                .drt()
-                .runtime()
-                .secondary()
-                .spawn(start_worker_kv_query_endpoint(
-                    component,
-                    worker_id,
-                    dp_rank,
-                    local_indexer,
-                ))
-        });
-
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
 
-        if enable_local_indexer {
-            tracing::info!("Using event plane for KV event publishing (local_indexer mode)");
-            let component_clone = component.clone();
-            component.drt().runtime().secondary().spawn(async move {
-                let event_publisher =
-                    match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
-                        &component_clone,
-                        KV_EVENT_SUBJECT,
-                    )
-                    .await
-                    {
-                        Ok(publisher) => publisher,
-                        Err(e) => {
-                            tracing::error!("Failed to create event publisher: {}", e);
-                            return;
-                        }
-                    };
-
-                start_event_processor(
-                    EventPlanePublisher(event_publisher),
-                    worker_id,
-                    cancellation_token_clone,
-                    rx,
-                    local_indexer_clone,
-                    batching_timeout_ms,
+        tracing::info!("Using event plane for KV event publishing");
+        let endpoint_clone = endpoint.clone();
+        component.drt().runtime().secondary().spawn(async move {
+            let event_publisher =
+                match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
+                    endpoint_clone.drt(),
+                    &kv_state_endpoint,
+                    KV_EVENT_SUBJECT,
                 )
                 .await
-            });
-        } else {
-            let stream_name = create_kv_stream_name(&component, KV_EVENT_SUBJECT);
-            let nats_server = std::env::var(env_nats::NATS_SERVER)
-                .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-            let mut nats_queue = NatsQueue::new_without_consumer(
-                stream_name,
-                nats_server,
-                std::time::Duration::from_secs(60),
-            );
+                {
+                    Ok(publisher) => publisher,
+                    Err(e) => {
+                        tracing::error!("Failed to create event publisher: {}", e);
+                        return;
+                    }
+                };
+            let publisher_id = event_publisher.publisher_id();
 
-            component.drt().runtime().secondary().spawn(async move {
-                if let Err(e) = nats_queue.connect().await {
-                    tracing::error!("Failed to connect NatsQueue: {e}");
+            let recovery_endpoint = if let Some(local_indexer) = local_indexer_clone.as_ref() {
+                match start_worker_kv_query_endpoint(
+                    component.clone(),
+                    publisher_id,
+                    worker_id,
+                    dp_rank,
+                    local_indexer.clone(),
+                )
+                .await
+                {
+                    Ok(endpoint) => Some(endpoint),
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            worker_id,
+                            dp_rank,
+                            publisher_id,
+                            "KV recovery endpoint failed; advertising a live-only KV source"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if cancellation_token_clone.is_cancelled() {
+                if let Some(endpoint) = recovery_endpoint {
+                    let _ = endpoint.shutdown().await;
+                }
+                return;
+            }
+
+            let source = DiscoveredKvEventSource {
+                kv_state_endpoint: kv_state_endpoint.clone(),
+                worker: WorkerWithDpRank::new(worker_id, dp_rank),
+                publisher_id,
+                recovery_target: recovery_endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.instance().clone()),
+            };
+            let source_spec = DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_state_endpoint.clone(),
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id,
+                metadata: match serde_json::to_value(&source) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        tracing::error!(%error, "Failed to encode KV event source advertisement");
+                        if let Some(endpoint) = recovery_endpoint {
+                            let _ = endpoint.shutdown().await;
+                        }
+                        return;
+                    }
+                },
+            };
+            let source_instance = match component.drt().discovery().register(source_spec).await {
+                Ok(instance) => instance,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to advertise KV event source");
+                    if let Some(endpoint) = recovery_endpoint {
+                        let _ = endpoint.shutdown().await;
+                    }
                     return;
                 }
-                start_event_processor_jetstream(
-                    nats_queue,
-                    worker_id,
-                    cancellation_token_clone,
-                    rx,
-                    local_indexer_clone,
-                    batching_timeout_ms,
-                )
+            };
+
+            start_event_processor(
+                EventPlanePublisher(event_publisher),
+                worker_id,
+                cancellation_token_clone,
+                rx,
+                local_indexer_clone,
+                batching_timeout_ms,
+            )
+            .await;
+
+            if let Err(error) = component
+                .drt()
+                .discovery()
+                .unregister(source_instance)
                 .await
-            });
-        }
+            {
+                tracing::warn!(%error, publisher_id, "Failed to unregister KV event source");
+            }
+            if let Some(endpoint) = recovery_endpoint
+                && let Err(error) = endpoint.shutdown().await
+            {
+                tracing::warn!(%error, publisher_id, "Failed to stop KV recovery endpoint");
+            }
+        });
 
         Ok(Self {
             kv_block_size,
@@ -355,11 +480,81 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
-        match self.tx.send(placement_event) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+        self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
+    }
+
+    /// Publish an ordered list of engine events as one processor input.
+    ///
+    /// The processor handles the complete list without receiving another list
+    /// or servicing its batching timer between source events. Existing
+    /// coalescing and block-count limits still apply within the list. Empty
+    /// lists are ignored.
+    pub fn publish_batch(
+        &self,
+        events: Vec<KvCacheEvent>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        if events.is_empty() {
+            return Ok(());
         }
+
+        let placement_events = events
+            .into_iter()
+            .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
+            .collect();
+        self.tx.send(placement_events).map_err(|err| {
+            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        })
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
+        self.send_singleton(placement_event)
+    }
+
+    /// Publishes events that share one source visibility boundary.
+    pub fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let events = events
+            .into_iter()
+            .map(|(event, storage_tier)| {
+                PlacementEvent::new(
+                    Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+                    event,
+                )
+            })
+            .collect();
+
+        self.tx.send(events).map_err(|err| {
+            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        })
+    }
+
+    fn send_singleton(
+        &self,
+        event: PlacementEvent,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        self.tx.send(vec![event]).map_err(|err| {
+            mpsc::error::SendError(
+                err.0
+                    .into_iter()
+                    .next()
+                    .expect("singleton publish returned an empty failed batch")
+                    .event,
+            )
+        })
     }
 
     pub fn next_event_id(&self) -> u64 {

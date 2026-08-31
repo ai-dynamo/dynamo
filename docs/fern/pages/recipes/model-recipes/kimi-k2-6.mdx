@@ -1,0 +1,326 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Kimi-K2.6"
+subtitle: "Serve moonshotai/Kimi-K2.6 with Dynamo and vLLM, tuned per GPU and workload."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a validated aggregated vLLM deployment of Kimi-K2.6 — text + image input, reasoning, and tool calling — with KV-aware routing, Eagle3 MLA speculative decoding, and LMCache CPU KV-cache offload, benchmarked to roughly 50 output tok/s per user on its trace. Pick your GPU and workload; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200 <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
+<label htmlFor="recipe-usecase-chat">Chat</label>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="chat">
+<span><b>Checkpoint</b> nvidia/Kimi-K2.6-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV cache</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4</span>
+<span><b>MoE backend</b> FlashInfer-TRTLLM</span>
+<span><b>Attention</b> TokenSpeed MLA</span>
+<span><b>Workload</b> Chat, 70% KV reuse</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="agentic">
+<span><b>Checkpoint</b> nvidia/Kimi-K2.6-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV cache</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4</span>
+<span><b>MoE backend</b> FlashInfer-TRTLLM</span>
+<span><b>Attention</b> TokenSpeed MLA</span>
+<span><b>Workload</b> Agentic, 64K-median ISL, 90% KV reuse</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="chat">
+<span><b>Checkpoint</b> moonshotai/Kimi-K2.6 (native INT4)</span>
+<span><b>Precision</b> INT4</span>
+<span><b>GPUs</b> 8x H200 per worker, TP8</span>
+<span><b>MoE backend</b> Marlin</span>
+<span><b>Attention</b> FlashAttention MLA</span>
+<span><b>Workload</b> Chat, 70% KV reuse</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="agentic">
+<span><b>Checkpoint</b> moonshotai/Kimi-K2.6 (native INT4)</span>
+<span><b>Precision</b> INT4</span>
+<span><b>GPUs</b> 8x H200 per worker, TP8</span>
+<span><b>MoE backend</b> Marlin</span>
+<span><b>Attention</b> FlashAttention MLA</span>
+<span><b>Workload</b> Agentic, 64K-median ISL, 90% KV reuse</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-sku="b200">
+
+- A Kubernetes cluster with the Dynamo platform installed and **4x B200 per worker replica** available (results below were measured at 4 replicas).
+- A Hugging Face token with access to `nvidia/Kimi-K2.6-NVFP4` and `lightseekorg/kimi-k2.6-eagle3-mla`.
+
+</div>
+
+<div data-sku="h200">
+
+- A Kubernetes cluster with the Dynamo platform installed and **8x H200 per worker replica** available (results below were measured at 4 replicas).
+- A Hugging Face token with access to `moonshotai/Kimi-K2.6` and `lightseekorg/kimi-k2.6-eagle3-mla`.
+
+</div>
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and cluster-specific placement in the manifests before applying them.
+</Warning>
+
+## Deploy
+
+Prepare the model cache and download the checkpoint and Eagle3 head:
+
+<div data-sku="b200">
+
+```bash
+# 1. Storage — edit storageClassName in model-cache.yaml first (kubectl get storageclass).
+kubectl apply -f recipes/kimi-k2.6/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+# 2. Download. B200 uses the NVFP4 checkpoint — remove the native INT4
+#    download from model-download.yaml before applying.
+kubectl apply -f recipes/kimi-k2.6/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+# 1. Storage — edit storageClassName in model-cache.yaml first (kubectl get storageclass).
+kubectl apply -f recipes/kimi-k2.6/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+# 2. Download. H200 uses the native INT4 checkpoint — remove the NVFP4
+#    download from model-download.yaml before applying.
+kubectl apply -f recipes/kimi-k2.6/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+Then deploy:
+
+<div data-sku="b200" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/kimi-k2.6/vllm/agg-b200-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-usecase="agentic">
+
+```bash
+kubectl apply -f recipes/kimi-k2.6/vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/kimi-k2.6/vllm/agg-h200-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+```bash
+kubectl apply -f recipes/kimi-k2.6/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic:
+
+<div data-sku="b200" data-usecase="chat">
+
+```bash
+kubectl port-forward svc/kimi-k26-agg-b200-chat-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-usecase="agentic">
+
+```bash
+kubectl port-forward svc/kimi-k26-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="chat">
+
+```bash
+kubectl port-forward svc/kimi-k26-agg-h200-chat-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+```bash
+kubectl port-forward svc/kimi-k26-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"moonshotai/Kimi-K2.6","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark
+
+A single AIPerf trace-replay Job ([`perf/perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/perf.yaml)) covers every target — only `ENDPOINT` and `TRACE_FILE` change. Before running it: point the worker's `SPECULATIVE_CONFIG` at the `speculative-config-synthetic` ConfigMap key (synthetic Eagle3 acceptance, AL=2.49), set worker `replicas` to your target, and stage the traces from [`recipes/kimi-k2.6/perf/traces/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.6/perf/traces) onto the `model-cache` PVC:
+
+```bash
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+kubectl cp recipes/kimi-k2.6/perf/traces ${NAMESPACE}/pvc-helper:/model-cache/
+```
+
+<div data-sku="b200" data-usecase="chat">
+
+Set `ENDPOINT` to `kimi-k26-agg-b200-chat-frontend:8000` and `TRACE_FILE` to the chat trace, then apply. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile -m moonshotai/Kimi-K2.6 --tokenizer moonshotai/Kimi-K2.6 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 --url http://kimi-k26-agg-b200-chat-frontend:8000 --streaming \
+  --use-server-token-count --extra-inputs ignore_eos:true --concurrency 48 --random-seed 42
+```
+
+</div>
+
+<div data-sku="b200" data-usecase="agentic">
+
+Set `ENDPOINT` to `kimi-k26-agg-b200-agentic-frontend:8000` and `TRACE_FILE` to the agentic trace, then apply. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile -m moonshotai/Kimi-K2.6 --tokenizer moonshotai/Kimi-K2.6 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 --url http://kimi-k26-agg-b200-agentic-frontend:8000 --streaming \
+  --use-server-token-count --extra-inputs ignore_eos:true --concurrency 64 --random-seed 42
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="chat">
+
+Set `ENDPOINT` to `kimi-k26-agg-h200-chat-frontend:8000` and `TRACE_FILE` to the chat trace, then apply. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile -m moonshotai/Kimi-K2.6 --tokenizer moonshotai/Kimi-K2.6 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 --url http://kimi-k26-agg-h200-chat-frontend:8000 --streaming \
+  --use-server-token-count --extra-inputs ignore_eos:true --concurrency 32 --random-seed 42
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+Set `ENDPOINT` to `kimi-k26-agg-h200-agentic-frontend:8000` and `TRACE_FILE` to the agentic trace, then apply. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile -m moonshotai/Kimi-K2.6 --tokenizer moonshotai/Kimi-K2.6 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 --url http://kimi-k26-agg-h200-agentic-frontend:8000 --streaming \
+  --use-server-token-count --extra-inputs ignore_eos:true --concurrency 48 --random-seed 42
+```
+
+</div>
+
+```bash
+kubectl apply -f recipes/kimi-k2.6/perf/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/kimi-k26-bench -n ${NAMESPACE} --timeout=7200s
+```
+
+15% and 30% trace subsets are provided for shorter runs. To sweep concurrencies, delete the DGD worker pods between runs so residual KV-cache and prefix-cache state does not skew results — see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/README.md) for the full workflow, artifact layout, and tunable environment variables.
+
+## Expected Performance
+
+Each target is tuned for its workload shape at a 50 tok/s/user interactivity target:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Chat | 1K | 1K | 70% | 50 |
+| Agentic | 64K | 400 | 90% | 50 |
+
+Measured results below were collected by replaying the **15% trace subsets** (`*_short_15perc.jsonl`) with 4 worker replicas per deployment; your selected target's row is highlighted:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Recipe</th><th>SKU</th><th>Worker replicas</th><th>Concurrency</th><th>User output tok/s</th><th>System output tok/s/GPU</th></tr></thead>
+<tbody>
+<tr data-sku="b200" data-usecase="chat"><td>Chat (15% subset)</td><td>B200</td><td>4</td><td>48</td><td>49.86</td><td>107.8</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td>Agentic (15% subset)</td><td>B200</td><td>4</td><td>64</td><td>55.50</td><td>166.5</td></tr>
+<tr data-sku="h200" data-usecase="chat"><td>Chat (15% subset)</td><td>H200</td><td>4</td><td>32</td><td>54.86</td><td>38.7</td></tr>
+<tr data-sku="h200" data-usecase="agentic"><td>Agentic (15% subset)</td><td>H200</td><td>4</td><td>48</td><td>56.06</td><td>66.5</td></tr>
+</tbody>
+</table>
+</div>
+
+## Compare All Targets
+
+All four targets serve `moonshotai/Kimi-K2.6` on aggregated vLLM 0.21.0 with KV-aware routing, Eagle3 MLA speculative decoding (3 draft tokens), and LMCache CPU KV-cache offload. They differ in checkpoint, parallelism, kernel backends, and the trace they are benchmarked against:
+
+| | B200 chat | H200 chat | B200 agentic | H200 agentic |
+|---|---|---|---|---|
+| **GPUs per worker** | 4x B200 | 8x H200 | 4x B200 | 8x H200 |
+| **Precision** | NVFP4 + FP8 KV | INT4 (native) | NVFP4 + FP8 KV | INT4 (native) |
+| **Parallelism** | TP4 | TP8 | TP4 | TP8 |
+| **MoE backend** | FlashInfer-TRTLLM | Marlin | FlashInfer-TRTLLM | Marlin |
+| **Attention backend** | TokenSpeed MLA | FlashAttention MLA | TokenSpeed MLA | FlashAttention MLA |
+| **AllReduce** | NCCL symmetric memory | NCCL | NCCL symmetric memory | NCCL |
+| **Workload** | Chat trace | Chat trace | Agentic trace | Agentic trace |
+
+## Notes
+
+- Dynamo's KV cache router does not support all LMCache KV events, so routing can be sub-optimal.
+- Some 400 HTTP errors raised by workers on invalid inputs can surface as 500 errors through the frontend.
+- B200 targets run `nvidia/Kimi-K2.6-NVFP4` with FP8 KV cache; H200 targets run the native INT4 `moonshotai/Kimi-K2.6` checkpoint. Both serve under the name `moonshotai/Kimi-K2.6`.
+- The chat- and agentic-tuned deployments for a given SKU share the same engine configuration; they are separate targets because each is benchmarked and sized against its own trace, and either trace can be replayed against either DGD.
+- For benchmarking, swap `SPECULATIVE_CONFIG` to the `speculative-config-synthetic` key so Eagle3 acceptance is synthetic and deterministic (AL=2.49); production deployments use the standard `speculative-config` key.
+
+## Source
+
+- Source README: [recipes/kimi-k2.6/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/README.md)
+- Benchmark README: [recipes/kimi-k2.6/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/README.md) and [recipes/kimi-k2.6/perf/perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/perf.yaml)
+- B200 chat: [recipes/kimi-k2.6/vllm/agg-b200-chat/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/vllm/agg-b200-chat/deploy.yaml)
+- H200 chat: [recipes/kimi-k2.6/vllm/agg-h200-chat/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/vllm/agg-h200-chat/deploy.yaml)
+- B200 agentic: [recipes/kimi-k2.6/vllm/agg-b200-agentic/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/vllm/agg-b200-agentic/deploy.yaml)
+- H200 agentic: [recipes/kimi-k2.6/vllm/agg-h200-agentic/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/vllm/agg-h200-agentic/deploy.yaml)
+- Setup assets: [recipes/kimi-k2.6/model-cache/model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/model-cache/model-cache.yaml) and [recipes/kimi-k2.6/model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/model-cache/model-download.yaml)

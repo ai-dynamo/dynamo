@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Extra-engine-args for the prefill side of disaggregated TRT-LLM in router
+# e2e tests.
+#
+# Two settings are required for context-only workers on the pytorch backend:
+#   * cache_transceiver_config: TRT-LLM 1.3+ asserts a transceiver backend is
+#     configured whenever disaggregation is active (otherwise the first
+#     request fails with "kv_cache_transceiver is disabled").
+#   * disable_overlap_scheduler: prefill workers cannot run with the overlap
+#     scheduler enabled while KV block reuse is on (TRT-LLM raises
+#     "Context only requests are not supported in pytorch backend when
+#     overlap is enabled with block reuse").
+disable_overlap_scheduler: true
+
+cache_transceiver_config:
+  backend: DEFAULT

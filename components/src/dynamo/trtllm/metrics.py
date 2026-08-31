@@ -28,12 +28,13 @@ This module adds metrics that have no engine/runtime/frontend equivalent:
   - Request types (image, structured output)
   - KV transfer metrics (success counter, latency, throughput, per-request bytes)
   - Abort tracking
+  - KV event buffer drain telemetry
 """
 
 import logging
 from datetime import timedelta
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from dynamo.prometheus_names import trtllm_additional as metric_names
 
@@ -79,6 +80,27 @@ KV_TRANSFER_BYTES_BUCKETS = (
     500_000_000,
     1_000_000_000,
     5_000_000_000,
+    float("inf"),
+)
+KV_EVENT_DRAIN_BATCH_BUCKETS = (
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1_024,
+    2_048,
+    4_096,
+    8_192,
+    16_384,
+    32_768,
+    65_536,
+    131_072,
     float("inf"),
 )
 
@@ -142,6 +164,27 @@ class AdditionalMetricsCollector:
             buckets=KV_TRANSFER_SPEED_BUCKETS,
         )
 
+        # --- KV event buffer telemetry ---
+        # TRT-LLM exposes drained event batches, not its live internal queue depth.
+        # Keep these names explicit so dashboards do not mistake a drain size for
+        # an instantaneous queue-depth sample.
+        self.kv_event_buffer_capacity = Gauge(
+            metric_names.KV_EVENT_BUFFER_CAPACITY,
+            "Configured maximum TRT-LLM KV events buffered before older events are dropped",
+            labelnames=self._labelnames,
+        )
+        self.kv_event_drain_batch_size = Histogram(
+            metric_names.KV_EVENT_DRAIN_BATCH_SIZE,
+            "Number of TRT-LLM KV events returned to Dynamo in one polling drain",
+            labelnames=self._labelnames,
+            buckets=KV_EVENT_DRAIN_BATCH_BUCKETS,
+        )
+        self.kv_event_id_gap_events = Counter(
+            metric_names.KV_EVENT_ID_GAP_EVENTS_TOTAL,
+            "Total number of missing TRT-LLM KV event IDs detected by Dynamo",
+            labelnames=self._labelnames,
+        )
+
         logger.info("AdditionalMetricsCollector initialized")
 
     # --- Request helpers ---
@@ -200,3 +243,18 @@ class AdditionalMetricsCollector:
             self.kv_transfer_speed.labels(*self._labelvalues).observe(speed_gb_s)
 
         return True
+
+    # --- KV event buffer telemetry ---
+
+    def set_kv_event_buffer_capacity(self, capacity: int):
+        """Publish the configured TRT-LLM KV event buffer limit."""
+        self.kv_event_buffer_capacity.labels(*self._labelvalues).set(capacity)
+
+    def record_kv_event_drain_batch(self, batch_size: int):
+        """Record one non-empty batch drained from TRT-LLM by Dynamo."""
+        self.kv_event_drain_batch_size.labels(*self._labelvalues).observe(batch_size)
+
+    def record_kv_event_id_gap(self, missing_events: int):
+        """Record TRT-LLM event IDs skipped between two observed events."""
+        if missing_events > 0:
+            self.kv_event_id_gap_events.labels(*self._labelvalues).inc(missing_events)

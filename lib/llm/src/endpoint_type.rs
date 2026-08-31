@@ -18,10 +18,20 @@ pub enum EndpointType {
     Audios,
     /// Videos API (video generation)
     Videos,
+    /// Realtime API (bidirectional streaming over WebSocket)
+    Realtime,
+    /// Classification API (sequence classification / cross-encoder pooling)
+    Classify,
+    /// Pooling API (raw pooler output: token embeddings, logits, rewards)
+    Pooling,
     /// Responses API
     Responses,
     /// Anthropic Messages API
     AnthropicMessages,
+    /// Generate API (token-in/token-out)
+    Generate,
+    /// Batch API
+    Batch,
 }
 
 impl EndpointType {
@@ -33,8 +43,13 @@ impl EndpointType {
             Self::Images => "images",
             Self::Audios => "audios",
             Self::Videos => "videos",
+            Self::Realtime => "realtime",
+            Self::Classify => "classify",
+            Self::Pooling => "pooling",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::Generate => "generate",
+            Self::Batch => "batch",
         }
     }
 
@@ -46,8 +61,48 @@ impl EndpointType {
             Self::Images,
             Self::Audios,
             Self::Videos,
+            Self::Realtime,
+            Self::Classify,
+            Self::Pooling,
             Self::Responses,
             Self::AnthropicMessages,
+            Self::Generate,
+            Self::Batch,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_as_str() {
+        assert_eq!(EndpointType::Realtime.as_str(), "realtime");
+    }
+
+    #[test]
+    fn realtime_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Realtime));
+    }
+
+    #[test]
+    fn generate_as_str() {
+        assert_eq!(EndpointType::Generate.as_str(), "generate");
+    }
+
+    #[test]
+    fn generate_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Generate));
+    }
+
+    #[test]
+    fn batch_as_str() {
+        assert_eq!(EndpointType::Batch.as_str(), "batch");
+    }
+
+    #[test]
+    fn batch_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Batch));
     }
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -32,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -171,7 +173,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 
 	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy,
 		"inter-pod failover engines must be RestartPolicyNever so the "+
-			"FailoverCascadeReconciler is the sole recovery path")
+			"failover cascade controller is the sole recovery path")
 }
 
 // TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever pins the
@@ -214,22 +216,27 @@ func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 }
 
 func TestRemoveGPUFromLimits(t *testing.T) {
+	migResource := corev1.ResourceName("nvidia.com/mig-3g.20gb")
 	c := &corev1.Container{
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
 				"nvidia.com/gpu":      k8sresource.MustParse("8"),
+				migResource:           k8sresource.MustParse("1"),
 				corev1.ResourceMemory: k8sresource.MustParse("64Gi"),
 			},
 			Requests: corev1.ResourceList{
 				"nvidia.com/gpu": k8sresource.MustParse("8"),
+				migResource:      k8sresource.MustParse("1"),
 			},
 		},
 	}
 
 	removeGPUFromLimits(c)
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Limits, migResource)
 	assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory)
 	assert.NotContains(t, c.Resources.Requests, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Requests, migResource)
 }
 
 func TestAddGPUToleration_Idempotent(t *testing.T) {
@@ -264,38 +271,39 @@ func TestRemoveEnvVar(t *testing.T) {
 func TestGetGPUCount(t *testing.T) {
 	tests := []struct {
 		name      string
-		resources *v1alpha1.Resources
+		resources corev1.ResourceRequirements
 		want      int32
 	}{
-		{"nil resources", nil, 0},
-		{"nil limits", &v1alpha1.Resources{}, 0},
-		{"empty gpu string", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: ""}}, 0},
-		{"valid gpu count", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "8"}}, 8},
-		{"invalid gpu string", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "abc"}}, 0},
+		{"empty resources", corev1.ResourceRequirements{}, 0},
+		{"empty limits", corev1.ResourceRequirements{Limits: corev1.ResourceList{}}, 0},
+		{"valid limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}, 8},
+		{"valid request gpu count", corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}, 4},
+		{"valid MIG limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/mig-3g.20gb"): k8sresource.MustParse("1")}}, 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getGPUCount(tt.resources))
+			got, err := getGPUCount(tt.resources)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
 
 func TestGetDeviceClassName(t *testing.T) {
 	tests := []struct {
-		name      string
-		resources *v1alpha1.Resources
-		want      string
+		name    string
+		gmsSpec *v1beta1.GPUMemoryServiceSpec
+		want    string
 	}{
-		{"nil resources", nil, "gpu.nvidia.com"},
-		{"nil limits", &v1alpha1.Resources{}, "gpu.nvidia.com"},
-		{"empty gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{}}, "gpu.nvidia.com"},
-		{"custom gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPUType: "gpu.nvidia.com/h100"}}, "gpu.nvidia.com/h100"},
+		{"nil spec", nil, "gpu.nvidia.com"},
+		{"empty device class", &v1beta1.GPUMemoryServiceSpec{}, "gpu.nvidia.com"},
+		{"custom device class", &v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com/h100"}, "gpu.nvidia.com/h100"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getDeviceClassName(tt.resources))
+			assert.Equal(t, tt.want, getDeviceClassName(tt.gmsSpec))
 		})
 	}
 }
@@ -362,23 +370,70 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 }
 
 func TestGmsRCTName(t *testing.T) {
-	assert.Equal(t, "my-svc-gpu-rank-0", gmsRCTName("my-svc", 0))
-	assert.Equal(t, "llama-gpu-rank-2", gmsRCTName("llama", 2))
+	tests := []struct {
+		name        string
+		serviceName string
+		rank        int32
+		expected    string
+	}{
+		{
+			name:        "already normalized",
+			serviceName: "my-svc",
+			rank:        0,
+			expected:    "my-svc-gpu-rank-0",
+		},
+		{
+			name:        "lowercase",
+			serviceName: "llama",
+			rank:        2,
+			expected:    "llama-gpu-rank-2",
+		},
+		{
+			name:        "camel case",
+			serviceName: "VllmWorker",
+			rank:        0,
+			expected:    "vllmworker-gpu-rank-0",
+		},
+		{
+			name:        "uppercase",
+			serviceName: "VLLMWorker",
+			rank:        2,
+			expected:    "vllmworker-gpu-rank-2",
+		},
+		{
+			name:        "dot",
+			serviceName: "Vllm.Worker",
+			rank:        1,
+			expected:    "vllm-worker-gpu-rank-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Generate the ResourceClaimTemplate name")
+			name := gmsRCTName(tt.serviceName, tt.rank)
+
+			t.Log("Verify the name is normalized and RFC 1123 compliant")
+			assert.Equal(t, tt.expected, name)
+			assert.Empty(t, validation.IsDNS1123Subdomain(name))
+		})
+	}
 }
 
 func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
-	resources := &v1alpha1.Resources{
-		Limits: &v1alpha1.ResourceItem{GPU: "8", GPUType: "gpu.nvidia.com/h100"},
-	}
+	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}
+	gmsSpec := &v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com/h100"}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, resources, roles)
+	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
-	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
+	assert.Equal(t, "vllmworker-gpu-rank-0", configs[0].Name)
+	assert.Empty(t, validation.IsDNS1123Subdomain(configs[0].Name))
 
 	req := configs[0].TemplateSpec.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
@@ -387,9 +442,8 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
-	resources := &v1alpha1.Resources{
-		Limits: &v1alpha1.ResourceItem{GPU: "4"},
-	}
+	t.Log("Set up a two-rank inter-pod GMS service")
+	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
@@ -397,12 +451,22 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
+	t.Log("Build ResourceClaimTemplate configs from a mixed-case service name")
+	configs, err := gmsResourceClaimTemplateConfigs("VllmDecodeWorker", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	require.NoError(t, err)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, configs, 2)
-	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
-	assert.Equal(t, "svc-gpu-rank-1", configs[1].Name)
+	expectedNames := []string{
+		"vllmdecodeworker-gpu-rank-0",
+		"vllmdecodeworker-gpu-rank-1",
+	}
+	for i, config := range configs {
+		assert.Equal(t, expectedNames[i], config.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(config.Name))
+	}
 
+	t.Log("Verify the GPU request configuration is preserved")
 	req := configs[1].TemplateSpec.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
@@ -415,16 +479,18 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	refs := gmsResourceSharingEntries("svc", roles)
+	refs := gmsResourceSharingEntries("VllmWorker", roles)
 
 	require.Len(t, refs, 1)
-	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, "vllmworker-gpu-rank-0", refs[0].Name)
+	assert.Empty(t, validation.IsDNS1123Subdomain(refs[0].Name))
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
 	assert.Equal(t, []string{"svc-gms-0", "svc"}, refs[0].Filter.ChildCliqueNames)
 }
 
 func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
+	t.Log("Set up a two-rank inter-pod GMS service")
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
@@ -432,19 +498,43 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	refs := gmsResourceSharingEntries("svc", roles)
+	t.Log("Build resource-sharing entries from a mixed-case service name")
+	refs := gmsResourceSharingEntries("VllmDecodeWorker", roles)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, refs, 2)
+	expectedNames := []string{
+		"vllmdecodeworker-gpu-rank-0",
+		"vllmdecodeworker-gpu-rank-1",
+	}
+	for i, ref := range refs {
+		assert.Equal(t, expectedNames[i], ref.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(ref.Name))
+	}
 
-	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	t.Log("Verify rank zero targets the GMS server and leader cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
 	assert.Equal(t, []string{"svc-gms-0", "svc-ldr"}, refs[0].Filter.ChildCliqueNames)
 
-	assert.Equal(t, "svc-gpu-rank-1", refs[1].Name)
+	t.Log("Verify rank one targets the GMS server and worker cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[1].Scope)
 	require.NotNil(t, refs[1].Filter)
 	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.ChildCliqueNames)
+}
+
+func TestGmsResourceSharingEntries_IncludesFutureClientPods(t *testing.T) {
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
+		{Name: "svc-loader-0", Role: Role("gms-client"), Rank: 0, Replicas: 1},
+	}
+
+	refs := gmsResourceSharingEntries("svc", roles)
+
+	require.Len(t, refs, 1)
+	require.NotNil(t, refs[0].Filter)
+	assert.Equal(t, []string{"svc-gms-0", "svc", "svc-loader-0"}, refs[0].Filter.ChildCliqueNames)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -468,6 +558,8 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 					{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
 					{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+					{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+					{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
 					{Name: "TMPDIR", Value: gms.SharedMountPath},
 				},
 				Ports: []corev1.ContainerPort{
@@ -530,15 +622,18 @@ func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
+	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
+	t.Log("Verify each engine keeps container discovery and receives its own container identity")
 	for i := range 2 {
 		engine := ps.Containers[i]
 		env := envToMap(engine.Env)
 		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
 		assert.Equal(t, fmt.Sprintf("engine-%d", i), env["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
+		assert.Equal(t, "container", env["DYN_KUBE_DISCOVERY_MODE"], "engine-%d discovery mode", i)
 		assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
 		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
 		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
@@ -632,17 +727,24 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
-func TestIsFailoverEnabled(t *testing.T) {
-	assert.True(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+// --- IsIntraPodFailoverEnabled ---
+
+func TestIsIntraPodFailoverEnabled(t *testing.T) {
+	assert.True(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
-	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	})))
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
-	}), "inter-pod mode must not trigger intra-pod container cloning")
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	})), "inter-pod mode must not trigger intra-pod container cloning")
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: false, Mode: v1alpha1.GMSModeIntraPod},
-	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	})))
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})))
+	assert.False(t, IsIntraPodFailoverEnabled(nil))
+}
+
+func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
+	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

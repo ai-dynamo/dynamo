@@ -28,6 +28,13 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const (
+	profilerEntrypoint        = "python"
+	outputCopierShell         = "/bin/sh"
+	outputCopierScriptStub    = "echo sidecar-script"
+	outputCopierOverrideImage = "internal-registry/kubectl:1.29"
+)
+
 func baseJob() *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -56,7 +63,7 @@ func baseJob() *batchv1.Job {
 						{
 							Name:    "profiler",
 							Image:   "profiler:latest",
-							Command: []string{"python", "-m", "dynamo.profiler"},
+							Command: []string{profilerEntrypoint, "-m", "dynamo.profiler"},
 							Env: []corev1.EnvVar{
 								{Name: "OUTPUT_DIR", Value: "/output"},
 							},
@@ -401,6 +408,266 @@ func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	}
 }
 
+func TestEnsureOutputCopierKubeAPIAccess_AutomountServiceAccountTokenFalse(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil {
+		t.Fatal("expected output-copier kube API access volume")
+	}
+	if tokenVolume.Projected == nil {
+		t.Fatal("expected output-copier kube API access volume to be projected")
+	}
+	if len(tokenVolume.Projected.Sources) != 3 {
+		t.Fatalf("expected service account token, root CA, and namespace projections, got %d", len(tokenVolume.Projected.Sources))
+	}
+	if tokenVolume.Projected.Sources[0].ServiceAccountToken == nil {
+		t.Error("expected service account token projection")
+	}
+	if tokenVolume.Projected.Sources[1].ConfigMap == nil || tokenVolume.Projected.Sources[1].ConfigMap.Name != ConfigMapNameKubeRootCA {
+		t.Error("expected kube root CA ConfigMap projection")
+	}
+	if tokenVolume.Projected.Sources[2].DownwardAPI == nil {
+		t.Error("expected namespace DownwardAPI projection")
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not mount output-copier kube API access token")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	sidecarMount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts)
+	if sidecarMount == nil {
+		t.Fatal("expected output-copier kube API access token mount")
+	}
+	if sidecarMount.MountPath != ServiceAccountTokenPath || !sidecarMount.ReadOnly {
+		t.Errorf("unexpected sidecar token mount: %+v", *sidecarMount)
+	}
+}
+
+func TestEnsureOutputCopierKubeAPIAccess_ProtectsTokenVolumeFromOverrides(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+				Volumes: []corev1.Volume{{
+					Name:         VolumeNameOutputCopierKubeAPIAccess,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+				Containers: []corev1.Container{{
+					VolumeMounts: []corev1.VolumeMount{{
+						Name:      VolumeNameOutputCopierKubeAPIAccess,
+						MountPath: "/unexpected-token",
+					}},
+				}},
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil || tokenVolume.Projected == nil {
+		t.Fatalf("expected protected volume to be restored as projected volume, got %+v", tokenVolume)
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not retain a mount for the protected output-copier token volume")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	if mount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts); mount == nil || mount.MountPath != ServiceAccountTokenPath {
+		t.Errorf("expected output-copier to mount protected token volume at %s, got %+v", ServiceAccountTokenPath, mount)
+	}
+}
+
+func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{{
+					Name: VolumeNameDGDOverrideTool,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "unexpected"},
+					},
+				}},
+				InitContainers: []corev1.Container{
+					{
+						Name:  ContainerNameDGDOverrideInstaller,
+						Image: "unexpected:latest",
+					},
+					{
+						Name:  "user-init",
+						Image: "user-init:latest",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      VolumeNameDGDOverrideTool,
+								MountPath: "/unexpected-init",
+							},
+							{
+								Name:      "conflicting-init-path",
+								MountPath: DGDOverrideToolMountPath,
+							},
+							{
+								Name:      "user-data",
+								MountPath: "/user-data",
+							},
+						},
+					},
+				},
+				Containers: []corev1.Container{{
+					Env: []corev1.EnvVar{{
+						Name:  EnvDGDOverrideToolPath,
+						Value: "/unexpected-bin",
+					}},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      VolumeNameDGDOverrideTool,
+							MountPath: "/unexpected-mount",
+						},
+						{
+							Name:      "conflicting-profiler-path",
+							MountPath: DGDOverrideToolMountPath,
+						},
+					},
+				}},
+			},
+		},
+	})
+
+	err := ensureDGDOverrideTool(
+		job,
+		"registry.example/operator:v1.2.3",
+		corev1.PullAlways,
+	)
+	if err != nil {
+		t.Fatalf("ensureDGDOverrideTool() error = %v", err)
+	}
+
+	assertDGDOverrideInstaller(t, &job.Spec.Template.Spec)
+	assertDGDOverrideMountProtection(t, &job.Spec.Template.Spec)
+}
+
+func assertDGDOverrideInstaller(t *testing.T, spec *corev1.PodSpec) {
+	t.Helper()
+
+	toolVolume := findVolume(spec.Volumes, VolumeNameDGDOverrideTool)
+	if toolVolume == nil || toolVolume.EmptyDir == nil || toolVolume.PersistentVolumeClaim != nil {
+		t.Fatalf("expected protected emptyDir tool volume, got %+v", toolVolume)
+	}
+
+	installer := findContainer(spec.InitContainers, ContainerNameDGDOverrideInstaller)
+	if installer == nil {
+		t.Fatal("expected DGD override installer")
+	}
+	if installer.Image != "registry.example/operator:v1.2.3" || installer.ImagePullPolicy != corev1.PullAlways {
+		t.Errorf("unexpected installer image configuration: %+v", *installer)
+	}
+	if len(installer.Command) != 1 || installer.Command[0] != "/dgd-apply-overrides" {
+		t.Errorf("unexpected installer command: %v", installer.Command)
+	}
+	if len(installer.Args) != 2 || installer.Args[0] != "--install-to" || installer.Args[1] != DGDOverrideToolPath {
+		t.Errorf("unexpected installer args: %v", installer.Args)
+	}
+	installerMount := findVolumeMount(installer.VolumeMounts, VolumeNameDGDOverrideTool)
+	if installerMount == nil || installerMount.MountPath != DGDOverrideToolMountPath || installerMount.ReadOnly {
+		t.Errorf("unexpected installer mount: %+v", installerMount)
+	}
+	assertRestrictedInstallerSecurityContext(t, installer.SecurityContext)
+}
+
+func assertRestrictedInstallerSecurityContext(t *testing.T, securityContext *corev1.SecurityContext) {
+	t.Helper()
+
+	if securityContext == nil ||
+		securityContext.AllowPrivilegeEscalation == nil || *securityContext.AllowPrivilegeEscalation ||
+		securityContext.ReadOnlyRootFilesystem == nil || !*securityContext.ReadOnlyRootFilesystem ||
+		securityContext.RunAsNonRoot == nil || !*securityContext.RunAsNonRoot ||
+		securityContext.RunAsUser == nil || *securityContext.RunAsUser != 1000 ||
+		securityContext.RunAsGroup == nil || *securityContext.RunAsGroup != 1000 ||
+		securityContext.SeccompProfile == nil || securityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
+		securityContext.Capabilities == nil || len(securityContext.Capabilities.Drop) != 1 || securityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("installer security context is not restricted: %+v", securityContext)
+	}
+}
+
+func assertDGDOverrideMountProtection(t *testing.T, spec *corev1.PodSpec) {
+	t.Helper()
+
+	userInit := findContainer(spec.InitContainers, "user-init")
+	if userInit == nil {
+		t.Fatal("expected user init container to be preserved")
+	}
+	if findVolumeMount(userInit.VolumeMounts, VolumeNameDGDOverrideTool) != nil {
+		t.Error("user init container should not mount the reserved tool volume")
+	}
+	if findVolumeMountByPath(userInit.VolumeMounts, DGDOverrideToolMountPath) != nil {
+		t.Error("user init container should not mount the reserved tool path")
+	}
+	if findVolumeMount(userInit.VolumeMounts, "user-data") == nil {
+		t.Error("unrelated user init container mount should be preserved")
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	profilerMount := findVolumeMount(profiler.VolumeMounts, VolumeNameDGDOverrideTool)
+	if profilerMount == nil || profilerMount.MountPath != DGDOverrideToolMountPath || !profilerMount.ReadOnly {
+		t.Errorf("unexpected profiler tool mount: %+v", profilerMount)
+	}
+	toolEnv := findEnv(profiler.Env, EnvDGDOverrideToolPath)
+	if toolEnv == nil || toolEnv.Value != DGDOverrideToolPath {
+		t.Errorf("unexpected profiler tool environment: %+v", toolEnv)
+	}
+	if countVolumeMountsByPath(profiler.VolumeMounts, DGDOverrideToolMountPath) != 1 {
+		t.Errorf("expected exactly one profiler mount at reserved path, got %v", profiler.VolumeMounts)
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output copier")
+	}
+	if findVolumeMount(sidecar.VolumeMounts, VolumeNameDGDOverrideTool) != nil {
+		t.Error("output copier should not mount the DGD override tool")
+	}
+	if len(spec.ImagePullSecrets) != 1 || spec.ImagePullSecrets[0].Name != "nvcr-imagepullsecret" {
+		t.Errorf("expected target-namespace image pull secrets to remain unchanged, got %v", spec.ImagePullSecrets)
+	}
+}
+
+func TestEnsureDGDOverrideTool_RequiresOperatorImage(t *testing.T) {
+	err := ensureDGDOverrideTool(baseJob(), "", corev1.PullIfNotPresent)
+	if err == nil || err.Error() != "operator image must be configured when a DGD override is present" {
+		t.Fatalf("expected missing operator image error, got %v", err)
+	}
+}
+
 func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -666,7 +933,7 @@ func TestApplyProfilingJobOverrides_CommandAndArgsPreserved(t *testing.T) {
 		},
 	})
 	c := job.Spec.Template.Spec.Containers[0]
-	if len(c.Command) == 0 || c.Command[0] != "python" {
+	if len(c.Command) == 0 || c.Command[0] != profilerEntrypoint {
 		t.Error("command was unexpectedly overwritten")
 	}
 }
@@ -690,6 +957,192 @@ func TestApplyProfilingJobOverrides_SidecarUntouched(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.Containers[1].Image != "busybox:latest" {
 		t.Error("sidecar image was modified")
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierImage(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+				},
+			},
+		},
+	})
+	sidecar := job.Spec.Template.Spec.Containers[1]
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
+		t.Error("output-copier command was unexpectedly overwritten")
+	}
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Error("output-copier args were unexpectedly overwritten")
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+				},
+			},
+		},
+	})
+	if job.Spec.Template.Spec.Containers[0].Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	job.Spec.Template.Spec.Containers[1].Env = []corev1.EnvVar{{
+		Name:  "SIDECAR_MODE",
+		Value: "baseline",
+	}}
+	job.Spec.Template.Spec.Containers[1].VolumeMounts = []corev1.VolumeMount{{
+		Name:      VolumeNameProfilingOutput,
+		MountPath: ProfilingOutputPath,
+		ReadOnly:  true,
+	}}
+	job.Spec.Template.Spec.Containers[1].SecurityContext = &corev1.SecurityContext{
+		RunAsNonRoot: ptr.To(true),
+	}
+
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+						Env: []corev1.EnvVar{{
+							Name:  "SIDECAR_MODE",
+							Value: "custom",
+						}},
+						EnvFrom: []corev1.EnvFromSource{{
+							ConfigMapRef: &corev1.ConfigMapEnvSource{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "sidecar-env"},
+							},
+						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      VolumeNameProfilingOutput,
+								MountPath: "/elsewhere",
+							},
+							{
+								Name:      "extra-logs",
+								MountPath: "/var/log/sidecar",
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						},
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot: ptr.To(false),
+						},
+						Command: []string{"/bin/bash"},
+						Args:    []string{"-c", "echo overridden"},
+					},
+				},
+			},
+		},
+	})
+
+	sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("output-copier container not found")
+	}
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if sidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("500m")) != 0 {
+		t.Errorf("expected output-copier CPU limit override, got %v", sidecar.Resources.Limits)
+	}
+	mode := findEnv(sidecar.Env, "SIDECAR_MODE")
+	if mode == nil || mode.Value != "baseline" {
+		t.Errorf("output-copier env overrides should be ignored, got %+v", mode)
+	}
+	if len(sidecar.EnvFrom) != 0 {
+		t.Errorf("output-copier EnvFrom overrides should be ignored, got %v", sidecar.EnvFrom)
+	}
+	if len(sidecar.VolumeMounts) != 1 {
+		t.Fatalf("expected controller-owned volume mounts only, got %v", sidecar.VolumeMounts)
+	}
+	mount := sidecar.VolumeMounts[0]
+	if mount.Name != VolumeNameProfilingOutput || mount.MountPath != ProfilingOutputPath || !mount.ReadOnly {
+		t.Errorf("controller-owned profiling-output mount was changed: %+v", mount)
+	}
+	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsNonRoot == nil || !*sidecar.SecurityContext.RunAsNonRoot {
+		t.Errorf("output-copier securityContext overrides should be ignored, got %+v", sidecar.SecurityContext)
+	}
+	if len(sidecar.Command) != 2 || sidecar.Command[0] != outputCopierShell {
+		t.Errorf("output-copier command was unexpectedly overwritten: %v", sidecar.Command)
+	}
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Errorf("output-copier args were unexpectedly overwritten: %v", sidecar.Args)
+	}
+}
+
+func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+					{
+						Name:  ContainerNameProfiler,
+						Image: "custom-profiler:v3",
+					},
+				},
+			},
+		},
+	})
+
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "custom-profiler:v3" {
+		t.Errorf("profiler image: want custom-profiler:v3, got %s", profiler.Image)
+	}
+	if len(profiler.Command) == 0 || profiler.Command[0] != profilerEntrypoint {
+		t.Error("profiler command was unexpectedly overwritten")
+	}
+
+	sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("output-copier container not found")
+	}
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("output-copier image: want %s, got %s", outputCopierOverrideImage, sidecar.Image)
+	}
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
+		t.Error("output-copier command was unexpectedly overwritten")
+	}
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Error("output-copier args were unexpectedly overwritten")
 	}
 }
 
@@ -774,7 +1227,7 @@ func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	if profiler.Image != "profiler:v2" {
 		t.Errorf("image: want profiler:v2, got %s", profiler.Image)
 	}
-	if profiler.Command[0] != "python" {
+	if profiler.Command[0] != profilerEntrypoint {
 		t.Error("command was overwritten")
 	}
 	if profiler.Resources.Limits.Cpu().String() != "8" {
@@ -828,4 +1281,68 @@ func TestMergeNamedSlice_PreservesOrder(t *testing.T) {
 	if result[1].Value != "override" {
 		t.Errorf("A not overridden: %s", result[1].Value)
 	}
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == name {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func findVolumeMountByPath(mounts []corev1.VolumeMount, path string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].MountPath == path {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func countVolumeMountsByPath(mounts []corev1.VolumeMount, path string) int {
+	count := 0
+	for i := range mounts {
+		if mounts[i].MountPath == path {
+			count++
+		}
+	}
+	return count
+}
+
+func findEnv(env []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			return &env[i]
+		}
+	}
+	return nil
+}
+
+func findOutputCopierKubeAPIAccessMount(mounts []corev1.VolumeMount) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == VolumeNameOutputCopierKubeAPIAccess {
+			return &mounts[i]
+		}
+	}
+	return nil
 }

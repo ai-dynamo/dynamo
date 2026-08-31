@@ -1,25 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_kv_router::{
     BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
     ThreadPoolIndexer,
 };
-use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run, make_progress_bar,
-    rescale_trace_timestamps,
-};
+use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
+use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,20 +100,6 @@ impl MooncakeIndexerConfig {
         }
     }
 
-    pub fn is_multi_threaded(&self) -> bool {
-        matches!(
-            self.kind,
-            MooncakeIndexerKind::NestedMap
-                | MooncakeIndexerKind::ConcurrentRadixTree
-                | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
-                | MooncakeIndexerKind::BranchShardedCrtc
-        )
-    }
-
-    pub fn supports_remove(&self) -> bool {
-        true
-    }
-
     pub fn from_short_name(name: &str, num_event_workers: usize) -> anyhow::Result<Self> {
         let config = match name {
             "radix-tree" => Self::radix_tree(),
@@ -140,8 +121,8 @@ impl MooncakeIndexerConfig {
         &self,
         block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
-    ) -> Arc<dyn KvIndexerInterface + Send + Sync> {
-        match self.kind {
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
             MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new(
                 CancellationToken::new(),
                 block_size,
@@ -186,7 +167,55 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
-        }
+        };
+        Ok(indexer)
+    }
+
+    pub fn build_approximate_with_prune_config(
+        &self,
+        block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        prune_config: PruneConfig,
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
+            MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new_with_pruning(
+                CancellationToken::new(),
+                block_size,
+                metrics,
+                Some(prune_config),
+            )),
+            MooncakeIndexerKind::NestedMap => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    PositionalIndexer::new(self.jump_size),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::ConcurrentRadixTree => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    ConcurrentRadixTree::new(),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    ConcurrentRadixTreeCompressed::new(),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::BranchShardedCrtc => {
+                anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
+            }
+        };
+        Ok(indexer)
     }
 }
 
@@ -194,260 +223,212 @@ impl MooncakeIndexerConfig {
 pub struct MooncakeBenchmarkConfig {
     pub benchmark_duration_ms: u64,
     pub inference_worker_duplication_factor: usize,
-    pub count_events: bool,
-    pub find_matches_concurrency: usize,
 }
 
 /// A single entry in a worker's merged benchmark timeline.
 #[derive(Clone)]
-enum WorkerTraceEntry {
+pub(crate) enum WorkerTraceEntry {
     Request(Vec<LocalBlockHash>),
-    Event(KvCacheEvent),
+    Event {
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    },
 }
 
 /// A timestamped entry in a worker's benchmark trace, used to replay requests
 /// and events at the correct relative timing.
 #[derive(Clone)]
-struct WorkerTrace {
-    entry: WorkerTraceEntry,
-    timestamp_us: u64,
+pub(crate) struct WorkerTrace {
+    pub(crate) entry: WorkerTraceEntry,
+    pub(crate) timestamp_us: u64,
 }
 
-fn prepare_worker_traces(
-    artifacts: Vec<WorkerReplayArtifacts>,
-    benchmark_duration_ms: u64,
-) -> Vec<Vec<WorkerTrace>> {
-    let traces = artifacts
-        .into_iter()
-        .map(|artifact| {
-            let mut merged = artifact
-                .requests
-                .into_iter()
-                .map(|request| WorkerTrace {
-                    timestamp_us: request.timestamp_us,
-                    entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes),
-                })
-                .chain(artifact.kv_events.into_iter().map(|event| WorkerTrace {
-                    timestamp_us: event.timestamp_us,
-                    entry: WorkerTraceEntry::Event(event.event),
-                }))
-                .collect::<Vec<_>>();
-            merged.sort_by_key(|entry| entry.timestamp_us);
-            merged
-        })
-        .collect::<Vec<_>>();
+pub(crate) struct MergedMooncakeBenchmark {
+    worker_traces: WorkerTimelines<WorkerTrace>,
+    block_size: u32,
+}
 
-    rescale_trace_timestamps(
-        &traces,
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MooncakeTraceTotals {
+    pub(crate) requests: usize,
+    pub(crate) stored_events: usize,
+    pub(crate) removed_events: usize,
+    pub(crate) cleared_events: usize,
+    pub(crate) request_blocks: usize,
+    pub(crate) stored_blocks: usize,
+    pub(crate) removed_blocks: usize,
+}
+
+impl MooncakeTraceTotals {
+    pub(crate) fn events(self) -> usize {
+        self.stored_events + self.removed_events + self.cleared_events
+    }
+
+    pub(crate) fn event_blocks(self) -> usize {
+        self.stored_blocks + self.removed_blocks
+    }
+
+    pub(crate) fn write_blocks(self) -> usize {
+        self.event_blocks()
+    }
+
+    pub(crate) fn total_block_ops(self) -> usize {
+        self.request_blocks + self.write_blocks()
+    }
+
+    pub(crate) fn expanded(self, factor: usize) -> Self {
+        Self {
+            requests: self.requests * factor,
+            stored_events: self.stored_events * factor,
+            removed_events: self.removed_events * factor,
+            cleared_events: self.cleared_events * factor,
+            request_blocks: self.request_blocks * factor,
+            stored_blocks: self.stored_blocks * factor,
+            removed_blocks: self.removed_blocks * factor,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedMooncakeBenchmark {
+    pub(crate) worker_traces: WorkerTimelines<WorkerTrace>,
+    pub(crate) totals: MooncakeTraceTotals,
+    pub(crate) benchmark_duration_ms: u64,
+    pub(crate) block_size: u32,
+}
+
+fn merge_event_worker_trace(
+    worker_idx: usize,
+    artifact: WorkerReplayArtifacts,
+) -> anyhow::Result<Vec<WorkerTrace>> {
+    let WorkerReplayArtifacts {
+        requests,
+        output_signals: _,
+        kv_events,
+    } = artifact;
+    validate_timestamps(worker_idx, "requests", &requests, |request| {
+        request.timestamp_us
+    })?;
+    validate_timestamps(worker_idx, "kv_events", &kv_events, |event| {
+        event.timestamp_us
+    })?;
+
+    let mut requests = requests.into_iter().peekable();
+    let mut events = kv_events.into_iter().peekable();
+    let mut merged = Vec::with_capacity(requests.len() + events.len());
+    while requests.peek().is_some() || events.peek().is_some() {
+        let take_request = match (requests.peek(), events.peek()) {
+            (Some(request), Some(event)) => request.timestamp_us <= event.timestamp_us,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_request {
+            let request = requests.next().expect("peeked request must exist");
+            merged.push(WorkerTrace {
+                timestamp_us: request.timestamp_us,
+                entry: WorkerTraceEntry::Request(
+                    request
+                        .replay_hashes
+                        .local_block_hashes
+                        .into_iter()
+                        .map(LocalBlockHash)
+                        .collect(),
+                ),
+            });
+        } else {
+            let event = events.next().expect("peeked event must exist");
+            merged.push(WorkerTrace {
+                timestamp_us: event.timestamp_us,
+                entry: WorkerTraceEntry::Event {
+                    event: event.event,
+                    storage_tier: event.storage_tier,
+                },
+            });
+        }
+    }
+    Ok(merged)
+}
+
+fn merge_event_worker_traces(
+    artifacts: Vec<WorkerReplayArtifacts>,
+) -> anyhow::Result<WorkerTimelines<WorkerTrace>> {
+    let worker_traces = artifacts
+        .into_iter()
+        .enumerate()
+        .map(|(worker_idx, artifact)| merge_event_worker_trace(worker_idx, artifact))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(WorkerTimelines::new(worker_traces))
+}
+
+fn validate_timestamps<T>(
+    worker_idx: usize,
+    source: &'static str,
+    entries: &[T],
+    timestamp_of: impl Fn(&T) -> u64,
+) -> anyhow::Result<()> {
+    for idx in 1..entries.len() {
+        let previous = timestamp_of(&entries[idx - 1]);
+        let current = timestamp_of(&entries[idx]);
+        if current < previous {
+            anyhow::bail!(
+                "worker {worker_idx} {source} timestamps are not ordered at index {idx}: prev={previous}, curr={current}"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn merge_worker_traces(
+    artifacts: Vec<WorkerReplayArtifacts>,
+    block_size: u32,
+) -> anyhow::Result<MergedMooncakeBenchmark> {
+    Ok(MergedMooncakeBenchmark {
+        worker_traces: merge_event_worker_traces(artifacts)?,
+        block_size,
+    })
+}
+
+pub(crate) fn prepare_scaled_benchmark(
+    merged: MergedMooncakeBenchmark,
+    benchmark_duration_ms: u64,
+) -> PreparedMooncakeBenchmark {
+    let worker_traces = merged.worker_traces.into_rescaled_from_first(
         benchmark_duration_ms,
         |entry| entry.timestamp_us,
         |entry, timestamp_us| WorkerTrace {
-            entry: entry.entry.clone(),
+            entry: entry.entry,
             timestamp_us,
         },
-    )
-}
+    );
 
-pub async fn run_benchmark(
-    indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
-    artifacts: Vec<WorkerReplayArtifacts>,
-    config: MooncakeBenchmarkConfig,
-) -> anyhow::Result<BenchmarkRun> {
-    let worker_traces = prepare_worker_traces(artifacts, config.benchmark_duration_ms);
-    let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
+    let mut totals = MooncakeTraceTotals::default();
 
-    let progress = make_progress_bar(Some(
-        worker_traces
-            .iter()
-            .map(|trace| trace.len() as u64)
-            .sum::<u64>()
-            * config.inference_worker_duplication_factor as u64,
-    ));
-
-    let mut tasks = Vec::new();
-    for replica in 0..config.inference_worker_duplication_factor {
-        for (worker_id, worker_trace) in worker_traces.iter().enumerate() {
-            let indexer = Arc::clone(&indexer);
-            let trace = Arc::clone(worker_trace);
-            let progress = progress.clone();
-            let worker_id = worker_id + replica * worker_traces.len();
-            tasks.push(tokio::spawn(async move {
-                let mut request_latencies = Vec::with_capacity(trace.len());
-
-                let submit = |entry: WorkerTrace| async {
-                    match entry.entry {
-                        WorkerTraceEntry::Request(request) => {
-                            let start = minstant::Instant::now();
-                            indexer.find_matches(request).await?;
-                            Ok::<Option<u64>, anyhow::Error>(
-                                Some(start.elapsed().as_nanos() as u64),
-                            )
-                        }
-                        WorkerTraceEntry::Event(event) => {
-                            indexer
-                                .apply_event(RouterEvent::new(worker_id as u64, event))
-                                .await;
-                            Ok(None)
-                        }
-                    }
-                };
-
-                let mut target = Instant::now();
-                let mut trace = trace.iter().peekable();
-                let mut local_count = 0;
-
-                while let Some(entry) = trace.next() {
-                    let mut processed = 1;
-                    let entry_timestamp_us = entry.timestamp_us;
-
-                    if let Some(latency) = submit(entry.clone()).await? {
-                        request_latencies.push(latency);
-                    }
-
-                    while let Some(next) = trace.peek() {
-                        if next.timestamp_us == entry_timestamp_us {
-                            if let Some(latency) = submit(trace.next().unwrap().clone()).await? {
-                                request_latencies.push(latency);
-                            }
-                            processed += 1;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if let Some(next) = trace.peek() {
-                        target += Duration::from_micros(next.timestamp_us - entry_timestamp_us);
-                    }
-
-                    if target > Instant::now() {
-                        tokio::time::sleep_until(target).await;
-                    }
-
-                    local_count += processed;
-
-                    if local_count > 100 {
-                        progress.inc(local_count);
-                        local_count = 0;
-                    }
-                }
-
-                progress.inc(local_count);
-
-                Ok::<_, anyhow::Error>(request_latencies)
-            }));
-        }
-    }
-
-    let fm_stop = Arc::new(AtomicBool::new(false));
-    let mut fm_tasks = Vec::new();
-    if config.find_matches_concurrency > 0 {
-        let seq_pool: Arc<Vec<Vec<LocalBlockHash>>> = Arc::new(
-            worker_traces
-                .iter()
-                .flat_map(|trace| trace.iter())
-                .filter_map(|entry| match &entry.entry {
-                    WorkerTraceEntry::Request(hashes) => Some(hashes.clone()),
-                    WorkerTraceEntry::Event(_) => None,
-                })
-                .collect(),
-        );
-
-        if !seq_pool.is_empty() {
-            for task_id in 0..config.find_matches_concurrency {
-                let indexer = Arc::clone(&indexer);
-                let pool = Arc::clone(&seq_pool);
-                let stop = Arc::clone(&fm_stop);
-                fm_tasks.push(tokio::spawn(async move {
-                    let mut latencies = Vec::new();
-                    let mut idx = task_id % pool.len();
-                    while !stop.load(Ordering::Relaxed) {
-                        let seq = pool[idx].clone();
-                        let start = minstant::Instant::now();
-                        let _ = indexer.find_matches(seq).await;
-                        latencies.push(start.elapsed().as_nanos() as u64);
-                        idx = (idx + 1) % pool.len();
-                    }
-                    latencies
-                }));
+    for entry in worker_traces.iter().flatten() {
+        match &entry.entry {
+            WorkerTraceEntry::Request(hashes) => {
+                totals.requests += 1;
+                totals.request_blocks += hashes.len();
             }
-        }
-    }
-
-    let mut latencies = Vec::new();
-    for task in tasks {
-        latencies.extend(task.await??);
-    }
-
-    fm_stop.store(true, Ordering::Relaxed);
-    for task in fm_tasks {
-        if let Ok(fm_latencies) = task.await {
-            latencies.extend(fm_latencies);
-        }
-    }
-
-    let total_duration = progress.elapsed();
-    let total_events = worker_traces
-        .iter()
-        .map(|trace| {
-            trace
-                .iter()
-                .filter(|entry| matches!(entry.entry, WorkerTraceEntry::Event(_)))
-                .count()
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
-
-    let total_requests = worker_traces.iter().map(|trace| trace.len()).sum::<usize>()
-        * config.inference_worker_duplication_factor
-        - total_events;
-
-    let total_request_blocks = worker_traces
-        .iter()
-        .flat_map(|trace| trace.iter())
-        .filter_map(|entry| match &entry.entry {
-            WorkerTraceEntry::Request(hashes) => Some(hashes.len()),
-            WorkerTraceEntry::Event(_) => None,
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
-
-    let total_event_blocks = worker_traces
-        .iter()
-        .flat_map(|trace| trace.iter())
-        .filter_map(|entry| match &entry.entry {
-            WorkerTraceEntry::Event(event) => match &event.data {
-                KvCacheEventData::Stored(store) => Some(store.blocks.len()),
-                _ => Some(0),
+            WorkerTraceEntry::Event { event, .. } => match &event.data {
+                KvCacheEventData::Stored(store) => {
+                    totals.stored_events += 1;
+                    totals.stored_blocks += store.blocks.len();
+                }
+                KvCacheEventData::Removed(remove) => {
+                    totals.removed_events += 1;
+                    totals.removed_blocks += remove.block_hashes.len();
+                }
+                KvCacheEventData::Cleared => totals.cleared_events += 1,
             },
-            WorkerTraceEntry::Request(_) => None,
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
+        }
+    }
 
-    let counted_events = if config.count_events { total_events } else { 0 };
-    let counted_event_blocks = if config.count_events {
-        total_event_blocks
-    } else {
-        0
-    };
-
-    let run = compute_benchmark_run(
-        total_requests + counted_events,
-        total_request_blocks + counted_event_blocks,
-        config.benchmark_duration_ms,
-        total_duration,
-        latencies,
-    );
-
-    println!(
-        "Offered Ops Throughput: {} ops/s | Achieved: {} ops/s (requests + events)",
-        run.results.offered_ops_throughput as u64, run.results.ops_throughput as u64,
-    );
-    println!(
-        "Offered Block Throughput: {} block ops/s | Achieved: {} block ops/s",
-        run.results.offered_block_throughput as u64, run.results.block_throughput as u64,
-    );
-    println!("Latency p99: {}us", run.results.latency_p99_us);
-
-    Ok(run)
+    PreparedMooncakeBenchmark {
+        worker_traces,
+        totals,
+        benchmark_duration_ms,
+        block_size: merged.block_size,
+    }
 }
