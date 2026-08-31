@@ -13,7 +13,7 @@
 # runtime image. Keep this tag synchronized with the captured Ubuntu SBOM in
 # container/compliance/base_sboms/manifest.json; refresh that baseline before
 # advancing the image tag.
-ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
+ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20260730.1
 
 # ---- common builder ---------------------------------------------------------
 FROM ${BASE_IMAGE} AS builder-base
@@ -123,10 +123,19 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
 FROM builder-base AS compliance-inventory
 
 ARG TARGETARCH
+ARG CARGO_CYCLONEDX_VERSION=0.5.9
 
-# Standalone binaries have no wheel-embedded SBOM. Derive the exact normal
-# dependency closure of the three shipped executables from Cargo metadata and
-# harvest their registry license files for the common compliance generator.
+# Runtime images get cargo-cyclonedx output through maturin's wheel SBOMs. The
+# sidecars are standalone binaries, so run the same upstream generator directly
+# and stage its output where the common Rust compliance generator can read it.
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \
+    CARGO_TARGET_DIR=/tmp/cargo-tools \
+    cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"
+
+# Generate one target-specific SBOM per shipped executable. Development and
+# build-only dependencies cannot be linked into these binaries and are omitted.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
@@ -134,20 +143,30 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         arm64) echo "aarch64-unknown-linux-gnu" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
     esac) \
-    && python3 container/compliance/generate_rust_binary_sbom.py \
-        --manifest-path Cargo.toml \
-        --target "${RUSTARCH}" \
-        --package dynamo-vllm-sidecar \
-        --package dynamo-sglang-sidecar \
-        --package dynamo-trtllm-sidecar \
-        --output /out/sidecar.cyclonedx.json \
-    && mkdir -p /out/rust-licenses \
+    && mkdir -p /out/sidecar-sboms /out/rust-licenses \
+    && for spec in \
+        "lib/sidecar/vllm/Cargo.toml:dynamo-vllm-sidecar" \
+        "lib/sidecar/sglang/Cargo.toml:dynamo-sglang-sidecar" \
+        "lib/sidecar/trtllm/Cargo.toml:dynamo-trtllm-sidecar"; do \
+        manifest="${spec%%:*}"; \
+        binary="${spec##*:}"; \
+        cargo cyclonedx \
+            --manifest-path "${manifest}" \
+            --format json \
+            --spec-version 1.5 \
+            --describe binaries \
+            --target "${RUSTARCH}" \
+            --no-build-deps; \
+        install -m 0644 \
+            "$(dirname "${manifest}")/${binary}_bin.cdx.json" \
+            "/out/sidecar-sboms/${binary}.cyclonedx.json"; \
+    done \
     && for src in /usr/local/cargo/registry/src/*; do \
         [ -d "${src}" ] || continue; \
         find "${src}" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r crate; do \
             dest="/out/rust-licenses/$(basename "${crate}")"; \
             for license in "${crate}"/LICENSE* "${crate}"/LICENCE* "${crate}"/COPYING* "${crate}"/NOTICE* "${crate}"/UNLICENSE*; do \
-                [ -e "${license}" ] || continue; \
+                [ -f "${license}" ] || continue; \
                 mkdir -p "${dest}" && cp "${license}" "${dest}/"; \
             done; \
         done; \
@@ -195,8 +214,8 @@ RUN mkdir -p /legal /tmp/runtime-root \
 # present in this helper stage. The Rust SBOM contains only dependencies linked
 # into the three sidecar executables.
 COPY --from=runtime-base / /tmp/runtime-root/
-COPY --from=compliance-inventory /out/sidecar.cyclonedx.json \
-    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms/sidecar.cyclonedx.json
+COPY --from=compliance-inventory /out/sidecar-sboms/ \
+    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms/
 COPY --from=compliance-inventory /out/rust-licenses /tmp/rust-licenses
 
 ENV PYTHONPATH=/src/container
@@ -207,7 +226,7 @@ RUN python3 -m compliance.generators \
         --rust-licenses-dir /tmp/rust-licenses \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
-        --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --subtract-sbom /src/container/compliance/base_sboms/ubuntu@b8e64fb1-${TARGETARCH}.cdx.json \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \

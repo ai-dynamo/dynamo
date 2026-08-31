@@ -144,6 +144,7 @@ runs:
     - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ steps.dockerfile.outputs.path }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
@@ -204,7 +205,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
-            -f ${{ steps.dockerfile.outputs.path }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 
@@ -370,6 +371,7 @@ runs:
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ steps.dockerfile.outputs.path }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
@@ -415,7 +417,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/sources \
             --progress=plain \
-            -f ${{ steps.dockerfile.outputs.path }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 
