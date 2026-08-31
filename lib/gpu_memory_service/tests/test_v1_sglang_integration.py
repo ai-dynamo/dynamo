@@ -6,9 +6,14 @@ from unittest.mock import Mock, call
 
 import pytest
 
-pytest.importorskip("sglang", reason="SGLang is required")
+# Guard on the plugin itself, not on "sglang": the runtime image ships a
+# top-level sglang package without sglang.srt, so importorskip("sglang")
+# passes there and the plugin's own sglang.srt imports then fail collection.
+plugin = pytest.importorskip(
+    "gpu_memory_service.v1.integrations.sglang.plugin",
+    reason="SGLang is required",
+)
 
-import gpu_memory_service.v1.integrations.sglang.plugin as plugin  # noqa: E402
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType  # noqa: E402
 
 pytestmark = [
