@@ -84,6 +84,26 @@ struct CacheLossWorkerOutcome {
     cpu_lookup_tokens: u64,
 }
 
+pub(super) struct CacheLossTracking {
+    route: RouteObservation,
+    history: Arc<Mutex<CacheHistory>>,
+    request: CacheHistoryRequest,
+}
+
+impl CacheLossTracking {
+    pub(super) fn new(
+        route: RouteObservation,
+        history: Arc<Mutex<CacheHistory>>,
+        request: CacheHistoryRequest,
+    ) -> Self {
+        Self {
+            route,
+            history,
+            request,
+        }
+    }
+}
+
 fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
@@ -608,17 +628,13 @@ where
         worker: WorkerWithDpRank,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
-        cache_loss: RouteObservation,
-        cache_history: Arc<Mutex<CacheHistory>>,
-        cache_history_request: CacheHistoryRequest,
+        cache_loss_tracking: CacheLossTracking,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
             request,
-            cache_loss,
-            cache_history,
-            cache_history_request,
+            cache_loss_tracking,
         )
     }
 
@@ -626,9 +642,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
-        cache_loss: RouteObservation,
-        cache_history: Arc<Mutex<CacheHistory>>,
-        cache_history_request: CacheHistoryRequest,
+        cache_loss_tracking: CacheLossTracking,
     ) -> Self {
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
@@ -643,7 +657,7 @@ where
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
-            request_metrics.observe_cache_loss_input(cache_loss.prompt_tokens);
+            request_metrics.observe_cache_loss_input(cache_loss_tracking.route.prompt_tokens);
         }
         let lru_registration = scheduler_tracked
             .then(|| chooser.approximate_lru_rank_registration(worker))
@@ -672,10 +686,10 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
-            cache_loss: scheduler_tracked.then_some(cache_loss),
+            cache_loss: scheduler_tracked.then_some(cache_loss_tracking.route),
             cache_loss_recorded: false,
-            cache_history,
-            cache_history_request: scheduler_tracked.then_some(cache_history_request),
+            cache_history: cache_loss_tracking.history,
+            cache_history_request: scheduler_tracked.then_some(cache_loss_tracking.request),
             cache_history_verified: false,
             _lora_load: None,
         }

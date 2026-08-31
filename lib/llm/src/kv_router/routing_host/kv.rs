@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
-use crate::kv_router::minimal_cache_loss::{CacheHistoryRequest, RouteObservation};
+use crate::kv_router::{
+    FindBestMatchAdmission,
+    minimal_cache_loss::{CacheHistoryRequest, RouteObservation},
+    routing_host::{kv_selection::SelectionOutcome, request_guard::CacheLossTracking},
+};
 
 impl<Sel> RoutingHost<Sel>
 where
@@ -313,9 +316,11 @@ where
                 self.request_metrics.clone(),
                 cleanup,
                 request,
-                cache_loss,
-                Arc::clone(cache_history),
-                cache_history_request,
+                CacheLossTracking::new(
+                    cache_loss,
+                    Arc::clone(cache_history),
+                    cache_history_request,
+                ),
             ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
@@ -324,9 +329,11 @@ where
                 selected_worker,
                 request,
                 !is_query_only,
-                cache_loss,
-                Arc::clone(cache_history),
-                cache_history_request,
+                CacheLossTracking::new(
+                    cache_loss,
+                    Arc::clone(cache_history),
+                    cache_history_request,
+                ),
             ),
         };
 
