@@ -23,6 +23,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    get_sglang_model_config,
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
@@ -151,6 +152,30 @@ def test_compat_restores_sglang_top_level_exports():
                 delattr(sgl, "ServerArgs")
         else:
             sgl.ServerArgs = original_server_args
+
+
+def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=True)
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "_model_config_of",
+        lambda value: expected if value is server_args else None,
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=False)
+    server_args = SimpleNamespace(get_model_config=lambda: expected)
+    monkeypatch.setattr(
+        sglang_compat,
+        "_model_config_of",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert get_sglang_model_config(server_args) is expected
 
 
 def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):

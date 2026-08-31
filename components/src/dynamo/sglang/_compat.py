@@ -34,6 +34,21 @@ except ImportError:
     # Fallback for SGLang <= 0.5.17. Remove when min supported version is 0.5.18+.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
+try:
+    from sglang.srt.arg_groups.overrides import model_config_of as _model_config_of
+except ImportError:
+    _model_config_of = None
+
+
+def get_sglang_model_config(server_args: Any) -> Any:
+    """Return the resolved model config across SGLang ServerArgs APIs."""
+    legacy_getter = getattr(server_args, "get_model_config", None)
+    if legacy_getter is not None:
+        return legacy_getter()
+    if _model_config_of is None:
+        raise AttributeError("SGLang does not expose a model config accessor")
+    return _model_config_of(server_args)
+
 
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
