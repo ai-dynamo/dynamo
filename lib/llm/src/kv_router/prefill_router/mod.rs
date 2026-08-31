@@ -302,6 +302,12 @@ where
             return next.generate(context.map(|_| req)).await;
         }
 
+        // Query-only requests are owned by the decode RoutingHost. In particular,
+        // do not turn an advisory worker lookup into conditional local execution.
+        if req.get_annotation_value("query_instance_id").is_some() {
+            return next.generate(context.map(|_| req)).await;
+        }
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
@@ -694,15 +700,114 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::RouterConfigOverride;
-    use std::collections::{HashMap, HashSet};
+    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use futures::StreamExt;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::oneshot;
 
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
+        timing::RoutingData,
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[derive(Default)]
+    struct QueryOnlyDecodeHost {
+        requests: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for QueryOnlyDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            assert!(request.get_annotation_value("query_instance_id").is_some());
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            let output = Annotated::from_data(LLMEngineOutput {
+                routing_data: Some(RoutingData {
+                    token_ids: Some(request.token_ids.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move { output })),
+                request.context(),
+            ))
+        }
+    }
+
+    fn active_conditional_router() -> Arc<PrefillRouter> {
+        let (_activation_tx, activation_rx) = oneshot::channel();
+        let router = PrefillRouter::new(
+            activation_rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            16,
+            Some(KvRouterConfig {
+                conditional_disagg_enabled: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+            "model".to_string(),
+            "namespace".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
+        );
+        assert!(router.conditional_disagg_enabled());
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router
+    }
+
+    fn query_only_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(vec!["query_instance_id:".to_string()])
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_query_only_forwards_to_decode_host() {
+        let router = active_conditional_router();
+        let decode_host = Arc::new(QueryOnlyDecodeHost::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            decode_host.clone();
+
+        let mut response = router
+            .generate(SingleIn::new(query_only_request()), next)
+            .await
+            .expect("query-only request should bypass conditional planning");
+        let output = response
+            .next()
+            .await
+            .expect("decode host should return routing data")
+            .data
+            .expect("query-only response should contain data");
+
+        assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            output.routing_data.and_then(|routing| routing.token_ids),
+            Some(vec![1, 2, 3])
+        );
+    }
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
