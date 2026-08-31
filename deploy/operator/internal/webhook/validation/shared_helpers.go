@@ -117,6 +117,21 @@ func runtimeVersionImageAndPathV1Alpha1(
 	return "", imagePath
 }
 
+// toleratesMissingRuntimeVersionOverride reports whether componentType may omit
+// runtimeVersionOverride when its image tag carries no resolvable version.
+//
+// EPP is never exempt. Whether eppConfig is required (legacy Go EPP) or
+// forbidden (native Rust EPP, 1.5.0+) is decided entirely by the resolved
+// runtime version, so an unresolvable version enforces neither half of the
+// rule: eppRuntimeCompatibilityError returns nil and the component is admitted
+// with no contract checked at all. Standalone DynamoComponentDeployments set
+// allowMissingRuntimeVersionOverride, so without this carve-out an EPP DCD on a
+// non-semver tag (a CI sha tag, :latest, a digest ref) would silently skip the
+// check that the DynamoGraphDeployment path still performs.
+func (v *sharedValidation) toleratesMissingRuntimeVersionOverride(componentType string) bool {
+	return v.allowMissingRuntimeVersionOverride && componentType != consts.ComponentTypeEPP
+}
+
 // runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
 func runtimeVersionOverrideRequired(image, override string) bool {
 	if override != "" {
@@ -156,7 +171,10 @@ func eppRuntimeContractV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymen
 }
 
 // eppRuntimeCompatibilityError returns the cross-field error for an EPP runtime-contract mismatch.
-// Invalid or unavailable runtime versions are reported by the runtime-version validator.
+// Invalid or unavailable runtime versions are reported by the runtime-version
+// validator instead, which for an EPP component always demands a resolvable
+// version (see toleratesMissingRuntimeVersionOverride) -- so returning nil here
+// defers the report rather than admitting an unchecked contract.
 func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *field.Path) *field.Error {
 	if contract.componentType != consts.ComponentTypeEPP {
 		return nil

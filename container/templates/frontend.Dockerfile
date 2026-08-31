@@ -8,8 +8,12 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-# The EPP image is built from deploy/inference-gateway/ext-proc. Only its native
-# Rust binary is copied into the Frontend image.
+# The EPP image is built from deploy/inference-gateway/ext-proc (Rust). This
+# image contributes three things to the frontend: the /epp binary (copied
+# below), and — consumed by compliance.Dockerfile's licenses and sources_collect
+# stages — the CycloneDX SBOM describing /epp's crate closure plus the harvested
+# LICENSE texts for those crates. /epp ships in no wheel, so that SBOM is the
+# only thing that puts its crates into the frontend's NOTICES and OSRB bundle.
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
 # reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,

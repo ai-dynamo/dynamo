@@ -34,12 +34,14 @@ ARG SCCACHE_REGION=""
 # protos import. libclang-dev is needed by bindgen (nixl-sys transitive dep).
 # libzmq3-dev + pkg-config are needed by the `zmq` crate the in-process
 # selection service uses for KV-event and replica-sync sockets.
+# python3 runs container/compliance/cargo_sbom.py in the build RUN below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libprotobuf-dev \
     libclang-dev \
     libzmq3-dev \
     pkg-config \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /dynamo
@@ -68,6 +70,9 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 
+# Compliance: emits the CycloneDX SBOM for /epp in the build step below.
+COPY --from=dynamo container/compliance/cargo_sbom.py /tmp/cargo_sbom.py
+
 # Build the binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
@@ -80,6 +85,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     fi && \
     cargo build --release -p dynamo-ext-proc && \
     cp target/release/dynamo-ext-proc /epp && \
+    case "$TARGETARCH" in \
+        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
+        *)     RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+    esac && \
+    python3 /tmp/cargo_sbom.py \
+        --package dynamo-ext-proc \
+        --target "$RUST_TARGET" \
+        --output /sbom-rust-epp.cdx.json && \
+    mkdir -p /rust-licenses && \
+    find "${CARGO_HOME:-/usr/local/cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
+    | while IFS= read -r crate; do \
+        dest="/rust-licenses/$(basename "$crate")"; \
+        for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+            [ -e "$lf" ] || continue; \
+            mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+        done; \
+    done; \
+    echo "epp rust license harvest: $(find /rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files" && \
     if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "dynamo-ext-proc" || true; fi
 
 # =============================================================================
@@ -98,6 +121,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /
 
 COPY --from=builder /epp /epp
+
+# Compliance: the SBOM for /epp's crate closure, plus the crates' real LICENSE
+# texts, travel in the SAME image as the binary they describe. The frontend
+# image copies /epp out of here (container/templates/frontend.Dockerfile) and
+# its licenses stage copies these two alongside, so attribution cannot silently
+# drift from the binary actually shipped -- a stale layer missing the SBOM fails
+# that COPY instead of quietly emitting NOTICES that omit /epp's crates.
+COPY --from=builder /sbom-rust-epp.cdx.json /sbom-rust-epp.cdx.json
+COPY --from=builder /rust-licenses /rust-licenses
 
 RUN useradd -r -u 65532 -g nogroup nonroot
 USER 65532:65534

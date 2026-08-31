@@ -51,7 +51,10 @@ const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 /// batch. Chat and single/pre-tokenized completion requests are always safe.
 type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints, bool);
 
-fn validate_kube_discovery_mode() -> Result<()> {
+/// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
+/// is in effect. Read once at startup and threaded down to the pod reflector
+/// rather than re-read per pod event, since it cannot change while we run.
+fn validate_kube_discovery_mode() -> Result<bool> {
     match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
         Ok(mode) => validate_kube_discovery_mode_value(Some(&mode)),
         Err(std::env::VarError::NotPresent) => validate_kube_discovery_mode_value(None),
@@ -61,9 +64,12 @@ fn validate_kube_discovery_mode() -> Result<()> {
     }
 }
 
-fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<()> {
+/// `Ok(true)` for container discovery, `Ok(false)` for pod discovery (the
+/// default when unset).
+fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
     match mode {
-        None | Some("pod") | Some("container") => Ok(()),
+        None | Some("pod") => Ok(false),
+        Some("container") => Ok(true),
         Some(mode) => anyhow::bail!(
             "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
         ),
@@ -116,7 +122,7 @@ impl Router {
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
     pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
-        validate_kube_discovery_mode()?;
+        let container_discovery = validate_kube_discovery_mode()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -202,7 +208,8 @@ impl Router {
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
-        let (worker_index, pod_store_ready) = spawn_pod_reflector(namespace).await?;
+        let (worker_index, pod_store_ready) =
+            spawn_pod_reflector(namespace, container_discovery).await?;
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -845,25 +852,24 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 }
 
 /// All worker instance IDs `pod` is currently known under: its pod-level
-/// identity, plus — under `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod
-/// GMS failover, where each engine container registers under its own
-/// container name) — the per-container identity of each currently `Ready`
-/// container. Mirrors the runtime's own `extract_ready_containers`, so a
-/// container that has stopped being `Ready` (a demoted or crashed engine) is
-/// never matched against a worker_id, and the "main" container name (which
-/// collapses to the pod-level identity) never double-counts.
+/// identity, plus each `Ready` container's identity when `container_discovery`
+/// is set (`DYN_KUBE_DISCOVERY_MODE=container`, e.g. intra-pod GMS failover).
+/// `"main"` collapses to the pod identity so it never double-counts, and the
+/// HTTP endpoint stays pod-level either way (see [`pod_endpoint_address`]).
 ///
-/// A pod's HTTP inference endpoint stays pod-level regardless (resolved
-/// separately by [`pod_endpoint_address`]): the failover engine containers
-/// only expose their internal system/health ports, and traffic still lands
-/// on the pod's single OpenAI-compatible port (typically a `sidecar-frontend`
-/// container, untouched by failover's container cloning).
-fn pod_worker_ids(pod: &k8s_openapi::api::core::v1::Pod) -> impl Iterator<Item = u64> + '_ {
+/// The gate is load-bearing: under pod discovery a worker registers under its
+/// pod identity alone, so per-container ids would invent phantom workers that
+/// `register_workers` defaults to zero load and zero KV overlap — making them
+/// the most attractive candidates the scheduler sees.
+fn pod_worker_ids(
+    pod: &k8s_openapi::api::core::v1::Pod,
+    container_discovery: bool,
+) -> impl Iterator<Item = u64> + '_ {
     let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
     let pod_id = (!pod_name.is_empty()).then(|| hash_pod_name(pod_name));
-    let container_ids = pod
-        .status
-        .as_ref()
+    let container_ids = container_discovery
+        .then_some(pod.status.as_ref())
+        .flatten()
         .and_then(|s| s.container_statuses.as_ref())
         .into_iter()
         .flatten()
@@ -884,6 +890,11 @@ fn pod_worker_ids(pod: &k8s_openapi::api::core::v1::Pod) -> impl Iterator<Item =
 /// with pod/container count and allocated on every miss.
 #[derive(Default)]
 struct WorkerEndpointIndex {
+    /// Whether `DYN_KUBE_DISCOVERY_MODE=container` is in effect, resolved once
+    /// at startup. Held here rather than read per event so the index cannot
+    /// disagree with itself between two pods. Defaults to `false` (pod
+    /// discovery), which is the mode that must not invent per-container ids.
+    container_discovery: bool,
     /// worker_id -> endpoint.
     endpoints: HashMap<u64, String>,
     /// pod name -> worker_ids currently registered for that pod, so a later
@@ -893,6 +904,13 @@ struct WorkerEndpointIndex {
 }
 
 impl WorkerEndpointIndex {
+    fn new(container_discovery: bool) -> Self {
+        Self {
+            container_discovery,
+            ..Default::default()
+        }
+    }
+
     /// Apply one pod's current state: drop any ids it previously registered,
     /// then add its current worker IDs mapped to its endpoint. A pod with no
     /// worker IDs (unnamed, matching [`pod_worker_ids`]) or no resolvable
@@ -905,7 +923,7 @@ impl WorkerEndpointIndex {
         let Some(endpoint) = pod_endpoint_address(pod) else {
             return;
         };
-        let ids: Vec<u64> = pod_worker_ids(pod).collect();
+        let ids: Vec<u64> = pod_worker_ids(pod, self.container_discovery).collect();
         if ids.is_empty() {
             return;
         }
@@ -932,6 +950,8 @@ impl WorkerEndpointIndex {
     /// Drop every entry — used when the reflector stream ends, since a frozen
     /// snapshot must not keep answering lookups as if it were still live.
     fn clear(&mut self) {
+        // Deliberately leaves `container_discovery` alone: it is startup
+        // configuration, not reflector state.
         self.endpoints.clear();
         self.by_pod.clear();
     }
@@ -957,6 +977,7 @@ impl WorkerEndpointIndex {
 /// and no pod rescans on the hot path.
 async fn spawn_pod_reflector(
     dynamo_namespace: &str,
+    container_discovery: bool,
 ) -> Result<(Arc<RwLock<WorkerEndpointIndex>>, Arc<AtomicBool>)> {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Pod;
@@ -985,7 +1006,7 @@ async fn spawn_pod_reflector(
     let watcher_config = watcher::Config::default().labels(&selector);
     let reflect = reflector::reflector(writer, watcher(pods, watcher_config));
     let index: Arc<RwLock<WorkerEndpointIndex>> =
-        Arc::new(RwLock::new(WorkerEndpointIndex::default()));
+        Arc::new(RwLock::new(WorkerEndpointIndex::new(container_discovery)));
 
     tracing::info!(
         namespace = k8s_namespace,
@@ -1813,10 +1834,15 @@ mod tests {
 
     #[test]
     fn discovery_mode_accepts_pod_and_container_rejects_unknown() {
-        assert!(validate_kube_discovery_mode_value(None).is_ok());
-        assert!(validate_kube_discovery_mode_value(Some("pod")).is_ok());
+        // The bool is what gates per-container worker ids, so assert the
+        // resolved mode rather than just that validation succeeded.
         assert!(
-            validate_kube_discovery_mode_value(Some("container")).is_ok(),
+            !validate_kube_discovery_mode_value(None).unwrap(),
+            "unset must default to pod discovery"
+        );
+        assert!(!validate_kube_discovery_mode_value(Some("pod")).unwrap());
+        assert!(
+            validate_kube_discovery_mode_value(Some("container")).unwrap(),
             "container mode (e.g. intra-pod GMS failover) must be accepted, not rejected at startup"
         );
         assert!(validate_kube_discovery_mode_value(Some("bogus")).is_err());
@@ -1888,7 +1914,7 @@ mod tests {
     #[test]
     fn pod_worker_ids_includes_pod_and_ready_containers_only() {
         let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
-        let ids: HashSet<u64> = pod_worker_ids(&pod).collect();
+        let ids: HashSet<u64> = pod_worker_ids(&pod, true).collect();
 
         assert!(ids.contains(&hash_pod_name("worker-0")));
         assert!(ids.contains(&hash_container_name("worker-0", "engine-0")));
@@ -1897,6 +1923,133 @@ mod tests {
             "the not-ready standby engine must not be a live worker_id"
         );
         assert_eq!(ids.len(), 2);
+    }
+
+    /// Builds an ordinary pod-discovery worker pod: a `main` engine container
+    /// plus the sidecars a real Dynamo worker runs, all `Ready`. `simple_pod`
+    /// sets no `container_statuses` at all, so it cannot reproduce what a live
+    /// pod-mode pod looks like to `pod_worker_ids` — this fixture can.
+    fn pod_mode_worker_pod() -> Pod {
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerPort, ContainerStatus, PodSpec, PodStatus,
+        };
+        use kube::api::ObjectMeta;
+
+        let names = ["main", "sidecar-frontend", "metrics"];
+        Pod {
+            metadata: ObjectMeta {
+                name: Some("worker-0".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: names
+                    .iter()
+                    .map(|name| Container {
+                        name: name.to_string(),
+                        ports: (*name == "sidecar-frontend").then(|| {
+                            vec![ContainerPort {
+                                name: Some(DYNAMO_CONTAINER_PORT_NAME.to_string()),
+                                container_port: 8000,
+                                ..Default::default()
+                            }]
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                pod_ip: Some("10.0.0.1".to_string()),
+                container_statuses: Some(
+                    names
+                        .iter()
+                        .map(|name| ContainerStatus {
+                            name: name.to_string(),
+                            ready: true,
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Under pod discovery a worker registers under its pod identity alone, so
+    /// a pod's ready sidecars must contribute no worker ids. Emitting them
+    /// would invent workers no backend registered under: they miss
+    /// `register_workers`' discovery lookup, default to `(0, 1)` with no load
+    /// and no KV overlap, and so look maximally attractive to the scheduler.
+    #[test]
+    fn pod_worker_ids_ignores_containers_under_pod_discovery() {
+        let pod = pod_mode_worker_pod();
+        let ids: Vec<u64> = pod_worker_ids(&pod, false).collect();
+
+        assert_eq!(
+            ids,
+            vec![hash_pod_name("worker-0")],
+            "pod discovery must yield exactly the pod-level identity"
+        );
+        for sidecar in ["sidecar-frontend", "metrics"] {
+            assert!(
+                !ids.contains(&hash_container_name("worker-0", sidecar)),
+                "{sidecar} must not become a phantom worker under pod discovery"
+            );
+        }
+    }
+
+    /// The same pod under container discovery: `main` collapses into the
+    /// pod-level identity, the other ready containers each add one id.
+    #[test]
+    fn pod_worker_ids_includes_containers_under_container_discovery() {
+        let ids: HashSet<u64> = pod_worker_ids(&pod_mode_worker_pod(), true).collect();
+
+        assert!(ids.contains(&hash_pod_name("worker-0")));
+        assert_eq!(
+            hash_container_name("worker-0", "main"),
+            hash_pod_name("worker-0"),
+            "the main container collapses to the pod identity and must not double-count"
+        );
+        for sidecar in ["sidecar-frontend", "metrics"] {
+            assert!(ids.contains(&hash_container_name("worker-0", sidecar)));
+        }
+        assert_eq!(ids.len(), 3);
+    }
+
+    /// End of the chain that made this matter: the index feeds
+    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> `register_workers`,
+    /// so one backend pod must contribute exactly one worker id under pod
+    /// discovery rather than one per ready container.
+    #[test]
+    fn worker_index_registers_one_id_per_pod_under_pod_discovery() {
+        let mut index = WorkerEndpointIndex::default();
+        index.upsert(&pod_mode_worker_pod());
+
+        assert_eq!(
+            index.endpoints.len(),
+            1,
+            "one backend pod must not register as several scheduler workers"
+        );
+        assert_eq!(
+            index.endpoints.get(&hash_pod_name("worker-0")),
+            Some(&"10.0.0.1:8000".to_string())
+        );
+    }
+
+    /// `clear()` drops reflector state; the discovery mode is startup config
+    /// and must survive, or a stream restart would silently change behaviour.
+    #[test]
+    fn worker_index_clear_preserves_the_discovery_mode() {
+        let mut index = WorkerEndpointIndex::new(true);
+        index.upsert(&pod_mode_worker_pod());
+        index.clear();
+        index.upsert(&pod_mode_worker_pod());
+
+        assert_eq!(
+            index.endpoints.len(),
+            3,
+            "container discovery must still be in effect after a clear"
+        );
     }
 
     /// A minimal pod exposing an `http`-named port, for
@@ -1934,7 +2087,7 @@ mod tests {
     /// resolved endpoint.
     #[test]
     fn worker_index_upsert_maps_pod_and_container_ids_to_the_pod_endpoint() {
-        let mut index = WorkerEndpointIndex::default();
+        let mut index = WorkerEndpointIndex::new(true);
         let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
         index.upsert(&pod);
 
@@ -1961,7 +2114,7 @@ mod tests {
     /// endpoint for a container that stopped being ready.
     #[test]
     fn worker_index_upsert_retracts_ids_that_are_no_longer_ready() {
-        let mut index = WorkerEndpointIndex::default();
+        let mut index = WorkerEndpointIndex::new(true);
         index.upsert(&failover_pod(
             &[("engine-0", true), ("engine-1", true)],
             true,
