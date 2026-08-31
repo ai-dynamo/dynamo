@@ -2170,6 +2170,15 @@ body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:n
 }
 
 /* Highlight the matching row in an expected-performance or comparison table */
+body:has(input[name="recipe-sku"][value="b200"]:checked) [data-highlight-sku~="b200"],
+body:has(input[name="recipe-sku"][value="h200"]:checked) [data-highlight-sku~="h200"],
+body:has(input[name="recipe-sku"][value="h100"]:checked) [data-highlight-sku~="h100"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-highlight-sku~="gb200"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-highlight-sku~="gb300"] {
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    font-weight: 600;
+}
+
 body:has(input[name="recipe-sku"]:checked) tr[data-sku][data-usecase] {
     opacity: 0.55;
 }
