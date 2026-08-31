@@ -32,7 +32,7 @@ from dynamo.frontend.prepost import (
     _prepare_request,
     build_tool_call_guided_decoding,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -1151,62 +1151,27 @@ def vllm_processor_module(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generator_preserves_zero_top_logprobs(
+async def test_generator_rejects_logprobs_including_zero_top_logprobs(
     vllm_processor_module,
     monkeypatch,
-    caplog,
 ):
-    class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset()
-
+    preprocess_chat_request = AsyncMock()
     monkeypatch.setattr(
         vllm_processor_module,
         "preprocess_chat_request",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                request_for_sampling=RequestForSampling(
-                    max_completion_tokens=None,
-                    max_tokens=1,
-                    logprobs=True,
-                    top_logprobs=0,
-                    cache_salt=None,
-                    mm_processor_kwargs=None,
-                ),
-                tool_parser=None,
-                chat_template_kwargs={},
-                engine_prompt={"prompt": "Hello"},
-                prompt_token_ids=[1],
-                guided_decoding=None,
-            )
-        ),
-    )
-
-    class ProjectionObserved(Exception):
-        pass
-
-    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
-        assert sampling_params.logprobs == 0
-        raise ProjectionObserved
-
-    input_processor = SimpleNamespace(
-        generation_config_fields={},
-        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
-        process_inputs=process_inputs,
-        # Real InputProcessor always carries this (vllm_config.model_config);
-        # _generator_inner forwards it to the reasoning parser.
-        model_config=None,
+        preprocess_chat_request,
     )
 
     processor = vllm_processor_module.VllmProcessor(
-        tokenizer=SimpleNamespace(eos_token_id=2),
-        input_processor=input_processor,
+        tokenizer=object(),
+        input_processor=object(),
         output_processor=object(),
         tool_parser_class=None,
         reasoning_parser_class=None,
         routed_engine=object(),
     )
 
-    with pytest.raises(ProjectionObserved):
+    with pytest.raises(HttpError) as excinfo:
         await anext(
             processor._generator_inner(
                 {
@@ -1217,10 +1182,10 @@ async def test_generator_preserves_zero_top_logprobs(
                 }
             )
         )
-    assert (
-        "Logprobs requested but not supported in distributed inference mode"
-        in caplog.messages
-    )
+
+    assert excinfo.value.code == 400
+    assert "logprobs" in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1492,6 +1457,47 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_backend_rejection_keeps_the_backend_status(
+        self, vllm_processor_module
+    ):
+        # A worker-side rejection crosses the Rust boundary as a plain ValueError
+        # whose text carries the real status. It must reach the client as that
+        # status with that message -- not as a generic 500 with both discarded.
+        class _RejectingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise ValueError(
+                    'BackendInvalidArgument: {"message":"The min_p and logit_bias '
+                    "sampling parameters are not yet supported with speculative "
+                    'decoding.","code":400}'
+                )
+
+        processor = _make_processor(vllm_processor_module, _RejectingEngine())
+
+        with pytest.raises(HttpError) as excinfo:
+            await _run_generate(processor, _base_preproc())
+
+        assert excinfo.value.code == 400
+        assert "min_p" in excinfo.value.message
+        # The serialized envelope must not leak to the client.
+        assert "BackendInvalidArgument" not in excinfo.value.message
+
+    @pytest.mark.asyncio
+    async def test_genuine_internal_failure_is_still_internal(
+        self, vllm_processor_module
+    ):
+        # The mapping is narrow on purpose: anything without the discriminator
+        # keeps the existing internal-error behaviour.
+        class _BrokenEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise RuntimeError("CUDA out of memory")
+
+        processor = _make_processor(vllm_processor_module, _BrokenEngine())
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks[-1]["error"]["type"] == "internal_error"
+
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()

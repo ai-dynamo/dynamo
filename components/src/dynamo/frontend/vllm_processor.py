@@ -39,11 +39,13 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -583,6 +585,19 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        logprobs = request.get("logprobs")
+        top_logprobs = request.get("top_logprobs")
+        if (
+            logprobs is True
+            or (isinstance(logprobs, int) and not isinstance(logprobs, bool))
+            or top_logprobs not in (None, 0)
+        ):
+            raise HttpError(
+                400,
+                "Validation: `logprobs` and `top_logprobs` are not supported by the "
+                "vLLM chat processor (--dyn-chat-processor vllm).",
+            )
+
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
         # Validate cache-UUID modality support before vLLM downloads or
@@ -657,20 +672,6 @@ class VllmProcessor:
         nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
             "max_thinking_tokens"
         )
-        logprobs = request_for_sampling.logprobs
-        top_logprobs = request_for_sampling.top_logprobs
-        if logprobs is True:
-            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
-        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-            sampling_params.logprobs = logprobs
-        elif top_logprobs not in (None, 0):
-            sampling_params.logprobs = top_logprobs
-        # TODO: Support logprobs in the distributed vLLM chat processor by
-        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
-        if sampling_params.logprobs is not None:
-            logger.warning(
-                "Logprobs requested but not supported in distributed inference mode"
-            )
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -1053,6 +1054,18 @@ class VllmProcessor:
             # below is reserved for genuine internal failures.
             raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))
         finally:
