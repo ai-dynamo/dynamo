@@ -853,6 +853,17 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
+        # Every ORIGINAL generated token id for this choice, in order (NVBug
+        # 6678449b). The count is delegated to the pinned vLLM parser's own
+        # `count_reasoning_tokens`, so it is never re-derived from parser output.
+        # Deriving it was wrong three ways: the response projections drop or
+        # defer it (`_suppress_reasoning_output`, and the non-streaming tool
+        # path's terminal-delta buffering); a per-chunk classifier over-counts a
+        # chunk carrying both kinds; and re-encoding decoded text drifts from the
+        # original ids, because detokenisation is not injective -- one generated
+        # id can re-encode to several.
+        self._reasoning_token_ids: list[int] = []
+
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
@@ -894,6 +905,13 @@ class StreamingPostProcessor:
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    @property
+    def reasoning_token_total(self) -> int:
+        """Reasoning tokens for this choice, per the parser's own counter."""
+        if self.reasoning_parser is None:
+            return 0
+        return self.reasoning_parser.count_reasoning_tokens(self._reasoning_token_ids)
 
     def _decode_dynamo_json_fallback_tool_calls(
         self, text: str
@@ -1290,6 +1308,10 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        # BEFORE any branch below: every path must feed the ledger, including
+        # the ones that emit nothing for this chunk.
+        if self.reasoning_parser is not None:
+            self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback:
             return self._process_dynamo_json_fallback_tool_calls(output)
         if self._should_buffer_for_non_streaming_tool_parse():
