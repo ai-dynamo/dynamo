@@ -2,16 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2026-01-13):
-- test_request_migration_sglang_aggregated: ~75s
+Test Execution Times (H100 validation: 2026-08-20):
+- test_request_migration_sglang_aggregated: ~104s
 - test_request_migration_sglang_prefill: N/A
 - test_request_migration_sglang_kv_transfer: N/A
-- test_request_migration_sglang_decode: ~75s
+- test_request_migration_sglang_decode: ~145-168s per case (~156s average)
 """
 
 import logging
 import os
-import shutil
 
 import pytest
 
@@ -31,47 +30,48 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.parametrize(
-        "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
-    ),
-    pytest.mark.parametrize(
-        "migration_max_seq_len",
-        [
-            pytest.param(None, id="max_seq_len_disabled"),
-            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
-            pytest.param(1, id="max_seq_len_exceeded"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "immediate_kill",
-        [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(False, id="graceful_shutdown"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "request_api",
-        [
-            pytest.param("chat"),
-            pytest.param(
-                "completion",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "stream",
-        [
-            pytest.param(True, id="stream"),
-            pytest.param(
-                False,
-                id="unary",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
+
+
+def migration_control_parameter():
+    """Parametrize the migration controls exercised by the proven decode path."""
+    migration_limits = ((3, "migration_enabled"), (0, "migration_disabled"))
+    max_sequence_lengths = (
+        (None, "max_seq_len_disabled"),
+        (1_000_000, "max_seq_len_not_exceeded"),
+        (1, "max_seq_len_exceeded"),
+    )
+    shutdown_modes = ((True, "worker_failure"), (False, "graceful_shutdown"))
+    cases = tuple(
+        pytest.param(
+            migration_limit,
+            migration_max_seq_len,
+            immediate_kill,
+            id=f"{limit_id}-{max_seq_id}-{shutdown_id}",
+        )
+        for migration_limit, limit_id in migration_limits
+        for migration_max_seq_len, max_seq_id in max_sequence_lengths
+        for immediate_kill, shutdown_id in shutdown_modes
+    )
+    return pytest.mark.parametrize(
+        "migration_limit,migration_max_seq_len,immediate_kill", cases
+    )
+
+
+def representative_worker_failure_parameter():
+    """Parametrize the smallest migration-enabled worker-failure scenario."""
+    return pytest.mark.parametrize(
+        "migration_limit,migration_max_seq_len,immediate_kill",
+        [
+            pytest.param(
+                3,
+                1_000_000,
+                True,
+                id="migration_enabled-max_seq_len_not_exceeded-worker_failure",
+            )
+        ],
+    )
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -171,17 +171,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        # TODO: Have the managed process take a command name explicitly to distinguish
-        #       between processes started with the same command.
-        log_dir = f"{request.node.name}_{worker_id}"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = request.getfixturevalue("tmp_path") / worker_id
 
         super().__init__(
             command=command,
@@ -192,7 +182,7 @@ class DynamoWorkerProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
             stragglers=["SGLANG:EngineCore"],
             straggler_commands=["-m dynamo.sglang"],
-            log_dir=log_dir,
+            log_dir=str(log_dir),
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -222,12 +212,9 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(330)  # 3x measured H100 average
 @pytest.mark.post_merge
-@pytest.mark.skip(
-    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
-    "skipped wholesale until the underlying migration fault is owned and fixed."
-)
+@representative_worker_failure_parameter()
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -236,8 +223,6 @@ def test_request_migration_sglang_aggregated(
     migration_limit,
     migration_max_seq_len,
     immediate_kill,
-    request_api,
-    stream,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -246,36 +231,11 @@ def test_request_migration_sglang_aggregated(
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
         migration_max_seq_len: Max sequence length for migration state tracking
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+        This representative case uses the chat streaming API. Completion and unary
+        migration behavior remains unverified and is not collected as supported coverage.
     """
-
-    request_plane = request.getfixturevalue("request_plane")
-
-    # OPS-4472: graceful-shutdown migration with NATS is flaky for the
-    # chat streaming aggregated SGLang case.
-    if (
-        migration_limit == 3
-        and migration_max_seq_len is None
-        and immediate_kill is False
-        and request_api == "chat"
-        and stream is True
-        and request_plane == "nats"
-    ):
-        pytest.skip("Flaky: graceful-shutdown migration fails with NATS. OPS-4472")
-
-    # OPS-4446: first-token delay routinely exceeds the 6s threshold in
-    # utils.validate_response for this parameter combination. Originally only
-    # the NATS variant tripped; once the NATS skip landed, the TCP variant
-    # started failing the same way (now bears the cold-start cost first).
-    if (
-        migration_limit == 3
-        and migration_max_seq_len is None
-        and immediate_kill is True
-        and request_api == "chat"
-        and stream is True
-    ):
-        pytest.skip("Flaky: first-token delay > 6s threshold. OPS-4446")
+    # Graceful shutdown remains excluded by OPS-4472. A disabled max-sequence
+    # limit remains excluded by OPS-4446's first-token-delay failure.
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
@@ -305,15 +265,17 @@ def test_request_migration_sglang_aggregated(
                     migration_limit=migration_limit,
                     migration_max_seq_len=migration_max_seq_len,
                     immediate_kill=immediate_kill,
-                    use_chat_completion=(request_api == "chat"),
-                    stream=stream,
+                    use_chat_completion=True,
+                    stream=True,
                 )
 
 
-@pytest.mark.skip(reason="Cannot reliably migrate at Prefill that finish < 1 ms")
-@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.skip(
+    reason="SGLang prefill completes before migration can be triggered; DYN-4059"
+)
+@pytest.mark.timeout(230)
 @pytest.mark.nightly
+@representative_worker_failure_parameter()
 def test_request_migration_sglang_prefill(
     request,
     runtime_services_dynamic_ports,
@@ -322,8 +284,6 @@ def test_request_migration_sglang_prefill(
     migration_limit,
     migration_max_seq_len,
     immediate_kill,
-    request_api,
-    stream,
 ):
     """
     End-to-end test for prefill worker request migration in disaggregated mode.
@@ -333,8 +293,7 @@ def test_request_migration_sglang_prefill(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+        The disabled representative uses the chat streaming API.
     """
 
     # Step 1: Start the frontend
@@ -380,15 +339,18 @@ def test_request_migration_sglang_prefill(
                         migration_limit=migration_limit,
                         migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
+                        use_chat_completion=True,
+                        stream=True,
                         use_long_prompt=True,
                     )
 
 
-@pytest.mark.skip(reason="KV cache transfer may fail")
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.skip(
+    reason="SGLang migration during KV transfer is not reliable; DYN-4059"
+)
+@pytest.mark.timeout(230)
 @pytest.mark.nightly
+@representative_worker_failure_parameter()
 def test_request_migration_sglang_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -397,8 +359,6 @@ def test_request_migration_sglang_kv_transfer(
     migration_limit,
     migration_max_seq_len,
     immediate_kill,
-    request_api,
-    stream,
 ):
     """
     End-to-end test for request migration during KV transfer in disaggregated mode.
@@ -408,8 +368,7 @@ def test_request_migration_sglang_kv_transfer(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+        The disabled representative uses the chat streaming API.
     """
 
     # Step 1: Start the frontend
@@ -455,14 +414,15 @@ def test_request_migration_sglang_kv_transfer(
                         migration_limit=migration_limit,
                         migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
+                        use_chat_completion=True,
+                        stream=True,
                         use_long_prompt=True,
                     )
 
 
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(480)  # 3x measured H100 average
 @pytest.mark.nightly
+@migration_control_parameter()
 def test_request_migration_sglang_decode(
     request,
     runtime_services_dynamic_ports,
@@ -471,8 +431,6 @@ def test_request_migration_sglang_decode(
     migration_limit,
     migration_max_seq_len,
     immediate_kill,
-    request_api,
-    stream,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -482,14 +440,8 @@ def test_request_migration_sglang_decode(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+        The verified decode matrix uses the chat streaming API.
     """
-    if not stream:
-        pytest.skip(
-            "Decode test requires streaming to wait for response before stopping worker"
-        )
-
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
         request,
@@ -533,7 +485,7 @@ def test_request_migration_sglang_decode(
                         migration_limit=migration_limit,
                         migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
+                        use_chat_completion=True,
+                        stream=True,
                         wait_for_new_response_before_stop=True,
                     )

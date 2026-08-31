@@ -29,6 +29,12 @@ Each backend (vLLM, SGLang, TRT-LLM) has the following test types:
 
 Where `{backend}` is one of: `vllm`, `sglang`, `trtllm`
 
+SGLang currently treats chat streaming as the verified request shape. Its decode
+test exercises the complete migration-control matrix over NATS and TCP, while
+the aggregated test exercises a representative migration-enabled abrupt worker
+failure over both transports. Prefill and KV-transfer migration remain explicit
+unsupported/unreliable skips tracked by DYN-4059.
+
 ### Common Test Flow
 
 1. Start a Dynamo frontend with round-robin routing
