@@ -101,11 +101,32 @@ const (
 	// the snapshot CheckpointIDLabel because the snapshot-agent watches that
 	// label to start a restore.
 	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
-	// CheckpointNameAnnotation stores the candidate DynamoCheckpoint CR name.
+	// CheckpointNameAnnotation stores the candidate checkpoint resource name;
+	// CheckpointSourceKindAnnotation identifies its API kind.
 	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+	// CheckpointSourceKindAnnotation identifies the API kind that owns a
+	// checkpoint reference while automatic capture remains on the legacy path.
+	CheckpointSourceKindAnnotation = "nvidia.com/dynamo-checkpoint-source-kind"
+	CheckpointSourceKindLegacy     = "DynamoCheckpoint"
+	CheckpointSourceKindSnapshot   = "PodSnapshot"
+
+	// Snapshot compatibility metadata is written by Dynamo capture producers
+	// and validated before a PodSnapshot may restore a Dynamo worker.
+	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
+	SnapshotWorkerHashAnnotation           = "nvidia.com/dynamo-snapshot-worker-hash"
+	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
+	SnapshotCompatibilityVersion           = "v1"
+	SnapshotGMSModeDisabled                = "disabled"
+
+	// Native restore candidate metadata pins the PodSnapshot observation used
+	// by workload reconciliation so admission can detect intervening changes.
+	SnapshotCandidateUIDAnnotation     = "nvidia.com/dynamo-restore-snapshot-uid"
+	SnapshotCandidateContentAnnotation = "nvidia.com/dynamo-restore-snapshot-content"
+	SnapshotCandidateGMSModeAnnotation = "nvidia.com/dynamo-restore-snapshot-gms-mode"
+	SnapshotCandidateVersionAnnotation = "nvidia.com/dynamo-restore-snapshot-version"
 
 	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
 	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the

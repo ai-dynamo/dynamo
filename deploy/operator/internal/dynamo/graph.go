@@ -1725,7 +1725,7 @@ func GenerateBasePodSpec(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional resolved checkpoint info.
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -2452,7 +2452,8 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
-		(p.checkpointInfo.StartupPolicy == "" ||
+		(p.checkpointInfo.NativeSnapshot != nil ||
+			p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if p.checkpointInfo != nil &&
@@ -2750,6 +2751,7 @@ func GenerateGrovePodCliqueSet(
 		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
 		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
 			checkpointInfo != nil &&
+			checkpointInfo.NativeSnapshot == nil &&
 			checkpointInfo.StartupPolicy != "" &&
 			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
 			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(

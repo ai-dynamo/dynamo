@@ -48,6 +48,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
@@ -238,6 +239,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	); err != nil {
 		return fmt.Errorf("register DGD component Pod index: %w", err)
 	}
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&nvidiacomv1beta1.DynamoGraphDeployment{},
+			dgdPodSnapshotRefIndex,
+			dgdPodSnapshotRefIndexValues,
+		); err != nil {
+			return fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
+		}
+	}
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
@@ -291,6 +302,13 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		ctrlBuilder = ctrlBuilder.Watches(
+			&snapshotv1alpha1.PodSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDGDRequests),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		ctrlBuilder = ctrlBuilder.Watches(
 			&resourcev1.ResourceClaim{},

@@ -757,16 +757,16 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	})
 }
 
-// --- ResolveCheckpointForService tests ---
+// --- ResolveLegacyCheckpointForService tests ---
 
-func TestResolveCheckpointForService(t *testing.T) {
+func TestResolveLegacyCheckpointForService(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 
 	t.Run("nil or disabled config returns disabled", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		for _, cfg := range []*nvidiacomv1alpha1.ServiceCheckpointConfig{nil, {Enabled: false}} {
-			info, err := ResolveCheckpointForService(ctx, c, testNamespace, cfg)
+			info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, cfg)
 			require.NoError(t, err)
 			assert.False(t, info.Enabled)
 		}
@@ -774,7 +774,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("deprecated Manual value without checkpointRef is ignored", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
 			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
 		})
@@ -785,7 +785,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("config without ref or identity resolves enabled without error", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)
@@ -808,7 +808,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
 		ref := hash
 
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		require.NoError(t, err)
@@ -831,7 +831,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
 		ref := hash
 
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		require.NoError(t, err)
@@ -842,7 +842,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 	t.Run("checkpointRef errors when CR not found", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		ref := "nonexistent"
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		_, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		assert.ErrorContains(t, err, "nonexistent")
@@ -861,7 +861,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
 		ref := "not-the-hash"
 
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
 		})
 		require.NoError(t, err)
@@ -884,7 +884,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
 
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
 		})
 		require.NoError(t, err)
@@ -909,7 +909,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
 
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
 		})
 		require.NoError(t, err)
@@ -921,7 +921,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 	t.Run("identity lookup returns not-ready when no CR found", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		identity := testIdentity()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
 		})
 		require.NoError(t, err)
@@ -932,7 +932,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("enabled without ref or identity waits for auto-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		info, err := ResolveLegacyCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)

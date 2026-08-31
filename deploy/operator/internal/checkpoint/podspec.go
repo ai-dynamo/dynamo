@@ -76,6 +76,11 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 		delete(annotations, commonconsts.CheckpointNameAnnotation)
 		delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+		delete(annotations, commonconsts.CheckpointSourceKindAnnotation)
+		delete(annotations, commonconsts.SnapshotCandidateUIDAnnotation)
+		delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
+		delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
+		delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
 	}
 	if !enabled {
 		return nil
@@ -108,6 +113,11 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
 	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+	delete(annotations, commonconsts.CheckpointSourceKindAnnotation)
+	delete(annotations, commonconsts.SnapshotCandidateUIDAnnotation)
+	delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
+	delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
+	delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
 	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
 		return nil
@@ -119,12 +129,40 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	}
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+	if checkpointInfo.NativeSnapshot == nil {
+		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
+	} else {
+		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
+		annotations[commonconsts.SnapshotCandidateUIDAnnotation] = string(checkpointInfo.NativeSnapshot.UID)
+		annotations[commonconsts.SnapshotCandidateContentAnnotation] = checkpointInfo.NativeSnapshot.BoundContentName
+		annotations[commonconsts.SnapshotCandidateGMSModeAnnotation] = checkpointInfo.NativeSnapshot.GMSMode
+		annotations[commonconsts.SnapshotCandidateVersionAnnotation] = checkpointInfo.NativeSnapshot.CompatibilityVersion
+	}
 	startupPolicy := checkpointInfo.StartupPolicy
 	if startupPolicy == "" {
 		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 	}
 	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	return nil
+}
+
+// ApplyCheckpointSourceMetadata records the resolved checkpoint API kind on
+// intermediate DCD metadata. This avoids name-based probing while native
+// explicit restore and legacy automatic capture coexist during the MR train.
+func ApplyCheckpointSourceMetadata(annotations map[string]string, checkpointInfo *CheckpointInfo) error {
+	if annotations == nil {
+		return fmt.Errorf("checkpoint source annotations map is required")
+	}
+	delete(annotations, commonconsts.CheckpointSourceKindAnnotation)
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+		return nil
+	}
+	if checkpointInfo.NativeSnapshot == nil {
+		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
+	} else {
+		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
+	}
 	return nil
 }
 

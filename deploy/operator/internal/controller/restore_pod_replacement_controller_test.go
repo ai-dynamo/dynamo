@@ -10,6 +10,7 @@ import (
 	"errors"
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,8 +31,30 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 )
 
-func TestGMSPodReplacementPredicate(t *testing.T) {
-	pred := gmsPodReplacementPredicate()
+func TestRestorePodReplacementPredicate(t *testing.T) {
+	pred := restorePodReplacementPredicate()
+
+	t.Run("admits terminal native restore failures", func(t *testing.T) {
+		for _, reason := range []string{
+			podcontract.RestoreReasonFailed,
+			podcontract.RestoreReasonPartiallySucceeded,
+		} {
+			t.Run(reason, func(t *testing.T) {
+				t.Log("Given an owned native restore Pod with a terminal failure outcome")
+				pod := gmsPodReplacementTestPod("pod-uid", 0)
+				delete(pod.Labels, snapshotprotocol.RestoreTargetLabel)
+				pod.Annotations = map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+				pod.Status.Conditions = []corev1.PodCondition{{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionFalse,
+					Reason: reason,
+				}}
+
+				t.Log("Then the controller observes the transition for whole-Pod replacement")
+				assert.True(t, pred.Create(event.CreateEvent{Object: pod}))
+			})
+		}
+	})
 
 	t.Run("admits restart transition", func(t *testing.T) {
 		oldPod := gmsPodReplacementTestPod("pod-uid", 0)
@@ -90,7 +113,7 @@ func TestGMSPodReplacementPredicate(t *testing.T) {
 	})
 }
 
-func TestGMSPodReplacementReconcile(t *testing.T) {
+func TestRestorePodReplacementReconcile(t *testing.T) {
 	tests := []struct {
 		name        string
 		podExists   bool
@@ -137,7 +160,7 @@ func TestGMSPodReplacementReconcile(t *testing.T) {
 				builder = builder.WithObjects(pod)
 			}
 			c := builder.Build()
-			reconciler := &gmsPodReplacementReconciler{Client: c}
+			reconciler := &restorePodReplacementReconciler{Client: c}
 			key := client.ObjectKeyFromObject(pod)
 
 			result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
@@ -161,7 +184,7 @@ func TestGMSPodReplacementReconcile(t *testing.T) {
 	}
 }
 
-func TestGMSPodReplacementErrors(t *testing.T) {
+func TestRestorePodReplacementErrors(t *testing.T) {
 	retryErr := errors.New("client failed")
 
 	t.Run("get error is returned for retry", func(t *testing.T) {
@@ -173,20 +196,20 @@ func TestGMSPodReplacementErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		reconciler := &gmsPodReplacementReconciler{Client: c}
+		reconciler := &restorePodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: types.NamespacedName{Namespace: "inference", Name: "restore-worker"},
 		})
 		require.ErrorIs(t, err, retryErr)
-		assert.ErrorContains(t, err, "get GMS Pod replacement candidate")
+		assert.ErrorContains(t, err, "get restore Pod replacement candidate")
 	})
 
 	t.Run("delete NotFound is harmless", func(t *testing.T) {
 		pod := gmsPodReplacementTestPod("observed-uid", 1)
 		c := gmsPodReplacementErrorClient(t, pod,
 			apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, pod.Name))
-		reconciler := &gmsPodReplacementReconciler{Client: c}
+		reconciler := &restorePodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: client.ObjectKeyFromObject(pod),
@@ -197,13 +220,13 @@ func TestGMSPodReplacementErrors(t *testing.T) {
 	t.Run("delete error is returned for retry", func(t *testing.T) {
 		pod := gmsPodReplacementTestPod("observed-uid", 1)
 		c := gmsPodReplacementErrorClient(t, pod, retryErr)
-		reconciler := &gmsPodReplacementReconciler{Client: c}
+		reconciler := &restorePodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: client.ObjectKeyFromObject(pod),
 		})
 		require.ErrorIs(t, err, retryErr)
-		assert.ErrorContains(t, err, "delete GMS Pod replacement candidate inference/restore-worker")
+		assert.ErrorContains(t, err, "delete restore Pod replacement candidate inference/restore-worker")
 	})
 }
 

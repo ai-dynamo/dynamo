@@ -38,6 +38,9 @@ type CheckpointInfo struct {
 	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
+	// NativeSnapshot is non-nil when CheckpointName identifies a standalone
+	// Snapshot PodSnapshot rather than a legacy DynamoCheckpoint.
+	NativeSnapshot *ResolvedPodSnapshot
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -64,7 +67,7 @@ func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string 
 	return snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
-func ResolveCheckpointForService(
+func ResolveLegacyCheckpointForService(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
