@@ -145,31 +145,6 @@ const testCases = [
     expect: { sidecar: true },
     desc: 'sidecar workflow triggers its own job'
   },
-  {
-    file: 'Cargo.lock',
-    expect: { sidecar: true, rust: true },
-    desc: 'workspace lockfile change rebuilds and retests the sidecar'
-  },
-  {
-    file: 'examples/router/custom-policy-example/Cargo.toml',
-    expect: { sidecar: true, rust: true },
-    desc: 'custom policy crate copied by the Dockerfile rebuilds the sidecar'
-  },
-  {
-    file: 'deploy/inference-gateway/ext-proc/Cargo.toml',
-    expect: { sidecar: true, rust: true },
-    desc: 'ext-proc crate copied by the Dockerfile rebuilds the sidecar'
-  },
-  {
-    file: 'container/compliance/policy/licenses.toml',
-    expect: { sidecar: true },
-    desc: 'compliance policy changes rebuild and validate the sidecar inventory'
-  },
-  {
-    file: '.github/actions/compliance-extract/action.yml',
-    expect: { sidecar: true },
-    desc: 'compliance extraction changes rerun the sidecar build'
-  },
 
   // Doc files should be excluded from core (negation patterns)
   {

@@ -287,21 +287,9 @@ planner:
   - '!**/*.rst'
 
 sidecar:
-  # Direct inputs copied by lib/sidecar/Dockerfile. Keep shared lib/** changes
-  # on the existing Rust path until sidecar E2E coverage is introduced.
-  - 'Cargo.toml'
-  - 'Cargo.lock'
-  - 'rust-toolchain.toml'
-  - '.cargo/**'
+  # TODO: Expand this to every Dockerfile and composite-action input after the
+  # acceptable CI fan-out is agreed. Keep the original narrow scope for now.
   - 'lib/sidecar/**'
-  - 'examples/router/custom-policy-example/**'
-  - 'deploy/inference-gateway/ext-proc/**'
-  - 'container/compliance/**'
-  - '.github/actions/docker-login/**'
-  - '.github/actions/docker-remote-build/**'
-  - '.github/actions/init-dynamo-builder/**'
-  - '.github/actions/builder-refresher/**'
-  - '.github/actions/compliance-extract/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - '!**/*.md'
   - '!**/*.rst'

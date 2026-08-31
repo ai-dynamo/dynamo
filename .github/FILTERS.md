@@ -15,7 +15,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
-| `sidecar` | Unified multi-architecture sidecar image build, publish, and compliance checks for direct image inputs (docs excluded) |
+| `sidecar` | Unified multi-architecture sidecar image build, publish, and compliance checks for changes under `lib/sidecar/**` (docs excluded) |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
@@ -26,6 +26,8 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `rust` | Rust pre merge checks |
 
 > **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published.
+
+> **TODO:** The sidecar image also consumes root Cargo files, shared libraries, compliance files, and composite actions. Expanding the filter to cover every build input is deferred until the additional PR CI fan-out is evaluated and agreed.
 
 ## Fixing "Uncovered Files" Errors
 
