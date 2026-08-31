@@ -950,6 +950,10 @@ pub fn run_mocker_trace_replay(
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
+    validate_jsonl_output_paths(
+        report_jsonl_path.as_deref(),
+        telemetry_jsonl_path.as_deref(),
+    )?;
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -2505,6 +2509,75 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
         return Err(PyValueError::new_err(format!(
             "{name} must be a finite, non-negative value, got {v}"
         )));
+    }
+    Ok(())
+}
+
+/// Resolve an output target without requiring the final file (or all of its
+/// parent directories) to exist. Existing ancestors are canonicalized so
+/// aliases through symlinked directories compare equal.
+fn resolve_output_target(path: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(target) = path.canonicalize() {
+        return Ok(target);
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let components = absolute.components().collect::<Vec<_>>();
+    for prefix_len in (1..=components.len()).rev() {
+        let mut prefix = PathBuf::new();
+        for component in &components[..prefix_len] {
+            prefix.push(component.as_os_str());
+        }
+        if let Ok(mut target) = prefix.canonicalize() {
+            for component in &components[prefix_len..] {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        target.pop();
+                    }
+                    std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::Normal(_) => target.push(component.as_os_str()),
+                }
+            }
+            return Ok(target);
+        }
+    }
+    Ok(absolute)
+}
+
+fn validate_jsonl_output_paths(
+    report_jsonl_path: Option<&Path>,
+    telemetry_jsonl_path: Option<&Path>,
+) -> PyResult<()> {
+    let (Some(report_path), Some(telemetry_path)) =
+        (report_jsonl_path, telemetry_jsonl_path)
+    else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    let same_existing_file = {
+        use std::os::unix::fs::MetadataExt;
+
+        match (report_path.metadata(), telemetry_path.metadata()) {
+            (Ok(report), Ok(telemetry)) => {
+                report.dev() == telemetry.dev() && report.ino() == telemetry.ino()
+            }
+            _ => false,
+        }
+    };
+    #[cfg(not(unix))]
+    let same_existing_file = false;
+    let report_target = resolve_output_target(report_path).map_err(to_pyerr)?;
+    let telemetry_target = resolve_output_target(telemetry_path).map_err(to_pyerr)?;
+    if same_existing_file || report_target == telemetry_target {
+        return Err(PyValueError::new_err(
+            "report_jsonl_path and telemetry_jsonl_path must refer to different files",
+        ));
     }
     Ok(())
 }

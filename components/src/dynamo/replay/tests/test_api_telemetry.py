@@ -103,3 +103,56 @@ def test_telemetry_rejects_online_mode_and_non_callable_callback() -> None:
             1,
             telemetry_callback=object(),
         )
+
+
+def test_trace_replay_rejects_colliding_jsonl_paths_before_native_call(
+    monkeypatch, tmp_path
+) -> None:
+    called = False
+
+    def run_native(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("native replay must not run for colliding outputs")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
+    output = tmp_path / "samples.jsonl"
+    alias = tmp_path / "missing" / ".." / "samples.jsonl"
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        api.run_trace_replay(
+            "trace.jsonl",
+            report_jsonl_path=output,
+            telemetry_jsonl_path=alias,
+        )
+
+    assert called is False
+    assert not output.exists()
+
+
+def test_trace_replay_rejects_hard_linked_jsonl_paths_before_native_call(
+    monkeypatch, tmp_path
+) -> None:
+    called = False
+
+    def run_native(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("native replay must not run for colliding outputs")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
+    output = tmp_path / "requests.jsonl"
+    output.write_text("sentinel")
+    telemetry = tmp_path / "telemetry.jsonl"
+    telemetry.hardlink_to(output)
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        api.run_trace_replay(
+            "trace.jsonl",
+            report_jsonl_path=output,
+            telemetry_jsonl_path=telemetry,
+        )
+
+    assert called is False
+    assert output.read_text() == "sentinel"
+    assert telemetry.read_text() == "sentinel"

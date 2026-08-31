@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 import pytest
 
-from dynamo._core import run_mocker_synthetic_trace_replay
+from dynamo._core import run_mocker_synthetic_trace_replay, run_mocker_trace_replay
 from dynamo.mocker import MockEngineArgs
+
+from .replay_utils import _write_multiturn_trace
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -183,3 +186,66 @@ def test_native_telemetry_rejects_non_callable_callback():
             **_replay_kwargs(),
             telemetry_callback=object(),
         )
+
+
+def test_native_rejects_colliding_jsonl_paths_before_truncation(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    output = tmp_path / "samples.jsonl"
+    output.write_text("sentinel")
+    alias = tmp_path / "missing" / ".." / "samples.jsonl"
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=output,
+            telemetry_jsonl_path=alias,
+        )
+
+    assert output.read_text() == "sentinel"
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlinks require privileges on Windows")
+def test_native_rejects_colliding_jsonl_paths_through_symlink_parent(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    target_root = tmp_path / "target_root"
+    real_parent = target_root / "nested"
+    real_parent.mkdir(parents=True)
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    output = target_root / "samples.jsonl"
+    output.write_text("sentinel")
+    report_alias = target_root / "report_missing" / ".." / "samples.jsonl"
+    telemetry_alias = (
+        alias_parent / ".." / "telemetry_missing" / ".." / "samples.jsonl"
+    )
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=report_alias,
+            telemetry_jsonl_path=telemetry_alias,
+        )
+
+    assert output.read_text() == "sentinel"
+    assert not (target_root / "report_missing").exists()
+    assert not (target_root / "telemetry_missing").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native inode comparison is Unix-only")
+def test_native_rejects_hard_linked_jsonl_paths_before_truncation(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    output = tmp_path / "requests.jsonl"
+    output.write_text("sentinel")
+    telemetry = tmp_path / "telemetry.jsonl"
+    telemetry.hardlink_to(output)
+
+    with pytest.raises(ValueError, match="must refer to different files"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path=output,
+            telemetry_jsonl_path=telemetry,
+        )
+
+    assert output.read_text() == "sentinel"
+    assert telemetry.read_text() == "sentinel"

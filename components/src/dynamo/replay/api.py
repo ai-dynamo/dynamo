@@ -135,6 +135,30 @@ def _validate_telemetry_options(
         raise TypeError("telemetry_callback must be callable or None")
 
 
+def _validate_jsonl_output_paths(
+    *,
+    report_jsonl_path: str | os.PathLike[str] | None,
+    telemetry_jsonl_path: str | os.PathLike[str] | None,
+) -> None:
+    """Reject output aliases before either JSONL sink can truncate its target."""
+    if report_jsonl_path is None or telemetry_jsonl_path is None:
+        return
+    try:
+        same_existing_file = os.path.samefile(
+            report_jsonl_path, telemetry_jsonl_path
+        )
+    except OSError:
+        same_existing_file = False
+    report_target = os.path.realpath(os.path.abspath(os.fspath(report_jsonl_path)))
+    telemetry_target = os.path.realpath(
+        os.path.abspath(os.fspath(telemetry_jsonl_path))
+    )
+    if same_existing_file or report_target == telemetry_target:
+        raise ValueError(
+            "report_jsonl_path and telemetry_jsonl_path must refer to different files"
+        )
+
+
 @overload
 def run_trace_replay(
     trace_files,
@@ -242,6 +266,10 @@ def run_trace_replay(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
         )
+    _validate_jsonl_output_paths(
+        report_jsonl_path=report_jsonl_path,
+        telemetry_jsonl_path=telemetry_jsonl_path,
+    )
     _validate_telemetry_options(
         replay_mode=replay_mode,
         capture_telemetry=capture_telemetry,
