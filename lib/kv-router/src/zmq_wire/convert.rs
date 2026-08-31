@@ -310,15 +310,13 @@ pub fn create_stored_block_from_parts(
     token_ids: &[u32],
     options: StoredBlockOptions<'_>,
 ) -> KvCacheStoredBlockData {
-    let event_has_video_placeholders = options
-        .video_token_id
-        .is_some_and(|video_token_id| token_ids.contains(&video_token_id));
+    let requires_exact_mm_mapping = options.video_token_id.is_some();
     create_stored_block_from_parts_with_video_context(
         kv_block_size,
         block_hash,
         token_ids,
         options,
-        event_has_video_placeholders,
+        requires_exact_mm_mapping,
     )
 }
 
@@ -327,7 +325,7 @@ fn create_stored_block_from_parts_with_video_context(
     block_hash: u64,
     token_ids: &[u32],
     options: StoredBlockOptions<'_>,
-    event_has_video_placeholders: bool,
+    requires_exact_mm_mapping: bool,
 ) -> KvCacheStoredBlockData {
     let StoredBlockOptions {
         lora_name,
@@ -338,13 +336,15 @@ fn create_stored_block_from_parts_with_video_context(
         video_token_id,
     } = options;
 
-    // Preserve the existing image-only run-order contract, including sparse
-    // image layouts. Events that actually contain video placeholders use exact
-    // modality-aware mapping. Both canonical paths hash without block_mm_infos;
-    // runless or ambiguous blocks preserve vLLM's native MM hash instead.
-    // SGLang events carry neither placeholders nor mm_extra_info and are unchanged.
+    // Preserve the existing image-only run-order contract for models without
+    // video support. Video-capable models always use exact modality-aware
+    // mapping: an incremental vLLM batch can omit a later video placeholder
+    // even when a boundary block already carries its MM identity. Both
+    // canonical paths hash without block_mm_infos; ambiguous blocks preserve
+    // vLLM's native MM hash instead. SGLang events carry neither placeholder
+    // ids nor mm_extra_info and are unchanged.
     let normalized_tokens = match mm_extra_info.as_ref() {
-        Some(info) if event_has_video_placeholders && !info.mm_objects.is_empty() => {
+        Some(info) if requires_exact_mm_mapping && !info.mm_objects.is_empty() => {
             let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
             substitute_pad_values(token_ids, image_token_id, video_token_id, &mm_hashes)
                 .map(|(tokens, _)| tokens)
@@ -421,8 +421,7 @@ pub fn create_stored_blocks(
 
     let mut token_offset: usize = 0;
     let append = is_eagle.unwrap_or(false) as usize;
-    let event_has_video_placeholders =
-        video_token_id.is_some_and(|video_token_id| token_ids.contains(&video_token_id));
+    let requires_exact_mm_mapping = video_token_id.is_some();
 
     for (block_idx, (num_tokens_it, block_hash_it)) in
         num_block_tokens.iter().zip(block_hashes.iter()).enumerate()
@@ -467,7 +466,7 @@ pub fn create_stored_blocks(
                 image_token_id,
                 video_token_id,
             },
-            event_has_video_placeholders,
+            requires_exact_mm_mapping,
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -630,7 +629,7 @@ mod normalize_tests {
     }
 
     #[test]
-    fn video_capable_image_only_event_preserves_legacy_clamping() {
+    fn video_capable_ambiguous_image_mapping_preserves_native_hash() {
         let block_size = 6u32;
         let image_token_id = 99u32;
         let video_token_id = 100u32;
@@ -656,13 +655,77 @@ mod normalize_tests {
                 ..Default::default()
             },
         );
-        let normalized = normalize_mm_token_runs(&tokens, image_token_id, &[41, 42])
-            .expect("image-only event normalizes")
-            .0;
-        let expected =
-            compute_block_hash_for_seq(&normalized, block_size, BlockHashOptions::default())[0];
+        let expected = create_stored_block_from_parts(
+            block_size,
+            0xabcd,
+            &tokens,
+            StoredBlockOptions {
+                mm_extra_info: Some(mm_info),
+                ..Default::default()
+            },
+        );
 
-        assert_eq!(stored.tokens_hash, expected);
+        assert_eq!(stored.tokens_hash, expected.tokens_hash);
+    }
+
+    #[test]
+    fn incremental_batch_preserves_later_video_identity_on_boundary_block() {
+        let block_size = 4u32;
+        let image_token_id = 151655u32;
+        let video_token_id = 151656u32;
+        let image_hash = 41u64;
+        // This incremental batch ends before the later video placeholder.
+        let tokens = [
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            7,
+            8,
+        ];
+        let make_blocks = |video_hash| {
+            let block_mm_infos = [
+                Some(BlockExtraInfo {
+                    mm_objects: vec![BlockMmObjectInfo {
+                        mm_hash: image_hash,
+                        offsets: vec![],
+                    }],
+                }),
+                Some(BlockExtraInfo {
+                    mm_objects: vec![
+                        BlockMmObjectInfo {
+                            mm_hash: image_hash,
+                            offsets: vec![],
+                        },
+                        BlockMmObjectInfo {
+                            mm_hash: video_hash,
+                            offsets: vec![],
+                        },
+                    ],
+                }),
+            ];
+            create_stored_blocks(
+                block_size,
+                &tokens,
+                &[4, 4],
+                &[101, 102],
+                None,
+                None,
+                &Arc::new(AtomicU32::new(0)),
+                Some(&block_mm_infos),
+                None,
+                Some(image_token_id),
+                Some(video_token_id),
+            )
+        };
+
+        let first_video = make_blocks(42);
+        let second_video = make_blocks(43);
+
+        assert_eq!(first_video[0].tokens_hash, second_video[0].tokens_hash);
+        assert_ne!(first_video[1].tokens_hash, second_video[1].tokens_hash);
     }
 
     #[test]
