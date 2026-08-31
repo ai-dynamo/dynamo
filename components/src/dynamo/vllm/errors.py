@@ -4,10 +4,16 @@
 """Translate vLLM request errors into Dynamo's HTTP error boundary."""
 
 from vllm.exceptions import (
-    VLLMClientError,
     VLLMNotFoundError,
     VLLMUnprocessableEntityError,
 )
+
+try:
+    from vllm.exceptions import VLLMClientError
+except ImportError:  # vLLM < 0.27 has no client-error base class
+
+    class VLLMClientError(Exception):  # type: ignore[no-redef]
+        """Fallback base so worker endpoints import on vLLM < 0.27."""
 
 from dynamo.llm.exceptions import HttpError
 
