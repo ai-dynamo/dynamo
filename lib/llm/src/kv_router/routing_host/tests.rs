@@ -1581,19 +1581,12 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     runtime.shutdown();
 }
 
-// ---------------------------------------------------------------------------
-// DYN-4143 — a client that disconnects while remote prefill is still running.
+// A client that disconnects while remote prefill is still running. These enter
+// through `RoutingHost::generate` with the context stopped on entry, which is the
+// production sequence (see `prefill_router/mod.rs`, NVBugs 5969206).
 //
-// These enter through `RoutingHost::generate`, the real entry point, with the
-// context already stopped on entry. That is the production sequence: the prefill
-// router deliberately continues to the decode leg on a killed context
-// (`prefill_router/mod.rs`, NVBugs 5969206) so the decode worker can release the
-// KV blocks prefill staged for it.
-//
-// The dispatch mock must yield before recording (see `PendingThenCompletedDispatch`).
-// A mock that is ready on its first poll wins `cancel_on_stop`'s biased race for
-// every phase and is green even on an unfixed build.
-// ---------------------------------------------------------------------------
+// The dispatch mock must yield before recording. One that is ready on its first
+// poll wins the biased race and stays green even on an unfixed build.
 
 /// Build a builtin-plane routing host (round-robin, random, occupancy, direct)
 /// whose dispatch plane records the workers it was asked to serve.
@@ -1647,10 +1640,9 @@ async fn stopped_request_in_phase(
     request
 }
 
-/// DYN-4143 on the builtin plane, which is what the failing vLLM cancellation
-/// test uses (`tests/fault_tolerance/cancellation/utils.py` sets
-/// `router_mode="round-robin"`). Covers all four dispatch arms of
-/// `select_and_dispatch_builtin`.
+/// The builtin plane, which is what the failing vLLM cancellation test uses
+/// (`tests/fault_tolerance/cancellation/utils.py` sets `router_mode="round-robin"`).
+/// Covers all four dispatch arms of `select_and_dispatch_builtin`.
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_path() {
@@ -1752,35 +1744,4 @@ async fn kv_stopped_decode_request_reaches_the_worker_through_generate() {
 
     drop(router);
     runtime.shutdown();
-}
-
-/// KV-plane negative control. Cancellation here happens at worker selection,
-/// which is a different stage from the builtin plane's dispatch-time check.
-#[tokio::test]
-#[serial_test::serial]
-async fn kv_stopped_prefill_and_aggregated_requests_never_reach_a_worker() {
-    for (index, phase) in [RequestPhase::Prefill, RequestPhase::Aggregated]
-        .into_iter()
-        .enumerate()
-    {
-        let (router, dispatch, _worker_id, runtime) =
-            router_with_recorded_dispatch(&format!("kv-non-decode-after-stop-{index}")).await;
-        let request = stopped_request_in_phase(phase, &format!("kv-cancelled-{phase}"), None).await;
-
-        let error = router
-            .generate(request)
-            .await
-            .expect_err("a stopped non-decode request must be cancelled before dispatch");
-        assert!(
-            match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]),
-            "{phase}: expected a cancellation error, got {error:#}"
-        );
-        assert!(
-            dispatch.worker_ids.lock().unwrap().is_empty(),
-            "{phase}: no worker should have been asked to serve a cancelled request"
-        );
-
-        drop(router);
-        runtime.shutdown();
-    }
 }

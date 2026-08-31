@@ -11,8 +11,8 @@ use dynamo_runtime::{
 use crate::protocols::common::timing::RequestPhase;
 
 /// How long a disconnected decode request may keep router state alive while it
-/// finishes reaching its worker. On expiry we fall back to the pre-DYN-4143
-/// behaviour: abandon the operation and release everything it held.
+/// finishes reaching its worker. On expiry we abandon the operation and release
+/// everything it held, which is what every phase did before the decode carve-out.
 const CLEANUP_DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Whether a disconnected client's request still reaches its worker.
