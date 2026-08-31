@@ -9,6 +9,11 @@ handler restarts the worker instead of recovering in process; the fail-fast
 tests assert the restart is actually triggered (via ``_WorkerShutdown``), not
 just that a value was returned.
 
+Fail-fast is stubbed at ``_fail_fast`` rather than at ``_shutdown_worker``:
+``_fail_fast`` is the seam that guarantees the exit even when the shutdown call
+underneath it raises, so a test that replaced only the shutdown helpers would
+not exercise it.
+
 ``ray`` is stubbed via the ``stub_ray`` fixture (the scale path imports it
 lazily and CI lacks it).
 """
@@ -25,6 +30,7 @@ pytest.importorskip("vllm.config")
 
 from vllm.v1.engine.exceptions import EngineDeadError  # noqa: E402
 
+from dynamo.vllm import handlers as handlers_mod  # noqa: E402
 from dynamo.vllm.handlers import BaseWorkerHandler  # noqa: E402
 
 pytestmark = [
@@ -61,7 +67,25 @@ def _make_handler(
     )
     handler._scale_ep_lock = asyncio.Lock()
     handler._scale_ep_in_progress = False
+    handler._scale_ep_cancelled = False
     return handler
+
+
+@pytest.fixture
+def short_deadline(monkeypatch):
+    """Shrink the scale deadline for the hang tests.
+
+    The deadline is resolved once at import (a per-request read would let a
+    typo'd env var restart the worker on every scale), so tests set the module
+    constant rather than the environment -- which also makes them hermetic
+    against a developer or CI shell that exports DYN_SCALE_EP_TIMEOUT_S.
+    """
+
+    def _set(timeout_s: float, grace_s: float = 0.05) -> None:
+        monkeypatch.setattr(handlers_mod, "_SCALE_EP_TIMEOUT_S", timeout_s)
+        monkeypatch.setattr(handlers_mod, "_SCALE_EP_KILL_GRACE_S", grace_s)
+
+    return _set
 
 
 @pytest.fixture
@@ -185,10 +209,13 @@ async def test_prefill_context_parallelism_is_rejected(size):
 
 
 class _WorkerShutdown(BaseException):
-    """Stand-in for the NoReturn _shutdown_worker / _shutdown_on_engine_dead.
+    """Stand-in for the NoReturn _fail_fast, which ends in os._exit(1).
+
     BaseException (not Exception) so the handler's broad ``except Exception``
     can't swallow it -- the test sees the restart as production does: control
-    leaves scale_elastic_ep without reporting success.
+    leaves scale_elastic_ep without reporting success. Production gets that
+    same guarantee from _fail_fast calling os._exit unconditionally, which
+    ``test_fail_fast_exits_even_if_shutdown_raises`` covers directly.
     """
 
 
@@ -222,13 +249,13 @@ class _FakeVllmEngine:
         )
         self._fail_sizes = list(fail_sizes)
         self._dead_sizes = list(dead_sizes)
-        self._hang_sizes = list(hang_sizes)  # sizes that hang until cancelled
-        self.calls: list[int] = []  # every requested size, in order
+        self._hang_sizes = list(hang_sizes)
+        self.calls: list[int] = []
 
     async def scale_elastic_ep(self, size: int) -> None:
         self.calls.append(size)
         if size in self._hang_sizes:
-            await asyncio.sleep(3600)  # hang until wait_for cancels us
+            await asyncio.sleep(3600)
         if size in self._dead_sizes:
             raise EngineDeadError()
         if size in self._fail_sizes:
@@ -245,23 +272,33 @@ def _make_self(engine: _FakeVllmEngine, shutdown_log: list) -> SimpleNamespace:
         shutdown_log.append("engine_dead")
         raise _WorkerShutdown()
 
-    return SimpleNamespace(
+    fake_self = SimpleNamespace(
         _scale_ep_lock=asyncio.Lock(),
         _scale_ep_in_progress=False,
+        _scale_ep_cancelled=False,
         engine_client=engine,
         _shutdown_worker=_shutdown_worker,
         _shutdown_on_engine_dead=_shutdown_on_engine_dead,
     )
+    # Stub the seam the handler actually calls. In production _fail_fast ends in
+    # os._exit(1) whatever the shutdown callable does; here it just lets the
+    # callable raise, so the test sees the same "never returns a result".
+    fake_self._fail_fast = lambda shutdown, reason: shutdown()
+    return fake_self
 
 
-def _run(engine: _FakeVllmEngine, body: dict):
+def _run(engine: _FakeVllmEngine, body: dict, fake_self=None):
     """Drive scale_elastic_ep. Returns ``(result, shutdown_log)``; ``result`` is
     ``_RESTARTED`` when the handler restarted the worker instead of returning."""
     shutdown_log: list[str] = []
+    target = fake_self if fake_self is not None else _make_self(engine, shutdown_log)
 
     async def _coro():
-        fake_self = _make_self(engine, shutdown_log)
-        return await BaseWorkerHandler.scale_elastic_ep(fake_self, body)
+        result = await BaseWorkerHandler.scale_elastic_ep(target, body)
+        # Whenever the handler returns at all, the endpoint must be reusable:
+        # a stuck in-progress flag is what wedges it for every later request.
+        assert target._scale_ep_in_progress is False
+        return result
 
     try:
         result = asyncio.run(_coro())
@@ -275,7 +312,7 @@ def test_scale_success(stub_ray):
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
-    assert shutdown == []  # no restart on success
+    assert shutdown == []
     assert result["status"] == "ok"
     assert result["new_data_parallel_size"] == 3
     assert engine.calls == [3]
@@ -289,9 +326,9 @@ def test_validation_error_does_not_restart_the_worker(stub_ray):
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 1})
 
-    assert shutdown == []  # no restart on a rejected request
+    assert shutdown == []
     assert result["status"] == "error"
-    assert engine.calls == []  # never reached the engine
+    assert engine.calls == []
 
 
 def test_unsupported_config_is_rejected_without_restart(stub_ray):
@@ -305,10 +342,10 @@ def test_unsupported_config_is_rejected_without_restart(stub_ray):
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
-    assert shutdown == []  # a healthy worker is NOT restarted
+    assert shutdown == []
     assert result["status"] == "error"
     assert "not enabled" in result["message"]
-    assert engine.calls == []  # never reached the engine
+    assert engine.calls == []
 
 
 def test_failed_grow_restarts_the_worker(stub_ray):
@@ -318,22 +355,165 @@ def test_failed_grow_restarts_the_worker(stub_ray):
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
-    assert result is _RESTARTED  # never returned a success/recovery dict
-    assert shutdown == ["worker"]  # worker restart was triggered
-    assert engine.calls == [3]  # grow attempted once; no rollback call
+    assert result is _RESTARTED
+    assert shutdown == ["worker"]
+    assert engine.calls == [3]
 
 
-def test_hung_grow_times_out_and_restarts(stub_ray, monkeypatch):
-    # A scale that hangs past the outer backstop is a wedged engine: fail fast and
+def test_hung_grow_times_out_and_restarts(stub_ray, short_deadline):
+    # A scale that hangs past the deadline is a wedged engine: fail fast and
     # restart, rather than leave the endpoint's in-progress flag stuck forever.
-    monkeypatch.setenv("DYN_SCALE_EP_TIMEOUT_S", "0.05")
+    # This hang answers cancellation, so the cooperative wait_for handles it.
+    short_deadline(0.05)
     engine = _FakeVllmEngine(prev_dp=2, hang_sizes=[3])
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
     assert result is _RESTARTED
-    assert shutdown == ["worker"]  # timeout -> fail-fast restart
+    assert shutdown == ["worker"]
     assert engine.calls == [3]
+
+
+def test_watchdog_bounds_a_hang_that_ignores_cancellation(
+    stub_ray, short_deadline, monkeypatch
+):
+    """The hang that actually happens in production.
+
+    asyncio.wait_for cancels the inner coroutine and then *awaits* the
+    cancellation, so a scale wedged in a step that does not answer cancellation
+    runs straight past the deadline and the in-progress flag never clears. The
+    watchdog is the only thing that bounds that, so assert it is armed across the
+    whole critical section and that its callback is a hard exit.
+
+    The timer itself is stubbed: a real one would call os._exit from another
+    thread, and the pytest process is not the thing under test.
+    """
+    short_deadline(0.05, grace_s=0.05)
+    armed: dict = {}
+
+    class _CapturingTimer:
+        def __init__(self, interval, function):
+            armed["interval"] = interval
+            armed["function"] = function
+            self.daemon = False
+
+        def start(self):
+            armed["started"] = True
+
+        def cancel(self):
+            armed["cancelled"] = True
+
+    monkeypatch.setattr(handlers_mod.threading, "Timer", _CapturingTimer)
+    engine = _FakeVllmEngine(prev_dp=2)
+
+    result, _ = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result["status"] == "ok"
+    assert armed["started"] and armed["cancelled"]  # armed for the scale, then off
+    assert armed["interval"] == pytest.approx(0.10)  # deadline + grace
+
+    # The armed callback exits the process. Nothing else can end a hang that
+    # swallows cancellation, because wait_for waits for the cancellation.
+    exits: list[int] = []
+    monkeypatch.setattr(handlers_mod.os, "_exit", lambda code: exits.append(code))
+    monkeypatch.setattr(handlers_mod.logging, "shutdown", lambda: None)
+    armed["function"]()
+    assert exits == [1]
+
+
+def test_fail_fast_exits_even_if_shutdown_raises(monkeypatch):
+    """_shutdown_worker calls runtime.shutdown() before os._exit(1). On the
+    degraded worker that got us here that call can raise, and the exception would
+    unwind into scale_elastic_ep's broad ``except Exception`` -- turning a wedged
+    engine into an ordinary error response while the worker stays registered and
+    keeps taking traffic. _fail_fast must exit regardless."""
+    exits: list[int] = []
+    monkeypatch.setattr(handlers_mod.os, "_exit", lambda code: exits.append(code))
+    monkeypatch.setattr(handlers_mod.logging, "shutdown", lambda: None)
+
+    def _shutdown_that_raises():
+        raise RuntimeError("runtime.shutdown() failed on a degraded worker")
+
+    handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
+    BaseWorkerHandler._fail_fast(handler, _shutdown_that_raises, "wedged engine")
+
+    assert exits == [1]
+
+
+def test_cancelled_scale_latches_the_endpoint_closed(stub_ray, short_deadline):
+    """An externally-cancelled scale must not restart the worker, but vLLM's grow
+    is not cancelled with us -- so the next scale must be refused rather than
+    raced against the orphan."""
+    short_deadline(30.0)
+    engine = _FakeVllmEngine(prev_dp=2, hang_sizes=[3])
+    fake_self = _make_self(engine, [])
+
+    async def _cancel_mid_scale():
+        task = asyncio.ensure_future(
+            BaseWorkerHandler.scale_elastic_ep(fake_self, {"new_data_parallel_size": 3})
+        )
+        await asyncio.sleep(0.05)  # let it reach the engine
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # A healthy worker is not killed...
+        assert fake_self._scale_ep_cancelled is True
+        # ...but it will not accept another scale that would race the orphan.
+        return await BaseWorkerHandler.scale_elastic_ep(
+            fake_self, {"new_data_parallel_size": 4}
+        )
+
+    result = asyncio.run(_cancel_mid_scale())
+
+    assert result["status"] == "error"
+    assert "must restart" in result["message"]
+    assert engine.calls == [3]  # the second request never reached the engine
+
+
+def test_list_nodes_patch_is_restored_and_passes_through_kwargs(stub_ray):
+    """The patch is a process-global. It must be restored exactly, and it must
+    not answer callers it was not meant to intercept: it honours no filters and
+    carries only node_id/node_ip."""
+    original = stub_ray.list_nodes
+    seen: list[dict] = []
+    engine = _FakeVllmEngine(prev_dp=2)
+
+    async def _scale_and_probe(size):
+        # Runs while the patch is installed.
+        seen.append({"no_args": stub_ray.list_nodes()})
+        seen.append({"with_kwargs": stub_ray.list_nodes(filters=[("x", "y")])})
+        engine.calls.append(size)
+
+    engine.scale_elastic_ep = _scale_and_probe
+
+    result, _ = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result["status"] == "ok"
+    assert stub_ray.list_nodes is original  # restored exactly
+    assert seen[0]["no_args"] == []  # our GCS stand-in (no live ray nodes)
+    assert seen[1]["with_kwargs"] == []  # delegated to the real list_nodes
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, handlers_mod._SCALE_EP_TIMEOUT_DEFAULT_S),
+        ("120", 120.0),
+        ("0", handlers_mod._SCALE_EP_TIMEOUT_DEFAULT_S),  # would restart every scale
+        ("-1", handlers_mod._SCALE_EP_TIMEOUT_DEFAULT_S),
+        ("600s", handlers_mod._SCALE_EP_TIMEOUT_DEFAULT_S),  # unparseable
+        ("", handlers_mod._SCALE_EP_TIMEOUT_DEFAULT_S),
+    ],
+)
+def test_scale_deadline_rejects_unusable_env_values(raw, expected, monkeypatch):
+    """A non-positive deadline makes every healthy scale time out, and a timed-out
+    scale restarts the worker -- so a typo'd env var would be a crashloop."""
+    if raw is None:
+        monkeypatch.delenv(handlers_mod._SCALE_EP_TIMEOUT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(handlers_mod._SCALE_EP_TIMEOUT_ENV, raw)
+
+    assert handlers_mod._read_scale_ep_timeout_s() == expected
 
 
 def test_engine_dead_restarts_the_worker(stub_ray):
@@ -345,4 +525,4 @@ def test_engine_dead_restarts_the_worker(stub_ray):
 
     assert result is _RESTARTED
     assert shutdown == ["engine_dead"]
-    assert engine.calls == [3]  # no rollback call
+    assert engine.calls == [3]
