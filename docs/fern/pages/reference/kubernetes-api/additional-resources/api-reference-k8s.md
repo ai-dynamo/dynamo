@@ -2372,6 +2372,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner contains the raw Planner configuration passed to the Planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.<br />DGDR passes this object through without field-level validation; the Planner<br />service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
+| `kvRouter` _[KVRouterSpec](#kvrouterspec)_ | KVRouter configures KV-cache-aware routing for the generated deployment.<br />When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.<br />Settings in spec.overrides.dgd take precedence: an override can replace<br />DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the<br />environment variable when both are present. |  | Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
@@ -2507,6 +2508,20 @@ _Appears in:_
 | `rdma` _boolean_ | RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,<br />    GPUDirect settings). It only expresses availability/intent.<br />  - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating<br />    RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery<br />    is unavailable, it may remain unset.<br />Impact of wrong / missing values:<br />  - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or<br />    deployments to assume RDMA is available; depending on the runtime transport selection and<br />    fallback behavior, this can lead to connection/setup failures or performance regressions.<br />  - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and<br />    fall back to non-RDMA transports, usually remaining functional but potentially slower.<br />  - If unset and undiscovered, consumers should treat RDMA availability as unknown and use<br />    conservative defaults / fallback transports. |  | Optional: \{\} <br /> |
 
 
+#### KVRouterSpec
+
+
+
+KVRouterSpec configures KV-cache-aware routing.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.<br />KV routing optimizes request scheduling based on KV cache locality. |  | Optional: \{\} <br /> |
 
 
 #### KvTransferEnforcement
@@ -3328,6 +3343,16 @@ _Appears in:_
 | `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
 | `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
 | `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
+| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  |  |
+| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  |  |
+| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  |  |
+| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  |  |
+| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  |  |
+| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  |  |
+| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  |  |
+| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  |  |
+| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  |  |
+| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  |  |
 
 
 #### IngressConfiguration

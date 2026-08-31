@@ -42,9 +42,9 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
-| Mon, Aug 24, 2026 | **[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)** | [Luma](https://luma.com/r8o604o0) |
+| Thu, Sep 10, 2026 | **[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)** | [Luma](https://luma.com/BaseDynSGL) |
+| Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
 | Thu, Jul 30, 2026 | ~~[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)~~ | [Luma](https://luma.com/JulyDynamoAfterHours) |
-| Wed, Jul 29, 2026 | ~~[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)~~ | [Online](https://meet.google.com/heb-demu-qok) |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -141,7 +141,7 @@ the Gateway API setup, supported features, and configuration.
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.2
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -155,7 +155,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.4.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.4.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -192,9 +192,9 @@ Pre-built recipes for common models:
 
 | Model | Framework | Mode | Recipe |
 |-------|-----------|------|--------|
-| Llama-3-70B | vLLM | Aggregated | [View](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
+| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
+| Kimi-K3 | vLLM | Aggregated | [View](recipes/kimi-k3/vllm/) |
 
 See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 
@@ -259,7 +259,7 @@ This writes to `docs/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 
-Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)) handle service discovery. External services are optional for most deployments:
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
