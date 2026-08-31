@@ -73,6 +73,18 @@ func TestRayCatalogKeepsExecutorFlagVisible(t *testing.T) {
 	}, container.Args)
 }
 
+func TestManualMPEnsuresPortInDirectVLLMCommand(t *testing.T) {
+	container := &corev1.Container{
+		Name:    "main",
+		Command: []string{"/bin/sh", "-c"},
+		Args:    []string{"exec vllm serve /mnt/models --distributed-executor-backend=mp"},
+	}
+	require.NoError(t, ManualMP().Apply(nil, workload.RoleLeader, container))
+	require.Equal(t, []string{
+		"exec vllm serve /mnt/models --distributed-executor-backend=mp --master-port 29500",
+	}, container.Args)
+}
+
 func count(values []string, wanted string) int {
 	var result int
 	for _, value := range values {

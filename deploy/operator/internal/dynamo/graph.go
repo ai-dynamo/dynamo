@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -432,6 +433,16 @@ func generateSingleDCD(
 	deployment.Namespace = parentDGD.Namespace
 	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
 
+	var effectiveWorker *v1beta1.DynamoComponentDeploymentSharedSpec
+	if component.Multinode != nil && component.Multinode.Worker != nil &&
+		component.Multinode.Worker.PodTemplateOverrides != nil {
+		var err error
+		effectiveWorker, err = EffectiveComponentForRole(component, RoleWorker)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
@@ -454,6 +465,13 @@ func generateSingleDCD(
 		if parentDGD.HasEPPComponent() {
 			labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
 			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+		}
+		if effectiveWorker != nil {
+			workerPodTemplate := ensurePodTemplate(effectiveWorker)
+			workerPodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+			if parentDGD.HasEPPComponent() {
+				workerPodTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+			}
 		}
 	}
 
@@ -481,6 +499,9 @@ func generateSingleDCD(
 		parentDGD,
 		nil, // no topology domains for DCDs (only applies for Grove pathway)
 	)
+	if effectiveWorker != nil {
+		applyDGDTemplateDefaults(effectiveWorker, parentDGD, nil)
+	}
 
 	// Topology label controller marker: set on the DCD so it propagates to pods.
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
@@ -494,10 +515,16 @@ func generateSingleDCD(
 	if restartState.ShouldAnnotateComponent(componentName) {
 		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
 		podTemplate.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		if effectiveWorker != nil {
+			ensurePodTemplate(effectiveWorker).Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		}
 	} else if existingRestartAnnotations != nil {
 		if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
 			podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
 			podTemplate.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+			if effectiveWorker != nil {
+				ensurePodTemplate(effectiveWorker).Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+			}
 		}
 	}
 
@@ -508,6 +535,17 @@ func generateSingleDCD(
 	if err := applyDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
 		return nil, err
 	}
+	if effectiveWorker != nil {
+		workerDeployment := deployment.DeepCopy()
+		workerDeployment.Spec.DynamoComponentDeploymentSharedSpec = *effectiveWorker
+		if err := applyDynDeploymentConfig(workerDeployment, commonconsts.DynamoServicePort); err != nil {
+			return nil, err
+		}
+		rebaseMultinodeWorkerPodTemplateOverrides(
+			component.Multinode.Worker.PodTemplateOverrides,
+			workerDeployment.Spec.PodTemplate,
+		)
+	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
 	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
@@ -517,6 +555,62 @@ func generateSingleDCD(
 	}
 
 	return deployment, nil
+}
+
+func rebaseMultinodeWorkerPodTemplateOverrides(
+	overrides *v1beta1.MultinodePodTemplateOverrides,
+	effective *corev1.PodTemplateSpec,
+) {
+	if overrides == nil || effective == nil {
+		return
+	}
+	if overrides.Metadata != nil {
+		if overrides.Metadata.Labels != nil {
+			*overrides.Metadata.Labels = maps.Clone(effective.Labels)
+		}
+		if overrides.Metadata.Annotations != nil {
+			*overrides.Metadata.Annotations = maps.Clone(effective.Annotations)
+		}
+	}
+	if overrides.Spec == nil {
+		return
+	}
+	effectiveSpec := effective.Spec.DeepCopy()
+	if overrides.Spec.NodeSelector != nil {
+		*overrides.Spec.NodeSelector = maps.Clone(effectiveSpec.NodeSelector)
+	}
+	if overrides.Spec.Tolerations != nil {
+		*overrides.Spec.Tolerations = effectiveSpec.Tolerations
+	}
+	if overrides.Spec.ResourceClaims != nil {
+		*overrides.Spec.ResourceClaims = effectiveSpec.ResourceClaims
+	}
+	if overrides.Spec.ImagePullSecrets != nil {
+		*overrides.Spec.ImagePullSecrets = slices.Clone(effectiveSpec.ImagePullSecrets)
+	}
+	if len(overrides.Spec.Containers) != 1 {
+		return
+	}
+	effectiveMain := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: effective})
+	if effectiveMain == nil {
+		return
+	}
+	container := &overrides.Spec.Containers[0]
+	if container.Image != nil {
+		*container.Image = effectiveMain.Image
+	}
+	if container.Command != nil {
+		*container.Command = slices.Clone(effectiveMain.Command)
+	}
+	if container.Args != nil {
+		*container.Args = slices.Clone(effectiveMain.Args)
+	}
+	if container.Env != nil {
+		*container.Env = (&corev1.Container{Env: effectiveMain.Env}).DeepCopy().Env
+	}
+	if container.Resources != nil && container.Resources.Claims != nil {
+		*container.Resources.Claims = slices.Clone(effectiveMain.Resources.Claims)
+	}
 }
 
 func applyDGDComponentAlphaCompatibilityToDCD(parentDGD *v1beta1.DynamoGraphDeployment, componentName string, dcd *v1beta1.DynamoComponentDeployment) error {
@@ -2424,6 +2518,12 @@ type cliqueParams struct {
 //
 //nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	effectiveComponent, err := EffectiveComponentForRole(p.component, p.r.Role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve effective component for role %s: %w", p.r.Name, err)
+	}
+	p.component = effectiveComponent
+
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
 		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
@@ -3250,7 +3350,10 @@ func GenerateBasePodSpecForController(
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
-	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+	componentSpec, err := EffectiveComponentForRole(ConvertDynamoComponentDeploymentToSpec(dynComponent), role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve effective component for role %s: %w", role, err)
+	}
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
 	}

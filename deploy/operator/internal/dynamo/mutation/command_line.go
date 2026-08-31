@@ -107,7 +107,7 @@ func hasArg(args []string, flag, value string) bool {
  *    - Use regex-based injection to find embedded Python+SGLang commands within args
  *    - Insert flags after the Python command but before any shell operators (|, &, ;)
  */
-func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, needsShell bool, framework string) {
+func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, needsShell bool, framework, executable, subcommand string) {
 	if len(container.Command) > 0 && IsPythonCommand(container.Command[0]) {
 		if needsShell {
 			quotedCommand := make([]string, len(container.Command))
@@ -131,12 +131,39 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 	}
 
 	for i, arg := range container.Args {
-		modified := injectFlagsIntoPythonCommand(arg, flags, framework)
+		modified := arg
+		if framework != "" {
+			modified = injectFlagsIntoPythonCommand(arg, flags, framework)
+		}
+		if modified == arg && executable != "" {
+			modified = injectFlagsIntoDirectCommand(arg, flags, executable, subcommand)
+		}
 		if modified != arg {
 			container.Args[i] = modified
 			return
 		}
 	}
+}
+
+func injectFlagsIntoDirectCommand(command, flags, executable, subcommand string) string {
+	directCommand := strings.TrimSpace(executable + " " + subcommand)
+	pattern := fmt.Sprintf(`(^|\s)((?:exec\s+)?%s(?:\s+[^|&;]*)?)(\s|$|[|&;])`, regexp.QuoteMeta(directCommand))
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllStringFunc(command, func(match string) string {
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) < 4 {
+			return match
+		}
+		prefix := submatches[1]
+		engineCommand := strings.TrimSpace(submatches[2])
+		separator := submatches[3]
+		return fmt.Sprintf("%s%s %s%s", prefix, engineCommand, flags, separator)
+	})
+}
+
+func isShellCommand(command string) bool {
+	command = strings.TrimPrefix(command, "/bin/")
+	return command == "sh" || command == "bash"
 }
 
 func injectFlagsIntoPythonCommand(command, flags, framework string) string {

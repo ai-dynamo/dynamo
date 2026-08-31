@@ -63,8 +63,9 @@ def project_standalone_dcd_schema(markdown: str) -> str:
             )
             if "Standalone DCDs accept only" not in columns[1]:
                 columns[1] += (
-                    " Standalone DCDs accept only `nodeCount`; `leader` and `worker` "
-                    "are DGD-only provider contexts."
+                    " Standalone DCDs accept only `nodeCount` and "
+                    "`worker.podTemplateOverrides`; `leader` and all role-level "
+                    "`providerOverride` fields are DGD-only provider contexts."
                 )
             line = " | ".join(columns) + "\n"
 

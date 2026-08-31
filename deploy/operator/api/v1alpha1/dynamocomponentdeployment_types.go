@@ -161,6 +161,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+
+	// Experimental groups opt-in preview features whose API shape and behavior
+	// may change without notice.
+	// +optional
+	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
+
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
@@ -205,11 +211,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
+// MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
+	// NodeCount is the number of nodes to deploy for the multinode component.
+	// Total GPUs used is NodeCount multiplied by the container GPU limit.
 	// +kubebuilder:default=2
-	// Indicates the number of nodes to deploy for multinode components.
-	// Total number of GPUs is NumberOfNodes * GPU limit.
-	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
 
@@ -217,10 +223,138 @@ type MultinodeSpec struct {
 	// +optional
 	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
 
-	// Worker configures the generated multinode worker unit.
+	// Worker configures the generated multinode worker unit. Its
+	// PodTemplateOverrides may be used with Automatic or Manual flag injection.
 	// +optional
-	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
+	Worker *MultinodeWorkerSpec `json:"worker,omitempty"`
 }
+
+// MultinodePodTemplateOverrides is the restricted worker PodTemplate overlay.
+type MultinodePodTemplateOverrides struct {
+	// Metadata overrides worker labels and annotations.
+	// +optional
+	Metadata *MultinodePodTemplateMetadataOverrides `json:"metadata,omitempty"`
+
+	// Spec overrides the supported worker PodSpec fields.
+	// +optional
+	Spec *MultinodePodSpecOverrides `json:"spec,omitempty"`
+}
+
+// MultinodePodTemplateMetadataOverrides contains worker metadata overrides.
+type MultinodePodTemplateMetadataOverrides struct {
+	// Labels replaces the inherited labels when present.
+	// +optional
+	Labels *map[string]string `json:"labels,omitempty"`
+
+	// Annotations replaces the inherited annotations when present.
+	// +optional
+	Annotations *map[string]string `json:"annotations,omitempty"`
+}
+
+// MultinodePodSpecOverrides contains the supported worker PodSpec overrides.
+type MultinodePodSpecOverrides struct {
+	// NodeSelector replaces the inherited node selector when present.
+	// +optional
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations replaces the inherited tolerations when present.
+	// +optional
+	Tolerations *[]corev1.Toleration `json:"tolerations,omitempty"`
+
+	// ResourceClaims replaces inherited pod-level DRA claim references when present.
+	// +optional
+	ResourceClaims *[]corev1.PodResourceClaim `json:"resourceClaims,omitempty"`
+
+	// ImagePullSecrets replaces inherited image pull secrets when present.
+	// +optional
+	ImagePullSecrets *[]corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// Containers, when present, contains exactly one override named main.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=map
+	// +listMapKey=name
+	Containers []MultinodeContainerOverride `json:"containers,omitempty"`
+}
+
+// MultinodeContainerOverride contains the supported worker main-container overrides.
+type MultinodeContainerOverride struct {
+	// Name must be main. Other containers cannot be overridden.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=main
+	Name string `json:"name"`
+
+	// Image replaces the inherited image when present.
+	// +optional
+	Image *string `json:"image,omitempty"`
+
+	// Command replaces the inherited command when present.
+	// +optional
+	Command *[]string `json:"command,omitempty"`
+
+	// Args replaces the inherited arguments when present.
+	// +optional
+	Args *[]string `json:"args,omitempty"`
+
+	// Env replaces the inherited user environment when present.
+	// +optional
+	Env *[]corev1.EnvVar `json:"env,omitempty"`
+
+	// Resources contains the supported worker container resource overrides.
+	// +optional
+	Resources *MultinodeContainerResourceOverrides `json:"resources,omitempty"`
+}
+
+// MultinodeContainerResourceOverrides contains worker container DRA claim overrides.
+type MultinodeContainerResourceOverrides struct {
+	// Claims replaces inherited container-level DRA claim references when present.
+	// +optional
+	Claims *[]corev1.ResourceClaim `json:"claims,omitempty"`
+}
+
+// ExperimentalSpec groups opt-in preview features whose API shape and behavior
+// may change without notice.
+type ExperimentalSpec struct {
+	// FlagsInjection controls backend-specific multinode flag and launch injection:
+	//
+	//   - Automatic (default): For vLLM multiprocessing, injects
+	//     --distributed-executor-backend=mp, --nnodes, --master-addr,
+	//     --master-port=29500, --node-rank, and --headless on workers. For vLLM
+	//     Ray, constructs the Ray head or worker launch command and adds
+	//     --distributed-executor-backend=ray to the leader. For vLLM data
+	//     parallelism, injects --data-parallel-hybrid-lb, --data-parallel-size
+	//     when absent, --data-parallel-size-local, --data-parallel-start-rank,
+	//     --data-parallel-address, and --data-parallel-rpc-port. For SGLang,
+	//     injects --dist-init-addr, --nnodes, and --node-rank. For TensorRT-LLM,
+	//     constructs the mpirun or sshd launch command. User-provided topology
+	//     flags are not rejected or rewritten and may therefore be duplicated.
+	//   - Manual: Omits the Automatic backend-specific injections and preserves
+	//     supplied launch commands. For vLLM multiprocessing,
+	//     --master-port=29500 remains operator-owned and is still injected when
+	//     the supplied command selects multiprocessing. Operator-owned pod wiring,
+	//     including the wait-for-leader-mp init container, TensorRT-LLM SSH, and
+	//     worker-probe handling, remains enabled. Manual is valid only for
+	//     multinode worker components and cannot initially be combined with GPU
+	//     memory service or failover.
+	//
+	// Multinode.Worker.PodTemplateOverrides is independent of this field and may
+	// be used with either value.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+}
+
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
 
 type IngressTLSSpec struct {
 	// SecretName is the name of a Kubernetes Secret containing the TLS certificate and key.

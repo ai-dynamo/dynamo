@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/workload"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -60,7 +61,7 @@ func TestMultinodeAppliesOrderedRoleFlags(t *testing.T) {
 				Command: []string{"python3"},
 				Args:    []string{"-m", "dynamo.sglang"},
 			}
-			err := Multinode(test.values).Apply(
+			err := mutation.Concat(MultinodePodWiring(), AutomaticMultinode(test.values)).Apply(
 				&v1beta1.DynamoComponentDeploymentSharedSpec{}, test.role, container,
 			)
 			require.NoError(t, err)
