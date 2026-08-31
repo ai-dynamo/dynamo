@@ -106,7 +106,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		envPatch, ok := patchesByPath["/spec/containers/0/env"].([]any)
 		require.True(t, ok, "expected env patch, got %#v", patchesByPath)
 		assert.Contains(t, envPatch, map[string]any{
-			"name":  "DYN_SNAPSHOT_RESTORE_STANDBY",
+			"name":  podcontract.RestoreStandbyModeEnv,
 			"value": "1",
 		})
 	})
@@ -199,7 +199,7 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		for _, container := range shaped.Spec.Containers {
 			assert.Equal(t, container.Name, container.VolumeMounts[0].SubPath)
 			assert.Equal(t, podcontract.SnapshotControlMountPath, container.VolumeMounts[0].MountPath)
-			assert.Contains(t, container.Env, corev1.EnvVar{Name: podcontract.LegacyRestoreStandbyModeEnv, Value: "1"})
+			assert.Contains(t, container.Env, corev1.EnvVar{Name: podcontract.RestoreStandbyModeEnv, Value: "1"})
 			require.NotNil(t, container.StartupProbe)
 			require.NotNil(t, container.StartupProbe.Exec)
 			assert.Equal(t, []string{"cat", "/snapshot-control/restore-complete"}, container.StartupProbe.Exec.Command)

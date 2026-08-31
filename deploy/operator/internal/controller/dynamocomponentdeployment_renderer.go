@@ -198,47 +198,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
-	var checkpointInfo *checkpoint.CheckpointInfo
-	if checkpointConfig := dynamo.GetCheckpoint(component); r.runtimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
-		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
-		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
-		sourceKind := dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation]
-
-		// Direct checkpointRef values are native. The explicit legacy marker is
-		// reserved for automatic DGD capture until the SnapshotJob MR replaces it.
-		var info *checkpoint.CheckpointInfo
-		switch {
-		case !hasCheckpointRef:
-			info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
-		case sourceKind == commonconsts.CheckpointSourceKindLegacy:
-			info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
-		case sourceKind == "" || sourceKind == commonconsts.CheckpointSourceKindSnapshot:
-			info, err = checkpoint.ResolvePodSnapshotForService(
-				ctx,
-				r.reader,
-				dcd.Namespace,
-				alphaCheckpointConfig,
-				dynamo.GetDCDEffectiveWorkerHash(dcd),
-			)
-		default:
-			return nil, errors.Errorf("unsupported checkpoint source kind %q", sourceKind)
-		}
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to resolve checkpoint")
-		}
-		if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
-		}
-		serviceGMS := dynamo.GetGPUMemoryService(component)
-		if info.NativeSnapshot != nil {
-			err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
-		} else {
-			err = gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, serviceGMS)
-		}
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
-		}
-		checkpointInfo = info
+	checkpointInfo, err := r.resolveCheckpointInfo(ctx, dcd, component)
+	if err != nil {
+		return nil, err
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(
@@ -322,6 +284,61 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (*checkpoint.CheckpointInfo, error) {
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if !r.runtimeConfig.Gate.Enabled(features.Checkpoint) || checkpointConfig == nil {
+		return nil, nil
+	}
+
+	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+	hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
+	sourceKind := dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation]
+
+	// Direct checkpointRef values are native. The explicit legacy marker is
+	// reserved for automatic DGD capture until the SnapshotJob MR replaces it.
+	var (
+		info *checkpoint.CheckpointInfo
+		err  error
+	)
+	switch {
+	case !hasCheckpointRef:
+		info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
+	case sourceKind == commonconsts.CheckpointSourceKindLegacy:
+		info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
+	case sourceKind == "" || sourceKind == commonconsts.CheckpointSourceKindSnapshot:
+		info, err = checkpoint.ResolvePodSnapshotForService(
+			ctx,
+			r.reader,
+			dcd.Namespace,
+			alphaCheckpointConfig,
+			dynamo.GetDCDEffectiveWorkerHash(dcd),
+		)
+	default:
+		return nil, errors.Errorf("unsupported checkpoint source kind %q", sourceKind)
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to resolve checkpoint")
+	}
+	if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+	}
+
+	serviceGMS := dynamo.GetGPUMemoryService(component)
+	if info.NativeSnapshot != nil {
+		err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
+	} else {
+		err = gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, serviceGMS)
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
+	}
+	return info, nil
 }
 
 func (r *dcdWorkloadRenderer) generateService(
