@@ -187,6 +187,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 #provider-all:checked ~ .dynamo-recipe-browser label[for="provider-all"],
 #provider-nvidia:checked ~ .dynamo-recipe-browser label[for="provider-nvidia"],
+#provider-google:checked ~ .dynamo-recipe-browser label[for="provider-google"],
 #provider-qwen:checked ~ .dynamo-recipe-browser label[for="provider-qwen"],
 #provider-deepseek:checked ~ .dynamo-recipe-browser label[for="provider-deepseek"],
 #provider-moonshot:checked ~ .dynamo-recipe-browser label[for="provider-moonshot"],
@@ -660,6 +661,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 }
 
 #provider-nvidia:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="nvidia"]),
+#provider-google:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="google"]),
 #provider-qwen:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="qwen"]),
 #provider-deepseek:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="deepseek"]),
 #provider-moonshot:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="moonshot"]),

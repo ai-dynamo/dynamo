@@ -15,6 +15,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-google" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
@@ -49,6 +50,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Provider</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-google">Google</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
@@ -69,9 +71,9 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="trtllm" data-hardware="b200 gb200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="google" data-runtime="trtllm" data-hardware="b200 gb200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/google.webp" alt="" />
       <div><h3>Gemma 4 31B</h3><p>Google / NVIDIA</p></div>
     </div>
     <p className="dynamo-model-summary">Aggregated TensorRT-LLM recipes for long-context agentic traffic on B200, GB200, or H200, with KV-aware routing and CPU KV-cache offload.</p>
