@@ -281,7 +281,7 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 						Leader: &nvidiacomv1beta1.MultinodeRoleSpec{
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
-						Worker: &nvidiacomv1beta1.MultinodeRoleSpec{
+						Worker: &nvidiacomv1beta1.MultinodeWorkerSpec{
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 					},

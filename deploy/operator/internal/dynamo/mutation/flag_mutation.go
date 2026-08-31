@@ -27,6 +27,8 @@ type AddFlagsMutation struct {
 	Flags         []Flag
 	NeedsShell    bool
 	Framework     string
+	Executable    string
+	Subcommand    string
 }
 
 func (m AddFlagsMutation) Apply(container *corev1.Container) error {
@@ -40,7 +42,7 @@ func (m AddFlagsMutation) Apply(container *corev1.Container) error {
 	if flags == "" {
 		return nil
 	}
-	injectFlagsIntoContainerCommand(container, flags, m.NeedsShell, m.Framework)
+	injectFlagsIntoContainerCommand(container, flags, m.NeedsShell, m.Framework, m.Executable, m.Subcommand)
 	return nil
 }
 
@@ -66,6 +68,8 @@ type AddFlagMutation struct {
 	Value         string
 	NeedsShell    bool
 	Framework     string
+	Executable    string
+	Subcommand    string
 }
 
 func (m AddFlagMutation) Apply(container *corev1.Container) error {
@@ -74,6 +78,8 @@ func (m AddFlagMutation) Apply(container *corev1.Container) error {
 		Flags:         []Flag{{Name: m.Flag, Value: m.Value}},
 		NeedsShell:    m.NeedsShell,
 		Framework:     m.Framework,
+		Executable:    m.Executable,
+		Subcommand:    m.Subcommand,
 	}).Apply(container)
 }
 
@@ -84,13 +90,31 @@ type EnsureFlagMutation struct {
 	Value         string
 	NeedsShell    bool
 	Framework     string
+	Executable    string
+	Subcommand    string
 }
 
 func (m EnsureFlagMutation) Apply(container *corev1.Container) error {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
+		return err
+	}
 	if ContainerCommandLineHasArg(container, m.Flag, m.Value) {
 		return nil
 	}
-	return AddFlagMutation(m).Apply(container)
+	if err := AddFlagMutation(m).Apply(container); err != nil {
+		return err
+	}
+	if !ContainerCommandLineHasArg(container, m.Flag, m.Value) &&
+		(len(container.Command) == 0 || !isShellCommand(container.Command[0])) {
+		container.Args = append(container.Args, m.Flag)
+		if m.Value != "" {
+			container.Args = append(container.Args, m.Value)
+		}
+	}
+	if !ContainerCommandLineHasArg(container, m.Flag, m.Value) {
+		return fmt.Errorf("could not add flag %q to the container command line", m.Flag)
+	}
+	return nil
 }
 
 // EnsureArgsFlagMutation adds one flag/value pair unless that exact pair
@@ -102,6 +126,8 @@ type EnsureArgsFlagMutation struct {
 	Value         string
 	NeedsShell    bool
 	Framework     string
+	Executable    string
+	Subcommand    string
 }
 
 func (m EnsureArgsFlagMutation) Apply(container *corev1.Container) error {

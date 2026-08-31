@@ -25,6 +25,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
@@ -98,6 +99,33 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
+
+	// Automatic is also the effective value when flagsInjection is omitted.
+	// Canonicalize it back to absence so spelling out the default does not create
+	// a new worker generation or perturb hashes created before the field existed.
+	if spec.Experimental != nil &&
+		EffectiveFlagsInjectionMode(&spec.DynamoComponentDeploymentSharedSpec) == v1beta1.FlagsInjectionModeAutomatic {
+		spec.Experimental.FlagsInjection = ""
+		if spec.Experimental.GPUMemoryService == nil && spec.Experimental.Failover == nil &&
+			spec.Experimental.Grove == nil && spec.Experimental.Checkpoint == nil {
+			spec.Experimental = nil
+		}
+	}
+
+	// A worker overlay that reproduces the inherited pod template is a no-op.
+	// Drop it from the canonical hash representation so the two equivalent API
+	// representations identify the same worker generation.
+	if spec.Multinode != nil && spec.Multinode.Worker != nil &&
+		spec.Multinode.Worker.PodTemplateOverrides != nil {
+		effectiveWorker, err := EffectiveComponentForRole(&spec.DynamoComponentDeploymentSharedSpec, RoleWorker)
+		if err == nil && apiequality.Semantic.DeepEqual(effectiveWorker.PodTemplate, spec.PodTemplate) {
+			spec.Multinode.Worker.PodTemplateOverrides = nil
+		}
+	}
+	if spec.Multinode != nil && spec.Multinode.Worker != nil &&
+		spec.Multinode.Worker.ProviderOverride == nil && spec.Multinode.Worker.PodTemplateOverrides == nil {
+		spec.Multinode.Worker = nil
+	}
 
 	return *spec
 }

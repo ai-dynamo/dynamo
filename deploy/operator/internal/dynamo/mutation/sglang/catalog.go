@@ -25,18 +25,23 @@ type MultinodeValues struct {
 	WorkerRankNeedsShell bool
 }
 
-// Multinode returns the complete SGLang multinode mutation group.
-func Multinode(values MultinodeValues) mutation.EngineMutations {
-	return mutation.EngineMutations{
-		{
-			Applies: mutation.WorkerRole,
-			Mutation: mutation.RemoveProbesMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Liveness:      true,
-				Readiness:     true,
-				Startup:       true,
-			},
+// MultinodePodWiring returns operator-owned wiring that remains active when
+// backend flag injection is manual.
+func MultinodePodWiring() mutation.EngineMutations {
+	return mutation.EngineMutations{{
+		Applies: mutation.WorkerRole,
+		Mutation: mutation.RemoveProbesMutation{
+			ContainerName: commonconsts.MainContainerName,
+			Liveness:      true,
+			Readiness:     true,
+			Startup:       true,
 		},
+	}}
+}
+
+// AutomaticMultinode returns the SGLang flags owned by automatic injection.
+func AutomaticMultinode(values MultinodeValues) mutation.EngineMutations {
+	return mutation.EngineMutations{
 		{
 			Applies: mutation.LeaderRole,
 			Mutation: mutation.AddFlagsMutation{

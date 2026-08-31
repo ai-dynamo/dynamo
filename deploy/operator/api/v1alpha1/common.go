@@ -68,6 +68,21 @@ type MultinodeRoleSpec struct {
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 }
 
+// MultinodeWorkerSpec configures the generated multinode worker unit.
+type MultinodeWorkerSpec struct {
+	// ProviderOverride configures the provider-native worker template fragment,
+	// supported only for components embedded in a DGD.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplateOverrides is a restricted, presence-aware overlay supported
+	// for the worker role. Omitted fields inherit the component pod configuration;
+	// present fields replace it, including explicit empty maps and lists. The
+	// overlay is independent of Experimental.FlagsInjection.
+	// +optional
+	PodTemplateOverrides *MultinodePodTemplateOverrides `json:"podTemplateOverrides,omitempty"`
+}
+
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
 type PVC struct {
 	// Create indicates to create a new PVC

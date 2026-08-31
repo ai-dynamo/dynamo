@@ -113,6 +113,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			"must be non-negative",
 		))
 	}
+	allErrs = append(allErrs, v.validateFlagsInjectionAndWorkerOverrides(spec, fldPath)...)
 
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
 		if options.validateInferencePoolAvailability {
@@ -294,7 +295,7 @@ func (v *sharedValidation) validateMultinodeSpec(
 	// Validate the optional leader provider context.
 	if multinode.Leader != nil {
 		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
-			multinode.Leader,
+			multinode.Leader.ProviderOverride,
 			fldPath.Child("leader"),
 			multinodeRoleSpecValidationOptions{
 				providerOverridesSupported: providerOverridesSupported,
@@ -308,7 +309,7 @@ func (v *sharedValidation) validateMultinodeSpec(
 	// Validate the optional worker provider context.
 	if multinode.Worker != nil {
 		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
-			multinode.Worker,
+			multinode.Worker.ProviderOverride,
 			fldPath.Child("worker"),
 			multinodeRoleSpecValidationOptions{
 				providerOverridesSupported: providerOverridesSupported,
@@ -328,28 +329,145 @@ type multinodeRoleSpecValidationOptions struct {
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
-// validateMultinodeRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override may be nil.
+// validateMultinodeRoleSpec validates the optional provider override for one
+// role. fldPath must not be nil.
 func (v *sharedValidation) validateMultinodeRoleSpec(
-	role *nvidiacomv1beta1.MultinodeRoleSpec,
+	providerOverride *nvidiacomv1beta1.ProviderOverride,
 	fldPath *field.Path,
 	options multinodeRoleSpecValidationOptions,
 ) field.ErrorList {
-	if role.ProviderOverride == nil {
+	if providerOverride != nil {
+		// Validate the provider fragment against this exact multinode role.
+		return v.validateProviderOverride(
+			providerOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        options.providerOverridesSupported,
+				workloadProvider: options.workloadProvider,
+				scope:            options.scope,
+				component:        options.component,
+			},
+		)
+	}
+	return nil
+}
+
+func (v *sharedValidation) validateFlagsInjectionAndWorkerOverrides(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	flagsInjectionPath := fldPath.Child("experimental", "flagsInjection")
+	mode := dynamo.EffectiveFlagsInjectionMode(spec)
+	switch mode {
+	case nvidiacomv1beta1.FlagsInjectionModeAutomatic:
+	case nvidiacomv1beta1.FlagsInjectionModeManual:
+		if spec.Multinode == nil {
+			allErrs = append(allErrs, field.Forbidden(
+				flagsInjectionPath,
+				"Manual flag injection requires a multinode component",
+			))
+			return allErrs
+		}
+		allErrs = append(allErrs, v.validateManualFlagsInjection(spec, fldPath)...)
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			flagsInjectionPath,
+			mode,
+			[]string{string(nvidiacomv1beta1.FlagsInjectionModeAutomatic), string(nvidiacomv1beta1.FlagsInjectionModeManual)},
+		))
+	}
+	if spec.Multinode == nil {
+		return allErrs
+	}
+
+	allErrs = append(allErrs, v.validateMultinodeWorkerOverrides(spec, fldPath)...)
+	return allErrs
+}
+
+func (v *sharedValidation) validateManualFlagsInjection(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	flagsInjectionPath := fldPath.Child("experimental", "flagsInjection")
+
+	if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+		allErrs = append(allErrs, field.Forbidden(
+			flagsInjectionPath,
+			"Manual flag injection is supported only for multinode worker components",
+		))
+	}
+	if spec.Experimental != nil && (spec.Experimental.GPUMemoryService != nil || spec.Experimental.Failover != nil) {
+		allErrs = append(allErrs, field.Forbidden(
+			flagsInjectionPath,
+			"Manual flag injection cannot be combined with gpuMemoryService or failover",
+		))
+	}
+	return allErrs
+}
+
+func (v *sharedValidation) validateMultinodeWorkerOverrides(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.Multinode.Worker == nil || spec.Multinode.Worker.PodTemplateOverrides == nil {
 		return nil
 	}
 
-	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
-		role.ProviderOverride,
-		fldPath.Child("providerOverride"),
-		providerOverrideValidationOptions{
-			supported:        options.providerOverridesSupported,
-			workloadProvider: options.workloadProvider,
-			scope:            options.scope,
-			component:        options.component,
-		},
-	)
+	allErrs := field.ErrorList{}
+	workerPath := fldPath.Child("multinode", "worker")
+	overrides := spec.Multinode.Worker.PodTemplateOverrides
+
+	containersPath := workerPath.Child("podTemplateOverrides", "spec", "containers")
+	if overrides.Spec != nil && overrides.Spec.Containers != nil {
+		if len(overrides.Spec.Containers) != 1 {
+			allErrs = append(allErrs, field.Invalid(
+				containersPath,
+				overrides.Spec.Containers,
+				"must contain exactly one container override named main",
+			))
+		} else if overrides.Spec.Containers[0].Name != consts.MainContainerName {
+			allErrs = append(allErrs, field.NotSupported(
+				containersPath.Index(0).Child("name"),
+				overrides.Spec.Containers[0].Name,
+				[]string{consts.MainContainerName},
+			))
+		}
+	}
+
+	effectiveWorker, err := dynamo.EffectiveComponentForRole(spec, dynamo.RoleWorker)
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			workerPath.Child("podTemplateOverrides"),
+			overrides,
+			err.Error(),
+		))
+		return allErrs
+	}
+	main := dynamo.GetMainContainer(effectiveWorker)
+	if main == nil {
+		allErrs = append(allErrs, field.Required(
+			containersPath,
+			"the effective worker template must contain a main container",
+		))
+		return allErrs
+	}
+	if main.Image == "" {
+		imagePath := fldPath.Child("podTemplate", "spec", "containers")
+		if overrides.Spec != nil && len(overrides.Spec.Containers) == 1 && overrides.Spec.Containers[0].Image != nil {
+			imagePath = containersPath.Index(0).Child("image")
+		}
+		allErrs = append(allErrs, field.Required(imagePath, "the effective worker image is required"))
+	}
+	if overrides.Spec != nil && len(overrides.Spec.Containers) == 1 && overrides.Spec.Containers[0].Image != nil &&
+		!v.allowMissingRuntimeVersionOverride && runtimeVersionOverrideRequired(main.Image, spec.RuntimeVersionOverride) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			runtimeVersionOverrideRequiredMessage,
+		))
+	}
+	return allErrs
 }
 
 // validateEPPConfig validates config. config and fldPath must not be nil.
@@ -753,8 +871,8 @@ func validateMultinodeSpecUpdate(
 	// Keep an existing leader provider identity stable across updates.
 	if newMultinode.Leader != nil && oldMultinode.Leader != nil {
 		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
-			newMultinode.Leader,
-			oldMultinode.Leader,
+			newMultinode.Leader.ProviderOverride,
+			oldMultinode.Leader.ProviderOverride,
 			fldPath.Child("leader"),
 		)...)
 	}
@@ -762,29 +880,29 @@ func validateMultinodeSpecUpdate(
 	// Keep an existing worker provider identity stable across updates.
 	if newMultinode.Worker != nil && oldMultinode.Worker != nil {
 		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
-			newMultinode.Worker,
-			oldMultinode.Worker,
+			newMultinode.Worker.ProviderOverride,
+			oldMultinode.Worker.ProviderOverride,
 			fldPath.Child("worker"),
 		)...)
 	}
 	return allErrs
 }
 
-// validateMultinodeRoleSpecUpdate validates a role update. newRole, oldRole,
-// and fldPath must not be nil; either optional provider override may be nil.
+// validateMultinodeRoleSpecUpdate validates the optional provider identity for
+// a role update. fldPath must not be nil.
 func validateMultinodeRoleSpecUpdate(
-	newRole *nvidiacomv1beta1.MultinodeRoleSpec,
-	oldRole *nvidiacomv1beta1.MultinodeRoleSpec,
+	newProviderOverride *nvidiacomv1beta1.ProviderOverride,
+	oldProviderOverride *nvidiacomv1beta1.ProviderOverride,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if newRole.ProviderOverride == nil || oldRole.ProviderOverride == nil {
+	if newProviderOverride == nil || oldProviderOverride == nil {
 		return nil
 	}
 
 	// Keep an existing role-level provider identity stable across updates.
 	return validateProviderOverrideUpdate(
-		newRole.ProviderOverride,
-		oldRole.ProviderOverride,
+		newProviderOverride,
+		oldProviderOverride,
 		fldPath.Child("providerOverride"),
 	)
 }

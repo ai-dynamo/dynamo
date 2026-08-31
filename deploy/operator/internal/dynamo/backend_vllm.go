@@ -64,17 +64,27 @@ func (b *VLLMBackend) containerMutations(
 	annotations := GetPodTemplateAnnotations(component)
 
 	if numberOfNodes > 1 {
-		containerGPUs, err := containerGPUCount()
+		manual := IsManualFlagsInjection(component)
+		manualMP := manual && mutation.ContainerCommandLineHasArg(container, vllmmutation.DistributedExecutorFlag, "mp")
+		launchMutations, err := vllmLaunchMutations(
+			container,
+			numberOfNodes,
+			role,
+			serviceName,
+			multinodeDeployer,
+			containerGPUCount,
+			annotations,
+			manual,
+			manualMP,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve container GPUs: %w", err)
+			return nil, err
 		}
 
 		return mutation.Concat(
 			commonMutations,
-			vllmMultinodeMutations(
-				container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations,
-			),
-			vllmMPSideChannelMutations(annotations),
+			launchMutations,
+			vllmMPSideChannelMutations(annotations, manual, manualMP),
 			vllmmutation.MultinodePodWiring(),
 			cacheMutations,
 		), nil
@@ -114,8 +124,35 @@ func vllmCompilationCacheMutations(component *v1beta1.DynamoComponentDeploymentS
 	return vllmmutation.CompilationCache(cacheDir)
 }
 
-func vllmMPSideChannelMutations(annotations map[string]string) mutation.EngineMutations {
-	if !shouldUseMpBackend(annotations) {
+func vllmLaunchMutations(
+	container *corev1.Container,
+	numberOfNodes int32,
+	role Role,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	containerGPUCount ContainerGPUCount,
+	annotations map[string]string,
+	manual bool,
+	manualMP bool,
+) (mutation.EngineMutations, error) {
+	if manual {
+		if manualMP {
+			return vllmmutation.ManualMP(), nil
+		}
+		return nil, nil
+	}
+
+	containerGPUs, err := containerGPUCount()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve container GPUs: %w", err)
+	}
+	return vllmMultinodeMutations(
+		container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations,
+	), nil
+}
+
+func vllmMPSideChannelMutations(annotations map[string]string, manual bool, manualMP bool) mutation.EngineMutations {
+	if !manualMP && (manual || !shouldUseMpBackend(annotations)) {
 		return nil
 	}
 	return vllmmutation.MPSideChannel()

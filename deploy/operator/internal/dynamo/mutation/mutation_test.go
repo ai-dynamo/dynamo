@@ -6,6 +6,7 @@
 package mutation
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -49,6 +50,34 @@ func TestAddFlagsMutationAppliesOrderedSetAtomically(t *testing.T) {
 	}
 	if got, want := container.Args, []string{"exec python3 -m dynamo.vllm --first $(FIRST) --second $(SECOND)"}; !equalStrings(got, want) {
 		t.Fatalf("container.Args = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureFlagMutationApply(t *testing.T) {
+	mutation := EnsureFlagMutation{
+		ContainerName: "main",
+		Flag:          "--master-port",
+		Value:         "29500",
+	}
+	container := &corev1.Container{Name: "main", Args: []string{"--model", "test"}}
+
+	if err := mutation.Apply(container); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if got, want := container.Args, []string{"--model", "test", "--master-port", "29500"}; !slices.Equal(got, want) {
+		t.Fatalf("Apply() args = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureFlagMutationIsIdempotent(t *testing.T) {
+	mutation := EnsureFlagMutation{ContainerName: "main", Flag: "--master-port", Value: "29500"}
+	container := &corev1.Container{Name: "main", Args: []string{"--master-port=29500"}}
+
+	if err := mutation.Apply(container); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if got, want := container.Args, []string{"--master-port=29500"}; !slices.Equal(got, want) {
+		t.Fatalf("Apply() args = %v, want %v", got, want)
 	}
 }
 

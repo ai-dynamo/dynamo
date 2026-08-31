@@ -110,6 +110,22 @@ func MP(values MPValues) mutation.EngineMutations {
 	}
 }
 
+// ManualMP contains the fixed operator-owned port required by Dynamo's
+// wait-for-leader wiring while leaving all native vLLM topology flags to the
+// user.
+func ManualMP() mutation.EngineMutations {
+	return mutation.EngineMutations{{
+		Mutation: mutation.EnsureFlagMutation{
+			ContainerName: commonconsts.MainContainerName,
+			Flag:          "--master-port",
+			Value:         commonconsts.VLLMMpMasterPort,
+			Framework:     framework,
+			Executable:    "vllm",
+			Subcommand:    "serve",
+		},
+	}}
+}
+
 // DataParallel returns the complete vLLM multinode data-parallel flag group.
 // Both roles run a local coordinator; the worker's start rank is resolved from
 // the topology backend. OmitTotalSize preserves a user-supplied DP size.

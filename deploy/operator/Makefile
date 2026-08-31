@@ -250,7 +250,7 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
-	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= (del(.providerOverride) | del(.multinode.properties.leader) | del(.multinode.properties.worker))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= (del(.providerOverride) | del(.multinode.properties.leader) | del(.multinode.properties.worker.properties.providerOverride))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.

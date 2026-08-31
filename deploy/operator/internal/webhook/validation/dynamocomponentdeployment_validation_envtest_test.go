@@ -19,6 +19,7 @@ package validation_test
 
 import (
 	"maps"
+	"slices"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -28,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -61,6 +63,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWebhookErrs    []string
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
+		wantExperimental   *bool
+		wantFlagsInjection string
+		wantWorkerArgs     []string
 	}{
 		// Baseline schema and webhook behavior.
 		{
@@ -69,6 +74,51 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			}),
+		},
+		{
+			name:             "v1alpha1 omitted experimental remains omitted",
+			deployment:       alphaDCDForAdmission(nil),
+			wantExperimental: k8sptr.To(false),
+		},
+		{
+			name: "v1alpha1 empty experimental defaults flags injection",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1alpha1.ExperimentalSpec{}
+			}),
+			wantExperimental:   k8sptr.To(true),
+			wantFlagsInjection: string(nvidiacomv1alpha1.FlagsInjectionModeAutomatic),
+		},
+		{
+			name:             "v1beta1 omitted experimental remains omitted",
+			deployment:       betaDCDForAdmission(nil),
+			wantExperimental: k8sptr.To(false),
+		},
+		{
+			name: "v1beta1 empty experimental defaults flags injection",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+			}),
+			wantExperimental:   k8sptr.To(true),
+			wantFlagsInjection: string(nvidiacomv1beta1.FlagsInjectionModeAutomatic),
+		},
+		{
+			name: "v1beta1 preserves worker pod template overrides",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Worker: &nvidiacomv1beta1.MultinodeWorkerSpec{
+						PodTemplateOverrides: &nvidiacomv1beta1.MultinodePodTemplateOverrides{
+							Spec: &nvidiacomv1beta1.MultinodePodSpecOverrides{
+								Containers: []nvidiacomv1beta1.MultinodeContainerOverride{{
+									Name: consts.MainContainerName,
+									Args: k8sptr.To([]string{"--node-rank=1"}),
+								}},
+							},
+						},
+					},
+				}
+			}),
+			wantWorkerArgs: []string{"--node-rank=1"},
 		},
 		{
 			name: "v1beta1 main image is required when pod template is absent on create",
@@ -1241,6 +1291,38 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.wantExperimental != nil {
+				_, found, err := unstructured.NestedMap(actual.Object, "spec", "experimental")
+				if err != nil {
+					t.Fatalf("read admitted spec.experimental: %v", err)
+				}
+				if found != *tt.wantExperimental {
+					t.Fatalf("spec.experimental presence = %t, want %t", found, *tt.wantExperimental)
+				}
+				if found {
+					got, found, err := unstructured.NestedString(actual.Object, "spec", "experimental", "flagsInjection")
+					if err != nil {
+						t.Fatalf("read admitted spec.experimental.flagsInjection: %v", err)
+					}
+					if !found || got != tt.wantFlagsInjection {
+						t.Fatalf("spec.experimental.flagsInjection = %q (present %t), want %q", got, found, tt.wantFlagsInjection)
+					}
+				}
+			}
+			if tt.wantWorkerArgs != nil {
+				var actualDCD nvidiacomv1beta1.DynamoComponentDeployment
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDCD); err != nil {
+					t.Fatalf("convert admitted DCD: %v", err)
+				}
+				worker := actualDCD.Spec.Multinode.Worker
+				if worker == nil || worker.PodTemplateOverrides == nil || worker.PodTemplateOverrides.Spec == nil ||
+					len(worker.PodTemplateOverrides.Spec.Containers) != 1 || worker.PodTemplateOverrides.Spec.Containers[0].Args == nil {
+					t.Fatalf("admitted DCD has no worker container args: %#v", actualDCD.Spec.Multinode)
+				}
+				if got := *worker.PodTemplateOverrides.Spec.Containers[0].Args; !slices.Equal(got, tt.wantWorkerArgs) {
+					t.Fatalf("worker override args = %v, want %v", got, tt.wantWorkerArgs)
+				}
+			}
 			if tt.wantPodAnnotations != nil {
 				t.Log("Verify the API server preserved embedded pod-template annotations")
 				var actualDCD nvidiacomv1beta1.DynamoComponentDeployment

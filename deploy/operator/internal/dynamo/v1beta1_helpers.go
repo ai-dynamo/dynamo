@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -15,6 +16,98 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// EffectiveFlagsInjectionMode returns Automatic for the omitted API value.
+func EffectiveFlagsInjectionMode(component *v1beta1.DynamoComponentDeploymentSharedSpec) v1beta1.FlagsInjectionMode {
+	if component == nil || component.Experimental == nil || component.Experimental.FlagsInjection == "" {
+		return v1beta1.FlagsInjectionModeAutomatic
+	}
+	return component.Experimental.FlagsInjection
+}
+
+// IsManualFlagsInjection reports whether backend-specific multinode launch
+// injection is disabled.
+func IsManualFlagsInjection(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return EffectiveFlagsInjectionMode(component) == v1beta1.FlagsInjectionModeManual
+}
+
+// EffectiveComponentForRole returns a role-specific component copy. The
+// component podTemplate is the leader and common worker base, and the restricted
+// worker overlay replaces every field that is explicitly present. Flag injection
+// mode does not affect template resolution.
+func EffectiveComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role) (*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+	effective := component.DeepCopy()
+	if role != RoleWorker || component.Multinode == nil || component.Multinode.Worker == nil ||
+		component.Multinode.Worker.PodTemplateOverrides == nil {
+		return effective, nil
+	}
+	if effective.PodTemplate == nil {
+		return nil, fmt.Errorf("multinode worker overrides require podTemplate as their base")
+	}
+	if err := applyMultinodeWorkerPodTemplateOverrides(effective.PodTemplate, component.Multinode.Worker.PodTemplateOverrides); err != nil {
+		return nil, err
+	}
+	return effective, nil
+}
+
+func applyMultinodeWorkerPodTemplateOverrides(podTemplate *corev1.PodTemplateSpec, overrides *v1beta1.MultinodePodTemplateOverrides) error {
+	if overrides.Metadata != nil {
+		if overrides.Metadata.Labels != nil {
+			podTemplate.Labels = maps.Clone(*overrides.Metadata.Labels)
+		}
+		if overrides.Metadata.Annotations != nil {
+			podTemplate.Annotations = maps.Clone(*overrides.Metadata.Annotations)
+		}
+	}
+	if overrides.Spec == nil {
+		return nil
+	}
+	if overrides.Spec.NodeSelector != nil {
+		podTemplate.Spec.NodeSelector = maps.Clone(*overrides.Spec.NodeSelector)
+	}
+	if overrides.Spec.Tolerations != nil {
+		podTemplate.Spec.Tolerations = (&corev1.PodSpec{Tolerations: *overrides.Spec.Tolerations}).DeepCopy().Tolerations
+	}
+	if overrides.Spec.ResourceClaims != nil {
+		podTemplate.Spec.ResourceClaims = (&corev1.PodSpec{ResourceClaims: *overrides.Spec.ResourceClaims}).DeepCopy().ResourceClaims
+	}
+	if overrides.Spec.ImagePullSecrets != nil {
+		podTemplate.Spec.ImagePullSecrets = append([]corev1.LocalObjectReference(nil), (*overrides.Spec.ImagePullSecrets)...)
+	}
+	if overrides.Spec.Containers == nil {
+		return nil
+	}
+	if len(overrides.Spec.Containers) != 1 || overrides.Spec.Containers[0].Name != commonconsts.MainContainerName {
+		return fmt.Errorf("multinode worker containers must contain exactly one %q override", commonconsts.MainContainerName)
+	}
+	main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplate})
+	if main == nil {
+		return fmt.Errorf("multinode worker base has no %q container", commonconsts.MainContainerName)
+	}
+	applyMultinodeWorkerContainerOverride(main, &overrides.Spec.Containers[0])
+	return nil
+}
+
+func applyMultinodeWorkerContainerOverride(container *corev1.Container, override *v1beta1.MultinodeContainerOverride) {
+	if override.Image != nil {
+		container.Image = *override.Image
+	}
+	if override.Command != nil {
+		container.Command = append([]string(nil), (*override.Command)...)
+	}
+	if override.Args != nil {
+		container.Args = append([]string(nil), (*override.Args)...)
+	}
+	if override.Env != nil {
+		container.Env = (&corev1.Container{Env: *override.Env}).DeepCopy().Env
+	}
+	if override.Resources != nil && override.Resources.Claims != nil {
+		container.Resources.Claims = append([]corev1.ResourceClaim(nil), (*override.Resources.Claims)...)
+	}
+}
 
 // ComponentsByName returns the graph deployment components indexed by their
 // stable v1beta1 component name.
@@ -97,6 +190,18 @@ func GetMainContainerResources(component *v1beta1.DynamoComponentDeploymentShare
 // GetDCDKubeLabels returns the labels rendered onto Kubernetes workloads for a
 // DCD before controller-specific role labels are added.
 func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	if dcd == nil {
+		return map[string]string{}
+	}
+	return GetDCDKubeLabelsForComponent(dcd, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+}
+
+// GetDCDKubeLabelsForComponent returns workload labels using the supplied
+// effective component as the pod-template metadata source.
+func GetDCDKubeLabelsForComponent(
+	dcd *v1beta1.DynamoComponentDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) map[string]string {
 	labels := map[string]string{}
 	if dcd == nil {
 		return labels
@@ -104,8 +209,13 @@ func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string 
 
 	objectLabels := dcd.GetLabels()
 	maps.Copy(labels, objectLabels)
+	for key, value := range GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		if labels[key] == value {
+			delete(labels, key)
+		}
+	}
 	maps.Copy(labels, GetDCDPreservedAlphaLabels(dcd))
-	maps.Copy(labels, GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	maps.Copy(labels, GetPodTemplateLabels(component))
 	AddBaseModelLabel(labels, dcd.Spec.ModelRef)
 	if subComponentType := GetDCDSubComponentType(dcd); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
@@ -133,13 +243,25 @@ func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string 
 // GetDCDKubeAnnotations returns the annotations rendered onto Kubernetes
 // workloads for a DCD.
 func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	if dcd == nil {
+		return map[string]string{}
+	}
+	return GetDCDKubeAnnotationsForComponent(dcd, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+}
+
+// GetDCDKubeAnnotationsForComponent returns workload annotations using the
+// supplied effective component as the pod-template metadata source.
+func GetDCDKubeAnnotationsForComponent(
+	dcd *v1beta1.DynamoComponentDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) map[string]string {
 	annotations := map[string]string{}
 	if dcd == nil {
 		return annotations
 	}
 
 	maps.Copy(annotations, GetDCDPreservedAlphaAnnotations(dcd))
-	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {

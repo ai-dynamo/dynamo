@@ -36,27 +36,48 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return nil
 	}
 
-	var launchMutations mutation.EngineMutations
-	switch role {
-	case RoleLeader:
-		containerGPUs, err := containerGPUCount()
-		if err != nil {
-			return fmt.Errorf("failed to resolve container GPUs: %w", err)
-		}
-		launchContainer := container.DeepCopy()
-		launchContainer.Env = append(launchContainer.Env, trtllmmutation.MPIEnvironment())
-		command, args := b.leaderCommand(launchContainer, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
-		launchMutations = trtllmmutation.LeaderLaunch(command, args)
-	case RoleWorker:
-		command, args := b.workerCommand()
-		launchMutations = trtllmmutation.WorkerLaunch(command, args)
+	launchMutations, err := b.launchMutations(
+		container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUCount,
+	)
+	if err != nil {
+		return err
 	}
-
 	mutations := mutation.Concat(
 		trtllmmutation.MultinodeWiring(b.MpiRunSecretName),
 		launchMutations,
 	)
 	return mutations.Apply(component, role, container)
+}
+
+func (b *TRTLLMBackend) launchMutations(
+	container *corev1.Container,
+	numberOfNodes int32,
+	role Role,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	containerGPUCount ContainerGPUCount,
+) (mutation.EngineMutations, error) {
+	if IsManualFlagsInjection(component) {
+		return nil, nil
+	}
+
+	switch role {
+	case RoleLeader:
+		containerGPUs, err := containerGPUCount()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve container GPUs: %w", err)
+		}
+		launchContainer := container.DeepCopy()
+		launchContainer.Env = append(launchContainer.Env, trtllmmutation.MPIEnvironment())
+		command, args := b.leaderCommand(launchContainer, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+		return trtllmmutation.LeaderLaunch(command, args), nil
+	case RoleWorker:
+		command, args := b.workerCommand()
+		return trtllmmutation.WorkerLaunch(command, args), nil
+	default:
+		return nil, nil
+	}
 }
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM

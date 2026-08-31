@@ -113,6 +113,23 @@ type MultinodeRoleSpec struct {
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 }
 
+// MultinodeWorkerSpec configures the generated multinode worker unit.
+type MultinodeWorkerSpec struct {
+	// providerOverride configures the Grove PCLQ template generated for the
+	// worker role. It uses apiVersion `grove.io/v1alpha1`, target
+	// `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is
+	// supported only for components embedded in a DGD.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// podTemplateOverrides is a restricted, presence-aware overlay supported
+	// for the worker role. Omitted fields inherit the component podTemplate;
+	// present fields replace it, including explicit empty maps and lists. The
+	// overlay is independent of experimental.flagsInjection.
+	// +optional
+	PodTemplateOverrides *MultinodePodTemplateOverrides `json:"podTemplateOverrides,omitempty"`
+}
+
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
@@ -126,9 +143,99 @@ type MultinodeSpec struct {
 	// +optional
 	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
 
-	// worker configures the generated multinode worker unit.
+	// worker configures the generated multinode worker unit. Its
+	// podTemplateOverrides may be used with Automatic or Manual flag injection.
 	// +optional
-	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
+	Worker *MultinodeWorkerSpec `json:"worker,omitempty"`
+}
+
+// MultinodePodTemplateOverrides is the restricted worker PodTemplate overlay.
+type MultinodePodTemplateOverrides struct {
+	// metadata overrides worker labels and annotations.
+	// +optional
+	Metadata *MultinodePodTemplateMetadataOverrides `json:"metadata,omitempty"`
+
+	// spec overrides the supported worker PodSpec fields.
+	// +optional
+	Spec *MultinodePodSpecOverrides `json:"spec,omitempty"`
+}
+
+// MultinodePodTemplateMetadataOverrides contains worker metadata overrides.
+type MultinodePodTemplateMetadataOverrides struct {
+	// labels replaces the inherited labels when present. An explicit empty map
+	// clears inherited user labels before operator-managed labels are applied.
+	// +optional
+	Labels *map[string]string `json:"labels,omitempty"`
+
+	// annotations replaces the inherited annotations when present. An explicit
+	// empty map clears inherited user annotations before operator-managed
+	// annotations are applied.
+	// +optional
+	Annotations *map[string]string `json:"annotations,omitempty"`
+}
+
+// MultinodePodSpecOverrides contains the supported worker PodSpec overrides.
+type MultinodePodSpecOverrides struct {
+	// nodeSelector replaces the inherited node selector when present.
+	// +optional
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations replaces the inherited tolerations when present.
+	// +optional
+	Tolerations *[]corev1.Toleration `json:"tolerations,omitempty"`
+
+	// resourceClaims replaces the inherited pod-level DRA claim references when present.
+	// +optional
+	ResourceClaims *[]corev1.PodResourceClaim `json:"resourceClaims,omitempty"`
+
+	// imagePullSecrets replaces the inherited image pull secrets when present.
+	// +optional
+	ImagePullSecrets *[]corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// containers, when present, contains exactly one override named main.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=map
+	// +listMapKey=name
+	Containers []MultinodeContainerOverride `json:"containers,omitempty"`
+}
+
+// MultinodeContainerOverride contains the supported worker main-container overrides.
+type MultinodeContainerOverride struct {
+	// name must be main. Other containers cannot be overridden.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=main
+	Name string `json:"name"`
+
+	// image replaces the inherited image when present.
+	// +optional
+	Image *string `json:"image,omitempty"`
+
+	// command replaces the inherited command when present. An explicit empty
+	// list selects the image entrypoint.
+	// +optional
+	Command *[]string `json:"command,omitempty"`
+
+	// args replaces the inherited arguments when present.
+	// +optional
+	Args *[]string `json:"args,omitempty"`
+
+	// env replaces the inherited user environment when present. Operator-managed
+	// environment variables are applied after this overlay.
+	// +optional
+	Env *[]corev1.EnvVar `json:"env,omitempty"`
+
+	// resources contains the supported worker container resource overrides.
+	// +optional
+	Resources *MultinodeContainerResourceOverrides `json:"resources,omitempty"`
+}
+
+// MultinodeContainerResourceOverrides contains worker container DRA claim overrides.
+type MultinodeContainerResourceOverrides struct {
+	// claims replaces the inherited container-level DRA claim references when present.
+	// +optional
+	Claims *[]corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
 // ModelReference identifies a model served by a component.
@@ -241,6 +348,34 @@ type GroveSpec struct {
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
+	// flagsInjection controls backend-specific multinode flag and launch injection:
+	//
+	//   - Automatic (default): For vLLM multiprocessing, injects
+	//     --distributed-executor-backend=mp, --nnodes, --master-addr,
+	//     --master-port=29500, --node-rank, and --headless on workers. For vLLM
+	//     Ray, constructs the Ray head or worker launch command and adds
+	//     --distributed-executor-backend=ray to the leader. For vLLM data
+	//     parallelism, injects --data-parallel-hybrid-lb, --data-parallel-size
+	//     when absent, --data-parallel-size-local, --data-parallel-start-rank,
+	//     --data-parallel-address, and --data-parallel-rpc-port. For SGLang,
+	//     injects --dist-init-addr, --nnodes, and --node-rank. For TensorRT-LLM,
+	//     constructs the mpirun or sshd launch command. User-provided topology
+	//     flags are not rejected or rewritten and may therefore be duplicated.
+	//   - Manual: Omits the Automatic backend-specific injections and preserves
+	//     supplied launch commands. For vLLM multiprocessing,
+	//     --master-port=29500 remains operator-owned and is still injected when
+	//     the supplied command selects multiprocessing. Operator-owned pod wiring,
+	//     including the wait-for-leader-mp init container, TensorRT-LLM SSH, and
+	//     worker-probe handling, remains enabled. Manual is valid only for
+	//     multinode worker components and cannot initially be combined with GPU
+	//     memory service or failover.
+	//
+	// multinode.worker.podTemplateOverrides is independent of this field and may
+	// be used with either value.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+
 	// gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
 	// access for GMS clients is managed via DRA.
 	// +optional
@@ -267,6 +402,17 @@ type ExperimentalSpec struct {
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
+
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
 // worker component. The operator injects GMS wiring and replaces the main

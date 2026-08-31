@@ -122,6 +122,8 @@ func TestComputeBetaDGDWorkersSpecHash_NoWorkers(t *testing.T) {
 }
 
 func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T) {
+	const runtimeImage = "runtime:1.4.0"
+
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -168,6 +170,51 @@ func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T)
 		},
 	}
 	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, dgd6), "podTemplate metadata change should change hash")
+
+	// Worker pod-template overrides are part of the generated worker DCD spec.
+	workerOverrideBase := betaDGD(t, base())
+	ensureMainContainer(ensurePodTemplate(&workerOverrideBase.Spec.Components[0])).Image = runtimeImage
+	workerOverrideBase.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+	dgd7 := workerOverrideBase.DeepCopy()
+	dgd7.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{
+		NodeCount: 2,
+		Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+			Spec: &v1beta1.MultinodePodSpecOverrides{Containers: []v1beta1.MultinodeContainerOverride{{
+				Name: v1beta1.MainContainerName,
+				Args: ptr.To([]string{"--node-rank=1"}),
+			}}},
+		}},
+	}
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, workerOverrideBase), mustComputeBetaDGDWorkersSpecHash(t, dgd7), "worker pod-template override should change hash")
+
+	automatic := betaDGD(t, base())
+	automatic.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+	automatic.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeAutomatic}
+	omitted := automatic.DeepCopy()
+	omitted.Spec.Components[0].Experimental = nil
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, automatic), mustComputeBetaDGDWorkersSpecHash(t, omitted), "explicit Automatic should hash like its omitted default")
+	manual := automatic.DeepCopy()
+	manual.Spec.Components[0].Experimental.FlagsInjection = v1beta1.FlagsInjectionModeManual
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, automatic), mustComputeBetaDGDWorkersSpecHash(t, manual), "Manual flags injection should change hash")
+
+	equivalentBase := betaDGD(t, base())
+	ensureMainContainer(ensurePodTemplate(&equivalentBase.Spec.Components[0])).Image = runtimeImage
+	equivalentBase.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+	baseMain := GetMainContainer(&equivalentBase.Spec.Components[0])
+	if baseMain == nil {
+		t.Fatal("converted base worker has no main container")
+	}
+	baseMain.Args = []string{"--model=test"}
+	equivalentOverride := equivalentBase.DeepCopy()
+	equivalentOverride.Spec.Components[0].Multinode.Worker = &v1beta1.MultinodeWorkerSpec{
+		PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+			Spec: &v1beta1.MultinodePodSpecOverrides{Containers: []v1beta1.MultinodeContainerOverride{{
+				Name: v1beta1.MainContainerName,
+				Args: ptr.To([]string{"--model=test"}),
+			}}},
+		},
+	}
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, equivalentBase), mustComputeBetaDGDWorkersSpecHash(t, equivalentOverride), "equivalent worker override should preserve hash")
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPropagatedDGDObjectAnnotations(t *testing.T) {

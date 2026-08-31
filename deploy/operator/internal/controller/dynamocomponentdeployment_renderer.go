@@ -166,12 +166,16 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
+	effectiveComponent, err := dynamo.EffectiveComponentForRole(component, role)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to resolve effective component for role %s", role)
+	}
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err
 	}
-	podLabels := dynamo.GetDCDKubeLabels(dcd)
-	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
+	podLabels := dynamo.GetDCDKubeLabelsForComponent(dcd, effectiveComponent)
+	podAnnotations := dynamo.GetDCDKubeAnnotationsForComponent(dcd, effectiveComponent)
 	kubeName := dcd.Name
 
 	// Convert user-provided metrics annotation into controller-managed label.
@@ -356,7 +360,7 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadPodLabels(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (map[string]string, error) {
-	labels := dynamo.GetDCDKubeLabels(dcd)
+	labels := dynamo.GetDCDKubeLabelsForComponent(dcd, nil)
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err

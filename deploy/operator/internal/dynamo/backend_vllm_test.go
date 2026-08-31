@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	vllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/vllm"
@@ -51,6 +52,39 @@ func TestShellQuotePOSIX_ArgvRoundTrip(t *testing.T) {
 	got = got[:len(got)-1] // trailing NUL yields a final empty element
 	if !reflect.DeepEqual(got, tokens) {
 		t.Fatalf("argv not preserved through sh -c:\n got  %#v\n want %#v", got, tokens)
+	}
+}
+
+func TestVLLMBackendManualFlagsInjectionAddsOnlyMpMasterPort(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeManual},
+		Multinode:    &v1beta1.MultinodeSpec{NodeCount: 2},
+	}
+	for _, role := range []Role{RoleLeader, RoleWorker} {
+		t.Run(string(role), func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model=test", "--distributed-executor-backend=mp"},
+			}
+			require.NoError(t, (&VLLMBackend{}).UpdateContainer(
+				container, 2, role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+			))
+
+			if !mutation.ContainerCommandLineHasArg(container, "--master-port", commonconsts.VLLMMpMasterPort) {
+				t.Fatalf("Manual vLLM MP args %v do not contain operator master port", container.Args)
+			}
+			commandLine := strings.Join(append(append([]string{}, container.Command...), container.Args...), " ")
+			for _, operatorGeneratedFlag := range []string{"--nnodes", "--node-rank", "--master-addr", "--headless"} {
+				if strings.Contains(commandLine, operatorGeneratedFlag) {
+					t.Fatalf("Manual vLLM command contains generated flag %q: %s", operatorGeneratedFlag, commandLine)
+				}
+			}
+			for _, env := range container.Env {
+				if env.Name == "DYNAMO_RANK" || env.Name == "DYNAMO_LEADER_ADDRESS" {
+					t.Fatalf("phase-one Manual flag injection added deferred topology alias %q", env.Name)
+				}
+			}
+		})
 	}
 }
 

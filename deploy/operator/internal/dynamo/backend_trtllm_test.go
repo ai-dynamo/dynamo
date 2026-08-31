@@ -498,6 +498,44 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 	}
 }
 
+func TestTRTLLMBackend_ManualFlagsPreservesLaunchAndRetainsPodWiring(t *testing.T) {
+	backend := &TRTLLMBackend{MpiRunSecretName: mpiRunSecretName}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.trtllm", "--user-owned-multinode"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+
+	if err := backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)); err != nil {
+		t.Fatalf("UpdateContainer() error = %v", err)
+	}
+	if !reflect.DeepEqual(container.Command, wantCommand) || !reflect.DeepEqual(container.Args, wantArgs) {
+		t.Fatalf("Manual flags injection changed user launch: command=%v args=%v", container.Command, container.Args)
+	}
+	if container.LivenessProbe != nil || container.StartupProbe != nil || container.ReadinessProbe == nil {
+		t.Fatalf("Manual flags injection did not retain worker probe wiring: %#v", container)
+	}
+	if len(container.VolumeMounts) != 1 || container.VolumeMounts[0].Name != mpiRunSecretName {
+		t.Fatalf("Manual flags injection did not retain the SSH volume mount: %#v", container.VolumeMounts)
+	}
+
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
+	if err := backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}); err != nil {
+		t.Fatalf("UpdatePodSpec() error = %v", err)
+	}
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != mpiRunSecretName {
+		t.Fatalf("Manual flags injection did not retain the SSH volume: %#v", podSpec.Volumes)
+	}
+}
+
 func TestTRTLLMBackend_hostNamesList(t *testing.T) {
 	tests := []struct {
 		name              string

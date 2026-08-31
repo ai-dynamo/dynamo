@@ -1661,7 +1661,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"",
 						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
 					)},
-					Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+					Worker: &nvidiacomv1beta1.MultinodeWorkerSpec{ProviderOverride: groveProviderOverride(
 						"",
 						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
 					)},
