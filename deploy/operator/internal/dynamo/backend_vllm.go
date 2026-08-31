@@ -17,19 +17,17 @@ import (
 )
 
 const (
-	VLLMPort                  = "6379"
-	dataParallelRPCPort       = "13445"
-	tensorParallelSizeFlag    = vllmmutation.TensorParallelSizeFlag
-	pipelineParallelSizeFlag  = vllmmutation.PipelineParallelSizeFlag
-	dataParallelSizeFlag      = vllmmutation.DataParallelSizeFlag
-	dataParallelSizeLocalFlag = vllmmutation.DataParallelSizeLocalFlag
-	distributedExecutorFlag   = vllmmutation.DistributedExecutorFlag
-	enableElasticEPFlag       = vllmmutation.EnableElasticEPFlag
-	dataParallelBackendFlag   = vllmmutation.DataParallelBackendFlag
+	VLLMPort                 = "6379"
+	dataParallelRPCPort      = "13445"
+	tensorParallelSizeFlag   = "--tensor-parallel-size"
+	pipelineParallelSizeFlag = "--pipeline-parallel-size"
+	enableElasticEPFlag      = "--enable-elastic-ep"
+	dataParallelBackendFlag  = "--data-parallel-backend"
+
 	// dataParallelBackendShortFlag is vLLM's documented short alias for
 	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
-	dataParallelBackendShortFlag = vllmmutation.DataParallelBackendShortFlag
-	dataParallelBackendRay       = vllmmutation.DataParallelBackendRay
+	dataParallelBackendShortFlag = "-dpb"
+	dataParallelBackendRay       = "ray"
 )
 
 type VLLMBackend struct {
@@ -286,7 +284,7 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 		return false
 	}
 
-	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+	return containerCommandLineHasArg(&podSpec.Containers[0], vllmmutation.DistributedExecutorFlag, "mp")
 }
 
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
@@ -559,7 +557,7 @@ func dataParallelLaunchValues(container *corev1.Container, role Role, serviceNam
 	dataParallelSizeLocal := containerGPUs / worldSize
 
 	// Get total DP size from args, or calculate from nodes
-	totalDPSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
+	totalDPSize := getFlagValue(expandedArgs, vllmmutation.DataParallelSizeFlag)
 	if totalDPSize == 1 {
 		totalDPSize = dataParallelSizeLocal * int64(numberOfNodes)
 	}
@@ -571,7 +569,7 @@ func dataParallelLaunchValues(container *corev1.Container, role Role, serviceNam
 	}
 	return vllmmutation.DataParallelValues{
 		TotalSize:            totalDPSize,
-		OmitTotalSize:        hasFlag(expandedArgs, dataParallelSizeFlag),
+		OmitTotalSize:        hasFlag(expandedArgs, vllmmutation.DataParallelSizeFlag),
 		LocalSize:            dataParallelSizeLocal,
 		LeaderAddress:        leaderHostname,
 		WorkerStartRank:      workerStartRank,
@@ -597,7 +595,7 @@ func getWorldSize(expandedArgs []string) int64 {
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
 func needsDataParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
-	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
+	dataParallelSize := getFlagValue(expandedArgs, vllmmutation.DataParallelSizeFlag)
 	if containerGPUs == 0 {
 		return false
 	}
