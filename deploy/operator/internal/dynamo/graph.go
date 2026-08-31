@@ -393,21 +393,20 @@ func elasticEPFollowerName(leaderName string) string {
 }
 
 // ElasticEPComponentIdentity returns the component name that per-component GPU
-// infrastructure should be resolved under.
+// infrastructure should be resolved under. That is the component's own name, except for a
+// synthesized elastic-EP follower, which resolves under its leader's.
 //
-// For everything except a synthesized elastic-EP follower that is the component's own
-// name. The follower is derived rather than declared, so the GMS DRA claim template --
-// created only for components in dgd.Spec.Components -- exists solely under the leader's
-// name; resolving under the follower's invented "<leader>-flw" name references a template
-// that was never created, and the pod can never be scheduled. Sharing the leader's
-// template is correct rather than merely convenient: a pod references a
-// ResourceClaimTemplate, and Kubernetes instantiates a separate ResourceClaim per pod
-// from it, so leader and follower still get their own GPUs. The recipe is identical
-// because the follower is a deep copy.
+// The follower is derived rather than declared, and the GMS DRA claim template is created
+// only for components in dgd.Spec.Components. Under the follower's invented "<leader>-flw"
+// name the lookup finds a template that was never created, and the pod can never schedule.
 //
-// Deliberately not used for checkpoint info. That lookup must keep missing for the
-// follower: inheriting the leader's would make it a CRIU restore target for an engine
-// process it never runs, since its command is a bare Ray join.
+// Sharing the leader's template is correct, not merely convenient: a pod references a
+// ResourceClaimTemplate and Kubernetes instantiates a separate ResourceClaim per pod from
+// it, so leader and follower still get their own GPUs.
+//
+// Not used for checkpoints. That lookup must keep missing for the follower: its command is
+// a bare Ray join, so inheriting the leader's checkpoint would make it a CRIU restore
+// target for an engine it never runs.
 func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string) string {
 	if leader := GetPodTemplateAnnotations(component)[commonconsts.KubeAnnotationElasticEPLeaderComponent]; leader != "" {
 		return leader
@@ -444,15 +443,15 @@ func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentShar
 // synthesizeElasticEPFollowerDCD derives the optional follower DCD for an elastic-EP
 // leader, or nil when the leader is not a single-pod elastic-EP Ray launch.
 //
-// The follower is a deep copy of the leader (same image, GPU, model args) resting at
-// zero replicas, marked so the renderer launches it as RoleFollower. Its component
-// identity is "<leader>-flw" so its Deployment, Service, and selector never collide
-// with the leader's; the renderer trims that suffix to rejoin the leader's Ray Service.
+// The follower is a deep copy of the leader (same image, GPU, model args) resting at zero
+// replicas, marked so the renderer launches it as RoleFollower. Its component identity is
+// "<leader>-flw", so its Deployment, Service, and selector never collide with the leader's,
+// and it carries the leader's Service name on an annotation rather than deriving it.
 //
-// The gate is the same predicate the Service renderer applies. Synthesizing on the
-// launch flags alone would emit a follower for shapes whose leader Service is never
-// rendered (replicas > 1) or that never route through RoleFollower at all (multinode,
-// which takes the LWS path), leaving it waiting on an address that does not exist.
+// The gate is the same predicate the Service renderer uses, because a follower is only
+// useful where a leader Service exists to join. Gating on the launch flags alone would
+// derive followers for shapes that never get one: replicas > 1, or multinode, which takes
+// the LWS path and never renders RoleFollower at all.
 func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
 	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
 		return nil
