@@ -20,6 +20,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
+| `post_merge_docs` | Skips post-merge tests only when every changed path matches; image builds still run |
 | `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
 | `examples` | Recipe Kustomize generation and unit checks |
 | `ignore` | Nothing (classification only) |

@@ -18,12 +18,21 @@
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
+#   post_merge_docs -> skip post-merge tests only when every changed path matches
 #
 # Filters for coverage only (no CI triggered):
 #   examples, ignore, sidecar
 
 all:
   - '**'
+
+# Exact match for the paths that previously suppressed the entire post-merge
+# workflow. The caller uses `only_modified` so mixed changes still run tests.
+post_merge_docs:
+  - 'docs/**'
+  - 'fern/**'
+  - '**.md'
+  - '**.rst'
 
 # Fern component sources only. The docs filter matches 458 of the last 1172
 # commits on main, but only 21 of those touched a component source, so a step

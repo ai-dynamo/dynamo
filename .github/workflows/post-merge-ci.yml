@@ -8,12 +8,6 @@ on:
     branches:
       - main
       - 'release/*.*.*'
-    # Documentation changes are validated before merge and do not affect images or GPU tests.
-    paths-ignore:
-      - 'docs/**'
-      - 'fern/**'
-      - '**.md'
-      - '**.rst'
   workflow_dispatch:
     inputs:
       framework:
@@ -30,6 +24,40 @@ permissions:
   actions: read
 
 jobs:
+  changed-files:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      run_tests: ${{ steps.policy.outputs.run_tests }}
+    steps:
+      - name: Checkout code
+        if: github.event_name == 'push'
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check for changes
+        id: changes
+        if: github.event_name == 'push'
+        continue-on-error: true
+        uses: $/.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+      - name: Set test policy
+        id: policy
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DETECTOR_OUTCOME: ${{ steps.changes.outcome }}
+          DOCS_ONLY: ${{ steps.changes.outputs.post_merge_docs_only }}
+        run: |
+          if [[ "$DETECTOR_OUTCOME" == "failure" ]]; then
+            echo "::warning title=Changed-file detection failed::Running the full post-merge test suite."
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$DETECTOR_OUTCOME" != "success" || "$DOCS_ONLY" != "true" ]]; then
+            echo "run_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ============================================================================
   # DISPATCH CONFIG
   # On workflow_dispatch, narrows the run to a single framework.
@@ -61,10 +89,13 @@ jobs:
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
-    if: github.event_name != 'workflow_dispatch'
+    needs: [changed-files]
+    if: always() && !cancelled() && github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      # A detector failure must not suppress release-required image artifacts.
+      run_tests: ${{ needs.changed-files.outputs.run_tests == 'true' }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
@@ -121,7 +152,8 @@ jobs:
 
   power-agent:
     name: Power Agent
-    if: github.event_name != 'workflow_dispatch'
+    needs: [changed-files]
+    if: always() && !cancelled() && github.event_name != 'workflow_dispatch'
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -143,6 +175,7 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-power-agent
       - name: Refresh BuildKit builder
+        if: needs.changed-files.outputs.run_tests == 'true'
         # The runtime build above can leave the remote BuildKit connection stale;
         # re-establish it (re-routing only if unhealthy) before the test build.
         uses: $/.github/actions/builder-refresher
@@ -152,6 +185,7 @@ jobs:
           arch: linux/amd64
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Run unit tests inside the container image
+        if: needs.changed-files.outputs.run_tests == 'true'
         # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
         # the suite against the exact shipped image (Python 3.12 + baked deps),
         # validating the container itself rather than a pip-installed runner env.
@@ -166,10 +200,12 @@ jobs:
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             -f deploy/power-agent/Dockerfile deploy/power-agent
       - name: Set up Helm
+        if: needs.changed-files.outputs.run_tests == 'true'
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
+        if: needs.changed-files.outputs.run_tests == 'true'
         run: make -C deploy/helm/charts/power-agent lint test
 
   # ============================================================================
@@ -422,7 +458,8 @@ jobs:
 
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -445,7 +482,8 @@ jobs:
 
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -462,7 +500,8 @@ jobs:
 
   vllm-4-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -479,7 +518,8 @@ jobs:
 
   vllm-efa-test:
     name: vllm-runtime-efa
-    needs: [vllm-efa-build]
+    needs: [changed-files, vllm-efa-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -496,8 +536,10 @@ jobs:
 
   vllm-kvbm-tests:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [config, vllm-build]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    needs: [changed-files, config, vllm-build]
+    if: |
+      needs.changed-files.outputs.run_tests == 'true' &&
+      (github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -520,7 +562,8 @@ jobs:
 
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -543,7 +586,8 @@ jobs:
 
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -560,7 +604,8 @@ jobs:
 
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -583,7 +628,8 @@ jobs:
 
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -600,7 +646,8 @@ jobs:
 
   trtllm-efa-test:
     name: trtllm-runtime-efa
-    needs: [trtllm-efa-build]
+    needs: [changed-files, trtllm-efa-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -617,7 +664,8 @@ jobs:
 
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
-    needs: [planner-build]
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.run_tests == 'true'
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -641,8 +689,10 @@ jobs:
 
   vllm-test-xpu:
     name: vllm-xpu
-    needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    needs: [changed-files, config]
+    if: |
+      needs.changed-files.outputs.run_tests == 'true' &&
+      (github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true')
     uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
@@ -874,7 +924,8 @@ jobs:
   # ============================================================================
 
   deploy-operator:
-    needs: [operator]
+    needs: [changed-files, operator]
+    if: needs.changed-files.outputs.run_tests == 'true'
     runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
@@ -955,8 +1006,10 @@ jobs:
 
   deploy-operator-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [changed-files, operator]
+    if: |
+      needs.changed-files.outputs.run_tests == 'true' &&
+      github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -985,8 +1038,10 @@ jobs:
 
   deploy-operator-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [changed-files, operator]
+    if: |
+      needs.changed-files.outputs.run_tests == 'true' &&
+      github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1015,8 +1070,10 @@ jobs:
 
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [changed-files, operator]
+    if: |
+      needs.changed-files.outputs.run_tests == 'true' &&
+      github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1374,8 +1431,10 @@ jobs:
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-cleanup:
-    if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
+    if: |
+      always() &&
+      needs.changed-files.outputs.run_tests == 'true'
+    needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1390,8 +1449,11 @@ jobs:
 
   deploy-cleanup-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Cleanup
-    if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
+    if: |
+      always() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.changed-files.outputs.run_tests == 'true'
+    needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1403,8 +1465,11 @@ jobs:
 
   deploy-cleanup-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Cleanup
-    if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
+    if: |
+      always() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.changed-files.outputs.run_tests == 'true'
+    needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1416,8 +1481,11 @@ jobs:
 
   deploy-cleanup-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Cleanup
-    if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
+    if: |
+      always() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.changed-files.outputs.run_tests == 'true'
+    needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1530,7 +1598,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, frontend-build, planner-build]
+    needs: [dynamo-pipeline, vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1550,7 +1618,26 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [ deploy-status-check ]
+    needs:
+      - deploy-status-check
+      - clean-k8s-builder
+      - dynamo-pipeline
+      - planner-compliance
+      - planner-test
+      - vllm-test
+      - vllm-multi-gpu-test
+      - vllm-4-gpu-test
+      - vllm-efa-test
+      - vllm-kvbm-tests
+      - sglang-test
+      - sglang-multi-gpu-test
+      - trtllm-test
+      - trtllm-multi-gpu-test
+      - trtllm-efa-test
+      - vllm-test-xpu
+      - vllm-dev-copy-to-acr
+      - sglang-dev-copy-to-acr
+      - trtllm-dev-copy-to-acr
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
