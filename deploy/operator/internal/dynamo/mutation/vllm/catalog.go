@@ -19,16 +19,13 @@ import (
 )
 
 const (
-	framework                    = "vllm"
-	TensorParallelSizeFlag       = "--tensor-parallel-size"
-	PipelineParallelSizeFlag     = "--pipeline-parallel-size"
-	DataParallelSizeFlag         = "--data-parallel-size"
-	DataParallelSizeLocalFlag    = "--data-parallel-size-local"
-	DistributedExecutorFlag      = "--distributed-executor-backend"
-	EnableElasticEPFlag          = "--enable-elastic-ep"
-	DataParallelBackendFlag      = "--data-parallel-backend"
-	DataParallelBackendShortFlag = "-dpb"
-	DataParallelBackendRay       = "ray"
+	framework                 = "vllm"
+	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+
+	// DataParallelSizeFlag is shared with the launch-mode selector.
+	DataParallelSizeFlag = "--data-parallel-size"
+	// DistributedExecutorFlag is shared with automatic and manual MP detection.
+	DistributedExecutorFlag = "--distributed-executor-backend"
 )
 
 // MPValues contains only the runtime values used by the static multiprocessing
@@ -125,7 +122,7 @@ func DataParallel(values DataParallelValues) mutation.EngineMutations {
 				Flags: []mutation.Flag{
 					{Name: "--data-parallel-hybrid-lb"},
 					{Name: DataParallelSizeFlag, Value: strconv.FormatInt(values.TotalSize, 10), Omit: values.OmitTotalSize},
-					{Name: DataParallelSizeLocalFlag, Value: strconv.FormatInt(values.LocalSize, 10)},
+					{Name: dataParallelSizeLocalFlag, Value: strconv.FormatInt(values.LocalSize, 10)},
 					{Name: "--data-parallel-start-rank", Value: "0"},
 					{Name: "--data-parallel-address", Value: values.LeaderAddress},
 					{Name: "--data-parallel-rpc-port", Value: values.RPCPort},
@@ -140,7 +137,7 @@ func DataParallel(values DataParallelValues) mutation.EngineMutations {
 				Flags: []mutation.Flag{
 					{Name: "--data-parallel-hybrid-lb"},
 					{Name: DataParallelSizeFlag, Value: strconv.FormatInt(values.TotalSize, 10), Omit: values.OmitTotalSize},
-					{Name: DataParallelSizeLocalFlag, Value: strconv.FormatInt(values.LocalSize, 10)},
+					{Name: dataParallelSizeLocalFlag, Value: strconv.FormatInt(values.LocalSize, 10)},
 					{Name: "--data-parallel-start-rank", Value: values.WorkerStartRank},
 					{Name: "--data-parallel-address", Value: values.LeaderAddress},
 					{Name: "--data-parallel-rpc-port", Value: values.RPCPort},
