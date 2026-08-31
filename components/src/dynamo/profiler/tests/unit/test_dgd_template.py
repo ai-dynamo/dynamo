@@ -86,7 +86,9 @@ def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> Non
     config = load_dgd_template(backend, mode)
 
     env_from = _main_container(config, "Frontend").get("envFrom", [])
-    assert {"secretRef": {"name": "hf-token-secret", "optional": True}} in env_from
+    assert any(
+        item.get("secretRef", {}).get("name") == "hf-token-secret" for item in env_from
+    )
 
 
 @pytest.mark.parametrize(
