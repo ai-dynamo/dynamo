@@ -459,6 +459,18 @@ fn server_info() -> pb::ServerInfo {
     }
 }
 
+#[test]
+fn discovered_model_advertises_token_native_generate() {
+    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&serde_json::Value::Bool(true))
+    );
+}
+
 fn sequence_response(
     terminal: bool,
     logprobs: bool,
@@ -489,6 +501,7 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -586,6 +599,30 @@ fn zero_output_logprobs_omits_top_logprobs() {
 }
 
 #[test]
+fn all_logprobs_use_the_proto_all_selector() {
+    let mut request = request();
+    request.output_options.logprobs = Some(u32::MAX);
+    request.output_options.prompt_logprobs = Some(u32::MAX);
+
+    let wire = build_generate_request(
+        request,
+        "all-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("build request");
+    let response = wire.response.expect("response options");
+
+    assert!(matches!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+    assert!(matches!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+}
+
+#[test]
 fn oversized_logprob_counts_are_rejected() {
     let oversized = i32::MAX as u32 + 1;
 
@@ -608,6 +645,248 @@ fn oversized_logprob_counts_are_rejected() {
     )
     .expect_err("oversized prompt logprobs must fail");
     assert!(prompt_error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request.routing.as_mut().unwrap().priority = Some(-7);
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 4,
+                "min_p": 0.1,
+                "seed": 123,
+                "max_tokens": 1,
+                "min_tokens": 1,
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.4,
+                "repetition_penalty": 1.1,
+                "stop": ["done"],
+                "stop_token_ids": [2],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "cache_salt": "cache-salt",
+                "skip_reading_prefix_cache": true,
+                "skip_special_tokens": false,
+                "include_stop_str_in_output": true,
+                "return_token_ids": true
+            },
+            "model": "served-model",
+            "stream": false,
+            "cache_salt": "cache-salt",
+            "priority": 7,
+            "kv_transfer_params": {
+                "connector_data": {"values": [1, true, null]}
+            }
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("projected compatibility envelope");
+
+    assert_eq!(wire.temperature, Some(0.2));
+    assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2]);
+    assert_eq!(wire.stopping.as_ref().unwrap().stop_strings, ["done"]);
+    assert!(wire.stopping.as_ref().unwrap().include_stop_strings);
+    assert_eq!(
+        wire.response.as_ref().unwrap().skip_special_tokens,
+        Some(false)
+    );
+    assert!(wire.response.as_ref().unwrap().output_logprobs);
+    assert_eq!(
+        wire.kv.as_ref().unwrap().cache_salt,
+        "dynamo-cache-salt:cache-salt"
+    );
+    assert!(wire.kv.as_ref().unwrap().bypass_prefix_cache);
+    assert!(wire.kv.as_ref().unwrap().kv_transfer_params.is_some());
+    assert_eq!(wire.priority, 7);
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_disabled_token_ids() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "return_token_ids": false},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("the token-native sidecar always returns token IDs");
+
+    assert!(
+        error
+            .to_string()
+            .contains("sampling_params.return_token_ids must be true")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_conflicting_cache_salt() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "cache_salt": "different-policy-version"},
+            "cache_salt": "cache-salt",
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("duplicate cache salts must match the canonical routing salt");
+
+    assert!(
+        error
+            .to_string()
+            .contains("sampling_params.cache_salt must match the canonical cache_salt")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_conflicting_prefix_cache_aliases() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "bypass_prefix_cache": true,
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"skip_reading_prefix_cache": false},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("prefix-cache aliases must agree");
+
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with extra_args.bypass_prefix_cache")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_treats_optional_nulls_as_omitted() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "skip_reading_prefix_cache": null,
+                "skip_special_tokens": null
+            },
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("optional nulls should be omitted");
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_unprojected_fields() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "future_sampling_field": true},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unprojected compatibility fields must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("extra_args.vllm_tito.sampling_params.future_sampling_field")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_multimodal_features_without_support() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": {"mm_hashes": {"image": ["untrusted"]}}
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("preprocessed features must fail until their transport is enabled");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires preprocessed multimodal")
+    );
+}
+
+#[test]
+fn skip_special_tokens_false_is_forwarded_to_vllm() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+
+    let mapped = build_generate_request(
+        request,
+        "skip-special-tokens".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("skip_special_tokens=false should be supported");
+
+    assert_eq!(
+        mapped
+            .response
+            .expect("response options")
+            .skip_special_tokens,
+        Some(false)
+    );
 }
 
 struct FakeServer {
