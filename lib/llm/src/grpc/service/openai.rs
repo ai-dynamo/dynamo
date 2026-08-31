@@ -26,6 +26,7 @@ use crate::http::service::{
 };
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
+use crate::discovery::Selected;
 use tonic::{Status, metadata::MetadataMap};
 
 /// Dynamo Annotation for the request ID
@@ -86,7 +87,10 @@ pub async fn completion_response_stream(
     let model = &request.inner.model;
 
     // todo - error handling should be more robust
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_completions_engine_with_parsing(model)
         .map_err(|e| match e {
@@ -105,7 +109,9 @@ pub async fn completion_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, &namespace);
 
     // prepare to process any annotations
     let annotations = request.annotations();

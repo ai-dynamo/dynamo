@@ -64,6 +64,7 @@ use crate::types::Annotated;
 use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use crate::discovery::Selected;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -403,7 +404,10 @@ async fn anthropic_messages(
 
     // Look up engine and parsing options early so we know whether a reasoning
     // parser is configured before converting the request.
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| match e {
@@ -546,7 +550,9 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&model, &namespace);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 

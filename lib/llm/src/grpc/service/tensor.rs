@@ -37,6 +37,7 @@ use tonic::{Status, metadata::MetadataMap};
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
+use crate::discovery::Selected;
 use inference::infer_parameter::ParameterChoice;
 
 // Extend the NvCreateTensorResponse to include options to control
@@ -87,7 +88,10 @@ pub async fn tensor_response_stream(
     let model = &request.model;
 
     // todo - error handling should be more robust
-    let engine = state
+    let Selected {
+        value: engine,
+        namespace,
+    } = state
         .manager()
         .get_tensor_engine(model)
         .map_err(|e| match e {
@@ -106,7 +110,9 @@ pub async fn tensor_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, &namespace);
 
     // prepare to process any annotations
     let annotations = request.annotations();

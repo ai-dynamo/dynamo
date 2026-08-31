@@ -4,6 +4,7 @@
 """Small Prometheus text exposition helpers for tests."""
 
 import re
+from collections.abc import Iterator
 
 _SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"
@@ -25,20 +26,13 @@ def _parse_labels(labels_text: str | None) -> dict[str, str]:
     }
 
 
-def find_metric_samples(
+def _iter_matching_samples(
     content: str,
     metric_name: str,
     labels: dict[str, str] | None = None,
-) -> list[float]:
-    """Return every Prometheus sample value matching a metric name and label subset.
-
-    Use this instead of :func:`sum_metric_samples` when the assertion is about a
-    metric being *registered* rather than about its value. An empty list means the
-    metric is absent from the exposition, which a summed value of ``0.0`` cannot
-    distinguish from a registered metric that simply has not been incremented.
-    """
+) -> "Iterator[tuple[dict[str, str], float]]":
+    """Yield ``(labels, value)`` for each sample matching a name and label subset."""
     expected_labels = labels or {}
-    values = []
 
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -55,9 +49,22 @@ def find_metric_samples(
         ):
             continue
 
-        values.append(float(match.group("value")))
+        yield sample_labels, float(match.group("value"))
 
-    return values
+
+def find_metric_samples(
+    content: str,
+    metric_name: str,
+    labels: dict[str, str] | None = None,
+) -> list[float]:
+    """Return every Prometheus sample value matching a metric name and label subset.
+
+    Use this instead of :func:`sum_metric_samples` when the assertion is about a
+    metric being *registered* rather than about its value. An empty list means the
+    metric is absent from the exposition, which a summed value of ``0.0`` cannot
+    distinguish from a registered metric that simply has not been incremented.
+    """
+    return [value for _, value in _iter_matching_samples(content, metric_name, labels)]
 
 
 def sum_metric_samples(
@@ -71,3 +78,14 @@ def sum_metric_samples(
     use :func:`find_metric_samples` if that distinction matters.
     """
     return sum(find_metric_samples(content, metric_name, labels))
+
+
+def metric_label_sets(content: str, metric_name: str) -> list[dict[str, str]]:
+    """Return the label set of every sample of `metric_name`, in exposition order.
+
+    Use this to assert which dimensions a family is split by -- e.g. that a metric
+    carries one series per `dynamo_namespace`, or that it carries none.
+    :func:`sum_metric_samples` answers "what is the value"; this answers "how is
+    it split".
+    """
+    return [labels for labels, _ in _iter_matching_samples(content, metric_name)]

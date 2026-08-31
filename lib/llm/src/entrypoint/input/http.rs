@@ -388,7 +388,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
         model_type
     );
     match model_type {
-        ModelUpdate::Added(card) => {
+        ModelUpdate::Added { card, .. } => {
             // Handle all supported endpoint types, not just the first one
             for endpoint_type in card
                 .model_type
@@ -406,6 +406,10 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
                 service.enable_model_endpoint(endpoint_type, false)?;
             }
         }
+        // Endpoint enablement is a process-wide availability question. One
+        // deployment retiring says nothing about it -- another namespace may
+        // still serve the model -- so `Removed` remains the only signal here.
+        ModelUpdate::DeploymentRemoved { .. } => {}
     }
     Ok(())
 }
@@ -416,16 +420,36 @@ fn update_model_metrics(
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) {
     match model_type {
-        ModelUpdate::Added(card) => {
+        ModelUpdate::Added {
+            card,
+            namespace,
+            worker_type,
+        } => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
-                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
+            if let Err(err) = metrics.update_metrics_from_mdc(&card, &namespace, &worker_type) {
+                tracing::warn!(%err, model_name=card.display_name, %namespace, %worker_type, "update_metrics_from_mdc failed");
             }
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
-            // Note: Metrics are typically not removed to preserve historical data
-            // This matches the behavior in the polling task
+            // Counters and histograms are deliberately retained: their value is
+            // the history, and dropping them would rewrite it. The
+            // point-in-time per-deployment gauges are handled by
+            // `DeploymentRemoved` below, which fires at the finer granularity
+            // those gauges are keyed by.
+        }
+        ModelUpdate::DeploymentRemoved {
+            model,
+            namespace,
+            worker_type,
+        } => {
+            tracing::debug!(
+                %model,
+                %namespace,
+                %worker_type,
+                "Deployment removed; dropping its per-deployment gauges"
+            );
+            metrics.remove_deployment_metrics(&model, &namespace, &worker_type);
         }
     }
 }

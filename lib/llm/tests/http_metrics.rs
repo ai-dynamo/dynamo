@@ -464,29 +464,29 @@ async fn test_multimodal_count_metrics_exposed() {
         // Trailing newline so a value like `1` can't prefix-match `10`.
         assert!(
             metrics_body
-                .contains("dynamo_frontend_images_per_request_count{model=\"mmmodel\"} 1\n"),
+                .contains("dynamo_frontend_images_per_request_count{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 1\n"),
             "images_per_request_count should be 1; got:\n{metrics_body}"
         );
         assert!(
-            metrics_body.contains("dynamo_frontend_images_per_request_sum{model=\"mmmodel\"} 2\n"),
+            metrics_body.contains("dynamo_frontend_images_per_request_sum{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 2\n"),
             "images_per_request_sum should be 2; got:\n{metrics_body}"
         );
         assert!(
-            metrics_body.contains("dynamo_frontend_videos_per_request_sum{model=\"mmmodel\"} 1\n"),
+            metrics_body.contains("dynamo_frontend_videos_per_request_sum{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 1\n"),
             "videos_per_request_sum should be 1; got:\n{metrics_body}"
         );
         assert!(
-            metrics_body.contains("dynamo_frontend_audio_per_request_sum{model=\"mmmodel\"} 0\n"),
+            metrics_body.contains("dynamo_frontend_audio_per_request_sum{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 0\n"),
             "audio_per_request_sum should be 0; got:\n{metrics_body}"
         );
         assert!(
             metrics_body
-                .contains("dynamo_frontend_image_tokens_per_request_count{model=\"mmmodel\"} 1\n"),
+                .contains("dynamo_frontend_image_tokens_per_request_count{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 1\n"),
             "image_tokens_per_request_count should be 1; got:\n{metrics_body}"
         );
         assert!(
             metrics_body
-                .contains("dynamo_frontend_image_tokens_per_request_sum{model=\"mmmodel\"} 1290\n"),
+                .contains("dynamo_frontend_image_tokens_per_request_sum{dynamo_namespace=\"__local__\",model=\"mmmodel\"} 1290\n"),
             "image_tokens_per_request_sum should be 1290; got:\n{metrics_body}"
         );
 
@@ -719,7 +719,7 @@ mod integration_tests {
         if let Err(e) = service
             .state()
             .metrics_clone()
-            .update_metrics_from_mdc(&card)
+            .update_metrics_from_mdc(&card, "test_ns", "decode")
         {
             tracing::debug!(
                 model = %card.display_name,

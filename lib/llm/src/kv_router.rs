@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -549,6 +549,18 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    /// Bound to this router's own component so shared-cache observations carry this
+    /// namespace's labels. A frontend serving several namespaces runs one router each.
+    request_metrics: Arc<metrics::RouterRequestMetrics>,
+    /// This router's namespace, for the routing-overhead histograms.
+    routing_overhead_namespace: String,
+    /// Routing-overhead histogram children for [`Self::routing_overhead_namespace`].
+    ///
+    /// Resolved on first use rather than in `new()`: the histograms are
+    /// registered by the frontend HTTP service (`service_v2.rs`), which may run
+    /// after the router is built, and `RoutingOverheadMetrics::get()` returns
+    /// `None` until then. Caching eagerly would pin `None` for the router's life.
+    routing_overhead: OnceLock<Option<metrics::RoutingOverheadHandles>>,
 }
 
 fn resolve_tracking_model_name(
@@ -855,7 +867,22 @@ where
             lora_filter,
             endpoint_registration: None,
             teardown_task_guard: None,
+            request_metrics: metrics::RouterRequestMetrics::from_component(component),
+            routing_overhead_namespace: component.namespace().name().to_string(),
+            routing_overhead: OnceLock::new(),
         })
+    }
+
+    /// The routing-overhead histogram children for this router's namespace, or
+    /// `None` if the frontend never registered them (non-frontend routers, and
+    /// any router built before registration that has not yet been asked again).
+    fn routing_overhead_handles(&self) -> Option<&metrics::RoutingOverheadHandles> {
+        self.routing_overhead
+            .get_or_init(|| {
+                metrics::RoutingOverheadMetrics::get()
+                    .map(|m| m.handles_for(&self.routing_overhead_namespace))
+            })
+            .as_ref()
     }
 
     pub(crate) fn set_endpoint_registration(
@@ -1498,7 +1525,7 @@ where
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
 
         // Keep existing routing metrics scoped to requests admitted into the scheduler by this call.
-        if is_admitted_routing && let Some(m) = metrics::RoutingOverheadMetrics::get() {
+        if is_admitted_routing && let Some(m) = self.routing_overhead_handles() {
             m.observe(
                 hash_elapsed,
                 seq_hash_elapsed,
@@ -1510,10 +1537,8 @@ where
         }
 
         // Observe per-request shared cache metrics.
-        if is_admitted_routing
-            && let Some(hits) = sc_hits_for_metrics
-            && let Some(m) = metrics::RouterRequestMetrics::get()
-        {
+        if is_admitted_routing && let Some(hits) = sc_hits_for_metrics {
+            let m = &self.request_metrics;
             if num_blocks > 0 {
                 m.shared_cache_hit_rate
                     .observe(hits.total_hits as f64 / num_blocks as f64);

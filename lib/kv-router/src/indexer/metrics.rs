@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+use std::collections::HashMap;
 #[cfg(any(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::Arc;
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(feature = "runtime-protocols")]
 use dynamo_runtime::component::Component;
@@ -230,8 +232,15 @@ const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcom
 #[cfg(feature = "metrics")]
 const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 
+/// Indexer metrics keyed by the component's `namespace.component` path.
+///
+/// `Component::metrics()` bakes `dynamo_namespace`/`dynamo_component` into the metrics
+/// it creates, so a single memoized instance would mislabel every namespace but the
+/// first in a process that hosts more than one (e.g. a frontend that discovers the
+/// same model in several namespaces).
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
+static KV_INDEXER_METRICS: LazyLock<Mutex<HashMap<String, Arc<KvIndexerMetrics>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl KvIndexerMetrics {
     #[cfg(feature = "metrics")]
@@ -275,14 +284,18 @@ impl KvIndexerMetrics {
         Ok(metrics)
     }
 
-    /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
-    /// KV_INDEXER_METRICS to avoid duplicate registration issues.
+    /// Creates a new KvIndexerMetrics from a Component, memoizing the result per
+    /// component in KV_INDEXER_METRICS to avoid duplicate registration issues.
     #[cfg(feature = "runtime-protocols")]
     pub fn from_component(component: &Component) -> Arc<Self> {
         #[cfg(feature = "metrics")]
         {
-            KV_INDEXER_METRICS
-                .get_or_init(|| {
+            let mut entries = KV_INDEXER_METRICS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            entries
+                .entry(component.to_string())
+                .or_insert_with(|| {
                     match (
                         component.metrics().create_intcountervec(
                             KV_CACHE_EVENTS_APPLIED_SUFFIX,
