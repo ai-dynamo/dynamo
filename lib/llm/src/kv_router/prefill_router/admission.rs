@@ -41,13 +41,8 @@ where
         };
 
         if let Some(error) = first_output.err() {
-            // Fold the worker's own error text into the message. `to_pyerr`
-            // formats with `Display` only, so a `#[source]` never reaches the
-            // frontend: without this it saw the bare wrapper text and could not
-            // tell an invalid argument from an engine fault, so a request the
-            // worker had correctly rejected with 400 reached the client as a
-            // 500. The rendered text keeps the `BackendInvalidArgument: {...}`
-            // discriminator the HTTP layer and chat processors already key on.
+            // Include the worker's text. `to_pyerr` keeps only `Display`, so a
+            // `#[source]` is lost. See `PrefillError::PrefillError`.
             let detail = format!("Prefill router returned error in output: {error}");
             return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
         }

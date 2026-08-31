@@ -1486,8 +1486,8 @@ class TestRoutedEnginePath:
     async def test_genuine_internal_failure_is_still_internal(
         self, vllm_processor_module
     ):
-        # The mapping is narrow on purpose: anything without the discriminator
-        # keeps the existing internal-error behaviour.
+        """A real engine fault stays internal, and is sent as a tagged frame."""
+
         class _BrokenEngine(_FakeRoutedEngine):
             async def generate(self, preprocessed, **kwargs):
                 raise RuntimeError("CUDA out of memory")
@@ -1496,12 +1496,9 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # Yielded, not raised: a genuine engine fault must not be mapped to a 4xx.
+        # Yielded, not raised: an error without the discriminator is not a 4xx.
         last = chunks[-1]
-        # And it must be a TAGGED annotated frame. An untagged {"error": {...}} is
-        # parsed by the binding as a completion chunk and dies with
-        # "missing field `id`", so the client gets an opaque 500 and the reason is
-        # lost -- which is what this envelope exists to prevent.
+        # It must also be tagged. An untagged dict fails to parse and becomes a 500.
         assert last["_dynamo_annotated"] is True
         assert last["event"] == "error"
         assert "CUDA out of memory" in last["comment"][0]

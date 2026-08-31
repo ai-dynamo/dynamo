@@ -958,15 +958,17 @@ class VllmProcessor:
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine choice index {output_idx} "
-                                f"for request {request_id}"
-                            ),
-                            "type": "internal_error",
+                    yield as_error_envelope(
+                        {
+                            "error": {
+                                "message": (
+                                    f"Invalid engine choice index {output_idx} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
                         }
-                    }
+                    )
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -1003,15 +1005,17 @@ class VllmProcessor:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
                         if post is None:
-                            yield {
-                                "error": {
-                                    "message": (
-                                        f"Invalid postprocessor choice index {output.index} "
-                                        f"for request {request_id}"
-                                    ),
-                                    "type": "internal_error",
+                            yield as_error_envelope(
+                                {
+                                    "error": {
+                                        "message": (
+                                            f"Invalid postprocessor choice index "
+                                            f"{output.index} for request {request_id}"
+                                        ),
+                                        "type": "internal_error",
+                                    }
                                 }
-                            }
+                            )
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
