@@ -29,7 +29,7 @@
       .backend { fill: #0f1d33; stroke: #60a5fa; }
     }
     .eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 1.6px; }
-    .title { font-size: 21px; font-weight: 700; }
+    .title { font-size: 20px; font-weight: 700; }
     .inner-title { font-size: 19px; font-weight: 700; }
     .body { font-size: 14px; }
     .body-compact { font-size: 13px; }
@@ -62,10 +62,10 @@
 
   <!-- Framework-owned inputs. -->
   <rect x="48" y="150" width="210" height="150" rx="10" class="framework" stroke-width="1.5" />
-  <text x="68" y="180" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="68" y="220" class="title">Prompts and tasks</text>
-  <text x="68" y="252" class="body muted">Environments, tools, and</text>
-  <text x="68" y="276" class="body muted">sampling intent</text>
+  <text x="153" y="180" class="eyebrow muted" text-anchor="middle">RL FRAMEWORK</text>
+  <text x="153" y="220" class="title" text-anchor="middle">Prompts and tasks</text>
+  <text x="153" y="252" class="body muted" text-anchor="middle">Environments, tools, and</text>
+  <text x="153" y="276" class="body muted" text-anchor="middle">sampling intent</text>
 
   <!-- Dynamo serving span. -->
   <rect x="336" y="90" width="524" height="246" rx="12" class="dynamo" stroke-width="2" />
@@ -87,16 +87,16 @@
 
   <!-- Framework-owned evaluation and optimization. -->
   <rect x="940" y="150" width="204" height="150" rx="10" class="framework" stroke-width="1.5" />
-  <text x="960" y="180" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="960" y="220" class="title">Evaluate rollouts</text>
-  <text x="960" y="252" class="body muted">Score trajectories and</text>
-  <text x="960" y="276" class="body muted">apply environment rules</text>
+  <text x="1042" y="180" class="eyebrow muted" text-anchor="middle">RL FRAMEWORK</text>
+  <text x="1042" y="220" class="title" text-anchor="middle">Evaluate rollouts</text>
+  <text x="1042" y="252" class="body muted" text-anchor="middle">Score trajectories and</text>
+  <text x="1042" y="276" class="body muted" text-anchor="middle">apply environment rules</text>
 
   <rect x="1200" y="150" width="204" height="150" rx="10" class="framework" stroke-width="1.5" />
-  <text x="1220" y="180" class="eyebrow muted">RL FRAMEWORK</text>
+  <text x="1302" y="180" class="eyebrow muted" text-anchor="middle">RL FRAMEWORK</text>
   <text x="1302" y="220" class="title" text-anchor="middle">Optimize policy</text>
-  <text x="1302" y="252" class="body-compact muted" text-anchor="middle">Advantages and optimizer</text>
-  <text x="1302" y="276" class="body-compact muted" text-anchor="middle">Checkpoint and acceptance</text>
+  <text x="1302" y="252" class="body-compact muted" text-anchor="middle">Advantages · optimizer</text>
+  <text x="1302" y="276" class="body-compact muted" text-anchor="middle">Checkpoint · acceptance</text>
 
   <!-- Compact ownership legend. -->
   <line x1="48" y1="526" x2="1392" y2="526" class="panel-border" stroke-width="1" />
