@@ -32,6 +32,7 @@
     .title { font-size: 21px; font-weight: 700; }
     .inner-title { font-size: 19px; font-weight: 700; }
     .body { font-size: 14px; }
+    .body-compact { font-size: 13px; }
     .small { font-size: 12px; }
     .arrow-label { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
   </style>
@@ -53,10 +54,10 @@
   <line x1="860" y1="210" x2="936" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
   <text x="898" y="194" class="arrow-label muted" text-anchor="middle">samples</text>
 
-  <line x1="1144" y1="210" x2="1220" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
-  <text x="1182" y="194" class="arrow-label muted" text-anchor="middle">rewards</text>
+  <line x1="1144" y1="210" x2="1196" y2="210" class="line" stroke-width="2" marker-end="url(#arrow)" />
+  <text x="1170" y="194" class="arrow-label muted" text-anchor="middle">rewards</text>
 
-  <path d="M 1314 300 L 1314 432 Q 1314 462 1284 462 L 750 462 Q 720 462 720 432 L 720 336" fill="none" class="line-green" stroke-width="2.5" marker-end="url(#arrow-green)" />
+  <path d="M 1302 300 L 1302 432 Q 1302 462 1272 462 L 750 462 Q 720 462 720 432 L 720 336" fill="none" class="line-green" stroke-width="2.5" marker-end="url(#arrow-green)" />
   <text x="1017" y="450" class="arrow-label accent" text-anchor="middle">updated policy · weight refresh</text>
 
   <!-- Framework-owned inputs. -->
@@ -91,11 +92,11 @@
   <text x="960" y="252" class="body muted">Score trajectories and</text>
   <text x="960" y="276" class="body muted">apply environment rules</text>
 
-  <rect x="1224" y="150" width="180" height="150" rx="10" class="framework" stroke-width="1.5" />
-  <text x="1244" y="180" class="eyebrow muted">RL FRAMEWORK</text>
-  <text x="1244" y="220" class="title">Optimize policy</text>
-  <text x="1244" y="252" class="body muted">Advantages and optimizer</text>
-  <text x="1244" y="276" class="body muted">Checkpoint and acceptance</text>
+  <rect x="1200" y="150" width="204" height="150" rx="10" class="framework" stroke-width="1.5" />
+  <text x="1220" y="180" class="eyebrow muted">RL FRAMEWORK</text>
+  <text x="1302" y="220" class="title" text-anchor="middle">Optimize policy</text>
+  <text x="1302" y="252" class="body-compact muted" text-anchor="middle">Advantages and optimizer</text>
+  <text x="1302" y="276" class="body-compact muted" text-anchor="middle">Checkpoint and acceptance</text>
 
   <!-- Compact ownership legend. -->
   <line x1="48" y1="526" x2="1392" y2="526" class="panel-border" stroke-width="1" />
