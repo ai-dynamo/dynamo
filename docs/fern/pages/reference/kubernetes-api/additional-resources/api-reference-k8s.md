@@ -3343,6 +3343,16 @@ _Appears in:_
 | `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
 | `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
 | `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
+| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  |  |
+| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  |  |
+| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  |  |
+| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  |  |
+| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  |  |
+| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  |  |
+| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  |  |
+| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  |  |
+| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  |  |
+| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  |  |
 
 
 #### IngressConfiguration
