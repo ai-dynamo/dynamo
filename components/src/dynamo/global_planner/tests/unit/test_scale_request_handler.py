@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.global_planner.gpu_cost import GpuCostConfig
 from dynamo.global_planner.orchestrator import PoolIntent
 from dynamo.global_planner.priority import PriorityConfig
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
@@ -1265,9 +1266,12 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
     # the iteration to simulate a concurrent first-time request.
     original = handler.orchestrator.capacity_manager._read_pools
 
-    def _mutating_read(connector):
+    calls: list[str] = []
+
+    def _mutating_read(participant_id, connector, role_hints=None):
         # Inject a new connector mid-iteration. Without the list() snapshot
         # this raises RuntimeError: dictionary changed size during iteration.
+        calls.append(participant_id)
         new_conn = MagicMock()
         new_conn.parent_dgd_name = "racy-dgd"
         new_conn.kube_api = MagicMock()
@@ -1277,12 +1281,17 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
         handler.orchestrator.capacity_manager.connectors.setdefault(
             "default/racy-dgd", new_conn
         )
-        return original(connector)
+        return original(participant_id, connector, role_hints)
 
     handler.orchestrator.capacity_manager._read_pools = _mutating_read  # type: ignore[method-assign]
 
     # Should not raise.
     snapshot = handler.orchestrator.capacity_manager.observe()
+    # observe() swallows per-participant read errors, so a monkeypatch whose
+    # signature does not match would silently never run and this test would
+    # pass while exercising nothing. Assert it actually fired.
+    assert calls, "_read_pools monkeypatch never ran — signature drift"
+    assert "default/racy-dgd" in handler.orchestrator.capacity_manager.connectors
     # The pre-existing key is in the snapshot; the mid-iteration insert
     # may or may not appear (depends on snapshot timing) but the call
     # must complete cleanly.
@@ -1992,3 +2001,92 @@ async def test_busy_pool_is_protected_by_its_condition(mock_runtime):
     prod, batch = await _run_conditional_transfer(mock_runtime, batch_num_requests=900)
     assert prod == {"prefill": 5, "decode": 1}
     assert batch == {"decode": 2}
+
+
+# ---------------------------------------------------------------------------- #
+# Mocker topologies: GPU-free pools taking part in the budget                   #
+# ---------------------------------------------------------------------------- #
+
+# Two mocker DGDs, neither requesting GPUs, priced only by declared cost:
+#   dsv4-flash  2 prefill + 2 decode @ 8 GPU/replica = 32
+#   gpt-oss-120b 2 prefill + 2 decode @ 4 GPU/replica = 16
+# Fixed total of 48, tolerance 8 (the largest per-replica cost) -> band [40, 48].
+_MOCKER_GPU_COST = GpuCostConfig(
+    pools=[
+        {"selector": "default/dsv4-**", "gpu_per_replica": 8},
+        {"selector": "default/gpt-oss-**", "gpu_per_replica": 4},
+    ]
+)
+
+
+def _mocker_handler(mock_runtime, gpu_cost):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dsv4-flash", "default-gpt-oss-120b"],
+        k8s_namespace="default",
+        min_total_gpus=48,
+        max_total_gpus=48,
+        gpu_cost_config=gpu_cost,
+        priority_config=PriorityConfig(
+            pools=[
+                {"selector": "default/dsv4-**", "priority": 900},
+                {"selector": "default/gpt-oss-**", "priority": 10},
+            ]
+        ),
+    )
+    # gpu=None -> the DGD declares no nvidia.com/gpu, exactly like a mocker.
+    dsv4 = _install_connector(
+        handler,
+        "default/dsv4-flash",
+        _dgd_spec(2, 2, prefill_gpu=None, decode_gpu=None),
+        parent_dgd_name="dsv4-flash",
+    )
+    gpt = _install_connector(
+        handler,
+        "default/gpt-oss-120b",
+        _dgd_spec(2, 2, prefill_gpu=None, decode_gpu=None),
+        parent_dgd_name="gpt-oss-120b",
+    )
+    return handler, dsv4, gpt
+
+
+@pytest.mark.asyncio
+async def test_mocker_pools_cannot_be_budgeted_without_declared_cost(mock_runtime):
+    """Without a declared cost a GPU-free pool cannot be read at all, so every
+    scale request fails. This is the gap that made mocker-based testing of the
+    budget impossible."""
+    handler, _, _ = _mocker_handler(mock_runtime, gpu_cost=None)
+    results = await _run(
+        handler, _scale_req(dgd="dsv4-flash", caller_ns="default-dsv4-flash", decode=3)
+    )
+    assert results[0]["status"] == "error"
+    assert "No GPU count specified" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mocker_pools_arbitrate_once_costs_are_declared(mock_runtime):
+    """End to end on a GPU-free topology: an over-ceiling request from the
+    important model is admitted by taking capacity from the expendable one, and
+    the cluster total is unchanged."""
+    handler, dsv4, gpt = _mocker_handler(mock_runtime, gpu_cost=_MOCKER_GPU_COST)
+
+    # gpt-oss has a pending scale-down worth 8 GPUs (2 decode replicas @ 4).
+    handler.orchestrator._intent_cache["default/gpt-oss-120b/decode"] = PoolIntent(
+        last_desired=0, last_seen_at=time.time()
+    )
+
+    # dsv4 wants a third decode replica: +8 GPUs, which alone would hit 56 > 48.
+    results = await _run(
+        handler, _scale_req(dgd="dsv4-flash", caller_ns="default-dsv4-flash", decode=3)
+    )
+    assert results[0]["status"] == "success", results[0]
+
+    def targets(connector):
+        return {
+            t.sub_component_type.value: t.desired_replicas
+            for t in connector.set_component_replicas.call_args[0][0]
+        }
+
+    assert targets(dsv4) == {"decode": 3}
+    assert targets(gpt) == {"decode": 0}
+    # dsv4 (2 + 3) * 8 = 40, gpt-oss-120b (2 + 0) * 4 = 8 -> 48, exactly the budget.

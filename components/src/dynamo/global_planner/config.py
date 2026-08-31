@@ -30,6 +30,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dynamo.global_planner.gpu_cost import GpuCostConfig
 from dynamo.global_planner.priority import PriorityConfig
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,15 @@ class GlobalPlannerConfig(BaseModel):
             "partner. Should be at least 2x the slowest local planner tick so "
             "opposite-direction intents can overlap; throughput scaling ticks "
             "every 180s by default, so 360 covers two ticks."
+        ),
+    )
+
+    gpu_cost: GpuCostConfig = Field(
+        default_factory=GpuCostConfig,
+        description=(
+            "GPU cost per replica for pools whose DGD requests no GPUs, so "
+            "GPU-free deployments such as mocker topologies can take part in "
+            "the budget. A declared cost is a fallback, never an override."
         ),
     )
 
@@ -216,6 +226,13 @@ class GlobalPlannerConfig(BaseModel):
         # pairing, so log it whenever either bound is active.
         if self.budget_enforcement_enabled():
             logger.info(f"Intent cache TTL seconds: {self.intent_cache_ttl_seconds}")
+
+        if self.gpu_cost.pools:
+            logger.info(f"Declared GPU costs: {len(self.gpu_cost.pools)}")
+            for entry in self.gpu_cost.pools:
+                logger.info(f"  {entry.selector} -> {entry.gpu_per_replica} GPU/replica")
+        else:
+            logger.info("Declared GPU costs: none (all pools priced by their DGD)")
 
         logger.info(f"Default pool priority: {self.priority.default}")
         if self.priority.pools:

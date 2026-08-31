@@ -24,6 +24,7 @@ from dynamo.global_planner.capacity_manager import (
     PoolSnapshot,
     PoolSpec,
 )
+from dynamo.global_planner.gpu_cost import GpuCostResolver
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.monitoring.dgd_services import (
@@ -44,8 +45,16 @@ class KubernetesCapacityManager(CapacityManager):
     ``KubernetesConnector`` is cached per participant.
     """
 
-    def __init__(self, namespace: str):
+    def __init__(
+        self,
+        namespace: str,
+        gpu_cost: Optional[GpuCostResolver] = None,
+    ):
         self.namespace = namespace
+        # Declared GPU costs for pools whose DGD requests no GPUs. Defaulting to
+        # an empty resolver preserves the previous behavior exactly: an
+        # unpriced pool still fails the read.
+        self._gpu_cost = gpu_cost or GpuCostResolver()
         # participant_id -> KubernetesConnector
         self.connectors: dict[str, KubernetesConnector] = {}
         # participant_id -> {component_name: planner_role}. Generic ``worker``
@@ -158,6 +167,33 @@ class KubernetesCapacityManager(CapacityManager):
     # Observe                                                            #
     # ------------------------------------------------------------------ #
 
+    def _resolve_gpu_per_replica(
+        self,
+        participant_id: str,
+        pool_key: str,
+        component: dict,
+        service: Service,
+    ) -> int:
+        """GPUs per replica from the DGD, falling back to a declared cost.
+
+        The DGD always wins where it speaks, so a stale or wrong ``gpu_cost``
+        entry can never make the planner under-count real hardware. When
+        neither source has an answer, the original error is re-raised with the
+        second remedy named, since an operator hitting this on a mocker
+        deployment has no way to add GPU limits.
+        """
+        try:
+            return self._gpu_per_replica(component, service)
+        except ValueError as exc:
+            declared = self._gpu_cost.resolve(participant_id, pool_key)
+            if declared is not None:
+                return declared
+            raise ValueError(
+                f"{exc} Alternatively, declare a cost for this pool under "
+                f"'gpu_cost' in the GlobalPlanner config with a selector "
+                f"matching '{participant_id}/{pool_key}'."
+            ) from exc
+
     def observe(self, require_complete: bool = False) -> PoolSnapshot:
         """Read current pool state for every known deployment.
 
@@ -174,7 +210,7 @@ class KubernetesCapacityManager(CapacityManager):
         for key, connector in list(self.connectors.items()):
             try:
                 all_pools[key] = self._read_pools(
-                    connector, self._component_roles.get(key)
+                    key, connector, self._component_roles.get(key)
                 )
             except Exception as e:
                 if require_complete:
@@ -231,6 +267,7 @@ class KubernetesCapacityManager(CapacityManager):
 
     def _read_pools(
         self,
+        participant_id: str,
         connector: KubernetesConnector,
         role_hints: Optional[dict[str, str]] = None,
     ) -> dict[str, PoolSpec]:
@@ -254,7 +291,9 @@ class KubernetesCapacityManager(CapacityManager):
                 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
             ):
                 try:
-                    gpu_per_replica = self._gpu_per_replica(component, service)
+                    gpu_per_replica = self._resolve_gpu_per_replica(
+                        participant_id, component_name, component, service
+                    )
                 except ValueError:
                     if component_type == "":
                         # An untyped non-worker component is not a pool.
@@ -276,7 +315,9 @@ class KubernetesCapacityManager(CapacityManager):
                 gpu_per_replica=(
                     gpu_per_replica
                     if gpu_per_replica is not None
-                    else self._gpu_per_replica(component, service)
+                    else self._resolve_gpu_per_replica(
+                        participant_id, pool_key, component, service
+                    )
                 ),
             )
         return pools
