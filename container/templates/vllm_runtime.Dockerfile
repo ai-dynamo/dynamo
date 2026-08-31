@@ -386,13 +386,18 @@ RUN set -eu; \
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
 # (set above) points imageio at the LGPL CLI copied from wheel_builder. The
 # --no-binary directive lives in the requirements file itself.
+# The upstream vllm-openai base bakes its own uv cache into the image at
+# /opt/uv/cache; the archived wheel copies there duplicate installed packages
+# (and keep stale versions on disk after the floors above refresh them), so
+# drop the cache in the same layer.
 {% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
-        --no-deps --requirement /tmp/requirements.vllm.txt
+        --no-deps --requirement /tmp/requirements.vllm.txt && \
+    rm -rf /opt/uv/cache
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an

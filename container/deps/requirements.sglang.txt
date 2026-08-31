@@ -15,7 +15,15 @@
 --no-binary imageio-ffmpeg
 
 blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
+# The upstream SGLang image pins diffusers at the prior minor via its diffusion
+# extra; move the bundled copy to the current maintained line for the diffusion
+# worker pipelines (bounded: this file installs with --force-reinstall).
+diffusers>=0.38.0,<0.39
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
+# Refresh the upstream image's bundled mooncake wheel: older builds vendor a
+# stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
+# the updated etcd client stack.
+mooncake-transfer-engine>=0.3.13.post1
 # The upstream SGLang image bundles pillow at an older patch release; floor it
 # so the install refreshes it to the current patch line.
 pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall
