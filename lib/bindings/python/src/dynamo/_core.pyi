@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Protocol,
     Sequence,
     Set,
     Tuple,
@@ -2422,6 +2423,88 @@ class _OfflineReplayResult:
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
 
+class ReplaySchedulerMetricsSnapshot(TypedDict):
+    """Rank-local scheduler telemetry at one replay scaling tick.
+
+    Occupancy and request counts are point-in-time state. ``cache_hit_tokens``
+    and ``cache_total_tokens`` cover the interval since the preceding tick.
+    They are currently SGLang-native; a zero total means unavailable rather
+    than a measured zero-percent hit rate.
+    """
+
+    worker_id: int
+    dp_rank: int
+    sampled_at_ms: float
+    active_blocks: int
+    inactive_blocks: int
+    total_blocks: int
+    active_cache_usage: float
+    physical_cache_usage: float
+    running_requests: int
+    waiting_requests: int
+    preemptions_total: int
+    cache_hit_tokens: int
+    cache_total_tokens: int
+
+class ReplayTrafficSnapshot(TypedDict):
+    duration_s: float
+    num_req: int
+    avg_isl: float
+    avg_osl: float
+    avg_ttft_ms: float
+    avg_itl_ms: float
+    shape_count: int
+    ttft_count: int
+    itl_count: int
+    avg_accept_length: Optional[float]
+    avg_kv_hit_rate: float
+    hit_rate_count: int
+    accept_length_forward_count: int
+
+class ReplayScalingSnapshot(TypedDict):
+    """Post-settlement state passed to an offline replay scaling callback.
+
+    Scheduler lists contain one row for every rank of every live worker,
+    including starting and draining workers. Router-pending counts describe
+    requests awaiting placement and are separate from each rank's
+    ``waiting_requests`` scheduler queue.
+    """
+
+    tick_ordinal: int
+    now_ms: float
+    prefill_fpm_snapshots: List[Dict[str, Any]]
+    decode_fpm_snapshots: List[Dict[str, Any]]
+    prefill_scheduler_metrics: List[ReplaySchedulerMetricsSnapshot]
+    decode_scheduler_metrics: List[ReplaySchedulerMetricsSnapshot]
+    router_pending_prefill_requests: int
+    router_pending_decode_requests: int
+    active_prefill_count: int
+    active_decode_count: int
+    active_prefill_ids: List[int]
+    active_decode_ids: List[int]
+    starting_prefill_count: int
+    starting_decode_count: int
+    starting_prefill_ids: List[int]
+    starting_decode_ids: List[int]
+    draining_prefill_count: int
+    draining_decode_count: int
+    draining_prefill_ids: List[int]
+    draining_decode_ids: List[int]
+    non_draining_prefill_count: int
+    non_draining_decode_count: int
+    total_prefill_count: int
+    total_decode_count: int
+    traffic: ReplayTrafficSnapshot
+
+class ReplayScalingDecision(TypedDict):
+    target_prefill: Optional[int]
+    target_decode: Optional[int]
+    next_tick_ms: Optional[float]
+
+class ReplayScalingPolicy(Protocol):
+    def initial_tick_ms(self) -> float: ...
+    def on_tick(self, snapshot: ReplayScalingSnapshot) -> ReplayScalingDecision: ...
+
 @overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
@@ -2474,7 +2557,7 @@ def run_mocker_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
-    scaling_policy: Optional[Any] = None,
+    scaling_policy: Optional[ReplayScalingPolicy] = None,
     agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
@@ -2495,7 +2578,10 @@ def run_mocker_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. Scheduler metric lists in the
+    snapshot contain all live worker/rank rows. Their cache-hit token counters
+    cover the preceding tick window; router-pending counts are placement
+    backlog and are separate from scheduler ``waiting_requests``.
     """
     ...
 
@@ -2549,7 +2635,7 @@ def run_mocker_synthetic_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
-    scaling_policy: Optional[Any] = None,
+    scaling_policy: Optional[ReplayScalingPolicy] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2562,7 +2648,10 @@ def run_mocker_synthetic_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. Scheduler metric lists in the
+    snapshot contain all live worker/rank rows. Their cache-hit token counters
+    cover the preceding tick window; router-pending counts are placement
+    backlog and are separate from scheduler ``waiting_requests``.
     """
     ...
 

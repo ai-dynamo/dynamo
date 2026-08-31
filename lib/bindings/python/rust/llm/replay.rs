@@ -15,6 +15,7 @@ use dynamo_mocker::loadgen::{
 };
 use dynamo_mocker::replay::{
     ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+    SchedulerMetricsSnapshot,
 };
 use parking_lot::Mutex;
 use pyo3::{
@@ -1777,10 +1778,12 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 mod tests {
     use super::{
         build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
-        validate_disagg_replay_mode,
+        scheduler_metrics_to_json, validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
+    use dynamo_mocker::replay::SchedulerMetricsSnapshot;
+    use serde_json::json;
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -1831,6 +1834,44 @@ mod tests {
 
         assert_eq!(snapshots[0]["worker_id"], 2);
         assert_eq!(snapshots[0]["dp_rank"], 3);
+    }
+
+    #[test]
+    fn scheduler_metrics_json_preserves_complete_rank_snapshot() {
+        let snapshots = scheduler_metrics_to_json(vec![SchedulerMetricsSnapshot {
+            worker_id: 2,
+            dp_rank: 3,
+            sampled_at_ms: 1250.0,
+            active_blocks: 11,
+            inactive_blocks: 5,
+            total_blocks: 32,
+            active_cache_usage: 0.34375,
+            physical_cache_usage: 0.5,
+            running_requests: 7,
+            waiting_requests: 4,
+            preemptions_total: 2,
+            cache_hit_tokens: 90,
+            cache_total_tokens: 120,
+        }]);
+
+        assert_eq!(
+            snapshots[0],
+            json!({
+                "worker_id": 2,
+                "dp_rank": 3,
+                "sampled_at_ms": 1250.0,
+                "active_blocks": 11,
+                "inactive_blocks": 5,
+                "total_blocks": 32,
+                "active_cache_usage": 0.34375,
+                "physical_cache_usage": 0.5,
+                "running_requests": 7,
+                "waiting_requests": 4,
+                "preemptions_total": 2,
+                "cache_hit_tokens": 90,
+                "cache_total_tokens": 120,
+            })
+        );
     }
 
     #[test]
@@ -2405,6 +2446,29 @@ fn fpm_snapshots_to_json(
         .collect()
 }
 
+fn scheduler_metrics_to_json(snapshots: Vec<SchedulerMetricsSnapshot>) -> Vec<serde_json::Value> {
+    snapshots
+        .into_iter()
+        .map(|snapshot| {
+            json!({
+                "worker_id": snapshot.worker_id,
+                "dp_rank": snapshot.dp_rank,
+                "sampled_at_ms": snapshot.sampled_at_ms,
+                "active_blocks": snapshot.active_blocks,
+                "inactive_blocks": snapshot.inactive_blocks,
+                "total_blocks": snapshot.total_blocks,
+                "active_cache_usage": snapshot.active_cache_usage,
+                "physical_cache_usage": snapshot.physical_cache_usage,
+                "running_requests": snapshot.running_requests,
+                "waiting_requests": snapshot.waiting_requests,
+                "preemptions_total": snapshot.preemptions_total,
+                "cache_hit_tokens": snapshot.cache_hit_tokens,
+                "cache_total_tokens": snapshot.cache_total_tokens,
+            })
+        })
+        .collect()
+}
+
 /// Reject a goodput SLA threshold that is not a finite, non-negative value;
 /// `None` (unset) is allowed and means "do not gate on this dimension".
 fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
@@ -2486,6 +2550,10 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             now_ms,
             prefill_fpm,
             decode_fpm,
+            prefill_scheduler_metrics,
+            decode_scheduler_metrics,
+            router_pending_prefill_requests,
+            router_pending_decode_requests,
             traffic,
             active_prefill_ids,
             active_decode_ids,
@@ -2504,6 +2572,14 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                 "now_ms": now_ms,
                 "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
                 "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
+                "prefill_scheduler_metrics": scheduler_metrics_to_json(
+                    prefill_scheduler_metrics
+                ),
+                "decode_scheduler_metrics": scheduler_metrics_to_json(
+                    decode_scheduler_metrics
+                ),
+                "router_pending_prefill_requests": router_pending_prefill_requests,
+                "router_pending_decode_requests": router_pending_decode_requests,
                 "active_prefill_count": active_prefill_ids.len(),
                 "active_decode_count": active_decode_ids.len(),
                 "active_prefill_ids": active_prefill_ids,

@@ -78,6 +78,24 @@ def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
     }
 
 
+def _scheduler_snap(worker_id: int, dp_rank: int = 0) -> dict:
+    return {
+        "worker_id": worker_id,
+        "dp_rank": dp_rank,
+        "sampled_at_ms": 1_250.0,
+        "active_blocks": 11,
+        "inactive_blocks": 5,
+        "total_blocks": 32,
+        "active_cache_usage": 0.34375,
+        "physical_cache_usage": 0.5,
+        "running_requests": 7,
+        "waiting_requests": 4,
+        "preemptions_total": 2,
+        "cache_hit_tokens": 90,
+        "cache_total_tokens": 120,
+    }
+
+
 def test_fpm_cache_keeps_all_ranks_for_each_active_worker():
     cache = {}
     snapshots = [
@@ -111,6 +129,32 @@ def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
     )
 
     assert set(cache) == {("0", 0), ("2", 0)}
+
+
+def test_scheduler_telemetry_record_preserves_snapshot_without_aliasing():
+    prefill = _scheduler_snap(worker_id=1)
+    decode = _scheduler_snap(worker_id=2, dp_rank=3)
+    result = {
+        "prefill_scheduler_metrics": [prefill],
+        "decode_scheduler_metrics": [decode],
+        "router_pending_prefill_requests": 6,
+        "router_pending_decode_requests": 9,
+    }
+
+    record = ReplayPlannerAdapter._scheduler_telemetry_record(result)
+
+    assert record == result
+    prefill["waiting_requests"] = 99
+    assert record["prefill_scheduler_metrics"][0]["waiting_requests"] == 4
+
+
+def test_scheduler_telemetry_record_defaults_new_fields_for_old_snapshots():
+    assert ReplayPlannerAdapter._scheduler_telemetry_record({}) == {
+        "prefill_scheduler_metrics": [],
+        "decode_scheduler_metrics": [],
+        "router_pending_prefill_requests": 0,
+        "router_pending_decode_requests": 0,
+    }
 
 
 def _orch_agg_config_sla() -> PlannerConfig:

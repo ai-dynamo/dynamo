@@ -64,7 +64,7 @@ impl OfflineDisaggReplayConfig {
 
 pub use aisimulate_core::replay::TrafficStats;
 pub use aisimulate_core::replay::{
-    ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+    ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot, SchedulerMetricsSnapshot,
 };
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,

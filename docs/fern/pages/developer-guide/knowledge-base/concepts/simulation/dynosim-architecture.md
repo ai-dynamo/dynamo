@@ -130,7 +130,7 @@ Prometheus. On each Planner traffic tick, the adapter reports:
 
 | Replay metric | Planner meaning |
 |---|---|
-| `num_req` | Completed requests in the observation window |
+| `num_req` | Requests arriving at the replay runtime in the observation window |
 | `avg_isl` / `avg_osl` | Mean raw input and output lengths |
 | `avg_kv_hit_rate` | Mean router prefix-cache hit rate at admission |
 | `avg_accept_length` | Mean visible output tokens per decode request-forward |
@@ -138,6 +138,21 @@ Prometheus. On each Planner traffic tick, the adapter reports:
 KV hit rate and speculative accept length use last-value semantics in the Planner. Missing accept
 length samples preserve the previous valid value. Without valid speculative-decoding metadata, the
 effective accept length is `1.0`.
+
+The lower-level Python scaling callback receives a `ReplayScalingSnapshot` at every scaling tick.
+Its `prefill_scheduler_metrics` and `decode_scheduler_metrics` lists contain one row for every data
+parallel rank of every live worker, including workers that are starting or draining. Block
+occupancy, cache utilization, running requests, waiting requests, and cumulative preemptions are
+point-in-time scheduler state sampled at `sampled_at_ms`. `cache_hit_tokens` and
+`cache_total_tokens` are SGLang-native interval counters covering the window since the preceding
+scaling tick. A zero total means that scheduler reuse is unavailable, rather than a measured 0%.
+
+The callback also reports `router_pending_prefill_requests` and
+`router_pending_decode_requests`. These count requests accepted by replay but still awaiting worker
+placement; they are separate from each scheduler row's `waiting_requests`, which counts requests
+already assigned to that worker/rank. Planner's adapter does not use these observability fields to
+make decisions, but detailed Planner replay reports preserve them on each tick for timeline
+analysis.
 
 Speculative decoding changes the Planner's effective decode latency and capacity calculations. It
 does not rewrite raw output length, which remains the input for KV residency, context-length, and

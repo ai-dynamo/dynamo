@@ -131,6 +131,70 @@ def test_planner_callback_error_preserves_python_exception_type(callback_method)
         )
 
 
+def test_scaling_callback_receives_complete_scheduler_metrics_contract():
+    class _CapturingPolicy:
+        def __init__(self):
+            self.snapshots = []
+
+        def initial_tick_ms(self):
+            return 0.0
+
+        def on_tick(self, snapshot):
+            self.snapshots.append(snapshot)
+            return {
+                "target_prefill": None,
+                "target_decode": None,
+                "next_tick_ms": None,
+            }
+
+    policy = _CapturingPolicy()
+    run_mocker_synthetic_trace_replay(
+        64,
+        16,
+        4,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            num_gpu_blocks=32,
+            speedup_ratio=1000.0,
+        ),
+        num_workers=2,
+        replay_concurrency=2,
+        scaling_policy=policy,
+    )
+
+    assert len(policy.snapshots) == 1
+    snapshot = policy.snapshots[0]
+    assert snapshot["prefill_scheduler_metrics"] == []
+    live_decode_ids = {
+        *snapshot["active_decode_ids"],
+        *snapshot["starting_decode_ids"],
+        *snapshot["draining_decode_ids"],
+    }
+    rows = snapshot["decode_scheduler_metrics"]
+    assert {(row["worker_id"], row["dp_rank"]) for row in rows} == {
+        (worker_id, 0) for worker_id in live_decode_ids
+    }
+    assert set(rows[0]) == {
+        "worker_id",
+        "dp_rank",
+        "sampled_at_ms",
+        "active_blocks",
+        "inactive_blocks",
+        "total_blocks",
+        "active_cache_usage",
+        "physical_cache_usage",
+        "running_requests",
+        "waiting_requests",
+        "preemptions_total",
+        "cache_hit_tokens",
+        "cache_total_tokens",
+    }
+    assert all(row["sampled_at_ms"] == snapshot["now_ms"] for row in rows)
+    assert all(row["total_blocks"] == 32 for row in rows)
+    assert isinstance(snapshot["router_pending_prefill_requests"], int)
+    assert isinstance(snapshot["router_pending_decode_requests"], int)
+
+
 class _DisabledScalingPolicy:
     def initial_tick_ms(self):
         return float("inf")

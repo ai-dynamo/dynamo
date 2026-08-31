@@ -143,6 +143,15 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
     assert report.coverage["capture_per_request"] is False
     assert report.planner.total_ticks == len(report.planner.ticks)
     assert report.planner.total_ticks > 0
+    for tick in report.planner.ticks:
+        assert tick["prefill_scheduler_metrics"] == []
+        assert {row["worker_id"] for row in tick["decode_scheduler_metrics"]} == {
+            *tick["topology"]["decode"]["active"],
+            *tick["topology"]["decode"]["starting"],
+            *tick["topology"]["decode"]["draining"],
+        }
+        assert isinstance(tick["router_pending_prefill_requests"], int)
+        assert isinstance(tick["router_pending_decode_requests"], int)
     events = [
         (event.component, event.from_count, event.to_count)
         for event in report.planner.scaling_events
