@@ -458,7 +458,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
+			require.NoError(t, backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer))
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {

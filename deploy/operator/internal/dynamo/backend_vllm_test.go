@@ -1142,7 +1142,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
 			initialVolCount := len(tt.initialPodSpec.Volumes)
-			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
+			g.Expect(backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)).To(gomega.Succeed())
 
 			if tt.expectInitContainer {
 				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
