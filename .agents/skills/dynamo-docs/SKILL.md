@@ -414,10 +414,12 @@ when the user has requested or authorized the external contribution.
      --json url,state,isDraft,body,baseRefName,headRefName,headRefOid
    ```
 
-   Confirm that `state` is `OPEN`, the URL contains `/pull/<number>`, the base, head branch, and commit
-   are the intended ones, and the body contains no template placeholders before handing it off. If the
-   PR is closed, reopen it when appropriate or create a new PR; if it is merged, create a new PR for
-   remaining changes or report that no active PR exists. Never present an inactive PR as reviewable.
+   Confirm that `state` is `OPEN`, `isDraft` matches the intended draft or ready-for-review state, the
+   URL contains `/pull/<number>`, and the base, head branch, and commit are the intended ones. Confirm
+   that the submitted body contains explicit `Summary` and `Validation` sections, every other
+   applicable template section, and no template placeholders. If the PR is closed, reopen it when
+   appropriate or create a new PR; if it is merged, create a new PR for remaining changes or report
+   that no active PR exists. Never present an inactive PR as reviewable.
 5. Report the PR's actual review and check state. Use the `pr-monitor` skill when CI diagnosis or
    continued monitoring is requested.
 
