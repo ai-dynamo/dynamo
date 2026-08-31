@@ -266,8 +266,9 @@ error-sweeper-direct.txt
 ```
 
 Composed inputs and Candidates are useful for explaining a diff, but are not stable API outputs or
-goldens. No custom report schema is defined; process output and the test framework carry execution
-status.
+goldens. An optional `report.json` records generation and live-validation status for contributors
+and CI artifacts. Reports are execution evidence, not comparison inputs, and never determine
+whether a generated DGD matches a golden.
 
 Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
 CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
@@ -293,5 +294,5 @@ The comparison does not require:
 - performance equivalence or benchmarking;
 - case-local hardware declarations;
 - a separate recipe hierarchy;
-- a custom report archive; or
+- a required or authoritative report archive; or
 - post-generation patches that hide an invalid generator result.

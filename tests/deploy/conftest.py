@@ -257,6 +257,7 @@ def _build_test_matrix(targets: List[DeploymentTarget]) -> Dict[str, List[str]]:
 ALL_DEPLOYMENT_TARGETS = _collect_all_targets()
 DEPLOY_TEST_MATRIX = _build_test_matrix(ALL_DEPLOYMENT_TARGETS)
 _deploy_test_failed_key: pytest.StashKey[bool] = pytest.StashKey()
+_deploy_test_call_report_key: pytest.StashKey[pytest.TestReport] = pytest.StashKey()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -264,10 +265,12 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     """Expose the call outcome to resource-owning deploy fixtures."""
 
     outcome = yield
+    report = outcome.get_result()
+    if call.when == "call":
+        item.stash[_deploy_test_call_report_key] = report
     if call.when in ("setup", "call"):
         item.stash[_deploy_test_failed_key] = (
-            item.stash.get(_deploy_test_failed_key, False)
-            or outcome.get_result().failed
+            item.stash.get(_deploy_test_failed_key, False) or report.failed
         )
 
 
