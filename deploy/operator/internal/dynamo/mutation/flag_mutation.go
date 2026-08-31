@@ -90,13 +90,7 @@ func (m EnsureFlagMutation) Apply(container *corev1.Container) error {
 	if ContainerCommandLineHasArg(container, m.Flag, m.Value) {
 		return nil
 	}
-	return (AddFlagMutation{
-		ContainerName: m.ContainerName,
-		Flag:          m.Flag,
-		Value:         m.Value,
-		NeedsShell:    m.NeedsShell,
-		Framework:     m.Framework,
-	}).Apply(container)
+	return AddFlagMutation(m).Apply(container)
 }
 
 // EnsureArgsFlagMutation adds one flag/value pair unless that exact pair
@@ -114,13 +108,7 @@ func (m EnsureArgsFlagMutation) Apply(container *corev1.Container) error {
 	if ContainerHasArg(container, m.Flag, m.Value) {
 		return nil
 	}
-	return (AddFlagMutation{
-		ContainerName: m.ContainerName,
-		Flag:          m.Flag,
-		Value:         m.Value,
-		NeedsShell:    m.NeedsShell,
-		Framework:     m.Framework,
-	}).Apply(container)
+	return AddFlagMutation(m).Apply(container)
 }
 
 func flagAndValue(flag, value string) string {
