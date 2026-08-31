@@ -9,16 +9,16 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash - an MOE model (320B total / 18B active) with hybrid sparse-and-linear attention and Manifold-Constrained Hyper-Connections (mHC). All targets load the same FP8-quantized checkpoint with BF16 KV cache. The GB200 targets use TP4 workers with a 128K-token context. The H200 targets use MTP7 speculative decoding and TP8 workers with up to a 1M-token context. Pick your GPU architecture and serving topology.
+Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash, a GLA/KDA hybrid-attention model. All targets load the same FP8-quantized checkpoint with BF16 KV cache and support up to 1,048,576 tokens of context. The GB200 targets use TP4 workers over MNNVL. The H200 targets add MTP7 speculative decoding and TP8 workers. Pick your GPU architecture and serving topology.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
-<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" defaultChecked />
-<label htmlFor="recipe-sku-h200">H200 <span className="dynamo-target-picker-hint">Recommended</span></label>
-<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
-<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200 <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -49,7 +49,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash 
 <span><b>GPUs</b> 4x GB200, one worker</span>
 <span><b>Parallelism</b> TP4 over MNNVL</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Context</b> Up to 128,000 tokens</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
@@ -57,7 +57,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash 
 <span><b>GPUs</b> 4x GB200 prefill + 4x GB200 decode</span>
 <span><b>Parallelism</b> TP4 prefill / TP4 decode over MNNVL</span>
 <span><b>Routing</b> KV-aware, NIXL/UCX KV transfer over TCP</span>
-<span><b>Context</b> Up to 128,000 tokens</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
 </div>
 
@@ -92,7 +92,7 @@ kubectl create secret generic hf-token-secret \
 ```
 
 <Warning>
-Edit namespace, node selectors, tolerations, storage, image tags, and resource claims in the manifests to match your cluster. The H200 manifests contain explicit `metadata.namespace` values; the `-n` flag does not override them.
+Edit namespace, node selectors, tolerations, storage, image tags, and resource claims in the manifests to match your cluster.
 </Warning>
 
 ## Deploy
@@ -102,7 +102,7 @@ All four targets read the checkpoint from the `model-cache` PVC with `HF_HUB_OFF
 <div data-sku="h200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml
+kubectl apply -f recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -110,7 +110,7 @@ kubectl apply -f recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml
 <div data-sku="h200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml
+kubectl apply -f recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -164,7 +164,7 @@ kubectl port-forward svc/glm53-flash-agg-gb200-agentic-frontend 8000:8000 -n ${N
 <div data-sku="gb200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/glm53-flash-disagg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/glm53-flash-disagg-gb200-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -190,7 +190,7 @@ All four targets serve the same FP8-quantized GLM-5.3-Flash checkpoint on vLLM w
 | **Parallelism** | TP4 | TP4 prefill / TP4 decode | TP8 | TP8 prefill / TP8 decode |
 | **Precision** | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV |
 | **Speculation** | None | None | MTP7 | MTP7 on prefill and decode |
-| **Maximum context** | 128,000 | 128,000 | 1,048,576 | 1,048,576 |
+| **Maximum context** | 1,048,576 | 1,048,576 | 1,048,576 | 1,048,576 |
 | **Maximum sequences** | 256 | 32 prefill / 256 decode | 32 | 16 prefill / 128 decode |
 | **Maximum batched tokens** | 8,192 | 16,384 prefill / 8,192 decode | 8,192 | 8,192 prefill / 2,048 decode |
 | **GPU memory utilization** | 0.92 | 0.92 prefill / 0.92 decode | 0.80 | 0.80 prefill / 0.85 decode |
