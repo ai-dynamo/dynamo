@@ -617,11 +617,24 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_AcceptsSGLang(t *testing.T) {
+	t.Log("SGLang needs only the backend-agnostic engine/lock wiring, no overrides")
 	ps := intraPodFailoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang, failoverEngineCount)
+	require.NoError(t, err)
+
+	// 2 engines + 1 preserved sidecar, same shape as the vLLM case.
+	assert.Len(t, ps.Containers, 3)
+	assert.Equal(t, "engine-0", ps.Containers[0].Name)
+	assert.Equal(t, "engine-1", ps.Containers[1].Name)
+	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
+}
+
+func TestBuildFailoverPod_RejectsUnsupportedBackend(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM, failoverEngineCount)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "currently supported only for vLLM and SGLang")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
@@ -919,6 +932,106 @@ func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
 	})
 }
 
+func sglangFailoverContainer(gpus string, args ...string) corev1.Container {
+	base := []string{"python3", "-m", sglangModuleName, "--model-path", "/m"}
+	return corev1.Container{
+		Name: commonconsts.MainContainerName,
+		Args: append(base, args...),
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"nvidia.com/gpu": k8sresource.MustParse(gpus),
+			},
+		},
+	}
+}
+
+func TestValidateSGLangAutomaticSnapshotProfile(t *testing.T) {
+	t.Run("accepts single-node TEP where tp matches the GPU count", func(t *testing.T) {
+		// This is the shape the TP=8 recovery matrix runs. The vLLM profile
+		// already allows TEP; SGLang must match rather than pin tp to 1.
+		c := sglangFailoverContainer("8", "--tp-size", "8")
+		assert.Empty(t, validateSGLangAutomaticSnapshotProfile(&c, 8))
+	})
+
+	t.Run("accepts every spelling SGLang itself accepts for tp", func(t *testing.T) {
+		// ServerArgs declares --tp-size with a --tensor-parallel-size alias and
+		// leaves argparse abbreviation on, so --tp resolves too. Shipping
+		// recipes use --tp; rejecting it would fail valid manifests.
+		for _, spelling := range []string{"--tp-size", "--tensor-parallel-size", "--tp"} {
+			c := sglangFailoverContainer("8", spelling, "8")
+			assert.Empty(
+				t,
+				validateSGLangAutomaticSnapshotProfile(&c, 8),
+				"tp spelling %s must be accepted", spelling,
+			)
+		}
+	})
+
+	t.Run("rejects tp that disagrees with the GPU count", func(t *testing.T) {
+		c := sglangFailoverContainer("8", "--tp-size", "4")
+		violations := validateSGLangAutomaticSnapshotProfile(&c, 8)
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Error(), "tensor parallel size must match")
+	})
+
+	t.Run("rejects data and pipeline parallelism", func(t *testing.T) {
+		// Either one spans multiple engine processes with independent CUDA
+		// contexts, which the single-target capture cannot represent.
+		c := sglangFailoverContainer("8", "--tp-size", "8", "--dp-size", "2")
+		assert.NotEmpty(t, validateSGLangAutomaticSnapshotProfile(&c, 8))
+
+		c = sglangFailoverContainer("8", "--tp-size", "8", "--pp-size", "2")
+		assert.NotEmpty(t, validateSGLangAutomaticSnapshotProfile(&c, 8))
+	})
+
+	t.Run("requires a direct dynamo.sglang module command", func(t *testing.T) {
+		c := sglangFailoverContainer("1")
+		c.Args = []string{"bash", "-c", "python3 -m dynamo.sglang --tp-size 1"}
+		violations := validateSGLangAutomaticSnapshotProfile(&c, 1)
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Error(), "direct python -m dynamo.sglang")
+	})
+}
+
+func TestPrepareSGLangAutomaticFailoverSnapshotSource(t *testing.T) {
+	t.Run("selects GMS V1 and the tcp request plane", func(t *testing.T) {
+		c := sglangFailoverContainer("8", "--tp-size", "8")
+		c.Env = []corev1.EnvVar{
+			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "9100"},
+			{Name: "KEEP_ME", Value: "yes"},
+		}
+
+		require.NoError(t, PrepareSGLangAutomaticFailoverSnapshotSource(&c, 8))
+		env := envToMap(c.Env)
+		assert.NotContains(t, env, "DYN_FORWARDPASS_METRIC_PORT")
+		assert.Equal(t, "true", env[gms.EnvUseV1])
+		assert.Equal(t, "tcp", env["DYN_REQUEST_PLANE"])
+		assert.Equal(t, "yes", env["KEEP_ME"])
+	})
+
+	t.Run("leaves the source unchanged when the profile is invalid", func(t *testing.T) {
+		c := sglangFailoverContainer("8", "--tp-size", "4")
+		original := c.DeepCopy()
+		require.Error(t, PrepareSGLangAutomaticFailoverSnapshotSource(&c, 8))
+		assert.Equal(t, *original, c)
+	})
+}
+
+func TestPrepareAutomaticFailoverSnapshotSource_DispatchesByBackend(t *testing.T) {
+	t.Run("rejects an unsupported backend", func(t *testing.T) {
+		c := sglangFailoverContainer("1", "--tp-size", "1")
+		err := PrepareAutomaticFailoverSnapshotSource(&c, BackendFrameworkTRTLLM)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only for vLLM and SGLang")
+	})
+
+	t.Run("routes sglang through the sglang profile", func(t *testing.T) {
+		c := sglangFailoverContainer("8", "--tp-size", "8")
+		require.NoError(t, PrepareAutomaticFailoverSnapshotSource(&c, BackendFrameworkSGLang))
+		assert.Equal(t, "true", envToMap(c.Env)[gms.EnvUseV1])
+	})
+}
+
 func TestIsDGDControlled(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: types.UID("graph-uid")},
@@ -998,7 +1111,7 @@ func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedS
 
 func vllmFlagValue(t *testing.T, args []string, flag string) string {
 	t.Helper()
-	value, _, _, found, err := tokenizedVLLMFlag(args, flag)
+	value, _, _, found, err := tokenizedFlag(args, flag)
 	require.NoError(t, err)
 	require.True(t, found)
 	return value

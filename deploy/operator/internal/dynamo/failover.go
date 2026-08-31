@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -402,12 +403,13 @@ var intraPodFailoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failov
 const (
 	failoverEngineCount                    = 2
 	vllmModuleName                         = "dynamo.vllm"
+	sglangModuleName                       = "dynamo.sglang"
 	vllmLoadFormatFlag                     = "--load-format"
 	vllmWorkerClassFlag                    = "--worker-cls"
 	gmsV0VLLMWorkerClass                   = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 	gmsV0VLLMWorkerClassAlt                = "gpu_memory_service.integrations.vllm.worker:GMSWorker"
 	gmsV1VLLMWorkerClass                   = "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
-	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint"
+	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint"
 )
 
 // IsDGDControlled reports whether a DCD has an exact DynamoGraphDeployment
@@ -489,8 +491,9 @@ func validateAutomaticFailoverCheckpointProfile(
 	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
 		violations = append(violations, errors.New("targetContainerName must be main"))
 	}
-	if BackendFramework(backendFramework) != BackendFrameworkVLLM {
-		violations = append(violations, errors.New("backendFramework must be vllm"))
+	backend := BackendFramework(backendFramework)
+	if backend != BackendFrameworkVLLM && backend != BackendFrameworkSGLang {
+		violations = append(violations, errors.New("backendFramework must be vllm or sglang"))
 	}
 	if component.ComponentType != v1beta1.ComponentTypeWorker {
 		violations = append(violations, errors.New("component type must be Worker"))
@@ -528,31 +531,56 @@ func validateAutomaticFailoverCheckpointProfile(
 		violations = append(violations, errors.New("main container must request at least one GPU"))
 		gpuCount = 1
 	}
-	if err := configureVLLMAutomaticSnapshotLoadProfile(main.DeepCopy()); err != nil {
-		violations = append(violations, err)
-		return violations
-	}
-	for _, profile := range []struct {
-		flag         string
-		defaultValue string
-		want         string
-		description  string
-	}{
-		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
-		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
-		{
-			flag:         tensorParallelSizeFlag,
-			defaultValue: "1",
-			want:         strconv.FormatInt(int64(gpuCount), 10),
-			description:  "tensor parallel size must match the main container GPU count",
-		},
-		{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
-		{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
-	} {
-		value, _, _, found, err := tokenizedVLLMFlag(main.Args, profile.flag)
-		if err != nil {
+	switch backend {
+	case BackendFrameworkVLLM:
+		if err := configureVLLMAutomaticSnapshotLoadProfile(main.DeepCopy()); err != nil {
 			violations = append(violations, err)
-			continue
+			return violations
+		}
+		violations = append(violations, validateAutomaticSnapshotFlags(main.Args, []automaticSnapshotFlag{
+			{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
+			{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
+			{
+				flag:         tensorParallelSizeFlag,
+				defaultValue: "1",
+				want:         strconv.FormatInt(int64(gpuCount), 10),
+				description:  "tensor parallel size must match the main container GPU count",
+			},
+			{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+			{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+		})...)
+	case BackendFrameworkSGLang:
+		violations = append(violations, validateSGLangAutomaticSnapshotProfile(main, gpuCount)...)
+	}
+	return violations
+}
+
+type automaticSnapshotFlag struct {
+	flag         string
+	defaultValue string
+	want         string
+	description  string
+}
+
+func validateAutomaticSnapshotFlags(args []string, profiles []automaticSnapshotFlag) []error {
+	var violations []error
+	for _, profile := range profiles {
+		spellings, ok := sglangFlagAliases[profile.flag]
+		if !ok {
+			spellings = []string{profile.flag}
+		}
+		value, found := "", false
+		for _, spelling := range spellings {
+			v, _, _, f, err := tokenizedFlag(args, spelling)
+			if err != nil {
+				violations = append(violations, err)
+				found = true
+				break
+			}
+			if f {
+				value, found = v, true
+				break
+			}
 		}
 		if !found {
 			value = profile.defaultValue
@@ -562,6 +590,35 @@ func validateAutomaticFailoverCheckpointProfile(
 		}
 	}
 	return violations
+}
+
+// validateSGLangAutomaticSnapshotProfile mirrors the vLLM profile in SGLang's
+// flag taxonomy. Single-node tensor+expert parallel (TEP) is allowed on the
+// same terms as vLLM: tensor parallel size must match the pod GPU count, while
+// pipeline and data parallel stay at 1 because either one spans multiple engine
+// processes with independent CUDA contexts, which the single-target capture
+// cannot represent.
+func validateSGLangAutomaticSnapshotProfile(container *corev1.Container, gpuCount int32) []error {
+	if !isDirectDynamoModuleCommand(container, sglangModuleName) {
+		return []error{fmt.Errorf(
+			"requires a direct python -m %s command with tokenized arguments (command=%q args=%q)",
+			sglangModuleName,
+			container.Command,
+			container.Args,
+		)}
+	}
+	return validateAutomaticSnapshotFlags(container.Args, []automaticSnapshotFlag{
+		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
+		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
+		{
+			flag:         sglangTensorParallelSizeFlag,
+			defaultValue: "1",
+			want:         strconv.FormatInt(int64(gpuCount), 10),
+			description:  "tensor parallel size must match the main container GPU count",
+		},
+		{flag: sglangDataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+		{flag: sglangPipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+	})
 }
 
 func wrapFailoverCompatibilityViolations(violations []error) []error {
@@ -592,6 +649,57 @@ func PrepareVLLMAutomaticFailoverSnapshotSource(container *corev1.Container) err
 	return nil
 }
 
+// PrepareAutomaticFailoverSnapshotSource applies the checkpoint-source changes
+// for whichever inference engine the component runs. Callers stay
+// backend-neutral; the per-engine differences live here.
+func PrepareAutomaticFailoverSnapshotSource(
+	container *corev1.Container,
+	backendFramework BackendFramework,
+) error {
+	if container == nil {
+		return fmt.Errorf("automatic failover snapshot source container is nil")
+	}
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		return PrepareVLLMAutomaticFailoverSnapshotSource(container)
+	case BackendFrameworkSGLang:
+		gpuCount, err := getGPUCount(container.Resources)
+		if err != nil {
+			return fmt.Errorf("automatic failover snapshot source: main container GPU resources are invalid: %w", err)
+		}
+		if gpuCount < 1 {
+			return fmt.Errorf("automatic failover snapshot source: main container must request at least one GPU")
+		}
+		return PrepareSGLangAutomaticFailoverSnapshotSource(container, gpuCount)
+	default:
+		return fmt.Errorf(
+			"failover is currently supported only for vLLM and SGLang (detected: %s)",
+			backendFramework,
+		)
+	}
+}
+
+// PrepareSGLangAutomaticFailoverSnapshotSource selects the GMS V1 snapshot
+// plugin without adding destination-only election state to the source process.
+// SGLang needs no worker-class or load-format rewrite: the GMS V1 hooks install
+// themselves from the engine process when DYN_GMS_USE_V1 is set.
+func PrepareSGLangAutomaticFailoverSnapshotSource(container *corev1.Container, gpuCount int32) error {
+	if container == nil {
+		return fmt.Errorf("automatic failover snapshot source container is nil")
+	}
+	if violations := validateSGLangAutomaticSnapshotProfile(container, gpuCount); len(violations) > 0 {
+		return fmt.Errorf("automatic failover snapshot source: %w", errors.Join(violations...))
+	}
+	updated := container.DeepCopy()
+	removeEnvVar(updated, "DYN_FORWARDPASS_METRIC_PORT")
+	gms.EnableV1(updated)
+	updated.Env = MergeEnvs(updated.Env, []corev1.EnvVar{
+		{Name: "DYN_REQUEST_PLANE", Value: "tcp"},
+	})
+	*container = *updated
+	return nil
+}
+
 func configureVLLMAutomaticSnapshotLoadProfile(container *corev1.Container) error {
 	if !isDirectDynamoVLLMCommand(container) {
 		return fmt.Errorf(
@@ -605,13 +713,13 @@ func configureVLLMAutomaticSnapshotLoadProfile(container *corev1.Container) erro
 		return fmt.Errorf("arguments after -- are unsupported")
 	}
 
-	workerClass, _, _, _, err := tokenizedVLLMFlag(container.Args, vllmWorkerClassFlag)
+	workerClass, _, _, _, err := tokenizedFlag(container.Args, vllmWorkerClassFlag)
 	if err != nil {
 		return err
 	}
 	switch workerClass {
 	case gmsV1VLLMWorkerClass:
-		loadFormat, _, _, found, err := tokenizedVLLMFlag(container.Args, vllmLoadFormatFlag)
+		loadFormat, _, _, found, err := tokenizedFlag(container.Args, vllmLoadFormatFlag)
 		if err != nil {
 			return err
 		}
@@ -632,31 +740,35 @@ func configureVLLMAutomaticSnapshotLoadProfile(container *corev1.Container) erro
 }
 
 func isDirectDynamoVLLMCommand(container *corev1.Container) bool {
+	return isDirectDynamoModuleCommand(container, vllmModuleName)
+}
+
+func isDirectDynamoModuleCommand(container *corev1.Container, module string) bool {
 	args := container.Args
 	switch {
 	case len(container.Command) == 0 &&
 		len(args) >= 3 &&
 		isPythonCommand(args[0]) &&
 		args[1] == "-m" &&
-		args[2] == vllmModuleName:
+		args[2] == module:
 		return true
 	case len(container.Command) == 1 &&
 		isPythonCommand(container.Command[0]) &&
 		len(args) >= 2 &&
 		args[0] == "-m" &&
-		args[1] == vllmModuleName:
+		args[1] == module:
 		return true
 	case len(container.Command) == 3 &&
 		isPythonCommand(container.Command[0]) &&
 		container.Command[1] == "-m" &&
-		container.Command[2] == vllmModuleName:
+		container.Command[2] == module:
 		return true
 	default:
 		return false
 	}
 }
 
-func tokenizedVLLMFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
+func tokenizedFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
 	index = -1
 	for i, arg := range args {
 		switch {
@@ -683,7 +795,7 @@ func tokenizedVLLMFlag(args []string, flag string) (value string, index int, equ
 }
 
 func upsertTokenizedVLLMFlag(args []string, flag, value string) ([]string, error) {
-	_, index, equalsForm, found, err := tokenizedVLLMFlag(args, flag)
+	_, index, equalsForm, found, err := tokenizedFlag(args, flag)
 	if err != nil {
 		return nil, err
 	}
@@ -783,8 +895,14 @@ func buildFailoverPod(
 		if err := applyVLLMOverrides(updated, numberOfNodes); err != nil {
 			return err
 		}
+	case BackendFrameworkSGLang:
+		// SGLang needs only the backend-agnostic engine identity, health and
+		// failover-lock wiring applied above. GMS V1 is selected on the
+		// checkpoint source before the shadow containers are cloned, and the
+		// engine elects itself via the process-lifetime flock in
+		// dynamo.common.snapshot.lifecycle.wake_restored_engine.
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is currently supported only for vLLM and SGLang (detected: %s)", backendFramework)
 	}
 
 	*podSpec = *updated

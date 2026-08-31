@@ -266,7 +266,10 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		return nil, err
 	}
 	if dynamo.IsIntraPodFailoverEnabled(component) {
-		if err := dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer); err != nil {
+		if err := dynamo.PrepareAutomaticFailoverSnapshotSource(
+			targetContainer,
+			backendFramework,
+		); err != nil {
 			return nil, err
 		}
 	}

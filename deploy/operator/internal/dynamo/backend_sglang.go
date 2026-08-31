@@ -11,7 +11,25 @@ import (
 
 const (
 	SglangPort = "29500"
+
+	// SGLang parallelism flags. SGLang's canonical spellings are --tp-size,
+	// --dp-size and --pp-size, but ServerArgs also declares the long vLLM-style
+	// aliases, and its parser leaves argparse abbreviation enabled so the short
+	// --tp / --dp / --pp forms resolve too. Shipping recipes use the short
+	// forms, so snapshot validation has to accept every spelling or it would
+	// reject valid manifests.
+	sglangTensorParallelSizeFlag   = "--tp-size"
+	sglangDataParallelSizeFlag     = "--dp-size"
+	sglangPipelineParallelSizeFlag = "--pp-size"
 )
+
+// sglangFlagAliases maps a canonical SGLang flag to every spelling that SGLang
+// itself accepts for it.
+var sglangFlagAliases = map[string][]string{
+	sglangTensorParallelSizeFlag:   {"--tp-size", "--tensor-parallel-size", "--tp"},
+	sglangDataParallelSizeFlag:     {"--dp-size", "--data-parallel-size", "--dp"},
+	sglangPipelineParallelSizeFlag: {"--pp-size", "--pipeline-parallel-size", "--pp"},
+}
 
 type SGLangBackend struct{}
 
