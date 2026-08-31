@@ -238,12 +238,15 @@ Benchmarked on B200, AIPerf trace-replay with 64K agentic trace (15% subset, 3,5
 |----------------------|------|---------|------|-------------|---------------------|---------------|-------------------------|---------------|--------------|-----------------|
 | Aggregated (15% subset) | B200 | 1 (TP4)  | 4  | 24 | 1,830  | 457.4 | 102.8 | 329 | 9.7 | 67.9% |
 | Aggregated (15% subset) | B200 | 2 (TP4×2) | 8  | 24 | 2,474  | 309.3 | 127.6 | 339 | 7.8 | 73.1% |
+| Aggregated (15% subset) | B200 | 3 (TP4×3) | 12 | 24 | 2,857  | 238.1 | 144.5 | 325 | 6.9 | 74.5% |
 | Disaggregated (15% subset) | B200 | 1P+1D (TP4×2) | 8  | 24 | 2,641  | 330.2 | 132.8 | 452 | 7.5 | 73.4% |
 | Disaggregated 2P1D (15% subset) | B200 | 2P+1D (TP4×3) | 12 | 24 | 2,735  | 227.9 | 133.4 | 407 | 7.5 | 77.2% |
 
 > **Note:** The 8-GPU aggregated recipe uses 2 workers (2×TP4) on a single node. Per-GPU throughput is lower (309 vs 458 tok/s/GPU) because the ultra-sparse model (6B active) is already compute-light — adding more workers improves aggregate throughput (+35%) and prefix cache hit rate (+5pp) but doesn't scale linearly due to shared memory bandwidth. ITL improves from 9.7 to 7.8 ms with more GPU resources per request.
 >
-> **Disaggregated** uses 1 prefill (TP4) + 1 decode (TP4) on a single node with InfiniBand RDMA for KV transfer (~18 GB/s avg). Prefill `--max-num-seqs` is reduced to 32 (from 256) to avoid OOM on large 260K-token prompts with only 4 GPUs. Disagg throughput (2,641 tok/s) is comparable to 8-GPU agg (2,474 tok/s) for this short-output agentic workload; disagg wins more on decode-heavy workloads with longer outputs.
+> **Disaggregated** uses 1 prefill (TP4) + 1 decode (TP4) on a single node with InfiniBand RDMA for KV transfer (~18 GB/s avg). Prefill `--max-num-seqs` is reduced to 32 (from 256) to avoid OOM on large 260K-token prompts with only 4 GPUs. Disagg 1P1D throughput (2,641 tok/s) is 7% faster than 8-GPU agg (2,474 tok/s) for this short-output agentic workload.
+>
+> **12-GPU comparison**: At 12 GPUs, aggregated (3×TP4, 2,857 tok/s) beats disaggregated 2P1D (2,735 tok/s) by 4.5% on throughput and 20% on TTFT p50. The crossover happens because 3 independent agg workers have no KV transfer overhead, while 2P1D pays RDMA transfer cost on every request. Disagg wins on ITL p90 (8.9ms vs 11.3ms, -21%) and cache hit (77.2% vs 74.5%, +2.7pp).
 
 ## Configuration notes
 
