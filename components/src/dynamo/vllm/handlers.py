@@ -1443,6 +1443,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
             }
         parallel_config = self.engine_client.vllm_config.parallel_config
+        # Capability gate: control/scale_elastic_ep is registered on every vLLM
+        # worker, but elastic EP only works with the Ray DP backend and the
+        # feature enabled. On a worker without it, vLLM's scale_elastic_ep raises
+        # NotImplementedError / a Ray-backend assertion, which the fail-fast grow
+        # handler below would turn into a needless restart of a healthy worker.
+        # Reject unsupported configs here, before the engine is touched.
+        if not getattr(parallel_config, "enable_elastic_ep", False) or (
+            getattr(parallel_config, "data_parallel_backend", "mp") != "ray"
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "elastic EP scaling is not enabled on this worker; it requires "
+                    "enable_elastic_ep=true and data_parallel_backend=ray"
+                ),
+            }
         tp_size = parallel_config.tensor_parallel_size
         # Elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
         # (elastic_execute.py), excluding PCP, and vLLM rejects PCP>1 with DP>1 -- so a

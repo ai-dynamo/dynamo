@@ -51,9 +51,10 @@ def _make_handler(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=tensor_parallel_size,
                 prefill_context_parallel_size=prefill_context_parallel_size,
-                # Captured up front by the rollback path before the grow; real
-                # vLLM engines always set it.
                 data_parallel_size=data_parallel_size,
+                # Elastic EP enabled + Ray backend so the capability gate passes.
+                enable_elastic_ep=True,
+                data_parallel_backend="ray",
             ),
         ),
         scale_elastic_ep=AsyncMock(),
@@ -201,11 +202,21 @@ class _FakeVllmEngine:
     actually attempted.
     """
 
-    def __init__(self, prev_dp, fail_sizes=(), dead_sizes=(), tensor_parallel_size=1):
+    def __init__(
+        self,
+        prev_dp,
+        fail_sizes=(),
+        dead_sizes=(),
+        tensor_parallel_size=1,
+        enable_elastic_ep=True,
+        data_parallel_backend="ray",
+    ):
         self.vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 data_parallel_size=prev_dp,
                 tensor_parallel_size=tensor_parallel_size,
+                enable_elastic_ep=enable_elastic_ep,
+                data_parallel_backend=data_parallel_backend,
             )
         )
         self._fail_sizes = list(fail_sizes)
@@ -276,6 +287,23 @@ def test_validation_error_does_not_restart_the_worker(stub_ray):
 
     assert shutdown == []  # no restart on a rejected request
     assert result["status"] == "error"
+    assert engine.calls == []  # never reached the engine
+
+
+def test_unsupported_config_is_rejected_without_restart(stub_ray):
+    # control/scale_elastic_ep is registered on every worker, but a worker
+    # without elastic EP / the Ray DP backend must get a nonfatal error, not a
+    # fail-fast restart -- vLLM would raise NotImplementedError before any scale
+    # state is mutated.
+    engine = _FakeVllmEngine(
+        prev_dp=2, enable_elastic_ep=False, data_parallel_backend="mp"
+    )
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
+
+    assert shutdown == []  # a healthy worker is NOT restarted
+    assert result["status"] == "error"
+    assert "not enabled" in result["message"]
     assert engine.calls == []  # never reached the engine
 
 
