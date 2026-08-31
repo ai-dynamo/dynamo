@@ -15,7 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -129,7 +129,7 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
 
 
-def _discard_orphan_result(fut: "Future") -> None:
+def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
     """Retrieve a timed-out snapshot's outcome so asyncio stays quiet about it.
 
     When ``get_ep_capacity`` times out, its waiter goes away but the future keeps
@@ -1130,7 +1130,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
     # get_ep_capacity single-flight state; see the comment at its call site.
-    _ep_capacity_inflight: Optional[Future] = None
+    # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
+    _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
     _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
 
     @property
@@ -1703,7 +1704,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         try:
             # shield: this caller timing out must not cancel the shared snapshot out
             # from under any other caller awaiting the same one.
-            snapshot = await asyncio.wait_for(
+            snapshot: dict = await asyncio.wait_for(
                 asyncio.shield(inflight), timeout=_EP_CAPACITY_RAY_TIMEOUT_S
             )
         except asyncio.TimeoutError:
