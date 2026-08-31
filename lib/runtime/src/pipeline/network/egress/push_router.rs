@@ -316,43 +316,64 @@ struct DispatchSink<T, U> {
 struct SinkEntry {
     sink: Arc<dyn LifecycleSink>,
     delivery: Arc<tokio::sync::Mutex<()>>,
+    events: tokio::sync::mpsc::UnboundedSender<SinkEvent>,
+    worker: tokio::task::AbortHandle,
+}
+
+enum SinkEvent {
+    Removed(EndpointInstanceId),
+    Added(EndpointInstanceId),
 }
 
 impl SinkEntry {
     fn new(sink: Arc<dyn LifecycleSink>) -> Self {
+        let delivery = Arc::new(tokio::sync::Mutex::new(()));
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker_delivery = delivery.clone();
+        let worker_sink = sink.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let _delivery = worker_delivery.lock().await;
+                match event {
+                    SinkEvent::Removed(id) => worker_sink.on_instance_removed(&id).await,
+                    SinkEvent::Added(id) => worker_sink.on_instance_added(&id).await,
+                }
+            }
+        });
+
         Self {
             sink,
-            delivery: Arc::new(tokio::sync::Mutex::new(())),
+            delivery,
+            events,
+            worker: worker.abort_handle(),
         }
     }
 
-    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
-        let _delivery = self.delivery.lock().await;
-        self.sink.on_instance_removed(id).await;
+    fn enqueue_removed(&self, id: &EndpointInstanceId) {
+        let _ = self.events.send(SinkEvent::Removed(id.clone()));
     }
 
-    async fn on_instance_added(&self, id: &EndpointInstanceId) {
-        let _delivery = self.delivery.lock().await;
-        self.sink.on_instance_added(id).await;
+    fn enqueue_added(&self, id: &EndpointInstanceId) {
+        let _ = self.events.send(SinkEvent::Added(id.clone()));
     }
 }
 
-async fn fan_out_removed(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
-    futures::future::join_all(
-        sinks
-            .into_iter()
-            .map(|sink| async move { sink.on_instance_removed(id).await }),
-    )
-    .await;
+impl Drop for SinkEntry {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
 }
 
-async fn fan_out_added(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
-    futures::future::join_all(
-        sinks
-            .into_iter()
-            .map(|sink| async move { sink.on_instance_added(id).await }),
-    )
-    .await;
+fn fan_out_removed(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
+    for sink in sinks {
+        sink.enqueue_removed(id);
+    }
+}
+
+fn fan_out_added(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
+    for sink in sinks {
+        sink.enqueue_added(id);
+    }
 }
 
 #[async_trait]
@@ -485,8 +506,8 @@ where
 
     let key = RuntimeEndpointId::for_endpoint(&endpoint);
     let sink = Arc::new(SinkEntry::new(Arc::new(DispatchSink { dispatch })));
-    // The initial replay holds the same per-sink lock as live fan-out. Events
-    // recorded after registration therefore cannot overtake the replay.
+    // The initial replay holds the same per-sink lock as the delivery worker.
+    // Events recorded after registration therefore cannot overtake the replay.
     let replay_delivery = sink.delivery.clone().lock_owned().await;
 
     let (watcher, sink_id, replay) = {
@@ -601,7 +622,7 @@ fn spawn_endpoint_watcher_task(
                                 instance_id = eid.instance_id,
                                 "Instance disappeared while the discovery watch was down"
                             );
-                            fan_out_removed(watcher.sinks(), &eid).await;
+                            fan_out_removed(watcher.sinks(), &eid);
                         }
                     }
                     Err(e) => {
@@ -621,13 +642,13 @@ fn spawn_endpoint_watcher_task(
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
                                     watcher.record_removed(eid);
-                                    fan_out_removed(watcher.sinks(), eid).await;
+                                    fan_out_removed(watcher.sinks(), eid);
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 watcher.record_added(&eid);
-                                fan_out_added(watcher.sinks(), &eid).await;
+                                fan_out_added(watcher.sinks(), &eid);
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
