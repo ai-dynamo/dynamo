@@ -730,6 +730,9 @@ navigation:
           - page: Overview
             path: ../pages-dev/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: GLM-5.3-Flash
+            path: ../pages-dev/recipes/model-recipes/glm-5-3-flash.mdx
+            slug: glm-5-3-flash
           - page: Kimi-K3
             path: ../pages-dev/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
