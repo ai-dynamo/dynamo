@@ -3,6 +3,7 @@
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
@@ -154,7 +155,7 @@ pub struct DeltaAggregator {
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
     /// Prompt logprobs captured from the terminal chunk.
-    prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
+    prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
