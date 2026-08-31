@@ -1834,6 +1834,8 @@ mod tests {
             "cancelling the runtime primary token must not publish an empty instance \
              list; local watcher teardown is not an authoritative discovery removal"
         );
+
+        rt.shutdown();
     }
 
     #[tokio::test]
