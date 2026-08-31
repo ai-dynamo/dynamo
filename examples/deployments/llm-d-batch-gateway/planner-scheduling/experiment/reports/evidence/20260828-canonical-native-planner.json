@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-08-28T21:51:39Z",
+  "run": {
+    "run_id": "20260828T213549Z-planner-native-1e3ff8",
+    "kind": "planner-native",
+    "control_plane_mode": "native-planner",
+    "standalone_controller_run_id": null,
+    "status": "completed",
+    "exit_code": 0,
+    "batch_id": "batch_f962abe4-dbf2-420e-b3c5-582ed2bccd9a"
+  },
+  "evidence_window": {
+    "t0": "2026-08-28T21:35:31Z",
+    "t1": "2026-08-28T21:40:16Z",
+    "experiment_driver_kubernetes_mutations": 0,
+    "standalone_controller_active": false,
+    "pre_run_setup": {
+      "at": "2026-08-28T21:28:07Z",
+      "action": "worker DGDSA replicas 1 -> 0",
+      "inside_evidence_window": false
+    }
+  },
+  "starting_state": {
+    "worker_dgdsa_spec_replicas": 0,
+    "worker_dgdsa_status_replicas": 0,
+    "worker_pods": 0,
+    "frontend_pod_existed": true,
+    "frontend_pod_state": "SchedulingGated",
+    "dgd_state": "pending",
+    "dgd_ready": false,
+    "redis_cap_rps": 0
+  },
+  "timeline": {
+    "gateway_first_progress": "2026-08-28T21:36:14.724Z",
+    "planner_floor_one_cap_zero": "2026-08-28T21:36:15.637Z",
+    "planner_worker_dgdsa_scale": "2026-08-28T21:36:15.707Z",
+    "observer_worker_ready": "2026-08-28T21:38:11Z",
+    "planner_cap_five": "2026-08-28T21:38:16.891Z",
+    "first_sampled_dispatch_increase": "2026-08-28T21:38:17.330Z",
+    "gateway_terminal": "2026-08-28T21:38:41.265Z",
+    "planner_floor_zero_cap_zero": "2026-08-28T21:38:42.162Z"
+  },
+  "scaling": {
+    "planner_target": "qwen3-0-6b-batch-vllmdecodeworker",
+    "planner_scaled_worker_only": true,
+    "frontend_scheduled_by_grove_kai_after_worker_creation": true,
+    "adapter_spec_before": 0,
+    "adapter_spec_after": 1,
+    "adapter_status_before": 0,
+    "adapter_status_after": 1,
+    "adapter_generation_before": 6,
+    "adapter_generation_after": 7,
+    "adapter_resource_version_before": "807643579",
+    "adapter_resource_version_after": "807657707",
+    "autonomous_scale_down_claimed": false
+  },
+  "batch": {
+    "terminal_status": "completed",
+    "total": 100,
+    "completed": 100,
+    "failed": 0,
+    "downloaded_output_lines": 100,
+    "downloaded_error_lines": 0,
+    "unique_custom_ids": 100,
+    "duration_seconds": 146.539409,
+    "average_completion_rate_rps": 0.6824102859593216,
+    "peak_poll_interval_completion_rate_rps": 6.727552483926554,
+    "compiler_data_quality_issue_count": 0
+  },
+  "async": {
+    "dispatched_counter_before": 400,
+    "dispatched_counter_after": 500,
+    "successful_counter_before": 400,
+    "successful_counter_after": 500,
+    "terminal_broker_backlog": 0,
+    "terminal_inflight": 0,
+    "terminal_queue_depth": 0,
+    "terminal_redis_cap_rps": 0,
+    "terminal_redis_pttl_milliseconds": 57644,
+    "idle_last_evaluated_drain_gauge_rps": 5,
+    "redis_lease_is_authoritative": true
+  },
+  "verification": {
+    "machine_assertions_total": 15,
+    "machine_assertions_passed": 15,
+    "planner_relevant_tests_passed": 478,
+    "affected_async_unit_packages_passed": true,
+    "async_tagged_integration_passed": true,
+    "async_targeted_go_vet_passed": true,
+    "helm_lint_and_render_passed": true,
+    "kubernetes_server_side_dry_run_passed": true
+  },
+  "deployment": {
+    "kubernetes_context": "omitted: deployment-specific cluster context",
+    "namespace": "omitted: deployment-specific POC namespace",
+    "planner_image": "omitted: local image built from this branch",
+    "planner_image_id": "omitted: private registry identity",
+    "async_image_id": "omitted: private registry identity",
+    "planner_ready_at_end": true,
+    "frontend_ready_at_end": true,
+    "worker_ready_at_end": true,
+    "worker_replicas_at_end": 1,
+    "batch_floor_at_end": 0,
+    "redis_cap_at_end": 0
+  },
+  "local_artifacts": {
+    "metadata.json": "ea4241e7c8856b58f9cd65ebd0085cd92f1253e24519c7129493c6a92dc4a384",
+    "terminal-batch.json": "acc54ea8d4acbe07533f8c68b51fa57ef4491dfa22442e1d288f71204d9b2a56",
+    "result-validation.json": "5be3b093f628eb1a104dfd8e42c4c8d4a1f4baf99a01f27dfd9c8cbf52827144",
+    "progress.jsonl": "9aa11be09a922e1cd00b8cb8069d62e7bb092c08d24436d9a180c4acd0ecb801",
+    "batch-output.jsonl": "3534390db7ef81e4f65b7983039af956090cef3a220e9be2dd69a04cd036e4fb",
+    "autonomous-scale-evidence/assertions.json": "02d06eb4a3b46ab1205f1b773f4011469c56cff2e701a2ab5f9007884c02198c",
+    "autonomous-scale-evidence/planner.log": "3a05210f5890bf7793931cb791d0a18d84169a3e032ac4e57edcd9d592b3cb3c",
+    "autonomous-scale-evidence/state.jsonl": "e5d7baeba91c8a7c1fb9e2659c3e106bc808105ea877d1d3016af12f7fa936a6",
+    "autonomous-scale-evidence/dgd.before.json": "0dba643fb78e0d9552e3a2bbc6d4aa263a323cedb04389ebc3137ada894e3bae",
+    "autonomous-scale-evidence/dgd.after.json": "349d29dcd89679f44a43834e03dc04da53b4d133bde2b7ba25b9bddda3584330",
+    "autonomous-scale-evidence/dgdsa.before.json": "22c3a8524e9b20ad4a0de6e1acf3a83b00cb48a1250d7d637a8db66ff1678064",
+    "autonomous-scale-evidence/dgdsa.after.json": "776327ef249a7a36879875d3598a760ae8007f7036dd967e367d7df5710f4d75",
+    "autonomous-scale-evidence/dgdsa.watch.jsonstream": "bed8bbd59ba664d25a1d08aaea0e041300f5f8208b85e433b9825f3eed6aa22a",
+    "autonomous-scale-evidence/redis.after.txt": "36a7cc21243edd0d8a3d9f8100045624832e24be3501f493b572da17e368cff1",
+    "autonomous-scale-evidence/async-metrics.before.txt": "8c6aea8c4652c11d38440ea18a75a7a82f452a0154d64df9280482fe3b17e1ab",
+    "autonomous-scale-evidence/async-metrics.after.txt": "4823c6380b02da74bfe69cddb10e7ae68868e41f447bbd0ef0ecf1deb32f3e84",
+    "compiled-summary.json": "cda2eaeae9448c9d41fa19f93b276564186ef4832d400d3ae57b2570eb438d7a"
+  },
+  "scope": {
+    "online_load_enabled": false,
+    "due_date_policy_exercised": false,
+    "multi_tenant_fairness_exercised": false,
+    "autonomous_worker_scale_up_exercised": true,
+    "autonomous_worker_scale_down_exercised": false,
+    "full_graph_started_from_zero": false,
+    "identity_grade_kubernetes_audit_attribution": false,
+    "raw_and_compiled_artifacts_are_git_ignored": true
+  }
+}
