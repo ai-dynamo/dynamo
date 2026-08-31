@@ -8,6 +8,7 @@
 
 mod handoff;
 mod metrics;
+mod sglang;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -796,6 +797,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
+        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -823,7 +825,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 as usize
         };
         let replay_key = (!is_prefill)
-            .then(|| request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY))
+            .then(|| {
+                request
+                    .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
+                    .or_else(|| {
+                        // A native SGLang request has no replay annotation, so fall back to its
+                        // rid. Only do so when a trace is loaded, otherwise every native request
+                        // would warn below about a replay it never asked for.
+                        let metadata = native_sglang.as_ref()?;
+                        self.response_replay_table.as_ref()?;
+                        Some(metadata.request_id().to_string())
+                    })
+            })
             .flatten();
         let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
             let Some(table) = self.response_replay_table.as_ref() else {
@@ -1260,7 +1273,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+        let mut completion_tokens = 0_usize;
+        let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
+            if let Some(metadata) = native_sglang.as_ref() {
+                completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
+                sglang::adapt(metadata, &mut output, completion_tokens);
+            }
+            Annotated::from_data(output)
+        });
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -1425,6 +1445,68 @@ mod tests {
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_stream_replays_exact_ids_without_changing_canonical_streams() {
+        let replay = write_replay_trace(&[serde_json::json!({
+            "request_id": "native-replay",
+            "output_length": 3,
+            "output_token_ids": [101, 202, 303],
+        })]);
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .response_replay_trace_path(Some(replay.path().to_path_buf()))
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut native_request = decode_request(3, 3);
+        native_request.extra_args = Some(serde_json::json!({
+            "sglang_tito": {
+                "rid": "native-replay",
+                "return_logprob": true,
+                "top_logprobs_num": 1,
+                "logprob_start_len": 0,
+            }
+        }));
+        let mut native_stream = engine
+            .generate(SingleIn::new(native_request))
+            .await
+            .unwrap();
+        let mut replayed: Vec<u32> = Vec::new();
+        let mut terminal_count = 0;
+        while let Some(output) = native_stream.next().await {
+            let output = output.data.unwrap();
+            replayed.extend(&output.token_ids);
+            let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+            assert_eq!(response["output_ids"], serde_json::json!(output.token_ids));
+            assert_eq!(response["meta_info"]["completion_tokens"], replayed.len());
+            if response["meta_info"]["finish_reason"].is_null() {
+                assert!(output.finish_reason.is_none());
+            } else {
+                terminal_count += 1;
+                assert_eq!(
+                    response["meta_info"]["finish_reason"],
+                    serde_json::json!({"type": "length"})
+                );
+            }
+        }
+        assert_eq!(replayed, [101, 202, 303]);
+        assert_eq!(terminal_count, 1);
+
+        let mut canonical_stream = engine
+            .generate(SingleIn::new(decode_request(3, 1)))
+            .await
+            .unwrap();
+        while let Some(output) = canonical_stream.next().await {
+            assert!(output.data.unwrap().engine_data.is_none());
+        }
     }
 
     #[tokio::test]

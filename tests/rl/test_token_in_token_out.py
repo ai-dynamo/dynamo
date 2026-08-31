@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from functools import partial
 from typing import Any, Generator
@@ -24,6 +23,7 @@ from tests.utils.constants import QWEN
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
+from tests.utils.sglang_generate import assert_native_stream, stream_generate
 
 TEST_MODEL = QWEN
 TEST_PROMPT = "The three primary colors are red,"
@@ -299,78 +299,22 @@ def test_vllm_token_in_token_out(start_vllm_tito_services: int) -> None:
     }
 
 
-def _request_sglang_generation_events(*, frontend_port: int) -> list[dict[str, Any]]:
-    with send_request(
-        f"http://localhost:{frontend_port}/generate",
-        {
+@pytest.mark.sglang
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(600)
+def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
+    events = stream_generate(
+        frontend_port=start_sglang_tito_services,
+        body={
             "input_ids": SGLANG_INPUT_IDS,
             "sampling_params": {
                 "max_new_tokens": 32,
                 "temperature": 0.0,
                 "n": 1,
             },
-            "stream": True,
             "return_logprob": True,
             "top_logprobs_num": 0,
         },
-        timeout=120,
-        stream=True,
-    ) as response:
-        assert response.status_code == 200, response.text
-        events: list[dict[str, Any]] = []
-        stream_finished = False
-        for line in response.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if data == "[DONE]":
-                stream_finished = True
-                continue
-            event = json.loads(data)
-            assert isinstance(event, dict), event
-            assert not event.get("error"), event
-            events.append(event)
-
-    assert stream_finished, events
-    assert events, "SGLang /generate returned no SSE data events"
-    return events
-
-
-@pytest.mark.sglang
-@pytest.mark.profiled_vram_gib(3.7)
-@pytest.mark.requested_sglang_kv_tokens(2048)
-@pytest.mark.timeout(600)
-def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
-    events = _request_sglang_generation_events(frontend_port=start_sglang_tito_services)
-    all_output_ids: list[int] = []
-    for event in events:
-        output_ids = event.get("output_ids")
-        assert isinstance(output_ids, list) and all(
-            isinstance(token_id, int) for token_id in output_ids
-        ), event
-
-        meta_info = event.get("meta_info")
-        assert isinstance(meta_info, dict), event
-        if not output_ids:
-            continue
-
-        output_logprobs = meta_info.get("output_token_logprobs")
-        assert isinstance(output_logprobs, list), event
-        assert len(output_logprobs) == len(output_ids), event
-        for token_id, logprob_entry in zip(output_ids, output_logprobs, strict=True):
-            assert isinstance(logprob_entry, list) and len(logprob_entry) >= 2, event
-            logprob, logprob_token_id = logprob_entry[:2]
-            assert isinstance(logprob, (int, float)) and math.isfinite(logprob), event
-            assert logprob_token_id == token_id, event
-
-        all_output_ids.extend(output_ids)
-
-    assert all_output_ids, events
-    final = events[-1]
-    meta_info = final.get("meta_info")
-    assert isinstance(meta_info, dict), final
-    assert meta_info.get("prompt_tokens") == len(SGLANG_INPUT_IDS), final
-    assert meta_info.get("completion_tokens") == len(all_output_ids), {
-        "completion_tokens": meta_info.get("completion_tokens"),
-        "all_output_ids": all_output_ids,
-    }
+    )
+    assert_native_stream(events, prompt_tokens=len(SGLANG_INPUT_IDS))

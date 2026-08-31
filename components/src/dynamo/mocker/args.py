@@ -470,6 +470,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
     )
+    parser.add_argument(
+        "--sglang-generate",
+        action="store_true",
+        default=False,
+        help="Serve native streaming SGLang /generate requests (default: disabled).",
+    )
 
     # TensorRT-LLM-specific configuration
     parser.add_argument(
