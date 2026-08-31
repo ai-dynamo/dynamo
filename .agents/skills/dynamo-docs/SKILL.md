@@ -407,12 +407,17 @@ when the user has requested or authorized the external contribution.
    `Summary` and `Validation` sections as required by the root `AGENTS.md`; do not assume `Overview`
    substitutes for `Summary`. Remove instructional comments and unused alternatives, report the
    validation actually run and its limitations, and do not invent a related issue.
-4. Verify the submitted PR with `gh pr view` (including `url`, `state`, `isDraft`, `body`,
-   `baseRefName`, `headRefName`, and `headRefOid`). Confirm that `state` is `OPEN`, the URL contains
-   `/pull/<number>`, the base, head branch, and commit are the intended ones, and the body contains no
-   template placeholders before handing it off. If the PR is closed, reopen it when appropriate or
-   create a new PR; if it is merged, create a new PR for remaining changes or report that no active PR
-   exists. Never present an inactive PR as reviewable.
+4. Query the submitted PR's verification fields explicitly:
+
+   ```bash
+   gh pr view <number-or-branch> --repo ai-dynamo/dynamo \
+     --json url,state,isDraft,body,baseRefName,headRefName,headRefOid
+   ```
+
+   Confirm that `state` is `OPEN`, the URL contains `/pull/<number>`, the base, head branch, and commit
+   are the intended ones, and the body contains no template placeholders before handing it off. If the
+   PR is closed, reopen it when appropriate or create a new PR; if it is merged, create a new PR for
+   remaining changes or report that no active PR exists. Never present an inactive PR as reviewable.
 5. Report the PR's actual review and check state. Use the `pr-monitor` skill when CI diagnosis or
    continued monitoring is requested.
 
