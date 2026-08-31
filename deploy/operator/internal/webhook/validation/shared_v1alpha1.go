@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -63,7 +64,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Ingress != nil {
 		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)
 	}
-	if spec.EPPConfig != nil {
+	if spec.EPPConfig != nil && v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 	if spec.FrontendSidecar != nil && spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil &&
@@ -80,15 +81,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
-		if spec.ComponentType == consts.ComponentTypeEPP {
-			if err := eppRuntimeCompatibilityError(
-				image,
-				spec.RuntimeVersionOverride,
-				spec.EPPConfig != nil,
-				fldPath.Child("eppConfig"),
-			); err != nil {
-				allErrs = append(allErrs, err)
-			}
+		if err := eppRuntimeCompatibilityError(
+			eppRuntimeContractV1Alpha1(spec, image),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
 		}
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -113,14 +110,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+	// Ratchet only complete, unchanged source-version runtime contract violations.
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
-		newHasEPPConfig := newSpec.EPPConfig != nil
-		oldHasEPPConfig := oldSpec.EPPConfig != nil
 		overrideChanged := newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride
-		tupleChanged := newImage != oldImage || overrideChanged || newHasEPPConfig != oldHasEPPConfig
 
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -133,20 +127,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 			))
 		}
 
-		// See the identical comment in validateDynamoComponentDeploymentSharedSpecUpdate
-		// (shared_v1beta1.go): only re-validate the image/eppConfig pairing
-		// when this update actually touches image, runtimeVersionOverride,
-		// or eppConfig presence, and validate the new tuple rather than
-		// diffing against the old one.
-		if newSpec.ComponentType == consts.ComponentTypeEPP && tupleChanged {
-			if err := eppRuntimeCompatibilityError(
-				newImage,
-				newSpec.RuntimeVersionOverride,
-				newHasEPPConfig,
-				fldPath.Child("eppConfig"),
-			); err != nil {
-				allErrs = append(allErrs, err)
-			}
+		if err := eppRuntimeCompatibilityUpdateError(
+			eppRuntimeContractV1Alpha1(newSpec, newImage),
+			eppRuntimeContractV1Alpha1(oldSpec, oldImage),
+			apiequality.Semantic.DeepEqual(newSpec.EPPConfig, oldSpec.EPPConfig),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
 		}
 	}
 
@@ -183,13 +170,17 @@ func (v *sharedValidation) validateEPPConfigV1alpha1(
 	config *nvidiacomv1alpha1.EPPConfig,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if (config.ConfigMapRef == nil) != (config.Config == nil) {
-		return nil
+	allErrs := field.ErrorList{}
+	if (config.ConfigMapRef == nil) == (config.Config == nil) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"exactly one of configMapRef or config is required",
+		))
 	}
-	return field.ErrorList{field.Forbidden(
-		fldPath,
-		"exactly one of configMapRef or config is required",
-	)}
+	if config.ConfigMapRef != nil && config.ConfigMapRef.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("configMapRef", "name"), "is required"))
+	}
+	return allErrs
 }
 
 // validateFailoverSpecV1alpha1 validates failover. failover and fldPath must not be nil.

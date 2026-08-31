@@ -1040,6 +1040,15 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
+		{
+			name: "v1beta1 EPP with an unresolvable image version leaves the runtime contract undecided",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:latest"
+			}),
+		},
 		// eppConfig is deprecated but still served, so its shape rules keep
 		// their coverage. The default 1.1.0 fixture image is a pre-1.5.0
 		// legacy Go EPP runtime, where an eppConfig is expected and only its
@@ -1279,6 +1288,66 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
+		},
+		{
+			name:               "v1beta1 unrelated update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Labels = map[string]string{"updated": "true"}
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name: "v1beta1 changing only component type to EPP validates the complete runtime contract",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name:               "v1beta1 changing eppConfig on a pre-existing native mismatch is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "changed-epp-config"}},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
 		},
 		{
 			// Split update: eppConfig cleared but the image stays at the
