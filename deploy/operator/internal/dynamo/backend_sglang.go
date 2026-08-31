@@ -2,9 +2,10 @@ package dynamo
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -15,15 +16,8 @@ const (
 
 type SGLangBackend struct{}
 
-// isPythonCommand checks if the command is a Python interpreter
-func isPythonCommand(cmd string) bool {
-	if cmd == "python" || cmd == "python3" {
-		return true
-	}
-	// Match python with version numbers like python3.11, python2.7, etc.
-	// Also support absolute paths like /usr/bin/python3.8, /opt/python/bin/python3.11
-	matched, _ := regexp.MatchString(`^(.*/)?(python\d*(\.\d+)*)$`, cmd)
-	return matched
+func isPythonCommand(command string) bool {
+	return render.IsPythonCommand(command)
 }
 
 func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
@@ -42,25 +36,35 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return nil
 	}
 
-	// Remove probes for multinode worker
-	if role == RoleWorker {
-		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
-		container.StartupProbe = nil
+	if err := (render.EngineMutations{
+		{
+			Applies: workerRole,
+			Mutation: render.RemoveProbesMutation{
+				ContainerName: commonconsts.MainContainerName,
+				Liveness:      true,
+				Readiness:     true,
+				Startup:       true,
+			},
+		},
+	}).Apply(component, role, container); err != nil {
+		return err
 	}
 
-	// Generate the flags to add
 	flags, needsShell := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
-	if flags == "" {
-		return nil
-	}
-
-	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
-	return nil
+	return (render.EngineMutations{
+		{
+			Mutation: render.AddFlagsMutation{
+				ContainerName: commonconsts.MainContainerName,
+				Flags:         flags,
+				NeedsShell:    needsShell,
+				Framework:     "sglang",
+			},
+		},
+	}).Apply(component, role, container)
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// do nothing
+func (b *SGLangBackend) UpdatePodSpec(*corev1.PodSpec, int32, Role, *v1beta1.DynamoComponentDeploymentSharedSpec, string, MultinodeDeployer) error {
+	return nil
 }
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation is needed

@@ -37,6 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -991,7 +992,7 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
 // elastic-EP leader a stable address its followers join with
-// `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).
+// `ray start --address=<service>:6379` (see elasticEPRayCommand).
 //
 // Two spec choices are deliberate:
 //
@@ -1237,14 +1238,14 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1beta1.DynamoGraphDeployment,
 // Define Role enum for leader/worker/main
 // Use this type everywhere instead of string for role
 
-type Role string
+type Role = render.Role
 
 const (
-	RoleLeader     Role = "leader"
-	RoleWorker     Role = "worker"
-	RoleMain       Role = "main"
-	RoleCheckpoint Role = "checkpoint"
-	RoleGMS        Role = "gms"
+	RoleLeader     = render.RoleLeader
+	RoleWorker     = render.RoleWorker
+	RoleMain       = render.RoleMain
+	RoleCheckpoint = render.RoleCheckpoint
+	RoleGMS        = render.RoleGMS
 )
 
 // ServiceRole describes one PodClique (PCLQ) to be materialised for a
@@ -1502,19 +1503,18 @@ type ContainerGPUCount func() (int64, error)
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
-	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+func (b *NoopBackend) UpdateContainer(*corev1.Container, int32, Role, *v1beta1.DynamoComponentDeploymentSharedSpec, string, MultinodeDeployer, ContainerGPUCount) error {
 	return nil
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+func (b *NoopBackend) UpdatePodSpec(*corev1.PodSpec, int32, Role, *v1beta1.DynamoComponentDeploymentSharedSpec, string, MultinodeDeployer) error {
+	return nil
 }
 
 type MultinodeDeployer interface {
@@ -1821,7 +1821,9 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	if err := backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer); err != nil {
+		return nil, fmt.Errorf("failed to update pod spec for backend %s: %w", backendFramework, err)
+	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -3002,7 +3004,7 @@ func generateLabels(
 	// container mode (see lib/runtime/src/discovery/kube/daemon.rs). Applied to
 	// every role by default because any role may host the dynamo runtime — for
 	// example, multinode vLLM workers in data-parallel hybrid-lb mode run their
-	// own API server (see RoleWorker branch in injectDataParallelLaunchFlags).
+	// own API server (see the worker data-parallel launch mutation).
 	// Callers that render non-dynamo pods (specifically the RoleGMS weight
 	// server, which runs gpu_memory_service.cli.server and never registers a
 	// DynamoWorkerMetadata CR) are responsible for stripping these labels after
