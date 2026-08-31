@@ -8,12 +8,14 @@ SPDX-License-Identifier: Apache-2.0
 The benchmark client is part of the measurement instrument; its version is part of benchmark-series identity.
 
 - At benchmark-plan authoring time, resolve the LATEST STABLE AIPerf release, record the exact version in the
-  immutable plan, and use that single version for every run in the engagement. Do not inherit a version pin from a
+  immutable plan, and use that single version for every run in the series. Do not inherit a version pin from a
   repo recipe's perf manifest by default: that pin exists to reproduce THAT recipe's reference numbers, not to
   govern a new series, and it goes stale.
 - Never change the tool version within a series. A version change is a series boundary
   (`series-boundaries.md`): results measured under different tool versions are not directly comparable, because
-  releases may change measurement semantics (windowing, pacing, accounting), not just fix bugs.
+  releases may change measurement semantics (windowing, pacing, accounting), not just fix bugs. Deliberately
+  adopting a newer version mid-engagement is allowed, but it requires a new plan and a new series; never mix the
+  resulting rows with the old series.
 - Exception 1: when the engagement's goal is to reproduce or compare against an external reference (for example a
   recipe's published perf numbers), match the reference's pinned version for that comparison and record the choice.
 - Exception 2: an operator-specified version always wins; record it in the plan.
