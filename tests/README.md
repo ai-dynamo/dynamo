@@ -691,6 +691,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
 
+> **Multi-GPU scripts must index into the gang, never name absolute devices.** The scheduler hands a `gpu_2` test a gang of *any* two devices -- `2,3` as readily as `0,1` -- in `CUDA_VISIBLE_DEVICES`. A script that writes `CUDA_VISIBLE_DEVICES=0` and `=1` for its two workers therefore lands on devices reserved for other tests and silently double-books their VRAM. Split the inherited value and index it (`IFS=',' read -r -a _GPUS <<< "${CUDA_VISIBLE_DEVICES-0,1}"`, then use `${_GPUS[0]}` / `${_GPUS[1]}`), as `examples/backends/vllm/launch/agg_embed_multiworker.sh` does.
+
 ### Engine-specific mapping
 
 Launch scripts call engine-specific functions from `examples/common/gpu_utils.sh` which check env var overrides and return the appropriate CLI flags:

@@ -286,10 +286,22 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
-# vLLM needs a stagger because --gpu-memory-utilization triggers a memory
-# profiling step that snapshots free memory — concurrent launches corrupt each
-# other's snapshots (bug #10643). SGLang uses --max-total-tokens which is
-# deterministic, so no stagger is needed.
+# vLLM launches are staggered for two independent reasons.
+#
+# The primary one is scheduler-level and holds no matter how the engine is
+# configured: profiled_vram_gib is a *peak*, so during a launch's allocation
+# ramp the live NVML reading this module admits against has not settled yet.
+# Launching two engines concurrently lets an admission decision be taken
+# against a card that is still filling. Capping the KV pool does not remove
+# this; it is a property of observing an allocation in flight.
+#
+# The secondary one is engine-internal: when --gpu-memory-utilization drives
+# vLLM's own memory-profiling step, concurrent launches corrupt each other's
+# snapshots (bug #10643). Pinning --kv-cache-memory-bytes removes that second
+# effect, and only that one.
+#
+# SGLang uses --max-total-tokens which is deterministic, so no stagger is
+# needed.
 _VLLM_LAUNCH_STAGGER_S = 5.0
 
 

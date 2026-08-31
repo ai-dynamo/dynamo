@@ -48,10 +48,18 @@ Instead, we use **absolute KV cache caps**:
 KV cache = budget - weights - activations - overhead. Pool is fixed at startup.
 
 `--kv-cache-memory-bytes` overrides automatic sizing and **skips memory
-profiling** ([PR #21489]). The KV cache is pinned to the exact byte value —
-no profiling race, no CUDAGraph estimation errors, safe for concurrent
-instances ([#10643]). When set, `--gpu-memory-utilization` only affects
-headroom for activations, not KV cache size.
+profiling** ([PR #21489]). The KV cache is pinned to the exact byte value, so
+vLLM's own KV-pool sizing no longer races a concurrent instance's snapshot
+([#10643]) and CUDAGraph estimation errors go away.
+
+It does not make concurrent launches unconditionally safe, and this repo does
+not rely on it for that. vLLM still samples free memory against
+`--gpu-memory-utilization` *before* the byte cap applies (see the note in
+`gpu_utils.sh` on why the fraction is driven to `0.01`), and the parallel test
+scheduler admits against a live NVML reading, which is still climbing during a
+launch's allocation ramp. Pinning the pool removes the engine-internal race
+only. When set, `--gpu-memory-utilization` only affects headroom for
+activations, not KV cache size.
 
 `--max-model-len` caps sequence length. Reducing it is the fastest way to
 cut VRAM when the model fits but KV cache doesn't.
