@@ -393,6 +393,25 @@ git add docs/ docs/fern/docs.yml          # also recipes/ examples/ docs/fern/ma
 git commit -s -m "docs: <add|update|move|remove> <page-title>"
 ```
 
+## Pull Request Handoff
+
+Creating or handing off a pull request is separate from committing and pushing a branch. Do it only
+when the user has requested or authorized the external contribution.
+
+1. Read the root `AGENTS.md` pull-request conventions and the current
+   `.github/pull_request_template.md`; treat the repository template as authoritative for the body.
+2. Confirm whether a pull-request object exists for the head branch. A pushed branch and a
+   `/pull/new/<branch>` URL are not pull requests; never report either one as a created PR.
+3. When creating or updating the PR, complete every applicable template section, remove instructional
+   comments and unused alternatives, report the validation actually run and its limitations, and do
+   not invent a related issue.
+4. Verify the submitted PR with `gh pr view` (including `url`, `state`, `isDraft`, `body`,
+   `headRefName`, and `headRefOid`). Confirm that the URL contains `/pull/<number>`, the head branch
+   and commit are the intended ones, and the body contains no template placeholders before handing it
+   off.
+5. Report the PR's actual review and check state. Use the `pr-monitor` skill when CI diagnosis or
+   continued monitoring is requested.
+
 ## Debugging
 
 | Symptom | Fix |
