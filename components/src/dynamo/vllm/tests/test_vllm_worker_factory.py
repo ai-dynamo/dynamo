@@ -4,19 +4,24 @@
 """Unit tests for worker_factory.py"""
 
 import asyncio
+import contextlib
 import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.instrumented_scheduler import ENV_FPM_WORKER_ID, InstrumentedScheduler
 from dynamo.vllm.worker_factory import (
+    FPM_SET_WORKER_ID_METHOD_NAME,
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
+    _sync_fpm_worker_id,
     _wait_and_load_benchmark,
 )
 
@@ -1159,6 +1164,291 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+# ---------------------------------------------------------------------------
+# _sync_fpm_worker_id: parent -> restored EngineCore child
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_config(scheduler_cls=InstrumentedScheduler) -> SimpleNamespace:
+    """A restored ``VllmConfig`` whose snapshot captured ``scheduler_cls``.
+
+    ``shutdown_timeout`` is read by ``_DecodeWorkerLifecycle.cleanup()`` when a
+    restore fails, so it has to be present on the decode path.
+    """
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(get_scheduler_cls=lambda: scheduler_cls),
+        shutdown_timeout=5.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_invokes_engine_core_utility():
+    """The parent reaches the restored child through the EngineCore utility RPC.
+
+    This is the only channel available: the child was created before the
+    runtime existed, so it inherited an environment with no worker id and
+    never re-reads it.
+    """
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "8465209922961459"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_fails_the_restore_when_the_child_rejects_it():
+    """A rejected sync fails the restore instead of degrading to a warning.
+
+    Swallowing it leaves both child-side identity fields empty, the FPM
+    subscriber drops every sample from the replica, and the planner's
+    ``_reconcile_fpm_worker_count`` abandons each scaling decision — the
+    ``worker_count_mismatch`` bug this fix exists to remove, arriving through a
+    second door. Better to fail before the worker registers than to advertise a
+    replica the planner cannot see.
+    """
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            call_utility_async=AsyncMock(
+                side_effect=Exception(
+                    "Call to set_fpm_worker_id method failed: 'EngineCoreProc' "
+                    "object has no attribute 'set_fpm_worker_id'"
+                )
+            )
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="invisible to the planner"):
+        await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_is_bounded_when_the_rpc_never_answers(monkeypatch):
+    """``call_utility_async()`` awaits its future with no deadline of its own.
+
+    An EngineCore rank that stops answering would otherwise hang the restore
+    here — before endpoint registration, with nothing in the logs to point at.
+    Expiry takes the same fail-restore path as any other sync failure.
+    """
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._FPM_SET_WORKER_ID_TIMEOUT_SECS", 0.01
+    )
+    rpc_was_cancelled = asyncio.Event()
+
+    async def never_answers(*_args, **_kwargs) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            rpc_was_cancelled.set()
+            raise
+
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=never_answers)
+    )
+
+    with pytest.raises(RuntimeError, match="Timed out"):
+        await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+    # wait_for() cancels the pending RPC on expiry; a leaked task would keep the
+    # ZMQ future alive for the life of the process.
+    assert rpc_was_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_skips_a_snapshot_without_the_instrumented_scheduler():
+    """Snapshot mode is independent of FPM mode.
+
+    A snapshot captured with vLLM's own scheduler has no FPM publisher to
+    retarget, and its child raises on the utility. Now that a rejection is
+    fatal, such a restore must never make the call at all.
+    """
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(
+        engine_client, _snapshot_config(AsyncScheduler), "8465209922961459"
+    )
+
+    call_utility_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_syncs_a_subclass_of_the_instrumented_scheduler():
+    """``--scheduler-cls`` may name a subclass; it still carries the publisher."""
+
+    class _Derived(InstrumentedScheduler):
+        pass
+
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(
+        engine_client, _snapshot_config(_Derived), "8465209922961459"
+    )
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "8465209922961459"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_skips_an_unresolvable_scheduler_class(caplog):
+    """An unimportable ``--scheduler-cls`` is not ours, and fails loudly elsewhere."""
+
+    def raises() -> type:
+        raise ImportError("No module named 'user.scheduler'")
+
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(get_scheduler_cls=raises)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await _sync_fpm_worker_id(engine_client, vllm_config, "8465209922961459")
+
+    call_utility_async.assert_not_awaited()
+    assert "Could not resolve the snapshot's scheduler class" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The production restore call sites: realtime, decode, prefill
+# ---------------------------------------------------------------------------
+
+# Each entry is the worker-creation method and the disaggregation mode that
+# reaches it. Every one of them unpacks a snapshot and must sync the identity.
+_RESTORE_PATHS = {
+    "decode": ("_create_decode_worker", DisaggregationMode.DECODE),
+    "prefill": ("_create_prefill_worker", DisaggregationMode.PREFILL),
+    "realtime": ("_create_realtime_worker", DisaggregationMode.AGGREGATED),
+}
+
+
+def _restore_snapshot_engine() -> tuple[EngineSetupResult, AsyncMock]:
+    """A snapshot ``EngineSetupResult`` whose utility RPC records its arguments."""
+    call_utility_async = AsyncMock()
+    engine_client = Mock()
+    engine_client.engine_core.call_utility_async = call_utility_async
+    snapshot: EngineSetupResult = (
+        engine_client,
+        _snapshot_config(),
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    return snapshot, call_utility_async
+
+
+async def _enter_restore_path(
+    factory: WorkerFactory,
+    path: str,
+    snapshot_engine: EngineSetupResult | None,
+) -> None:
+    """Enter one worker-creation path far enough to pass the identity sync.
+
+    Every path runs well past the sync into registration and serving, which this
+    harness does not stand up; the sync is among the first things each one does,
+    so whatever it fails on afterwards is not what is under test here.
+    """
+    method_name, mode = _RESTORE_PATHS[path]
+    endpoint = Mock(connection_id=Mock(return_value="cid-4242"))
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    config = _make_config(
+        disaggregation_mode=mode,
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+        enable_rl=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        use_vllm_tokenizer=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+
+    with contextlib.suppress(Exception):
+        await getattr(factory, method_name)(
+            runtime,
+            config,
+            asyncio.Event(),
+            [],
+            snapshot_engine=snapshot_engine,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+async def test_every_restore_path_syncs_the_endpoint_id_to_the_child(
+    path: str, monkeypatch
+):
+    """Guards the call sites, not just the helper.
+
+    Dropping the ``_sync_fpm_worker_id`` call from any one of realtime, decode,
+    or prefill reinstates the bug for that worker shape while every test above
+    stays green — those all reach the helper directly.
+    """
+    # The restore paths assign the id into the real environment on their way to
+    # the sync; monkeypatch puts it back afterwards.
+    monkeypatch.setenv(ENV_FPM_WORKER_ID, "")
+    snapshot, call_utility_async = _restore_snapshot_engine()
+
+    await _enter_restore_path(_make_factory(), path, snapshot)
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "cid-4242"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+async def test_cold_start_does_not_sync_the_fpm_worker_id(path: str, monkeypatch):
+    """A cold-started child inherits the id from the environment.
+
+    ``setup_vllm_engine()`` is called after the id is in ``os.environ``, so the
+    child reads it at construction. There is nothing to retarget, and the
+    utility RPC — fatal on failure since it may hit a foreign scheduler — must
+    not be made at all.
+    """
+    monkeypatch.setenv(ENV_FPM_WORKER_ID, "")
+    sync = AsyncMock()
+    monkeypatch.setattr("dynamo.vllm.worker_factory._sync_fpm_worker_id", sync)
+    engine_setup, _call_utility_async = _restore_snapshot_engine()
+    factory = _make_factory(setup_vllm_engine_fn=Mock(return_value=engine_setup))
+
+    await _enter_restore_path(factory, path, None)
+
+    sync.assert_not_awaited()
+
+
+def test_fpm_utility_name_matches_the_installed_method():
+    """The caller's method name must match what the scheduler module installs.
+
+    The two sides live in different modules and are linked only by this
+    string. A rename on either side would otherwise fail silently at runtime,
+    surfacing as an ``AttributeError`` folded into the utility's
+    ``failure_message`` long after deploy.
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    import dynamo.vllm.instrumented_scheduler  # noqa: F401  installs the patch
+
+    assert hasattr(EngineCore, FPM_SET_WORKER_ID_METHOD_NAME)
 
 
 @pytest.mark.asyncio

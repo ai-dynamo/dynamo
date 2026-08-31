@@ -103,6 +103,7 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
@@ -4344,3 +4345,25 @@ class InstrumentedScheduler(AsyncScheduler):
             dest,
             len(self._bench_results),
         )
+
+
+# TODO(upstream-vllm): remove once vLLM exposes a way to update scheduler
+# identity after engine construction. In snapshot mode the engine is built
+# before the Dynamo runtime exists, so the FPM worker_id is baked as "".
+def _install_fpm_worker_id_utility() -> None:
+    if hasattr(EngineCore, "set_fpm_worker_id"):
+        return
+
+    def set_fpm_worker_id(self, new_worker_id: str) -> None:
+        scheduler = self.scheduler
+        if not isinstance(scheduler, InstrumentedScheduler):
+            raise RuntimeError(
+                f"scheduler is {type(scheduler).__name__}, not InstrumentedScheduler"
+            )
+        scheduler._fpm_worker_id = new_worker_id
+        scheduler._publisher._worker_id = new_worker_id
+
+    EngineCore.set_fpm_worker_id = set_fpm_worker_id
+
+
+_install_fpm_worker_id_utility()
