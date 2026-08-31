@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Native AI Simulate SmartSearchConfig for the same core intent as
-# dgdr-v1beta1.yaml. The disaggregated mode is pinned to match recipe-dgd.yaml;
+# dgdr-v1beta1.yaml. The disaggregated mode is pinned to match recipe.yaml;
 # v1beta1 has no equivalent topology constraint and may select another mode.
 search_space:
   model_name: Qwen/Qwen3-32B
-  hardware_sku: h200_sxm
   deployment_mode: [disagg]
   backend: [vllm]
-  gpu_budget: 16
   context_length: 131072
 
 workload:

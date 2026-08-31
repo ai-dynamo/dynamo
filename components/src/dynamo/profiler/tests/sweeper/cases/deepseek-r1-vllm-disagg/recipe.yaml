@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml
+requirements:
+  h200-sxm-32gpu:
+    gpus: 32
