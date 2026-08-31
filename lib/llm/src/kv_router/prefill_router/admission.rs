@@ -77,8 +77,7 @@ where
         if !is_bootstrap {
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
-                    let detail =
-                        format!("Prefill router returned error in output stream: {error}");
+                    let detail = format!("Prefill router returned error in output stream: {error}");
                     return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
                 if let Some(output) = next.data.as_ref()
