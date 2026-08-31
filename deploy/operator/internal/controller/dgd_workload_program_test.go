@@ -355,7 +355,7 @@ func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
 	assert.Empty(t, dcds.Items)
 }
 
-func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
+func TestGroveProgram_ReconcileRequeuesAfterCurrentWorkerHashBackfill(t *testing.T) {
 	t.Log("Inject a shared-resource failure before the PodCliqueSet sync")
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -386,14 +386,11 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify the failed shared reconciliation preserves the worker hash only in program status")
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	t.Log("Verify worker hash status is persisted before reconciling shared resources")
+	require.NoError(t, err)
+	assert.True(t, result.Result.Requeue)
 	assert.Equal(t, previous.Components, result.Status.Components)
-	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
-	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
-	require.NotNil(t, ready)
-	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
+	assert.Equal(t, previous.State, result.Status.State)
 	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
 	assert.Equal(t, previous, dgd.Status)
 }
@@ -409,6 +406,7 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 	}
+	dgd.Status.CurrentWorkerHash = "old-worker-hash"
 	reconciler := createTestDGDReconcilerWithStatus(dgd)
 	program := reconciler.newComponentProgram()
 
@@ -421,6 +419,28 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
 	require.Len(t, result.Events, 1)
 	assert.Equal(t, "RollingUpdateStarted", result.Events[0].Reason)
+	assert.Nil(t, dgd.Status.RollingUpdate)
+}
+
+func TestComponentProgram_ReconcileRequeuesAfterCurrentWorkerHashBackfill(t *testing.T) {
+	t.Log("Build a DGD whose v2 hash exists only in the compatibility annotation")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	})
+	currentWorkerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: currentWorkerHash,
+	}
+	program := createTestDGDReconcilerWithStatus(dgd).newComponentProgram()
+
+	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
+
+	t.Log("Verify status is returned for persistence and dependent work is deferred")
+	require.NoError(t, err)
+	assert.True(t, result.Result.Requeue)
+	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
+	assert.Empty(t, dgd.Status.CurrentWorkerHash)
+	assert.Nil(t, result.Status.RollingUpdate)
 	assert.Nil(t, dgd.Status.RollingUpdate)
 }
 
@@ -534,7 +554,18 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+		currentWorkerHashChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		require.NoError(t, err)
+		assert.True(t, currentWorkerHashChanged)
+		assert.Equal(t, "old-worker-hash", status.CurrentWorkerHash)
+		assert.Nil(t, status.RollingUpdate)
+		assert.Empty(t, dgd.Status.CurrentWorkerHash)
+
+		dgd.Status = status
+		status = dgd.DeepCopy().Status
+		currentWorkerHashChanged, err = program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		require.NoError(t, err)
+		assert.False(t, currentWorkerHashChanged)
 
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
@@ -557,7 +588,9 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+		currentWorkerHashChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		require.NoError(t, err)
+		assert.True(t, currentWorkerHashChanged)
 
 		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)

@@ -60,25 +60,15 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
-	return r.ReconcileWithStatus(ctx, dgd, &dgd.Status, restartState, checkpointInfos)
-}
-
-func (r *componentWorkloadsReconciler) ReconcileWithStatus(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-	restartState *dynamo.RestartState,
-	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContextWithStatus(ctx, dgd, status)
+	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCDWithStatus(ctx, dgd, status)
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
@@ -148,20 +138,12 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[string]string, error) {
-	return r.getExistingRestartAnnotationsDCDWithStatus(ctx, dgd, &dgd.Status)
-}
-
-func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCDWithStatus(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return nil, err
 	}
-	workerHashes := activeWorkerHashCandidatesWithStatus(dgd, status, hashes)
+	workerHashes := activeWorkerHashCandidates(dgd, hashes)
 
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {

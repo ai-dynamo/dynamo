@@ -72,14 +72,6 @@ func (r *dgdSharedResourcesReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (dgdCheckpointsResult, error) {
-	return r.ReconcileWithStatus(ctx, dgd, &dgd.Status)
-}
-
-func (r *dgdSharedResourcesReconciler) ReconcileWithStatus(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (dgdCheckpointsResult, error) {
 	logger := log.FromContext(ctx)
 	if err := r.rbac.Reconcile(ctx, dgd); err != nil {
 		return dgdCheckpointsResult{}, err
@@ -96,7 +88,7 @@ func (r *dgdSharedResourcesReconciler) ReconcileWithStatus(
 		return dgdCheckpointsResult{}, err
 	}
 
-	checkpoints, err := r.checkpoints.ReconcileWithStatus(ctx, dgd, status)
+	checkpoints, err := r.checkpoints.Reconcile(ctx, dgd)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile checkpoints")
 		return dgdCheckpointsResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)

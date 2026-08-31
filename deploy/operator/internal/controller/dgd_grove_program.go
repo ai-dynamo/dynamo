@@ -103,11 +103,16 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
+	previousCurrentWorkerHash := programResult.Status.CurrentWorkerHash
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD, &programResult.Status); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	checkpoints, err := p.sharedResources.ReconcileWithStatus(ctx, req.DGD, &programResult.Status)
+	if programResult.Status.CurrentWorkerHash != previousCurrentWorkerHash {
+		programResult.Result.Requeue = true
+		return programResult, nil
+	}
+	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}
@@ -125,6 +130,7 @@ func (p *groveProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
+	previousCurrentWorkerHash = programResult.Status.CurrentWorkerHash
 	result, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
@@ -134,6 +140,10 @@ func (p *groveProgram) Reconcile(
 	)
 	if err != nil {
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
+	}
+	if programResult.Status.CurrentWorkerHash != previousCurrentWorkerHash {
+		programResult.Result.Requeue = true
+		return programResult, nil
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
