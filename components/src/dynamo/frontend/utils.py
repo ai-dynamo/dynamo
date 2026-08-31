@@ -183,6 +183,24 @@ def make_internal_error(request_id: str, detail: str | None = None) -> dict[str,
     }
 
 
+def as_error_envelope(error_payload: dict[str, Any]) -> dict[str, Any]:
+    """Wrap an OpenAI-style error dict as an annotated error frame.
+
+    A bare ``{"error": {...}}`` yielded from the async generator is NOT a valid
+    response object: the binding only treats a dict as an ``Annotated`` envelope
+    when it carries ``_dynamo_annotated`` (``depythonize_annotated`` in
+    ``lib/bindings/python/rust/engine.rs``). Without the tag it is parsed as a
+    completion chunk, fails with ``missing field `id```, and the client gets an
+    opaque 500 in place of the message -- so the error text never arrives.
+
+    Tagging it keeps every field optional and lets the HTTP layer's existing
+    error handling read the message off ``comment``; when that message carries a
+    serialized backend status, the layer recovers that status too.
+    """
+    message = (error_payload.get("error") or {}).get("message") or "unknown error"
+    return {"_dynamo_annotated": True, "event": "error", "comment": [message]}
+
+
 _SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX = "BackendInvalidArgument: "
 
 

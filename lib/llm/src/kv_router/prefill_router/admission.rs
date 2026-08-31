@@ -41,10 +41,15 @@ where
         };
 
         if let Some(error) = first_output.err() {
-            return Err(PrefillError::PrefillError(
-                "Prefill router returned error in output".to_string(),
-                Some(Box::new(error)),
-            ));
+            // Fold the worker's own error text into the message. `to_pyerr`
+            // formats with `Display` only, so a `#[source]` never reaches the
+            // frontend: without this it saw the bare wrapper text and could not
+            // tell an invalid argument from an engine fault, so a request the
+            // worker had correctly rejected with 400 reached the client as a
+            // 500. The rendered text keeps the `BackendInvalidArgument: {...}`
+            // discriminator the HTTP layer and chat processors already key on.
+            let detail = format!("Prefill router returned error in output: {error}");
+            return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
         }
 
         if let Some(ref tracker) = tracker {
@@ -72,10 +77,9 @@ where
         if !is_bootstrap {
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
-                    return Err(PrefillError::PrefillError(
-                        "Prefill router returned error in output stream".to_string(),
-                        Some(Box::new(error)),
-                    ));
+                    let detail =
+                        format!("Prefill router returned error in output stream: {error}");
+                    return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
                 if let Some(output) = next.data.as_ref()
                     && prompt_tokens_details.is_none()

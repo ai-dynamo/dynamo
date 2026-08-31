@@ -1496,7 +1496,15 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        assert chunks[-1]["error"]["type"] == "internal_error"
+        # Yielded, not raised: a genuine engine fault must not be mapped to a 4xx.
+        last = chunks[-1]
+        # And it must be a TAGGED annotated frame. An untagged {"error": {...}} is
+        # parsed by the binding as a completion chunk and dies with
+        # "missing field `id`", so the client gets an opaque 500 and the reason is
+        # lost -- which is what this envelope exists to prevent.
+        assert last["_dynamo_annotated"] is True
+        assert last["event"] == "error"
+        assert "CUDA out of memory" in last["comment"][0]
 
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
