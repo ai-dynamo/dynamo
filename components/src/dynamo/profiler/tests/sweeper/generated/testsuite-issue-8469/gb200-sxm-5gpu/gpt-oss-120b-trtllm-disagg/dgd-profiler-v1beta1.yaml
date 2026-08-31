@@ -1,0 +1,77 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-agg-85bdb5a6
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --tensor-parallel-size
+          - '4'
+          - --pipeline-parallel-size
+          - '1'
+          - --expert-parallel-size
+          - '1'
+          - --max-batch-size
+          - '128'
+          - --max-num-tokens
+          - '4640'
+          - --trtllm.moe_tensor_parallel_size
+          - '4'
+          - --trtllm.moe_config.backend
+          - WIDEEP
+          - --trtllm.kv_cache_config.dtype
+          - auto
+          - --trtllm.kv_cache_config.tokens_per_block
+          - '32'
+          - --trtllm.kv_cache_config.enable_block_reuse
+          - 'false'
+          - --trtllm.cuda_graph_config.enable_padding
+          - 'true'
+          - --trtllm.disable_overlap_scheduler
+          - 'false'
+          - --trtllm.print_iter_log
+          - 'false'
+          - --model-path
+          - openai/gpt-oss-120b
+          - --served-model-name
+          - openai/gpt-oss-120b
+          - --trtllm.enable_chunked_prefill
+          - 'true'
+          resources:
+            limits:
+              nvidia.com/gpu: '4'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '4'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

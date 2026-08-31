@@ -1,0 +1,104 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-32b-vllm-disagg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmDecodeWorker
+    type: decode
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --tensor-parallel-size
+          - '2'
+          - --block-size
+          - '64'
+          - --gpu-memory-utilization
+          - '0.9'
+          - --no-enable-prefix-caching
+          - --max-num-seqs
+          - '512'
+          - --max-num-batched-tokens
+          - '8192'
+          - --served-model-name
+          - Qwen/Qwen3-32B
+          resources:
+            limits:
+              nvidia.com/gpu: '2'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '2'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmPrefillWorker
+    type: prefill
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '2'
+          - --block-size
+          - '64'
+          - --gpu-memory-utilization
+          - '0.9'
+          - --enable-prefix-caching
+          - --max-num-seqs
+          - '128'
+          - --max-num-batched-tokens
+          - '16384'
+          - --served-model-name
+          - Qwen/Qwen3-32B
+          resources:
+            limits:
+              nvidia.com/gpu: '2'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '2'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

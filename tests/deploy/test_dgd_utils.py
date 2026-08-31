@@ -15,7 +15,13 @@ import requests
 import yaml
 
 from tests.deploy import dgd_utils
-from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.deploy.dgd_utils import (
+    SCHEMA_V1ALPHA1,
+    SCHEMA_V1BETA1,
+    DeploymentSpec,
+    ManagedDeployment,
+    ServiceSpec,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -292,3 +298,47 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+
+
+def test_model_resolves_shell_variable_from_v1alpha1_container_env() -> None:
+    service = ServiceSpec(
+        "Worker",
+        {
+            "extraPodSpec": {
+                "mainContainer": {
+                    "args": ["--model-path", "${MODEL_PATH}"],
+                    "env": [{"name": "MODEL_PATH", "value": "Qwen/Qwen3-32B-FP8"}],
+                }
+            }
+        },
+        schema=SCHEMA_V1ALPHA1,
+    )
+
+    assert service.model == "Qwen/Qwen3-32B-FP8"
+
+
+def test_model_resolves_shell_variable_from_v1beta1_container_env() -> None:
+    service = ServiceSpec(
+        "Worker",
+        {
+            "podTemplate": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "main",
+                            "args": ["--model", "$MODEL_ID"],
+                            "env": [
+                                {
+                                    "name": "MODEL_ID",
+                                    "value": "Qwen/Qwen3-32B-FP8",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        },
+        schema=SCHEMA_V1BETA1,
+    )
+
+    assert service.model == "Qwen/Qwen3-32B-FP8"
