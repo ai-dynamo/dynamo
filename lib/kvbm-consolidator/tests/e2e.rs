@@ -246,24 +246,14 @@ async fn run_replay(fixture_path: &str, engine_source: EventSource, snapshot_nam
 
     consolidator.shutdown().await;
 
-    // Batch framing is a timing artifact, not a contract. The publisher drains the
-    // tracker on a fixed poll interval and emits whatever is queued at that tick, so
-    // how the event stream is sliced into batches depends on which payloads happen to
-    // have been ingested when a tick fires. The replay above sends its payloads 5ms
-    // apart against a 20ms drain, leaving only ~10ms of slack; under CPU contention a
-    // payload slips past a tick boundary and its event lands in the next batch. That
-    // splits an otherwise identical stream across two batches and fails a snapshot
-    // taken over `Vec<SnapBatch>`.
-    //
-    // What the consolidator actually guarantees is the event stream: content, and
-    // relative order (see `sort_for_emission`). Snapshot that, and assert the batch
-    // envelope separately.
     assert!(
         batches.iter().all(|b| b.2 == Some(0)),
         "every egress batch must carry dp_rank Some(0), got {:?}",
         batches.iter().map(|b| b.2).collect::<Vec<_>>()
     );
 
+    // There is no guarantee about how events are batched, which depends on the publisher's poll interval.
+    // Therefore, only the order of events is tested.
     let collected: Vec<SnapEvent> = batches.into_iter().flat_map(|b| b.1).collect();
 
     insta::assert_yaml_snapshot!(snapshot_name, collected);
