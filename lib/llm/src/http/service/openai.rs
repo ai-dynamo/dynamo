@@ -182,6 +182,19 @@ fn unavailable_error_type() -> String {
         .to_string()
 }
 
+/// `error_type` for a genuine 400 that is not a load-shed rejection. Same
+/// reasoning as `unavailable_error_type`: `map_error_code_to_error_type`
+/// checks `code == overload_status_code()` first, and an operator can
+/// configure `DYN_HTTP_OVERLOAD_STATUS_CODE=400`, which would otherwise
+/// label unsupported content "Overloaded" — telling clients to retry a
+/// request that can never succeed.
+fn bad_request_error_type() -> String {
+    StatusCode::BAD_REQUEST
+        .canonical_reason()
+        .expect("400 is IANA-registered")
+        .to_string()
+}
+
 /// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
 /// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
 /// `map_error_code_to_error_type` checks `code == overload_status_code()`
@@ -502,7 +515,7 @@ impl ErrorMessage {
     pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::debug!("Unsupported Content error: {msg}");
         let code = StatusCode::BAD_REQUEST;
-        let error_type = map_error_code_to_error_type(code);
+        let error_type = bad_request_error_type();
         (
             code,
             Json(ErrorMessage {
@@ -7609,6 +7622,7 @@ mod tests {
         );
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.error_type, "Bad Request");
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
