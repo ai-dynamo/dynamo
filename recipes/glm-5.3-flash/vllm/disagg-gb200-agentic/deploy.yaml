@@ -196,6 +196,7 @@ spec:
                     --served-model-name zai-org/GLM-5.3-Flash \
                     --trust-remote-code \
                     --tensor-parallel-size 4 \
+                    --max-model-len 1048576 \
                     --max-num-seqs 32 \
                     --max-num-batched-tokens 16384 \
                     --gpu-memory-utilization 0.92 \
@@ -350,6 +351,7 @@ spec:
                     --served-model-name zai-org/GLM-5.3-Flash \
                     --trust-remote-code \
                     --tensor-parallel-size 4 \
+                    --max-model-len 1048576 \
                     --max-num-seqs 256 \
                     --max-num-batched-tokens 8192 \
                     --gpu-memory-utilization 0.92 \
