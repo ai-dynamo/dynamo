@@ -535,21 +535,57 @@ def _run_moe_kernel_post_load(module: torch.nn.Module, quant_method) -> None:
     values.
     """
     kernel = getattr(quant_method, "moe_kernel", None)
-    post_load = getattr(kernel, "process_weights_after_loading", None)
-    if not callable(post_load):
+    # process_weights_after_loading lives on the experts object, which the
+    # kernel maker nests inside the modular kernel (and, for the monolithic
+    # path, one level deeper behind .impl).
+    # The quant method also defines process_weights_after_loading, but for the
+    # modular path it raises ("uses the new modular kernel initialization
+    # logic"), so only consider the nested experts objects.
+    post_load = None
+    for holder in (
+        getattr(kernel, "fused_experts", None),
+        getattr(getattr(kernel, "impl", None), "fused_experts", None),
+    ):
+        cand = getattr(holder, "process_weights_after_loading", None)
+        if callable(cand):
+            post_load = cand
+            break
+    if post_load is None:
         return
     if id(module) in _moe_post_load_done:
         return
 
-    saved: dict[str, torch.Tensor] = {}
+    # post_load uses register_parameter, which refuses to overwrite. Some of
+    # these are already bound (the writer published them and materialization
+    # brought them across), and the KeyError would abort the function partway
+    # through, leaving the later registrations undone. Drop them first so the
+    # derived values are recomputed consistently from the imported scales.
+    for derived in ("g1_scale_c", "gemm1_clamp_limit", "gemm2_clamp_limit"):
+        module._parameters.pop(derived, None)
+        module.__dict__.pop(derived, None)
+
+    saved: dict[str, torch.nn.Parameter] = {}
     for attr in ("w13_input_scale", "w2_input_scale"):
         t = getattr(module, attr, None)
-        if torch.is_tensor(t):
+        if isinstance(t, torch.nn.Parameter):
             saved[attr] = t
-            setattr(module, attr, torch.ones_like(t))
+            # Must stay an nn.Parameter: the module rejects a bare tensor.
+            setattr(
+                module,
+                attr,
+                torch.nn.Parameter(torch.ones_like(t), requires_grad=False),
+            )
     try:
         post_load(module)
         _moe_post_load_done.add(id(module))
+        if len(_moe_post_load_done) == 1:
+            logger.info(
+                "[GMS] Read mode: MoE post-load ran (%s); derived params such "
+                "as g1_scale_c are now registered",
+                type(post_load.__self__).__name__
+                if hasattr(post_load, "__self__")
+                else "unknown",
+            )
     except Exception:
         logger.exception(
             "[GMS] Read mode: MoE post-load failed for a rebuilt kernel; "
