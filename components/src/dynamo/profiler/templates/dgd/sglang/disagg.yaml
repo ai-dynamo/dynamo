@@ -19,6 +19,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: my-registry/sglang-runtime:my-tag
           name: main
     replicas: 1
@@ -53,6 +54,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: my-registry/sglang-runtime:my-tag
           name: main
           resources:
@@ -91,6 +93,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: my-registry/sglang-runtime:my-tag
           name: main
           resources:

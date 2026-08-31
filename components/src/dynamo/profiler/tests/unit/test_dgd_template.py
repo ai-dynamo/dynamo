@@ -86,7 +86,33 @@ def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> Non
     config = load_dgd_template(backend, mode)
 
     env_from = _main_container(config, "Frontend").get("envFrom", [])
-    assert {"secretRef": {"name": "hf-token-secret"}} in env_from
+    assert {"secretRef": {"name": "hf-token-secret", "optional": True}} in env_from
+
+
+@pytest.mark.parametrize(
+    ("backend", "mode"),
+    [
+        ("vllm", "agg"),
+        ("vllm", "disagg"),
+        ("sglang", "agg"),
+        ("sglang", "disagg"),
+        ("trtllm", "agg"),
+        ("trtllm", "disagg"),
+        ("mocker", "disagg"),
+    ],
+)
+def test_all_hf_token_secret_refs_are_optional(backend: str, mode: str) -> None:
+    config = load_dgd_template(backend, mode)
+
+    secret_refs = [
+        env_from["secretRef"]
+        for component in config["spec"]["components"]
+        for container in component["podTemplate"]["spec"]["containers"]
+        for env_from in container.get("envFrom", [])
+        if env_from.get("secretRef", {}).get("name") == "hf-token-secret"
+    ]
+    assert secret_refs
+    assert all(secret_ref.get("optional") is True for secret_ref in secret_refs)
 
 
 def test_vllm_decode_blueprint_does_not_enable_kv_transfer() -> None:

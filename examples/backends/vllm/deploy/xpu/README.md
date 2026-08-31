@@ -31,7 +31,7 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
    ```
    See [container/README.md](../../../../../container/README.md) for complete build instructions.
-4. **HuggingFace token secret**:
+4. **Hugging Face token secret** for gated or private models:
    ```bash
    export HF_TOKEN=your_hf_token
    kubectl create secret generic hf-token-secret \
