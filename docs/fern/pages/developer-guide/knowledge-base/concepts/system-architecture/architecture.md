@@ -69,8 +69,10 @@ The request plane carries RPC traffic between Dynamo components. `DYN_REQUEST_PL
 - `tcp` is the default and uses direct pooled connections.
 - `nats` uses brokered request transport.
 
-An absent or empty value selects `tcp`. Any other value must be `tcp` or `nats`
-(case-insensitive); an unrecognized value stops startup instead of silently selecting `tcp`.
+When the runtime reads this setting from its environment, an absent or empty value
+selects `tcp`. Components that pass an explicit value reject an empty value. Any
+other value must be `tcp` or `nats` (case-insensitive); an unrecognized value stops
+startup instead of silently selecting `tcp`.
 
 `DYN_REQUEST_PLANE_CODEC` selects `msgpack` or `json`. The destination endpoint advertises its codec, so one client can communicate with endpoints that use different codecs.
 
