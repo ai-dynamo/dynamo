@@ -25,6 +25,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     override_server_args,
     require_reasoning_kwargs,
+    resolved_server_args,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -153,6 +154,20 @@ def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+def test_resolved_server_args_uses_declarative_view(monkeypatch):
+    raw_server_args = SimpleNamespace(page_size=None)
+    resolved_server_args_view = SimpleNamespace(page_size=64)
+
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args_view,
+    )
+
+    assert resolved_server_args(raw_server_args) is resolved_server_args_view
+    assert raw_server_args.page_size is None
 
 
 def test_config_uses_resolved_server_args_after_runtime_init():

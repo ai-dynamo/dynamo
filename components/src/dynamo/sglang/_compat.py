@@ -32,6 +32,12 @@ except ImportError:
     # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
     declare_late_resolution = None
 
+try:
+    from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
+except ImportError:
+    # SGLang #36255 exposes ServerArgs._resolved() instead.
+    sglang_resolved_view = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,12 +127,17 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang #36255 keeps ``ServerArgs`` as raw operator input. Older supported
-    releases and Dynamo's non-LLM argument stubs retain effective values on
-    the object itself.
+    SGLang #36255 exposes ``ServerArgs._resolved()``. Current SGLang keeps
+    ``ServerArgs`` raw and exposes the same projection through
+    ``resolved_view()``. Older supported releases and Dynamo's non-LLM argument
+    stubs retain effective values on the object itself.
     """
     resolve = getattr(server_args, "_resolved", None)
-    return resolve() if callable(resolve) else server_args
+    if callable(resolve):
+        return resolve()
+    if sglang_resolved_view is not None:
+        return sglang_resolved_view(server_args)
+    return server_args
 
 
 @lru_cache(maxsize=32)
