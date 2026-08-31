@@ -288,9 +288,11 @@ planner:
 
 sidecar:
   # TODO: Expand this to every Dockerfile and composite-action input after the
-  # acceptable CI fan-out is agreed. Keep the original narrow scope for now.
+  # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  # Compliance policy and baseline changes can fail the sidecar image build.
+  - 'container/compliance/**'
   - '!**/*.md'
   - '!**/*.rst'
 

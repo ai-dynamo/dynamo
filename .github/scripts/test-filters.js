@@ -145,6 +145,11 @@ const testCases = [
     expect: { sidecar: true },
     desc: 'sidecar workflow triggers its own job'
   },
+  {
+    file: 'container/compliance/policy/licenses.toml',
+    expect: { sidecar: true },
+    desc: 'compliance policy changes validate the sidecar image gate'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {

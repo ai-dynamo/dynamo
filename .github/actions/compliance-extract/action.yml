@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ''
   platform:
-    description: 'Single platform string, e.g. linux/amd64'
+    description: 'Platform string, e.g. linux/amd64, or a comma-separated list for multi-platform builds'
     required: true
   cuda_version:
     description: 'CUDA version string (e.g. 12.9, 13.0); empty for non-CUDA targets'

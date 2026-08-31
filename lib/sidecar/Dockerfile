@@ -73,7 +73,6 @@ COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
-COPY container/compliance/ container/compliance/
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -138,6 +137,7 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
 # build-only dependencies cannot be linked into these binaries and are omitted.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    set -e; \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         amd64) echo "x86_64-unknown-linux-gnu" ;; \
         arm64) echo "aarch64-unknown-linux-gnu" ;; \
@@ -161,6 +161,9 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
             "$(dirname "${manifest}")/${binary}_bin.cdx.json" \
             "/out/sidecar-sboms/${binary}.cyclonedx.json"; \
     done \
+    && test -s /out/sidecar-sboms/dynamo-vllm-sidecar.cyclonedx.json \
+    && test -s /out/sidecar-sboms/dynamo-sglang-sidecar.cyclonedx.json \
+    && test -s /out/sidecar-sboms/dynamo-trtllm-sidecar.cyclonedx.json \
     && for src in /usr/local/cargo/registry/src/*; do \
         [ -d "${src}" ] || continue; \
         find "${src}" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r crate; do \
@@ -207,6 +210,7 @@ FROM builder-base AS licenses
 ARG TARGETARCH
 
 USER root
+COPY container/compliance/ /src/container/compliance/
 RUN mkdir -p /legal /tmp/runtime-root \
     /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms
 
