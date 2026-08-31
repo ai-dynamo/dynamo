@@ -10,6 +10,7 @@ from dynamo.global_planner.priority import (
     DEFAULT_POOL_PRIORITY,
     DEFAULT_SELECTOR,
     LOWEST_PRIORITY,
+    PriorityCondition,
     PriorityConfig,
     PriorityContext,
     PriorityResolver,
@@ -199,8 +200,8 @@ def test_explicit_rules_are_accepted():
     assert (resolved.priority, resolved.rule_index) == (2, 0)
 
 
-def test_conditions_are_not_supported_yet_and_fail_loudly():
-    # Guards the dangerous alternative: parsing an unknown predicate into a
+def test_unknown_condition_fields_are_rejected():
+    # Guards the dangerous alternative: parsing a typo'd predicate into a
     # condition that silently matches everything.
     with pytest.raises(ValidationError):
         PriorityConfig(
@@ -265,3 +266,127 @@ def test_duplicate_selectors_are_rejected():
 def test_unknown_config_field_is_rejected():
     with pytest.raises(ValidationError):
         PriorityConfig(defualt=5)  # codespell:ignore defualt
+
+
+# ---------------------------------------------------------------------------- #
+# Load-conditional priorities                                                  #
+# ---------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "requests, expected",
+    [
+        (None, False),  # no signal -> never matches
+        (49.9, True),
+        (50.0, False),  # boundary is exclusive
+        (500.0, False),
+    ],
+)
+def test_predicted_requests_below(requests, expected):
+    condition = PriorityCondition(predicted_requests_below=50)
+    ctx = PriorityContext(predicted_num_requests=requests)
+    assert condition.matches(ctx) is expected
+
+
+@pytest.mark.parametrize(
+    "requests, expected",
+    [
+        (None, False),  # no signal -> never matches
+        (99.0, False),
+        (100.0, True),  # boundary is inclusive
+        (500.0, True),
+    ],
+)
+def test_predicted_requests_at_least(requests, expected):
+    condition = PriorityCondition(predicted_requests_at_least=100)
+    ctx = PriorityContext(predicted_num_requests=requests)
+    assert condition.matches(ctx) is expected
+
+
+def test_predicates_combine_as_a_band():
+    condition = PriorityCondition(
+        predicted_requests_at_least=10, predicted_requests_below=100
+    )
+    assert condition.matches(PriorityContext(predicted_num_requests=50))
+    assert not condition.matches(PriorityContext(predicted_num_requests=5))
+    assert not condition.matches(PriorityContext(predicted_num_requests=100))
+
+
+def test_unsatisfiable_band_is_rejected():
+    with pytest.raises(ValidationError, match="no request rate can satisfy"):
+        PriorityCondition(predicted_requests_at_least=100, predicted_requests_below=10)
+
+
+def test_conditional_policy_selects_the_matching_rule():
+    resolver = _resolver(
+        pools=[
+            {
+                "selector": "prod/batch",
+                "rules": [
+                    {"when": {"predicted_requests_below": 50}, "priority": 800},
+                    {"priority": 100},
+                ],
+            }
+        ]
+    )
+    quiet = resolver.resolve(
+        "prod/batch", "decode", PriorityContext(predicted_num_requests=5)
+    )
+    assert (quiet.priority, quiet.rule_index) == (800, 0)
+
+    busy = resolver.resolve(
+        "prod/batch", "decode", PriorityContext(predicted_num_requests=500)
+    )
+    assert (busy.priority, busy.rule_index) == (100, 1)
+
+    # No signal at all falls through to the unconditional rule.
+    unknown = resolver.resolve("prod/batch", "decode", PriorityContext())
+    assert (unknown.priority, unknown.rule_index) == (100, 1)
+
+
+# ---------------------------------------------------------------------------- #
+# Building a context from the wire                                             #
+# ---------------------------------------------------------------------------- #
+
+
+def test_context_from_predicted_load():
+    ctx = PriorityContext.from_predicted_load(
+        {"num_requests": 12, "isl": 2048.0, "osl": 256}
+    )
+    assert ctx.predicted_num_requests == 12.0
+    assert (ctx.predicted_isl, ctx.predicted_osl) == (2048.0, 256.0)
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"num_requests": None}])
+def test_absent_predicted_load_yields_an_empty_context(payload):
+    assert PriorityContext.from_predicted_load(payload) == PriorityContext()
+
+
+@pytest.mark.parametrize("value", ["100", True, False, [1], {"a": 1}])
+def test_malformed_predicted_load_degrades_to_no_signal(value):
+    # Caller-supplied payload: a bad prediction must not fail a scale request,
+    # and bool must not sneak through as an int.
+    ctx = PriorityContext.from_predicted_load({"num_requests": value})
+    assert ctx.predicted_num_requests is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), -1.0])
+def test_unusable_numeric_rates_degrade_to_no_signal(value):
+    # NaN is the dangerous one: every comparison against it is False, so
+    # without an explicit guard it slips past both predicate checks and
+    # satisfies any condition instead of none of them.
+    assert (
+        PriorityContext.from_predicted_load(
+            {"num_requests": value}
+        ).predicted_num_requests
+        is None
+    )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_rate_matches_nothing(value):
+    # PriorityContext is a plain dataclass, so guard at the decision point too
+    # rather than trusting only the from_predicted_load boundary.
+    ctx = PriorityContext(predicted_num_requests=value)
+    assert not PriorityCondition(predicted_requests_below=50).matches(ctx)
+    assert not PriorityCondition(predicted_requests_at_least=10).matches(ctx)

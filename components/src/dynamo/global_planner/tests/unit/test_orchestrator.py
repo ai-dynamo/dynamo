@@ -14,7 +14,11 @@ import pytest
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
 from dynamo.global_planner.orchestrator import Orchestrator
-from dynamo.global_planner.priority import PriorityConfig, PriorityResolver
+from dynamo.global_planner.priority import (
+    PriorityConfig,
+    PriorityContext,
+    PriorityResolver,
+)
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleStatus
 
@@ -258,6 +262,56 @@ def test_unconfigured_priorities_leave_arbitration_unchanged():
     # A uniform non-default value must behave the same as declaring nothing.
     uniform = _priority(pools=[{"selector": "ns/*", "priority": 42}])
     assert run(_priority()) == run(uniform)
+
+
+def test_partner_conditions_use_the_partners_own_cached_context():
+    """A partner's conditional priority must be evaluated against the signals
+    *it* published, not against whoever happens to be requesting now.
+
+    ns/b is expendable only while its own traffic is low. The requester always
+    reports high traffic, so resolving partners against the requester's context
+    would classify ns/b as important in both cases and never pick it.
+    """
+    pools = _pools(ns__a=(2, 5, 1), ns__b=(None, 5, 1))  # 2 + 5 + 5 = 12
+    resolver = _priority(
+        pools=[
+            {"selector": "ns/a", "priority": 900},
+            {
+                "selector": "ns/b",
+                "rules": [
+                    {"when": {"predicted_requests_below": 50}, "priority": 10},
+                    {"priority": 900},
+                ],
+            },
+        ]
+    )
+
+    def run(partner_requests):
+        orch = _decider(
+            max_total_gpus=12, min_total_gpus=12, priority_resolver=resolver
+        )
+        orch.update_intent_cache(
+            "ns/a", _targets(decode=3), pools["ns/a"], PriorityContext()
+        )
+        orch.update_intent_cache(
+            "ns/b",
+            _targets(decode=3),
+            pools["ns/b"],
+            PriorityContext(predicted_num_requests=partner_requests),
+        )
+        result = orch.mediate(
+            "ns/a",
+            _targets(prefill=4),
+            pools,
+            # The requester is busy in both runs.
+            priority_context=PriorityContext(predicted_num_requests=500),
+        )
+        return result.selected_partners[0].participant_id
+
+    # ns/b quiet -> priority 10 -> donates before the important pool.
+    assert run(10) == "ns/b"
+    # ns/b busy -> priority 900 -> ties with ns/a, atomicity tiebreak wins.
+    assert run(500) == "ns/a"
 
 
 def test_intent_cache_ttl_expiry_blocks_pairing():

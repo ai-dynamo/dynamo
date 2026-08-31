@@ -52,10 +52,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PoolIntent:
-    """Most recently observed desired replica count for a pool."""
+    """Most recently observed desired replica count for a pool.
+
+    ``context`` is the priority context that pool published alongside the
+    intent. Conditional priorities for a *partner* must be evaluated against
+    the partner's own signals, not the signals of whoever happens to be asking
+    now, so the context is cached with the intent rather than recomputed.
+    """
 
     last_desired: int
     last_seen_at: float
+    context: PriorityContext = field(default_factory=PriorityContext)
 
 
 @dataclass
@@ -263,6 +270,7 @@ class Orchestrator:
         blocking: bool,
         deployment_name: str,
         caller_name: str,
+        priority_context: Optional[PriorityContext] = None,
     ) -> ScaleOutcome:
         """Arbitrate and execute one scale request.
 
@@ -275,11 +283,21 @@ class Orchestrator:
         if self._scale_lock is not None:
             async with self._scale_lock:
                 terminal = await self._observe_decide_apply(
-                    participant_id, targets, blocking, deployment_name, caller_name
+                    participant_id,
+                    targets,
+                    blocking,
+                    deployment_name,
+                    caller_name,
+                    priority_context,
                 )
         else:
             terminal = await self._observe_decide_apply(
-                participant_id, targets, blocking, deployment_name, caller_name
+                participant_id,
+                targets,
+                blocking,
+                deployment_name,
+                caller_name,
+                priority_context,
             )
 
         if terminal is not None:
@@ -301,6 +319,7 @@ class Orchestrator:
         blocking: bool,
         deployment_name: str,
         caller_name: str,
+        priority_context: Optional[PriorityContext] = None,
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
@@ -333,6 +352,7 @@ class Orchestrator:
             all_pools,
             log_deployment_name=deployment_name,
             log_caller_name=caller_name,
+            priority_context=priority_context,
         )
         if not result.approved:
             # Soft denial: budget breach is an expected operational outcome in
@@ -454,6 +474,7 @@ class Orchestrator:
         all_pools: PoolSnapshot,
         log_deployment_name: str = "",
         log_caller_name: str = "",
+        priority_context: Optional[PriorityContext] = None,
     ) -> MediationResult:
         """Decide whether ``targets`` for ``participant_id`` fit the budget.
 
@@ -463,12 +484,13 @@ class Orchestrator:
         ``log_*`` values are used only for parity-identical log lines.
         """
         pools = all_pools.get(participant_id, {})
-        ctx = PriorityContext()
+        # The requesting pool's own signals; partners use their cached ones.
+        ctx = priority_context or PriorityContext()
 
         # Always update the intent cache with this request's targets, regardless
         # of decision. A later request from a complementary pool may need to pair
         # with this intent.
-        self.update_intent_cache(participant_id, targets, pools)
+        self.update_intent_cache(participant_id, targets, pools, ctx)
 
         request_pool_keys = {
             (participant_id, t.sub_component_type.value) for t in targets
@@ -529,6 +551,14 @@ class Orchestrator:
         # 2. Else if standalone in bounds → apply standalone.
         # 3. Else deny.
         if selected_partners:
+            priorities_for_log = {
+                (p.participant_id, p.sub_type): self.priority_resolver.resolve(
+                    p.participant_id,
+                    p.sub_type,
+                    self._cached_context(p.participant_id, p.sub_type),
+                ).priority
+                for p in selected_partners
+            }
             scope = (
                 "intra-participant"
                 if all(p.participant_id == participant_id for p in selected_partners)
@@ -537,7 +567,7 @@ class Orchestrator:
             partners_desc = ", ".join(
                 f"{p.participant_id}/{p.sub_type}={p.applied_desired}"
                 f" (priority "
-                f"{self.priority_resolver.resolve(p.participant_id, p.sub_type, ctx).priority})"
+                f"{priorities_for_log[(p.participant_id, p.sub_type)]})"
                 for p in selected_partners
             )
             logger.info(
@@ -642,9 +672,11 @@ class Orchestrator:
         participant_id: str,
         targets: list[TargetReplica],
         pools: dict[str, PoolSpec],
+        priority_context: Optional[PriorityContext] = None,
     ):
-        """Record the desired replicas for each pool in this request."""
+        """Record the desired replicas and priority context for this request."""
         now = self._now()
+        context = priority_context or PriorityContext()
         for target in targets:
             sub_type = target.sub_component_type.value
             if sub_type not in pools:
@@ -655,11 +687,21 @@ class Orchestrator:
             self._intent_cache[key] = PoolIntent(
                 last_desired=target.desired_replicas,
                 last_seen_at=now,
+                context=context,
             )
 
     # ------------------------------------------------------------------ #
     # Tolerance                                                          #
     # ------------------------------------------------------------------ #
+
+    def _cached_context(self, participant_id: str, sub_type: str) -> PriorityContext:
+        """The priority context a pool published with its last intent.
+
+        Falls back to an empty context, whose effect is that every condition
+        fails to match and the pool resolves to its unconditional rule.
+        """
+        intent = self._intent_cache.get(self._pool_cache_key(participant_id, sub_type))
+        return intent.context if intent is not None else PriorityContext()
 
     def _pair_tolerance(
         self,
@@ -841,10 +883,11 @@ class Orchestrator:
 
         # Resolve each candidate's priority once; the sort would otherwise
         # re-resolve on every comparison.
-        ctx = PriorityContext()
         priorities = {
             (c.participant_id, c.sub_type): self.priority_resolver.resolve(
-                c.participant_id, c.sub_type, ctx
+                c.participant_id,
+                c.sub_type,
+                self._cached_context(c.participant_id, c.sub_type),
             )
             for c in all_candidates
         }

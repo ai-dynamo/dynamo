@@ -38,19 +38,26 @@ participant. So a selector may name either, and the most specific match wins:
 Static priorities are degenerate conditionals
 ---------------------------------------------
 A policy is *always* an ordered list of rules resolved first-match-wins, whose
-final rule is unconditional. Today every rule is unconditional, so a policy is
-just a constant -- but :meth:`PriorityResolver.resolve` already takes a
-:class:`PriorityContext`, so adding real predicates later is a new
-:class:`PriorityCondition` field and nothing else. Callers do not change.
+final rule is unconditional, so ``priority: <n>`` is simply the one-rule case:
 
-``PriorityCondition`` forbids unknown fields, so a config that tries to declare
-a condition today fails loudly at startup instead of silently always-matching.
+.. code-block:: yaml
+
+    - selector: "prod/batch"
+      rules:
+        - when: {predicted_requests_below: 50}   # quiet: yield to everyone
+          priority: 800
+        - priority: 100                          # busy: normal standing
+
+Conditions are evaluated against the pool's own :class:`PriorityContext`, not
+the requester's -- a partner's context comes from the intent it published, so
+"while *its* traffic is low" means what it says.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -88,10 +95,52 @@ def outranks(a: int, b: int) -> bool:
 class PriorityContext:
     """Signals a conditional rule may test when resolving a pool's priority.
 
-    Empty today: every rule is unconditional, so resolution ignores it. It is
-    threaded through :meth:`PriorityResolver.resolve` from the start precisely
-    so that populating it later does not touch any call site.
+    Populated from the ``predicted_load`` a local planner already attaches to
+    every ``ScaleRequest``, so no protocol change was needed to reach them.
+    Each field is ``None`` when the caller did not supply it or supplied
+    something unusable (wrong type, negative, NaN, infinity); a condition that
+    tests a missing signal does **not** match, so a pool always falls through
+    to its unconditional rule rather than being silently reclassified on absent
+    or malformed data.
+
+    ``predicted_isl`` and ``predicted_osl`` are carried but no condition tests
+    them yet -- the context is the full signal set, conditions are the subset
+    we have designed predicates for.
     """
+
+    predicted_num_requests: Optional[float] = None
+    predicted_isl: Optional[float] = None
+    predicted_osl: Optional[float] = None
+
+    @classmethod
+    def from_predicted_load(cls, predicted_load: Optional[dict]) -> "PriorityContext":
+        """Build a context from a ``ScaleRequest.predicted_load`` payload.
+
+        Tolerates a missing payload and unexpected keys: this crosses a trust
+        boundary from a caller-supplied dict, and a malformed prediction must
+        degrade to "no signal" rather than fail a scale request.
+        """
+        if not predicted_load:
+            return cls()
+
+        def _number(key: str) -> Optional[float]:
+            value = predicted_load.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            number = float(value)
+            # NaN and infinity are not usable signals, and a negative rate is
+            # not a rate. NaN in particular is dangerous: every comparison
+            # against it is False, so it would slip past both predicate checks
+            # and satisfy any condition rather than degrading to "no signal".
+            if not math.isfinite(number) or number < 0:
+                return None
+            return number
+
+        return cls(
+            predicted_num_requests=_number("num_requests"),
+            predicted_isl=_number("isl"),
+            predicted_osl=_number("osl"),
+        )
 
 
 @dataclass(frozen=True)
@@ -116,15 +165,57 @@ class ResolvedPriority:
 class PriorityCondition(BaseModel):
     """Predicates gating a :class:`PriorityRule`.
 
-    No predicate fields exist yet. ``extra="forbid"`` means a config declaring
-    one is rejected at startup rather than parsed into a condition that
-    silently matches everything.
+    All declared predicates must hold for the condition to match. A predicate
+    whose signal is absent from the context does **not** hold, so a rule never
+    fires on missing data. ``extra="forbid"`` keeps a typo'd predicate name
+    from parsing into a condition that silently matches everything.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    predicted_requests_at_least: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Match when the caller's predicted request rate is at or above "
+            "this value -- 'this priority while traffic is high'."
+        ),
+    )
+    predicted_requests_below: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Match when the caller's predicted request rate is strictly below "
+            "this value -- 'this priority while traffic is low'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "PriorityCondition":
+        low = self.predicted_requests_at_least
+        high = self.predicted_requests_below
+        if low is not None and high is not None and low >= high:
+            raise ValueError(
+                f"predicted_requests_at_least ({low}) must be below "
+                f"predicted_requests_below ({high}); as written no request "
+                f"rate can satisfy both"
+            )
+        return self
+
     def matches(self, ctx: PriorityContext) -> bool:
-        """Whether this condition holds for ``ctx``. Vacuously true today."""
+        """Whether every declared predicate holds for ``ctx``."""
+        rate = ctx.predicted_num_requests
+        if rate is not None and not math.isfinite(rate):
+            # Treat a non-finite rate as absent. Comparing against NaN yields
+            # False in both directions, which would otherwise let it satisfy
+            # every predicate instead of none of them.
+            rate = None
+        if self.predicted_requests_at_least is not None:
+            if rate is None or rate < self.predicted_requests_at_least:
+                return False
+        if self.predicted_requests_below is not None:
+            if rate is None or rate >= self.predicted_requests_below:
+                return False
         return True
 
 
