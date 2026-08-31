@@ -109,6 +109,10 @@ impl EncodeBuffer {
     /// Floor on the predicted frame size, so an unusually small frame does not
     /// make the next one ask for less room than any frame could need.
     const MIN_RESERVE: usize = 64;
+    /// Starting capacity for the private buffer a re-entrant `send` falls back
+    /// to. Matches what `encode_annotated_response` gives the pull path, so the
+    /// fallback does not grow from zero.
+    const SCRATCH_CAPACITY: usize = 128;
 
     fn new() -> Self {
         Self {
@@ -153,8 +157,19 @@ impl EncodeBuffer {
 
     /// Drop a partially written frame after an encode failure, so the next
     /// frame does not inherit its bytes.
+    ///
+    /// An oversized partial frame also has to give its allocation back. On the
+    /// success path `split` hands that memory away with the frame, but a
+    /// discarded frame has nothing to hand it to — and `clear` keeps capacity,
+    /// which [`Self::reserve`] then sees as "already big enough" and never
+    /// replaces. Without this the buffer would stay oversized for the rest of
+    /// the request.
     fn discard(&mut self) {
-        self.buf.clear();
+        if self.buf.capacity() > Self::CHUNK {
+            self.buf = BytesMut::new();
+        } else {
+            self.buf.clear();
+        }
     }
 }
 
@@ -221,7 +236,10 @@ impl PushFrame {
         buffer: &parking_lot::Mutex<EncodeBuffer>,
     ) -> PyResult<Self> {
         let Some(mut pooled) = buffer.try_lock() else {
-            let mut scratch = BytesMut::new();
+            // Sized, not `new()`: growing from zero is the cost this whole
+            // change exists to remove, and the fallback should not quietly
+            // reintroduce it for the frame that takes it.
+            let mut scratch = BytesMut::with_capacity(EncodeBuffer::SCRATCH_CAPACITY);
             let is_error = Self::write(py, obj, codec, &mut scratch)?;
             return Ok(Self {
                 bytes: scratch.freeze(),
@@ -822,6 +840,37 @@ mod tests {
             buffer.buf.capacity() <= EncodeBuffer::CHUNK,
             "an oversized frame pinned {} bytes for the rest of the request",
             buffer.buf.capacity()
+        );
+    }
+
+    /// A frame that fails partway through must give its allocation back too,
+    /// not just its bytes. `clear()` alone keeps capacity, and `reserve()` reads
+    /// a large capacity as "already big enough" — so an oversized *failed* frame
+    /// would pin its buffer for the rest of the request, which is the same leak
+    /// `an_oversized_frame_does_not_pin_capacity` rules out on the success path.
+    #[test]
+    fn discard_releases_an_oversized_buffer() {
+        let mut buffer = EncodeBuffer::new();
+        write_frame(&mut buffer, 1, 52);
+        let _ = buffer.take();
+
+        // A large frame that fails mid-encode rather than being handed out.
+        write_frame(&mut buffer, 2, 4 * 1024 * 1024);
+        buffer.discard();
+
+        assert!(
+            buffer.buf.capacity() <= EncodeBuffer::CHUNK,
+            "a discarded oversized frame pinned {} bytes for the rest of the request",
+            buffer.buf.capacity()
+        );
+
+        // And the buffer must still be usable afterwards.
+        write_frame(&mut buffer, 3, 40);
+        let frame = buffer.take();
+        assert_eq!(frame.len(), 40);
+        assert!(
+            frame.iter().all(|b| *b == 3),
+            "discard leaked bytes forward"
         );
     }
 
