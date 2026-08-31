@@ -191,23 +191,28 @@ async def wake_restored_engine(
     lock = None
     if lock_path:
         if runtime is not None:
+            # Healthy while paused, so Kubernetes does not kill the standby
+            # during a long outage. Nothing watches it for death until the
+            # monitor is built with the handler; an operator-side liveness
+            # probe is the durable fix.
             runtime.set_health_status(True)
         logger.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+            "[Shadow][snapshot] Engine restored paused, startup probe now passing, "
+            "waiting for failover lock"
         )
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{os.environ.get('ENGINE_ID', '0')}")
-        logger.info("[Shadow] Lock acquired, waking engine")
+        logger.info("[Shadow][snapshot] Lock acquired, waking engine")
 
     try:
         await pause_controller.resume()
         pause_controller.mark_resumed()
-    except BaseException:
+    except Exception:
         if lock is not None:
             logger.critical(
-                "[Shadow] Engine wake failed after lock acquisition; "
+                "[Shadow][snapshot] Engine wake failed after lock acquisition; "
                 "terminating process while retaining the lock"
             )
             os._exit(1)

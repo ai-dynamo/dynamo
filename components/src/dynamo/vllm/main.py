@@ -225,11 +225,10 @@ async def worker(argv: list[str] | None = None) -> None:
         event_plane=config.event_plane,
     )
 
-    # Keep the flock alive for process lifetime. Linux releases it on exit.
     if snapshot_controller is not None:
-        _failover_lock = await wake_restored_engine(
-            snapshot_controller.pause_controller, runtime
-        )
+        # The flock lives on the open fd, not on any Python reference; the
+        # kernel releases it when the process exits.
+        await wake_restored_engine(snapshot_controller.pause_controller, runtime)
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
