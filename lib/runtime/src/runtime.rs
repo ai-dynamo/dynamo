@@ -351,7 +351,7 @@ impl Runtime {
     /// [`Runtime::shutdown`] have completed, that is once phase 3 has cancelled the
     /// primary token. It stays un-cancelled if `shutdown` was never called.
     pub fn shutdown_complete_token(&self) -> CancellationToken {
-        self.shutdown_state.complete.clone()
+        self.shutdown_state.complete.child_token()
     }
 
     /// Resolves once the shutdown phases started by [`Runtime::shutdown`] have completed.
@@ -464,19 +464,26 @@ impl Runtime {
         let spawned = std::thread::Builder::new()
             .name("dyn-rt-teardown".to_string())
             .spawn(move || {
-                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                    coordinator_done.recv_timeout(wait_bound)
-                {
+                let coordinator_timed_out = matches!(
+                    coordinator_done.recv_timeout(wait_bound),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                );
+                if coordinator_timed_out {
                     tracing::error!(
                         wait_secs = wait_bound.as_secs(),
                         "Shutdown coordinator did not finish in time; tearing down the owned runtime anyway"
                     );
                 }
 
-                // This thread is not inside a Tokio context, so these drops take the
-                // blocking branch of `Drop for RuntimeType`.
-                drop(primary);
-                drop(secondary);
+                if coordinator_timed_out {
+                    primary.shutdown_owned_timeout(TEARDOWN_WAIT_MARGIN);
+                    secondary.shutdown_owned_timeout(TEARDOWN_WAIT_MARGIN);
+                } else {
+                    // This thread is not inside a Tokio context, so these drops take the
+                    // blocking branch of `Drop for RuntimeType`.
+                    drop(primary);
+                    drop(secondary);
+                }
             });
 
         if let Err(err) = spawned {
@@ -496,6 +503,25 @@ impl RuntimeType {
             RuntimeType::External(rt) => rt.clone(),
             RuntimeType::Shared(rt) => rt.handle().clone(),
         }
+    }
+
+    /// Shut down a uniquely-owned Tokio runtime without allowing its task teardown to block
+    /// indefinitely. External handles have no runtime ownership to shut down.
+    fn shutdown_owned_timeout(self, timeout: Duration) {
+        let mut runtime_type = ManuallyDrop::new(self);
+        let RuntimeType::Shared(runtime) = &mut *runtime_type else {
+            unsafe { ManuallyDrop::drop(&mut runtime_type) };
+            return;
+        };
+
+        let Some(runtime) = Arc::get_mut(runtime) else {
+            unsafe { ManuallyDrop::drop(&mut runtime_type) };
+            return;
+        };
+
+        let runtime = unsafe { ManuallyDrop::take(runtime) };
+        unsafe { ManuallyDrop::drop(runtime) };
+        runtime.shutdown_timeout(timeout);
     }
 }
 
