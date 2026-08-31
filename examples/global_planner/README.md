@@ -12,9 +12,9 @@ enforces shared scaling policy across multiple DGDs.
 
 | File | Pattern | Backend | Description |
 |------|---------|---------|-------------|
-| `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
+| `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with a `max_total_gpus` budget |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
-| `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
+| `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `no_operation` mode |
 | `global-planner-vllm-test-xpu-dra.yaml` | Single-endpoint, multi-pool | vLLM (Intel XPU) | XPU/DRA variant with 2 TP1 prefill pools and 1 TP1 decode pool |
 
 ## Deployment Patterns
@@ -25,7 +25,7 @@ Multiple independent DGDs, each serving a different model with its own Frontend.
 A shared GlobalPlanner enforces a cluster-wide GPU cap.
 
 ```
-DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
+DGD gp-ctrl:    GlobalPlanner (--config with max_total_gpus)
 DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
 DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
 ```
@@ -160,25 +160,38 @@ Key fields for GlobalPlanner delegation:
 | `throughput_metrics_source` | `"router"` for multi-DGD setups (reads `dynamo_component_router_*` from Prometheus) |
 | `max_gpu_budget` | Per-pool GPU limit (`-1` = unlimited, defer to GlobalPlanner) |
 
-## GlobalPlanner Flags
+## GlobalPlanner Configuration
 
-| Flag | Description |
-|------|-------------|
-| `--max-total-gpus N` | Reject requests that would exceed N total GPUs across all managed DGDs. `0` = no GPU scaling allowed, `-1` (default) = unlimited |
-| `--min-total-gpus N` | Deny scale-down requests that would drop below N total GPUs unless they can be paired with a pending scale-up. `-1` (default) disables the floor |
-| `--intent-cache-ttl-seconds N` | Keep scale intents eligible for pairing for N seconds. Defaults to `360`, which covers two default throughput-scaling ticks |
-| `--managed-namespaces NS...` | Only accept scale requests from listed Dynamo namespaces (default: accept all). See *Management Modes* below |
-| `--no-operation` | Log scale requests without executing them (useful for dry-run testing) |
+GlobalPlanner takes a single `--config` argument: an inline JSON string or a path
+to a JSON/YAML file.
+
+```yaml
+# /etc/global-planner/config.yaml
+max_total_gpus: 16
+min_total_gpus: 16
+intent_cache_ttl_seconds: 360
+managed_namespaces:
+  - my-ns-gp-prefill-0
+  - my-ns-gp-decode-0
+```
+
+| Field | Description |
+|-------|-------------|
+| `max_total_gpus` | Reject requests that would exceed N total GPUs across all managed DGDs. `0` = no GPU scaling allowed, `-1` (default) = unlimited |
+| `min_total_gpus` | Deny scale-down requests that would drop below N total GPUs unless they can be paired with a pending scale-up. `-1` (default) disables the floor |
+| `intent_cache_ttl_seconds` | Keep scale intents eligible for pairing for N seconds. Defaults to `360`, which covers two default throughput-scaling ticks |
+| `managed_namespaces` | Only accept scale requests from listed Dynamo namespaces (default: accept all). See *Management Modes* below |
+| `no_operation` | Log scale requests without executing them (useful for dry-run testing) |
 
 ### Management Modes
 
-GlobalPlanner operates in one of two modes depending on whether `--managed-namespaces` is set:
+GlobalPlanner operates in one of two modes depending on whether `managed_namespaces` is set:
 
-- **Explicit mode** (`--managed-namespaces` provided): Only the listed Dynamo
+- **Explicit mode** (`managed_namespaces` provided): Only the listed Dynamo
   namespaces are authorized to send scale requests, and only their corresponding
   DGDs count toward the GPU budget. DGD names are derived from the Dynamo
   namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`.
-- **Implicit mode** (no `--managed-namespaces`): Any caller is accepted, and all
+- **Implicit mode** (no `managed_namespaces`): Any caller is accepted, and all
   DGDs in the Kubernetes namespace count toward the GPU budget.
 
 ## Namespace Convention
