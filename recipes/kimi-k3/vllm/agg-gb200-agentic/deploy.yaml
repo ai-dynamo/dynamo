@@ -1,229 +1,197 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# kimi-k3 on vLLM via Dynamo, aggregated, GB200 (TP=16) over MNNVL.
+# Kimi-K3 on vLLM via Dynamo, aggregated, GB200 (TP=16) over MNNVL.
 ---
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: kimi-k3-agg-compute-domain
+  name: kimi-k3-vllm-gb200-agg-agentic-compute-domain
 spec:
   numNodes: 0
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: kimi-k3-agg-compute-domain-channel
+      name: kimi-k3-vllm-gb200-agg-agentic-compute-domain-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: kimi-k3-agg
-  name: kimi-k3-agg
+  name: kimi-k3-vllm-gb200-agg-agentic
 spec:
   backendFramework: vllm
   components:
   - name: Frontend
+    type: frontend
+    replicas: 1
     podTemplate:
       spec:
         containers:
-        - args:
-          - --dyn-chat-processor
-          - dynamo
-          - --router-mode
-          - kv
-          - --router-kv-events
-          - --router-temperature
-          - '0'
-          - --router-min-initial-workers
-          - '1'
-          - --kv-cache-block-size
-          - '64'
-          - --http-port
-          - '8000'
-          command:
-          - python3
-          - -m
-          - dynamo.frontend
-          env:
-          - name: HF_HUB_OFFLINE
-            value: '1'
-          - name: TRANSFORMERS_OFFLINE
-            value: '1'
-          - name: VLLM_USE_V2_MODEL_RUNNER
-            value: '0'
+        - name: main
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-cb5a78bc81476659052a2889271a5e10dd545d97-vllm-runtime
           imagePullPolicy: IfNotPresent
-          name: main
+          command: [python3, -m, dynamo.frontend]
+          args:
+          - --dyn-chat-processor
+          - dynamo
+          - --router-kv-events
+          - --router-temperature
+          - "0"
+          - --router-min-initial-workers
+          - "1"
+          - --kv-cache-block-size
+          - "64"
+          - --model-name
+          - moonshotai/Kimi-K3
+          - --trust-remote-code
+          - --http-port
+          - "8000"
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
-          volumeMounts:
-          - mountPath: /models
-            name: models
-            readOnly: true
-        imagePullSecrets:
-        - name: acr-token-secret
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-GB200
-        tolerations:
-        - effect: NoSchedule
-          key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-        volumes:
-        - hostPath:
-            path: /mnt/stateful_partition/kube-ephemeral-ssd/models
-            type: Directory
-          name: models
-    replicas: 1
-    type: frontend
 
-  - multinode:
+  - name: Worker
+    type: worker
+    replicas: 1
+    multinode:
       nodeCount: 4
-    name: VllmDecodeWorker
+    sharedMemorySize: 64Gi
     podTemplate:
       metadata:
         annotations:
           nvidia.com/vllm-distributed-executor-backend: mp
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-vllm-gb200-agg-agentic-compute-domain-channel
         containers:
-        - args:
-          - |
-            exec python3 -m dynamo.vllm \
-              --model "${MODEL_PATH}" \
-              --served-model-name "${SERVED_MODEL_NAME}" \
-              --load-format fastsafetensors \
-              --safetensors-load-strategy lazy \
-              --trust-remote-code \
-              --tensor-parallel-size 16 \
-              --gpu-memory-utilization 0.92 \
-              --kv-cache-dtype fp8 \
-              --mm-encoder-tp-mode data \
-              --mm-encoder-attn-backend TORCH_SDPA \
-              --attention-backend FLASHINFER_MLA \
-              --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
-              --moe-backend auto \
-              --kda-prefill-backend flashkda \
-              --kernel-config '{"enable_cutedsl_warmup":true}' \
-              --max-num-seqs 1907 \
-              --max-num-batched-tokens 32768 \
-              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024]}' \
-              --block-size 64 \
-              --no-enable-flashinfer-autotune \
-              --skip-mm-profiling \
-              --enable-multimodal \
-              --disable-custom-all-reduce \
-              --enable-prefix-caching \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --dyn-enable-structural-tag \
-              --cpu-distributed-timeout-seconds 1800 \
-              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
-              --dyn-tool-call-parser kimi_k3 \
-              --reasoning-parser kimi_k3 \
-              --dyn-reasoning-parser kimi_k3
-          command:
-          - /bin/bash
-          - -lc
+        - name: main
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-cb5a78bc81476659052a2889271a5e10dd545d97-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - --model
+          - moonshotai/Kimi-K3
+          - --served-model-name
+          - moonshotai/Kimi-K3
+          - --load-format
+          - fastsafetensors
+          - --safetensors-load-strategy
+          - lazy
+          - --trust-remote-code
+          - --tensor-parallel-size
+          - "16"
+          - --gpu-memory-utilization
+          - "0.92"
+          - --kv-cache-dtype
+          - fp8
+          - --mm-encoder-tp-mode
+          - data
+          - --mm-encoder-attn-backend
+          - TORCH_SDPA
+          - --attention-backend
+          - FLASHINFER_MLA
+          - --attention-config
+          - '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
+          - --moe-backend
+          - auto
+          - --kda-prefill-backend
+          - flashkda
+          - --kernel-config
+          - '{"enable_cutedsl_warmup":true}'
+          - --max-num-seqs
+          - "1907"
+          - --max-num-batched-tokens
+          - "32768"
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024]}'
+          - --block-size
+          - "64"
+          - --no-enable-flashinfer-autotune
+          - --skip-mm-profiling
+          - --enable-multimodal
+          - --disable-custom-all-reduce
+          - --enable-prefix-caching
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --dyn-enable-structural-tag
+          - --cpu-distributed-timeout-seconds
+          - "1800"
+          - --scheduler-cls
+          - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --reasoning-parser
+          - kimi_k3
+          - --dyn-reasoning-parser
+          - kimi_k3
           env:
-          - name: MODEL_PATH
-            value: /models/model_weight
-          - name: SERVED_MODEL_NAME
-            value: moonshotai/Kimi-K3
           - name: HF_HUB_OFFLINE
-            value: '1'
-          - name: TRANSFORMERS_OFFLINE
-            value: '1'
+            value: "1"
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: VLLM_ENGINE_READY_TIMEOUT_S
-            value: '7200'
+            value: "7200"
           - name: VLLM_USE_V2_MODEL_RUNNER
-            value: '0'
+            value: "0"
           - name: VLLM_USE_NCCL_SYMM_MEM
-            value: '0'
+            value: "0"
           # Disables CUDA graph memory estimation; restores 7 GiB KV cache stolen by the vLLM 0.27.1 default.
           - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            value: '0'
-          # TP all-reduce over MNNVL via FlashInfer — reduces collective latency vs NCCL.
+            value: "0"
+          # TP all-reduce over MNNVL via FlashInfer reduces collective latency versus NCCL.
           - name: VLLM_ALLREDUCE_USE_FLASHINFER
-            value: '1'
+            value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
           - name: NCCL_CUMEM_ENABLE
-            value: '1'
+            value: "1"
           - name: NCCL_MNNVL_ENABLE
-            value: '1'
+            value: "1"
           - name: NCCL_NVLS_ENABLE
-            value: '1'
+            value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: NCCL_SOCKET_IFNAME
-            value: eth0
-          - name: GLOO_SOCKET_IFNAME
-            value: eth0
           - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
-            value: '3600'
+            value: "3600"
           - name: NVIDIA_GDRCOPY
-            value: '1'
+            value: "1"
           - name: PYTORCH_ALLOC_CONF
             value: expandable_segments:True
-          - name: DD_TRACE_ENABLED
-            value: 'false'
           # Disables cuDNN for Conv2d in MoonViT patch-embed; prevents a cudnnCreate crash on GB200.
           - name: GP_DISABLE_CUDNN
-            value: '1'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-cb5a78bc81476659052a2889271a5e10dd545d97-vllm-runtime
-          imagePullPolicy: IfNotPresent
-          name: main
+            value: "1"
           resources:
             claims:
             - name: compute-domain-channel
-            limits:
-              nvidia.com/gpu: '4'
             requests:
-              cpu: '32'
+              cpu: "16"
               memory: 200Gi
-              nvidia.com/gpu: '4'
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: "4"
+            limits:
+              nvidia.com/gpu: "4"
           securityContext:
             runAsUser: 0
             runAsGroup: 0
             allowPrivilegeEscalation: false
             capabilities:
-              add: [IPC_LOCK, SYS_RESOURCE]
-          startupProbe:
-            failureThreshold: 720
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
+              add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
           volumeMounts:
-          - mountPath: /models
-            name: models
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
             readOnly: true
-        imagePullSecrets:
-        - name: acr-token-secret
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-GB200
-          # On clusters with multiple NVLink domains (cliques), all worker pods must land
-          # on the same clique or MNNVL rendezvous fails at model load. Find your clique:
-          #   kubectl get nodes -L nvidia.com/gpu.clique
-          # Then uncomment and set the label below:
-          # nvidia.com/gpu.clique: <clique-uuid>
-        tolerations:
-        - effect: NoSchedule
-          key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-        resourceClaims:
-        - name: compute-domain-channel
-          resourceClaimTemplateName: kimi-k3-agg-compute-domain-channel
         terminationGracePeriodSeconds: 60
         volumes:
-        - hostPath:
-            path: /mnt/stateful_partition/kube-ephemeral-ssd/models
-            type: Directory
-          name: models
-    replicas: 1
-    sharedMemorySize: 256Gi
-    type: decode
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+            readOnly: true

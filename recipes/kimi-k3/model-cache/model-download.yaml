@@ -30,7 +30,7 @@ spec:
                 name: hf-token-secret
           env:
             - name: HF_HOME
-              value: /model-cache
+              value: /shared-model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           # ~1.5 TB checkpoint; the Job can run for hours on a cold PVC.
@@ -40,10 +40,11 @@ spec:
               pip install --no-cache-dir huggingface_hub==1.16.4
               hf download moonshotai/Kimi-K3
               hf download RadixArk/Kimi-K3-DSpark
+              hf download Inferact/Kimi-K3-DSpark
           volumeMounts:
-            - name: model-cache
-              mountPath: /model-cache
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
       volumes:
-      - name: model-cache
-        persistentVolumeClaim:
-          claimName: model-cache
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

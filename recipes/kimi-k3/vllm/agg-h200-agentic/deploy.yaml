@@ -1,224 +1,160 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
+---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-agg-h200-agentic
-  annotations:
-    vllm.nvidia.com/distributed-timeout-seconds: "7200"
+  name: kimi-k3-vllm-h200-agg-agentic
 spec:
   backendFramework: vllm
   components:
-    - name: Frontend
-      type: frontend
-      runtimeVersionOverride: 1.4.0
-      replicas: 1
-      podTemplate:
-        spec:
-          nodeSelector:
-            kubernetes.io/arch: amd64
-          imagePullSecrets:
-            - name: acr-token-secret
-          containers:
-            - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
-              imagePullPolicy: IfNotPresent
-              command:
-                - python3
-                - -m
-                - dynamo.frontend
-              args:
-                - --dyn-chat-processor
-                - dynamo
-                - --router-mode
-                - kv
-                - --http-port
-                - "8000"
-              env:
-                - name: HF_HOME
-                  value: /tmp/huggingface
-                - name: HF_MODULES_CACHE
-                  value: /tmp/huggingface/modules
-                - name: HF_HUB_CACHE
-                  value: /hf-cache/huggingface/hub
-                - name: HUGGINGFACE_HUB_CACHE
-                  value: /hf-cache/huggingface/hub
-                - name: HF_HUB_DISABLE_XET
-                  value: "1"
-              ports:
-                - name: http
-                  containerPort: 8000
-              volumeMounts:
-                - name: model-cache
-                  mountPath: /hf-cache
-                  readOnly: true
-              startupProbe:
-                httpGet:
-                  path: /health
-                  port: http
-                periodSeconds: 10
-                failureThreshold: 360
-                timeoutSeconds: 5
-              readinessProbe:
-                httpGet:
-                  path: /health
-                  port: http
-                periodSeconds: 10
-                failureThreshold: 3
-                timeoutSeconds: 5
-          volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
-                readOnly: true
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          command: [python3, -m, dynamo.frontend]
+          args:
+          - --dyn-chat-processor
+          - dynamo
+          - --router-kv-events
+          - --router-min-initial-workers
+          - "1"
+          - --model-name
+          - moonshotai/Kimi-K3
+          - --trust-remote-code
+          - --http-port
+          - "8000"
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
 
-    - name: VllmWorker
-      type: worker
-      runtimeVersionOverride: 1.4.0
-      replicas: 1
-      multinode:
-        nodeCount: 4
-      sharedMemorySize: 200Gi
-      podTemplate:
-        spec:
-          runtimeClassName: nvidia
-          imagePullSecrets:
-            - name: acr-token-secret
-          nodeSelector:
-            kubernetes.io/arch: amd64
-            nvidia.com/gpu.product: NVIDIA-H200
-          tolerations:
-            - key: team
-              operator: Equal
-              value: kimi-k3
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: "true"
-              effect: NoSchedule
-          containers:
-            - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
-              imagePullPolicy: IfNotPresent
-              command:
-                - /bin/bash
-                - -lc
-              args:
-                - |
-                  set -euo pipefail
-                  worker_args=(
-                    --model "${MODEL_PATH}"
-                    --served-model-name "${SERVED_MODEL_NAME}"
-                    --trust-remote-code
-                    --tensor-parallel-size 8
-                    --pipeline-parallel-size 4
-                    --nnodes 4
-                    --distributed-executor-backend mp
-                    --distributed-timeout-seconds 7200
-                    --cpu-distributed-timeout-seconds 7200
-                    --disable-custom-all-reduce
-                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}'
-                    --stream-interval 20
-                    --gpu-memory-utilization 0.85
-                    --max-num-batched-tokens 8192
-                    --max-num-seqs 256
-                    --enable-prefix-caching
-                    --enable-multimodal
-                    --no-enable-flashinfer-autotune
-                    --kv-cache-dtype bfloat16
-                    --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler
-                    --dyn-tool-call-parser kimi_k3
-                    --reasoning-parser kimi_k3
-                    --dyn-reasoning-parser kimi_k3
-                    --dyn-enable-structural-tag
-                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
-                  )
-                  exec python3 -m dynamo.vllm "${worker_args[@]}"
-              env:
-                - name: MODEL_PATH
-                  value: moonshotai/Kimi-K3
-                - name: SERVED_MODEL_NAME
-                  value: moonshotai/Kimi-K3
-                - name: HF_HOME
-                  value: /tmp/huggingface
-                - name: HF_MODULES_CACHE
-                  value: /tmp/huggingface/modules
-                - name: HF_HUB_CACHE
-                  value: /hf-cache/huggingface/hub
-                - name: HUGGINGFACE_HUB_CACHE
-                  value: /hf-cache/huggingface/hub
-                - name: HF_HUB_DISABLE_XET
-                  value: "1"
-                - name: HF_HUB_OFFLINE
-                  value: "1"
-                - name: TRANSFORMERS_OFFLINE
-                  value: "1"
-                - name: VLLM_USE_NCCL_SYMM_MEM
-                  value: "0"
-                - name: VLLM_ALLREDUCE_USE_SYMM_MEM
-                  value: "0"
-                - name: VLLM_ALLREDUCE_USE_FLASHINFER
-                  value: "0"
-                - name: NCCL_MNNVL_ENABLE
-                  value: "0"
-                - name: NCCL_NVLS_ENABLE
-                  value: "0"
-                - name: DYN_REQUEST_PLANE
-                  value: tcp
-                - name: ETCD_LEASE_TTL
-                  value: "120"
-                - name: VLLM_ENGINE_READY_TIMEOUT_S
-                  value: "7200"
-                - name: VLLM_RPC_TIMEOUT
-                  value: "600000"
-                - name: CUDA_HOME
-                  value: /usr/local/cuda
-                - name: VLLM_DEEP_GEMM_WARMUP
-                  value: skip
-                - name: PYTORCH_ALLOC_CONF
-                  value: expandable_segments:True
-                - name: VLLM_USE_V2_MODEL_RUNNER
-                  value: "1"
-                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
-                  value: "1800"
-                - name: NCCL_DEBUG
-                  value: WARN
-                - name: NCCL_IB_DISABLE
-                  value: "0"
-                - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
-                  value: "1800"
-                - name: NCCL_TIMEOUT
-                  value: "1800"
-              resources:
-                requests:
-                  cpu: "32"
-                  memory: 700Gi
-                  nvidia.com/gpu: "8"
-                  rdma/ib: "8"
-                limits:
-                  cpu: "64"
-                  memory: 900Gi
-                  nvidia.com/gpu: "8"
-                  rdma/ib: "8"
-              securityContext:
-                capabilities:
-                  add:
-                    - IPC_LOCK
-                    - SYS_RESOURCE
-              startupProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 30
-                failureThreshold: 720
-                timeoutSeconds: 10
-              volumeMounts:
-                - name: model-cache
-                  mountPath: /hf-cache
-                  readOnly: true
-          volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
-                readOnly: true
+  - name: Worker
+    type: worker
+    replicas: 1
+    multinode:
+      nodeCount: 4
+    sharedMemorySize: 64Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - --model
+          - moonshotai/Kimi-K3
+          - --served-model-name
+          - moonshotai/Kimi-K3
+          - --trust-remote-code
+          - --tensor-parallel-size
+          - "8"
+          - --pipeline-parallel-size
+          - "4"
+          - --nnodes
+          - "4"
+          - --distributed-executor-backend
+          - mp
+          - --distributed-timeout-seconds
+          - "7200"
+          - --cpu-distributed-timeout-seconds
+          - "7200"
+          - --disable-custom-all-reduce
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}'
+          - --stream-interval
+          - "20"
+          - --gpu-memory-utilization
+          - "0.85"
+          - --max-num-batched-tokens
+          - "8192"
+          - --max-num-seqs
+          - "256"
+          - --enable-prefix-caching
+          - --enable-multimodal
+          - --no-enable-flashinfer-autotune
+          - --kv-cache-dtype
+          - bfloat16
+          - --scheduler-cls
+          - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --reasoning-parser
+          - kimi_k3
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-enable-structural-tag
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+          env:
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "0"
+          - name: NCCL_MNNVL_ENABLE
+            value: "0"
+          - name: NCCL_NVLS_ENABLE
+            value: "0"
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: "120"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "7200"
+          - name: VLLM_RPC_TIMEOUT
+            value: "600000"
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: PYTORCH_ALLOC_CONF
+            value: expandable_segments:True
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: "1"
+          - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+            value: "1800"
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: "1800"
+          - name: NCCL_TIMEOUT
+            value: "1800"
+          resources:
+            requests:
+              cpu: "16"
+              memory: 700Gi
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+            readOnly: true
