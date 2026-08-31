@@ -17,28 +17,52 @@ import json
 import logging
 import math
 import os
+import re
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol
-from urllib.parse import parse_qsl
+from typing import TYPE_CHECKING, Dict, Literal, Optional, Protocol
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
-
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+if TYPE_CHECKING:
+    from dynamo.planner.core.batch_policy import BatchSchedulingPolicyConfig
 
 logger = logging.getLogger(__name__)
+
+_PROMETHEUS_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_http_url(value: str, *, field_name: str) -> str:
+    """Validate a service URL without normalizing its path or trailing slash."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{field_name} must be an absolute http(s) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            f"{field_name} must not contain credentials; use a mounted secret"
+        )
+    return value
+
+
+def _batch_redis_url_default() -> SecretStr | None:
+    value = os.environ.get("DYN_PLANNER_BATCH_REDIS_URL")
+    return SecretStr(value) if value else None
 
 
 class MinimumEndpointConfig(Protocol):
@@ -367,6 +391,265 @@ class SchedulingConfig(BaseModel):
     )
 
 
+class BatchGatewaySourceConfig(BaseModel):
+    """Batch Gateway API settings for native batch-demand observation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(
+        ...,
+        min_length=1,
+        description="Base URL of the OpenAI-compatible Batch Gateway API.",
+    )
+    tenant: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Dedicated Batch Gateway tenant observed by this single-pool POC. "
+            "Sent as the X-MaaS-Username header."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-request timeout for Batch Gateway API calls.",
+    )
+    page_size: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description="Batch list page size accepted by the Gateway API.",
+    )
+    max_pages: int = Field(
+        default=10_000,
+        ge=1,
+        description="Safety bound on Batch Gateway pagination.",
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="batch gateway base_url")
+
+
+class BatchMetricsConfig(BaseModel):
+    """Direct OpenMetrics scrape endpoints used by batch-aware planning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frontend_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Direct /metrics URL for the Dynamo frontend serving the shared pool."
+        ),
+    )
+    dispatcher_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description="Direct /metrics URL for the llm-d Async dispatcher.",
+    )
+    online_match_labels: dict[str, str] = Field(
+        default_factory=lambda: {"request_type": "stream"},
+        description=(
+            "Exact frontend metric labels selecting online traffic. The POC "
+            "uses streaming requests for online traffic and unary requests for "
+            "batch traffic."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-scrape timeout for both direct OpenMetrics endpoints.",
+    )
+
+    @field_validator("frontend_metrics_url")
+    @classmethod
+    def _validate_frontend_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="frontend_metrics_url")
+
+    @field_validator("dispatcher_metrics_url")
+    @classmethod
+    def _validate_dispatcher_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="dispatcher_metrics_url")
+
+    @field_validator("online_match_labels")
+    @classmethod
+    def _validate_online_match_labels(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError(
+                "online_match_labels must explicitly distinguish online traffic"
+            )
+        for label_name, label_value in value.items():
+            if not _PROMETHEUS_LABEL_NAME.fullmatch(label_name):
+                raise ValueError(
+                    f"online_match_labels contains invalid label name {label_name!r}"
+                )
+            if not label_value:
+                raise ValueError("online_match_labels values must be non-empty strings")
+        return dict(value)
+
+
+class BatchRedisActuatorConfig(BaseModel):
+    """Redis connection and key used to publish leased drain limits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: SecretStr | None = Field(
+        default_factory=_batch_redis_url_default,
+        exclude=True,
+        description=(
+            "Redis URL loaded from DYN_PLANNER_BATCH_REDIS_URL by default. "
+            "Excluded from serialized Planner config."
+        ),
+    )
+    control_key: str = Field(
+        ...,
+        min_length=1,
+        description="Exact llm-d Async Redis hash key for the configured pool.",
+    )
+    connect_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis connection timeout.",
+    )
+    socket_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis command read/write timeout.",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _validate_redis_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw_url = value.get_secret_value()
+        parsed = urlsplit(raw_url)
+        if parsed.scheme not in ("redis", "rediss") or not parsed.netloc:
+            raise ValueError("batch Redis url must be an absolute redis(s) URL")
+        return value
+
+
+class BatchPoolConfig(BaseModel):
+    """Capacity and deadline assumptions for the aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pool_id: str = Field(..., min_length=1)
+    work_class: str = Field(..., min_length=1)
+    safe_rps_per_ready_replica: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    cold_start_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    finalization_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    max_observation_age_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    drain_lease_duration_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Lifetime of each fail-closed llm-d Async drain-limit lease."),
+    )
+    min_replicas: int = Field(default=0, ge=0)
+    max_replicas: int = Field(..., ge=0)
+    scale_from_zero_replicas: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Replica floor requested when a fresh, valid active batch job is "
+            "observed while the pool has zero ready replicas."
+        ),
+    )
+    max_batch_admission_rps: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _validate_replica_range(self) -> "BatchPoolConfig":
+        if self.max_replicas < self.min_replicas:
+            raise ValueError("max_replicas must be >= min_replicas")
+        if self.scale_from_zero_replicas > self.max_replicas:
+            raise ValueError("scale_from_zero_replicas must be <= max_replicas")
+        return self
+
+
+class BatchSchedulingConfig(BaseModel):
+    """Opt-in native Planner integration for one aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    gateway: BatchGatewaySourceConfig | None = None
+    metrics: BatchMetricsConfig | None = None
+    redis: BatchRedisActuatorConfig | None = None
+    pool: BatchPoolConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_enabled_dependencies(self) -> "BatchSchedulingConfig":
+        if not self.enabled:
+            return self
+
+        missing = [
+            field_name
+            for field_name in ("gateway", "metrics", "redis", "pool")
+            if getattr(self, field_name) is None
+        ]
+        if missing:
+            raise ValueError(
+                "batch_scheduling.enabled=True requires: " + ", ".join(missing)
+            )
+        assert self.redis is not None
+        if self.redis.url is None:
+            raise ValueError(
+                "batch_scheduling.enabled=True requires redis.url or "
+                "DYN_PLANNER_BATCH_REDIS_URL"
+            )
+        return self
+
+    def to_policy_config(self) -> "BatchSchedulingPolicyConfig":
+        """Translate validated Planner config into the pure policy contract."""
+
+        if not self.enabled or self.pool is None:
+            raise ValueError("batch scheduling must be enabled and configured")
+
+        from dynamo.planner.core.batch_policy import BatchSchedulingPolicyConfig
+
+        pool = self.pool
+        return BatchSchedulingPolicyConfig(
+            pool_id=pool.pool_id,
+            work_class=pool.work_class,
+            safe_rps_per_ready_replica=pool.safe_rps_per_ready_replica,
+            cold_start_margin_s=pool.cold_start_margin_seconds,
+            finalization_margin_s=pool.finalization_margin_seconds,
+            max_observation_age_s=pool.max_observation_age_seconds,
+            drain_lease_duration_s=pool.drain_lease_duration_seconds,
+            min_replicas=pool.min_replicas,
+            max_replicas=pool.max_replicas,
+            scale_from_zero_replicas=pool.scale_from_zero_replicas,
+            max_batch_admission_rps=pool.max_batch_admission_rps,
+        )
+
+
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
@@ -384,9 +667,9 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    environment: Literal[
-        "kubernetes", "virtual", "global-planner"
-    ] = SLAPlannerDefaults.environment
+    environment: Literal["kubernetes", "virtual", "global-planner"] = (
+        SLAPlannerDefaults.environment
+    )
     namespace: str = Field(
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
         exclude=True,
@@ -610,9 +893,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
-    throughput_metrics_source: Literal[
-        "frontend", "router"
-    ] = SLAPlannerDefaults.throughput_metrics_source
+    throughput_metrics_source: Literal["frontend", "router"] = (
+        SLAPlannerDefaults.throughput_metrics_source
+    )
 
     model_name: Optional[str] = None
 
@@ -772,6 +1055,13 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    batch_scheduling: BatchSchedulingConfig = Field(
+        default_factory=BatchSchedulingConfig,
+        description=(
+            "Opt-in native batch scheduling for one Kubernetes aggregate pool."
+        ),
+    )
+
     plugin_registration: PluginRegistrationConfig = Field(
         default_factory=PluginRegistrationConfig,
         description=(
@@ -863,6 +1153,34 @@ class PlannerConfig(BaseModel):
                 "prefill_min_endpoint and decode_min_endpoint are not supported "
                 "when mode='agg'; use min_endpoint"
             )
+
+        if self.batch_scheduling.enabled:
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "batch_scheduling.enabled=True requires environment='kubernetes'"
+                )
+            if self.mode != "agg":
+                raise ValueError("batch_scheduling.enabled=True requires mode='agg'")
+
+            pool = self.batch_scheduling.pool
+            assert pool is not None
+            if pool.max_replicas < self.effective_decode_min_endpoint:
+                raise ValueError(
+                    "batch_scheduling.pool.max_replicas must be >= the effective "
+                    f"aggregate endpoint minimum ({self.effective_decode_min_endpoint})"
+                )
+            scale_interval_s = self.scheduling.scale_interval_seconds
+            minimum_lease_s = max(
+                2.0 * scale_interval_s,
+                self.scheduling.tick_max_duration_seconds + scale_interval_s,
+            )
+            if pool.drain_lease_duration_seconds < minimum_lease_s:
+                raise ValueError(
+                    "batch_scheduling.pool.drain_lease_duration_seconds must be "
+                    "at least max(2 * scheduling.scale_interval_seconds, "
+                    "scheduling.tick_max_duration_seconds + "
+                    f"scheduling.scale_interval_seconds) ({minimum_lease_s}s)"
+                )
 
         if self.report_interval_hours is not None:
             if (
