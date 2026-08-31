@@ -474,6 +474,82 @@ def torch_compiler_disable(fn):
     return disable(fn) if callable(disable) else fn
 
 
+_dsv4_hash_topk_probe_patched = False
+
+
+def patch_dsv4_hash_topk_probe() -> None:
+    """Report the dtypes reaching the hash-MoE top-k op.
+
+    ``topk_hash_softplus_sqrt`` fails with "expected scalar type Float but
+    found Int" on the read-only import path. Several of its operands come from
+    the gate (bias, hash table) and are rebound during materialization, so name
+    the offender rather than guessing which one is wrong.
+
+    Enable with DYN_GMS_DSV4_HASH_TOPK_PROBE.
+    """
+    global _dsv4_hash_topk_probe_patched
+
+    if _dsv4_hash_topk_probe_patched:
+        return
+
+    if os.environ.get("DYN_GMS_DSV4_HASH_TOPK_PROBE", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    try:
+        import torch
+        import vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router as mod
+    except ImportError:
+        return
+
+    original = mod.vllm_topk_softplus_sqrt
+
+    def probed(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+        e_score_correction_bias=None,
+        input_tokens=None,
+        hash_indices_table=None,
+        routed_scaling_factor=1.0,
+    ):
+        def d(t):
+            return "None" if not torch.is_tensor(t) else f"{t.dtype}/{t.device}"
+
+        logger.warning(
+            "[GMS Probe] topk_hash_softplus_sqrt operands: topk_weights=%s "
+            "topk_indices=%s token_expert_indices=%s gating_output=%s "
+            "e_score_correction_bias=%s input_tokens=%s hash_indices_table=%s",
+            d(topk_weights),
+            d(topk_indices),
+            d(token_expert_indices),
+            d(gating_output),
+            d(e_score_correction_bias),
+            d(input_tokens),
+            d(hash_indices_table),
+        )
+        return original(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
+    mod.vllm_topk_softplus_sqrt = probed
+    _dsv4_hash_topk_probe_patched = True
+    logger.info("[GMS Patch] hash top-k dtype probe enabled")
+
+
 _dsv4_layer_probe_patched = False
 
 

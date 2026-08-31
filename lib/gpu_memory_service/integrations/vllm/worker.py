@@ -51,6 +51,7 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_dsv4_gather_k_cache_check,
+    patch_dsv4_hash_topk_probe,
     patch_dsv4_layer_probe,
     patch_dsv4_gather_k_cache_triton,
     patch_dsv4_topk_clone_inputs,
@@ -84,6 +85,8 @@ patch_dsv4_gather_k_cache_triton()
 patch_dsv4_gather_k_cache_check()
 # Diagnostic: bisect which DSv4 stage first poisons the CUDA context.
 patch_dsv4_layer_probe()
+# Diagnostic: report operand dtypes reaching the hash-MoE top-k op.
+patch_dsv4_hash_topk_probe()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()

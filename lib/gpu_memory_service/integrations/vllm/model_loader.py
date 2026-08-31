@@ -687,11 +687,23 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
     # `mlp.experts.routed_experts`. Cloning each name separately would hand
     # the router and the experts different copies of the routing bias, so
     # keep one clone per source storage and reuse it.
-    by_storage: dict[tuple[int, int], torch.Tensor] = {}
+    #
+    # The key includes dtype and shape as well as the storage address: a
+    # DeepSeek-V4 gate carries either e_score_correction_bias (float32) or
+    # tid2eid (int32) and the two can share a storage, so keying on the
+    # address alone returns the int clone for the float slot and the
+    # float-only topk_hash_softplus_sqrt then fails with "expected scalar type
+    # Float but found Int".
+    by_storage: dict[tuple, torch.Tensor] = {}
 
     def _off_gms(tensor: torch.Tensor) -> torch.Tensor:
         # Must not run under gms_use_mem_pool or the clone stays on VMM.
-        key = (tensor.untyped_storage().data_ptr(), tensor.storage_offset())
+        key = (
+            tensor.untyped_storage().data_ptr(),
+            tensor.storage_offset(),
+            tensor.dtype,
+            tuple(tensor.shape),
+        )
         clone = by_storage.get(key)
         if clone is None:
             clone = tensor.detach().contiguous().clone()
@@ -764,6 +776,11 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
                 # resolve them against the live tensor of the same name.
                 qualified = f"{mod_name}.{attr}" if mod_name else attr
                 real = materialized.get(qualified)
+                if real is not None and real.dtype != t.dtype:
+                    # Same name, different dtype: not the tensor this alias
+                    # refers to. Resolving anyway swaps the int hash table into
+                    # the float bias slot.
+                    real = None
                 if real is None:
                     logger.warning(
                         "[GMS] Read mode: %s is on %s after materialization "
@@ -790,6 +807,63 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
             len(skipped),
             skipped[:10],
         )
+
+    # The MoE router itself is a plain object, not an nn.Module
+    # (FusedMoERouter subclasses ABC), so named_modules() never reaches it and
+    # the loop above cannot see the copies of the bias and hash table it
+    # captured in its constructor. Both come from the sibling `gate` module
+    # (DeepseekV4MoE assigns gate.e_score_correction_bias and gate.tid2eid), so
+    # resolve against the gate rather than against the router's own path.
+    #
+    # The two are mutually exclusive per layer: a hash-MoE layer has tid2eid
+    # and no bias, any other layer has the bias and no tid2eid. Match on the
+    # source name AND the dtype so a layer that only has one of them cannot
+    # silently resolve to the other - that hands the float-only
+    # topk_hash_softplus_sqrt an int table.
+    router_attr_sources = {
+        "e_score_correction_bias": (("e_score_correction_bias",), True),
+        "_hash_indices_table": (("tid2eid",), False),
+    }
+    for mod_name, module in model.named_modules():
+        router = getattr(module, "router", None)
+        if router is None or isinstance(router, torch.nn.Module):
+            continue
+        # `module` is the experts runner; the gate is its sibling under the
+        # shared MoE parent (…ffn.experts.router -> …ffn.gate).
+        parent_name = mod_name.rsplit(".", 1)[0] if "." in mod_name else ""
+        owners = [getattr(module, "gate", None)]
+        if parent_name:
+            owners.append(getattr(model.get_submodule(parent_name), "gate", None))
+
+        for attr, (sources, want_float) in router_attr_sources.items():
+            t = getattr(router, attr, None)
+            if not torch.is_tensor(t) or t.is_cuda:
+                continue
+            real = next(
+                (
+                    cand
+                    for owner in owners
+                    for src in sources
+                    for cand in [getattr(owner, src, None) if owner else None]
+                    if torch.is_tensor(cand)
+                    and cand.is_cuda
+                    and cand.is_floating_point() == want_float
+                ),
+                None,
+            )
+            if real is None:
+                logger.warning(
+                    "[GMS] Read mode: router attr %s.router.%s is on %s and no "
+                    "materialized %s of the right dtype was found on the gate; "
+                    "the first forward would fail on it",
+                    mod_name,
+                    attr,
+                    t.device,
+                    sources,
+                )
+                continue
+            setattr(router, attr, _off_gms(real))
+            cloned.append(f"{mod_name}.router.{attr}")
     if cloned:
         logger.info(
             "[GMS] Read mode: cloned %d Triton-incompatible params off GMS: %s",
@@ -813,6 +887,12 @@ def _clone_triton_incompatible_params_off_gms(model: torch.nn.Module) -> None:
             t = getattr(module, attr, None)
             if torch.is_tensor(t) and t.is_meta:
                 stranded.append(f"{mod_name}.{attr}" if mod_name else attr)
+        router = getattr(module, "router", None)
+        if router is not None and not isinstance(router, torch.nn.Module):
+            for attr in ("e_score_correction_bias", "_hash_indices_table"):
+                t = getattr(router, attr, None)
+                if torch.is_tensor(t) and t.is_meta:
+                    stranded.append(f"{mod_name}.router.{attr}")
     if stranded:
         raise RuntimeError(
             f"[GMS] Read mode: {len(stranded)} tensor(s) are still on the meta "
