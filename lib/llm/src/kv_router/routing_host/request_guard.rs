@@ -3,8 +3,15 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::Mutex;
+
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter,
+        metrics::RouterRequestMetrics,
+        minimal_cache_loss::{CacheHistory, CacheHistoryRequest, RouteObservation},
+        scheduler::DefaultWorkerSelector,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -66,6 +73,15 @@ struct MaterializedOutputBlocks {
     blocks: Vec<ApproximateLruBlock>,
     start_position: usize,
     private_blocks: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CacheLossWorkerOutcome {
+    complete: bool,
+    prompt_tokens: u64,
+    gpu_hit_tokens: u64,
+    cpu_hit_tokens: u64,
+    cpu_lookup_tokens: u64,
 }
 
 fn prompt_private_blocks(
@@ -573,6 +589,11 @@ where
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    cache_loss: Option<RouteObservation>,
+    cache_loss_recorded: bool,
+    cache_history: Arc<Mutex<CacheHistory>>,
+    cache_history_request: Option<CacheHistoryRequest>,
+    cache_history_verified: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
 
@@ -587,11 +608,17 @@ where
         worker: WorkerWithDpRank,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
+        cache_loss: RouteObservation,
+        cache_history: Arc<Mutex<CacheHistory>>,
+        cache_history_request: CacheHistoryRequest,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
             request,
+            cache_loss,
+            cache_history,
+            cache_history_request,
         )
     }
 
@@ -599,6 +626,9 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
+        cache_loss: RouteObservation,
+        cache_history: Arc<Mutex<CacheHistory>>,
+        cache_history_request: CacheHistoryRequest,
     ) -> Self {
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
@@ -613,6 +643,7 @@ where
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
+            request_metrics.observe_cache_loss_input(cache_loss.prompt_tokens);
         }
         let lru_registration = scheduler_tracked
             .then(|| chooser.approximate_lru_rank_registration(worker))
@@ -641,6 +672,11 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            cache_loss: scheduler_tracked.then_some(cache_loss),
+            cache_loss_recorded: false,
+            cache_history,
+            cache_history_request: scheduler_tracked.then_some(cache_history_request),
+            cache_history_verified: false,
             _lora_load: None,
         }
     }
@@ -670,6 +706,11 @@ where
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            cache_loss: None,
+            cache_loss_recorded: false,
+            cache_history: Arc::new(Mutex::new(CacheHistory::new(1, 1))),
+            cache_history_request: None,
+            cache_history_verified: false,
             _lora_load: lora_load,
         }
     }
@@ -764,6 +805,11 @@ where
             }
         }
 
+        if let (Some(data), Some(history)) =
+            (item.data.as_ref(), self.cache_history_request.as_mut())
+        {
+            history.observe_output(data.index.unwrap_or(0), &data.token_ids);
+        }
         if let (Some(data), Some(output_hashes), Some(lease)) = (
             item.data.as_ref(),
             self.output_hashes.as_mut(),
@@ -784,6 +830,7 @@ where
             );
         }
         self.observability.observe_tokens(new_tokens);
+        self.observe_cache_loss_worker_outcome(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
@@ -806,6 +853,8 @@ where
 
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
         self.observability
             .record_metrics(self.record_itl_at_completion);
         let lru_ack = self
@@ -833,10 +882,98 @@ where
     }
 
     pub(super) async fn abort(&mut self) {
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
         if let Some(lease) = &self.approximate_lru {
             lease.release_now();
         }
         self.cleanup.finish().await;
+    }
+
+    fn observe_cache_loss_worker_outcome(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if self.cache_loss_recorded {
+            return;
+        }
+        let Some(value) = item
+            .data
+            .as_ref()
+            .and_then(|data| data.engine_data.as_ref())
+            .and_then(|data| data.get("cache_loss"))
+        else {
+            return;
+        };
+        let Ok(outcome) = serde_json::from_value::<CacheLossWorkerOutcome>(value.clone()) else {
+            self.record_cache_loss_incomplete();
+            return;
+        };
+        let Some(route) = self.cache_loss else {
+            self.record_cache_loss_incomplete();
+            return;
+        };
+        if !outcome.complete || outcome.prompt_tokens != route.prompt_tokens {
+            self.record_cache_loss_incomplete();
+            return;
+        }
+
+        let f1 = route.previously_computed_tokens;
+        let f2 = route.best_router_tokens.min(f1);
+        let f3 = route.selected_router_tokens.min(f2);
+        let f4 = outcome
+            .gpu_hit_tokens
+            .saturating_add(outcome.cpu_lookup_tokens)
+            .min(f3);
+        let f5 = outcome
+            .gpu_hit_tokens
+            .saturating_add(outcome.cpu_hit_tokens)
+            .min(f4);
+        self.observability
+            .request_metrics()
+            .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
+        if let Some(history_request) = self.cache_history_request.as_mut() {
+            let mut history = self.cache_history.lock();
+            history_request.record_prompt(&mut history);
+            let stats = history.stats();
+            self.observability.request_metrics().set_cache_loss_history(
+                stats.retained_records,
+                stats.retained_unique_hashes,
+                stats.represented_tokens,
+                stats.estimated_retained_bytes,
+                stats.capacity_bytes,
+                stats.capacity_blocks,
+            );
+            self.cache_history_verified = true;
+        }
+        self.cache_loss_recorded = true;
+    }
+
+    fn record_cache_loss_incomplete(&mut self) {
+        if self.cache_loss_recorded || self.cache_loss.is_none() {
+            return;
+        }
+        self.observability
+            .request_metrics()
+            .observe_cache_loss_incomplete();
+        self.cache_loss_recorded = true;
+    }
+
+    fn finalize_cache_history(&mut self) {
+        if !self.cache_history_verified {
+            return;
+        }
+        let Some(history_request) = self.cache_history_request.as_mut() else {
+            return;
+        };
+        let mut history = self.cache_history.lock();
+        history_request.finalize(&mut history);
+        let stats = history.stats();
+        self.observability.request_metrics().set_cache_loss_history(
+            stats.retained_records,
+            stats.retained_unique_hashes,
+            stats.represented_tokens,
+            stats.estimated_retained_bytes,
+            stats.capacity_bytes,
+            stats.capacity_blocks,
+        );
     }
 }
 
@@ -845,6 +982,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     fn drop(&mut self) {
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
         self.observability
             .record_metrics(self.record_itl_at_completion);
         if let Some(lease) = &self.approximate_lru {
