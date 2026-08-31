@@ -220,7 +220,9 @@ where
             }
         };
         match affinity {
-            Some(affinity) => affinity.into_stream(selected_target, stream),
+            Some(affinity) => {
+                affinity.into_stream(selected_target, stream, self.session_affinity_mode)
+            }
             None => Ok(stream),
         }
     }
@@ -535,7 +537,7 @@ where
         };
         Ok((
             metadata,
-            self.track_session_affinity(operation, selected_target, stream)?,
+            operation.into_stream(selected_target, stream, self.session_affinity_mode)?,
         ))
     }
 }

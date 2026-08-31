@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use super::replica_sync::SessionAffinityUpdate;
 use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS, replica_sync::ReplicaSyncRuntime,
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode, replica_sync::ReplicaSyncRuntime,
 };
 use crate::protocols::common::extensions::SessionAffinityId;
 
@@ -624,23 +624,7 @@ impl AffinityAcquire {
         self,
         dispatched_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
-    ) -> Result<ManyOut<LlmResponse>, Error> {
-        self.into_stream_inner(dispatched_target, stream, false)
-    }
-
-    pub(crate) fn into_rebinding_stream(
-        self,
-        dispatched_target: AffinityTarget,
-        stream: ManyOut<LlmResponse>,
-    ) -> Result<ManyOut<LlmResponse>, Error> {
-        self.into_stream_inner(dispatched_target, stream, true)
-    }
-
-    fn into_stream_inner(
-        self,
-        dispatched_target: AffinityTarget,
-        stream: ManyOut<LlmResponse>,
-        allow_rebind: bool,
+        mode: SessionAffinityMode,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         match self {
             Self::Initialize(initialization) => {
@@ -649,8 +633,12 @@ impl AffinityAcquire {
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
-                if allow_rebind && target != dispatched_target {
-                    return Ok(lease.into_rebinding_stream(stream, target, dispatched_target));
+                if mode == SessionAffinityMode::Soft && target != dispatched_target {
+                    return Ok(stream::track(
+                        stream,
+                        lease,
+                        Some((target, dispatched_target)),
+                    ));
                 }
                 if let Err(error) = validate_dispatch_target("session", target, dispatched_target) {
                     lease.invalidate();
@@ -779,15 +767,6 @@ impl AffinityLease {
 
     pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
         stream::track(stream, self, None)
-    }
-
-    fn into_rebinding_stream(
-        self,
-        stream: ManyOut<LlmResponse>,
-        expected: AffinityTarget,
-        target: AffinityTarget,
-    ) -> ManyOut<LlmResponse> {
-        stream::track(stream, self, Some((expected, target)))
     }
 
     fn release(&mut self) {

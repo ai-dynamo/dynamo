@@ -495,13 +495,7 @@ where
     }
 
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
-        if self
-            .inner
-            .client
-            .instance_ids_discovered()
-            .binary_search(&target.worker_id)
-            .is_err()
-        {
+        if !self.inner.client.is_instance_discovered(target.worker_id) {
             return false;
         }
         let Some(kv_router) = self.kv_router_if_enabled() else {
@@ -559,18 +553,6 @@ where
                 Err(error)
             }
             Err(error) => Err(error),
-        }
-    }
-
-    fn track_session_affinity(
-        &self,
-        operation: AffinityAcquire,
-        target: AffinityTarget,
-        stream: ManyOut<Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        match self.session_affinity_mode {
-            SessionAffinityMode::Hard => operation.into_stream(target, stream),
-            SessionAffinityMode::Soft => operation.into_rebinding_stream(target, stream),
         }
     }
 
@@ -714,7 +696,9 @@ where
             }
         };
         match operation {
-            Some(operation) => self.track_session_affinity(operation, selected_target, stream),
+            Some(operation) => {
+                operation.into_stream(selected_target, stream, self.session_affinity_mode)
+            }
             None => Ok(stream),
         }
     }

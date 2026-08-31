@@ -500,7 +500,7 @@ where
         match operation {
             Some(operation) => Ok((
                 metadata,
-                self.track_session_affinity(operation, target, stream)?,
+                operation.into_stream(target, stream, self.session_affinity_mode)?,
             )),
             None => Ok((metadata, stream)),
         }

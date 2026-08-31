@@ -14,6 +14,7 @@ use dynamo_runtime::{
 };
 use futures::{StreamExt, stream};
 
+use super::SessionAffinityMode::{Hard, Soft};
 use super::{
     ADVISORY_DECODE_TARGET_CONTEXT_KEY, AffinityAcquire, AffinityCoordinator, AffinityTarget,
     LlmResponse, affinity_id,
@@ -66,7 +67,9 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
 
 async fn bind(coordinator: &AffinityCoordinator, target: AffinityTarget) {
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = operation.into_stream(target, response_stream(1)).unwrap();
+    let mut stream = operation
+        .into_stream(target, response_stream(1), Hard)
+        .unwrap();
     while stream.next().await.is_some() {}
 }
 
@@ -374,7 +377,7 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .into_stream(target(7, Some(0)), cancelled_response_stream(), Hard)
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
@@ -641,7 +644,7 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     let selected_target = target(7, Some(0));
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(selected_target, response_stream(1))
+        .into_stream(selected_target, response_stream(1), Hard)
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();
@@ -664,13 +667,13 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
         initialization
-            .into_stream(worker_binding, response_stream(1))
+            .into_stream(worker_binding, response_stream(1), Hard)
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = continuation
-        .into_stream(target(7, Some(3)), response_stream(1))
+        .into_stream(target(7, Some(3)), response_stream(1), Hard)
         .expect("worker-only affinity must allow the scheduler to select a DP rank");
 
     assert_eq!(
@@ -688,14 +691,14 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
         initialization
-            .into_stream(binding, response_stream(1))
+            .into_stream(binding, response_stream(1), Hard)
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
     assert!(
         continuation
-            .into_stream(target(7, Some(3)), response_stream(1))
+            .into_stream(target(7, Some(3)), response_stream(1), Hard)
             .is_err()
     );
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
@@ -717,7 +720,7 @@ async fn soft_affinity_rebinds_only_after_dispatch_succeeds() {
 
     let successful_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = successful_attempt
-        .into_rebinding_stream(replacement, response_stream(1))
+        .into_stream(replacement, response_stream(1), Soft)
         .unwrap();
     assert_eq!(
         coordinator.query_target(&session_id(), None).unwrap(),
@@ -739,7 +742,7 @@ async fn failed_or_cancelled_soft_stream_preserves_binding() {
 
     let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut failed = attempt
-        .into_rebinding_stream(replacement, error_response_stream())
+        .into_stream(replacement, error_response_stream(), Soft)
         .unwrap();
     while failed.next().await.is_some() {}
     assert_eq!(
@@ -749,7 +752,7 @@ async fn failed_or_cancelled_soft_stream_preserves_binding() {
 
     let attempt = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut cancelled = attempt
-        .into_rebinding_stream(replacement, cancelled_response_stream())
+        .into_stream(replacement, cancelled_response_stream(), Soft)
         .unwrap();
     assert!(cancelled.next().await.is_none());
     assert_eq!(
@@ -768,12 +771,8 @@ async fn concurrent_soft_rebind_uses_observed_version_cas() {
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let second = coordinator.acquire(&session_id(), None).await.unwrap();
 
-    let mut first_stream = first
-        .into_rebinding_stream(winner, response_stream(1))
-        .unwrap();
-    let mut second_stream = second
-        .into_rebinding_stream(stale, response_stream(1))
-        .unwrap();
+    let mut first_stream = first.into_stream(winner, response_stream(1), Soft).unwrap();
+    let mut second_stream = second.into_stream(stale, response_stream(1), Soft).unwrap();
     while first_stream.next().await.is_some() {}
     while second_stream.next().await.is_some() {}
     assert_eq!(
@@ -851,7 +850,7 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
     let replicated_target = target(7, Some(0));
     let operation = origin.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(replicated_target, response_stream(1))
+        .into_stream(replicated_target, response_stream(1), Hard)
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();

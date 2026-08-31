@@ -338,10 +338,6 @@ impl RoutingInstancesState {
         self.snapshot().routable_ids().to_vec()
     }
 
-    fn discovered_ids(&self) -> Vec<u64> {
-        self.snapshot().discovered_ids().to_vec()
-    }
-
     fn available_ids(&self) -> Option<Arc<HashSet<u64>>> {
         self.snapshot().available_ids()
     }
@@ -522,9 +518,13 @@ impl Client {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
-    /// Instance IDs in the latest discovery snapshot, including locally inhibited workers.
-    pub fn instance_ids_discovered(&self) -> Vec<u64> {
-        self.routing_instances.discovered_ids()
+    /// Whether the latest discovery snapshot contains this instance, including inhibited workers.
+    pub fn is_instance_discovered(&self, instance_id: u64) -> bool {
+        self.routing_instances
+            .snapshot()
+            .discovered_ids()
+            .binary_search(&instance_id)
+            .is_ok()
     }
 
     pub fn instance_ids_avail(&self) -> Vec<u64> {
