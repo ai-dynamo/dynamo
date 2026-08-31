@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -33,7 +34,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-    defer_indexer_listener_start: bool,
+    defer_indexer_for_bootstrap: bool,
 }
 
 impl SelectionServiceBuilder {
@@ -46,7 +47,7 @@ impl SelectionServiceBuilder {
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
             worker_selection_policy_factory: None,
-            defer_indexer_listener_start: false,
+            defer_indexer_for_bootstrap: false,
         }
     }
 
@@ -55,8 +56,10 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub fn defer_indexer_listener_start(mut self) -> Self {
-        self.defer_indexer_listener_start = true;
+    /// Keep new ZMQ listeners buffering until
+    /// [`SelectionService::bootstrap_indexer`] completes recovery.
+    pub fn defer_indexer_for_bootstrap(mut self) -> Self {
+        self.defer_indexer_for_bootstrap = true;
         self
     }
 
@@ -142,7 +145,7 @@ impl SelectionServiceBuilder {
                 }
             }
         }
-        if !self.defer_indexer_listener_start {
+        if !self.defer_indexer_for_bootstrap {
             core.start_indexer_listeners();
         }
 
@@ -260,19 +263,24 @@ impl SelectionService {
         self.replica_sync_port
     }
 
-    pub fn start_indexer_listeners(&self) {
+    /// Complete subscribe-first indexer bootstrap around a caller-provided recovery step.
+    ///
+    /// The service waits until every registered ZMQ listener is buffering, runs
+    /// `recover`, then drains the buffered tail before returning. The builder
+    /// must have been configured with [`SelectionServiceBuilder::defer_indexer_for_bootstrap`].
+    pub async fn bootstrap_indexer<F, Fut>(&self, recover: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        anyhow::ensure!(
+            !self.core.indexer_listeners_started(),
+            "indexer bootstrap requires deferred listener start; construct the service with \
+             SelectionServiceBuilder::defer_indexer_for_bootstrap()"
+        );
+        self.core.wait_for_indexer_listeners_buffering().await?;
+        recover().await?;
         self.core.start_indexer_listeners();
-    }
-
-    pub fn indexer_listeners_started(&self) -> bool {
-        self.core.indexer_listeners_started()
-    }
-
-    pub async fn wait_for_indexer_listeners_buffering(&self) -> anyhow::Result<()> {
-        self.core.wait_for_indexer_listeners_buffering().await
-    }
-
-    pub async fn wait_for_indexer_listeners_active(&self) -> anyhow::Result<()> {
         self.core.wait_for_indexer_listeners_active().await
     }
 
@@ -561,23 +569,41 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert!(service.indexer_listeners_started());
+        assert!(service.core.indexer_listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("deferred listener start"));
         service.shutdown().await;
     }
 
     #[tokio::test]
-    async fn deferred_builder_requires_explicit_listener_start() {
+    async fn deferred_builder_bootstraps_indexer_in_order() {
         let service = SelectionServiceBuilder::new(test_config())
             .indexer_threads(1)
-            .defer_indexer_listener_start()
+            .defer_indexer_for_bootstrap()
             .build()
             .await
             .unwrap();
-        assert!(!service.indexer_listeners_started());
-        service.start_indexer_listeners();
-        assert!(service.indexer_listeners_started());
-        service.start_indexer_listeners();
-        assert!(service.indexer_listeners_started());
+        assert!(!service.core.indexer_listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Err(anyhow::anyhow!("recovery failed")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "recovery failed");
+        assert!(
+            !service.core.indexer_listeners_started(),
+            "failed recovery must leave buffered listeners gated"
+        );
+        service
+            .bootstrap_indexer(|| async {
+                assert!(!service.core.indexer_listeners_started());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(service.core.indexer_listeners_started());
         service.shutdown().await;
     }
 }

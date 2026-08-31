@@ -125,7 +125,6 @@ impl EppRouter {
             // a valid empty pool. Each registered listener connects and enters
             // Buffering before the peer dump is requested.
             adapter.wait_initial_reconcile().await?;
-            selector.wait_for_indexer_listeners_buffering().await?;
             selector.start_peer_recovery().await?;
         }
 

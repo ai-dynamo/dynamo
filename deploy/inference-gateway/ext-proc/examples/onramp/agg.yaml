@@ -280,6 +280,8 @@ spec:
               containerPort: 9002
             - name: grpc-health
               containerPort: 9003
+            - name: metrics
+              containerPort: 9090
             # ZMQ replica-sync between EPP replicas (embedded replication).
             - name: replica-agg
               containerPort: 9092
@@ -338,9 +340,10 @@ spec:
 # The peer Service's `selection-http` serves the KV-index snapshot
 # (`GET /dump`) without authentication, so it is reachable only from sibling
 # EPP pods; the same peer-only restriction applies to `replica-agg` lifecycle
-# sync. The GAIE gateway still reaches gRPC (9002) and the kubelet still probes
-# grpc-health (9003) from any source; KV events flow *out* of the EPP to
-# workers, so no inbound rule is needed for them. Clusters without a
+# sync. The GAIE gateway still reaches gRPC (9002), the kubelet probes
+# grpc-health (9003), and metrics scrapers reach metrics (9090) from any source;
+# KV events flow *out* of the EPP to workers, so no inbound rule is needed for
+# them. Clusters without a
 # NetworkPolicy CNI simply ignore this object; operators with their own network
 # baseline may drop or replace it.
 apiVersion: networking.k8s.io/v1
@@ -365,12 +368,14 @@ spec:
           port: replica-agg
         - protocol: TCP
           port: selection-http
-    - from: [] # any source: GAIE gateway + kubelet probes
+    - from: [] # any source: GAIE gateway + kubelet probes + metrics scrapers
       ports:
         - protocol: TCP
           port: grpc
         - protocol: TCP
           port: grpc-health
+        - protocol: TCP
+          port: metrics
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and

@@ -208,7 +208,7 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         factory: Option<WorkerSelectionPolicyFactory>,
         replica_sync_port: Option<u16>,
-        defer_indexer_listener_start: bool,
+        defer_indexer_for_bootstrap: bool,
     ) -> Result<SelectionService> {
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
         // Done once at startup to avoid validating on every reconcile.
@@ -224,8 +224,8 @@ impl Selector {
         if let Some(peer_sync_port) = replica_sync_port {
             builder = builder.replica_sync(peer_sync_port, Vec::new());
         }
-        if defer_indexer_listener_start {
-            builder = builder.defer_indexer_listener_start();
+        if defer_indexer_for_bootstrap {
+            builder = builder.defer_indexer_for_bootstrap();
         }
 
         builder
@@ -267,13 +267,6 @@ impl Selector {
                     "prebuilt SelectionService replica-sync port {replica_sync_port} does not match \
                      EndpointSlice port {}",
                     replication.ports.replica_sync
-                );
-            }
-            if replication.ports.selection_http.is_some() && service.indexer_listeners_started() {
-                anyhow::bail!(
-                    "replicated peer recovery requires a prebuilt SelectionService with \
-                     deferred indexer listener start; construct it with \
-                     SelectionServiceBuilder::defer_indexer_listener_start()"
                 );
             }
         }
@@ -319,8 +312,9 @@ impl Selector {
                 None => {
                     // The Service does not declare `selection-http` (an
                     // image-only upgrade from a deployment that predates the
-                    // dump endpoint). Degrade to no-recovery instead of failing
-                    // startup: the replica bootstraps empty and serves.
+                    // dump endpoint). Skip KV-index recovery, but still gate
+                    // readiness on initial peer discovery so replica lifecycle
+                    // synchronization remains active.
                     crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_DISABLED);
                     tracing::warn!(
                         service = %replication.service_name,
@@ -328,7 +322,15 @@ impl Selector {
                          (bootstrapping empty). Update the peer Service to add the \
                          selection-http named port."
                     );
-                    None
+                    let recovered = Arc::new(AtomicBool::new(false));
+                    peer_recovery = Some(PeerRecovery {
+                        namespace: cfg.namespace.clone(),
+                        service_name: replication.service_name,
+                        ports: replication.ports,
+                        self_ip,
+                        recovered: recovered.clone(),
+                    });
+                    Some(recovered)
                 }
                 Some(selection_http_port) => {
                     // Shared flag gating /dump: the endpoint answers 503 until
@@ -379,36 +381,61 @@ impl Selector {
         })
     }
 
-    /// Run peer KV-index recovery now that worker registration has started.
+    /// Start peer discovery and optional KV-index recovery after worker registration.
     ///
     /// Subscribe-first ordering: the topology adapter registers workers (their
     /// ZMQ KV-event listeners begin buffering) before this runs, so the peer
     /// dump covers past history and the buffered events cover everything after
     /// it — only an overlap remains, absorbed idempotently. Blocks until
-    /// recovery succeeds or no peer exists (empty bootstrap). No-op when
-    /// replication is disabled or the Service lacks `selection-http`.
+    /// recovery succeeds or no peer exists (empty bootstrap). When the peer
+    /// Service lacks `selection-http`, recovery is skipped but peer discovery
+    /// and replica synchronization still start. No-op only when replication is
+    /// disabled.
     pub(crate) async fn start_peer_recovery(&self) -> Result<()> {
         let Some(recovery) = &self.peer_recovery else {
             return Ok(());
         };
-        let selection_http_port = recovery
-            .ports
-            .selection_http
-            .expect("guarded by construction");
-
-        crate::peer_discovery::spawn(
-            self.service.clone(),
-            &recovery.namespace,
-            &recovery.service_name,
-            recovery.ports.replica_sync,
-            selection_http_port,
-            recovery.self_ip.to_string(),
-            self.cancel.clone(),
-        )
-        .await?;
-
-        self.service.start_indexer_listeners();
-        self.service.wait_for_indexer_listeners_active().await?;
+        let selection_http_port = recovery.ports.selection_http;
+        let service = self.service.clone();
+        let namespace = recovery.namespace.clone();
+        let service_name = recovery.service_name.clone();
+        let replica_sync_port = recovery.ports.replica_sync;
+        let self_ip = recovery.self_ip.to_string();
+        let cancel = self.cancel.clone();
+        match selection_http_port {
+            Some(selection_http_port) => {
+                // Recovery needs the indexer listener deferred until the dump
+                // and buffered worker events have been applied.
+                self.service
+                    .bootstrap_indexer(|| async move {
+                        crate::peer_discovery::spawn(
+                            service,
+                            &namespace,
+                            &service_name,
+                            replica_sync_port,
+                            Some(selection_http_port),
+                            self_ip,
+                            cancel,
+                        )
+                        .await
+                    })
+                    .await?;
+            }
+            None => {
+                // Without selection-http there is no dump listener to defer;
+                // still reconcile peers and keep replica synchronization active.
+                crate::peer_discovery::spawn(
+                    service,
+                    &namespace,
+                    &service_name,
+                    replica_sync_port,
+                    None,
+                    self_ip,
+                    cancel,
+                )
+                .await?;
+            }
+        }
         recovery.recovered.store(true, Ordering::Release);
         Ok(())
     }
@@ -419,10 +446,6 @@ impl Selector {
 
     pub(crate) fn peer_recovery_required(&self) -> bool {
         self.peer_recovery.is_some()
-    }
-
-    pub(crate) async fn wait_for_indexer_listeners_buffering(&self) -> Result<()> {
-        self.service.wait_for_indexer_listeners_buffering().await
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
@@ -781,7 +804,7 @@ models:
     }
 
     #[tokio::test]
-    async fn deferred_selection_service_keeps_listener_gate_closed() {
+    async fn deferred_selection_service_completes_bootstrap() {
         let service = Selector::build_selection_service(
             &test_config(),
             KvRouterConfig::default(),
@@ -791,9 +814,10 @@ models:
         )
         .await
         .expect("deferred selection service should build");
-        assert!(!service.indexer_listeners_started());
-        service.start_indexer_listeners();
-        assert!(service.indexer_listeners_started());
+        service
+            .bootstrap_indexer(|| async { Ok(()) })
+            .await
+            .expect("deferred selection service should complete bootstrap");
         service.shutdown().await;
     }
 

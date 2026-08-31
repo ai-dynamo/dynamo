@@ -474,17 +474,18 @@ flowchart LR
     Service --> ReplicaB["EPP replica B<br/>selector + KV index"]
     Slices["Service EndpointSlices"] -. "discover sibling pod IPs" .-> ReplicaA
     Slices -. "discover sibling pod IPs" .-> ReplicaB
-    Workers["Ready vLLM pods"] -. "KV events :5557<br/>independent index warm-up" .-> ReplicaA
-    Workers -. "KV events :5557<br/>independent index warm-up" .-> ReplicaB
+    Workers["Ready vLLM pods"] -. "KV events :5557<br/>subscribe + buffer" .-> ReplicaA
+    Workers -. "KV events :5557<br/>subscribe + buffer" .-> ReplicaB
     ReplicaA <-->|"replica-agg :9092<br/>admission, prefill-complete, free"| ReplicaB
     ReplicaA <-->|"selection-http :9093<br/>startup GET /dump"| ReplicaB
 ```
 
-Before a joining or restarted EPP starts worker discovery, it recovers its KV index from a sibling's
-`GET /dump` endpoint. The EPP remains `NOT_SERVING` until recovery succeeds. If no sibling exists,
-the first EPP follows the normal worker-event and optional replay bootstrap path. If discovered peers
-are temporarily unreachable, recovery retries with backoff and retries immediately when peer membership
-changes.
+When a joining or restarted EPP starts, worker discovery and KV-event listeners are subscribed first,
+with events buffered. It then fetches a sibling's `GET /dump`, applies the dump, drains the buffered
+events, and becomes ready for live processing. The EPP remains `NOT_SERVING` until this sequence succeeds. If no
+sibling exists, the first EPP follows the normal worker-event and optional replay bootstrap path. If
+discovered peers are temporarily unreachable, recovery retries with backoff and retries immediately
+when peer membership changes.
 
 If recovery remains `NOT_SERVING`, check that the peer Service resolves the named ports and that each
 ready peer's `selection-http` address is reachable from the EPP Pod. Recovery intentionally retries
@@ -495,8 +496,9 @@ the `/dump` port before restarting replicas.
 The example uses the Deployment's default rolling-update strategy. A recovery source must already be
 serving (`serving=true`, not terminating), so a replica recovers only from an existing ready peer —
 never from a peer that is itself still bootstrapping. For the first upgrade from an EPP image without
-`selection-http`, apply the manifest (which adds the named port) before upgrading the image; an
-image-only upgrade degrades to no-recovery (the replica bootstraps empty) rather than failing startup.
+`selection-http`, apply the manifest (which adds the named port) before upgrading the image. An
+image-only upgrade skips KV-index recovery and bootstraps an empty index, while EndpointSlice
+watching and replica lifecycle synchronization continue.
 
 Recovery restores KV-index placement only. It does not restore active reservations or provide an atomic
 snapshot-plus-live-event handoff. Replica lifecycle synchronization and worker replay continue to converge

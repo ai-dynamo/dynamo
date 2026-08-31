@@ -510,6 +510,8 @@ async fn run_listener(
         return Ok(());
     }
 
+    // TODO: Size and monitor the ZMQ receive high-water mark for peer recovery.
+    // A slow dump can overflow this socket-only buffer and lose post-snapshot events.
     let socket = connect_sub_socket(&endpoint)
         .map_err(|e| format!("failed to connect ZMQ SUB socket to {endpoint}: {e}"))?;
 

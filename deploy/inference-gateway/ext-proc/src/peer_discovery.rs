@@ -37,8 +37,8 @@ pub(crate) struct PeerPorts {
     pub(crate) replica_sync: u16,
     /// `None` when the Service does not declare the `selection-http` port (an
     /// image-only upgrade from a deployment that predates the dump endpoint).
-    /// Peer KV-index recovery is then disabled — the replica bootstraps empty
-    /// — rather than failing startup.
+    /// Peer KV-index recovery is then disabled; peer discovery and
+    /// replica-load synchronization continue normally.
     pub(crate) selection_http: Option<u16>,
 }
 
@@ -186,15 +186,17 @@ fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
 /// replica-sync peers registered on `service` and excluding `self_ip`.
 ///
-/// This call does not return until initial KV-index recovery succeeds or the
-/// authoritative sibling set is empty. The dump server must already be bound.
+/// This call does not return until the initial peer set has been reconciled and,
+/// when `selection_http_port` is present, KV-index recovery succeeds or the
+/// authoritative sibling set is empty. The dump server must already be bound
+/// when recovery is enabled.
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     service: Arc<SelectionService>,
     namespace: &str,
     service_name: &str,
     sync_port: u16,
-    selection_http_port: u16,
+    selection_http_port: Option<u16>,
     self_ip: String,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -217,7 +219,7 @@ pub async fn spawn(
         %namespace,
         service = %service_name,
         sync_port,
-        selection_http_port,
+        selection_http_port = ?selection_http_port,
         %self_ip,
         "Starting EPP peer EndpointSlice watch (embedded replication)"
     );
@@ -268,7 +270,7 @@ pub async fn spawn(
     // InitDone generated the snapshot we just consumed; do not mistake it for a
     // peer change after the first failed recovery attempt.
     changes_rx.borrow_and_update();
-    recover_initial_index(
+    initialize_peer_state(
         &service,
         &store,
         sync_port,
@@ -277,12 +279,8 @@ pub async fn spawn(
         &mut known,
         &mut changes_rx,
         &cancel,
-        INITIAL_RECOVERY_BACKOFF,
-        MAX_RECOVERY_BACKOFF,
     )
     .await?;
-
-    tracing::info!("EPP peer discovery and KV-index bootstrap complete");
 
     tokio::spawn(async move {
         loop {
@@ -297,6 +295,48 @@ pub async fn spawn(
             reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
         }
     });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn initialize_peer_state(
+    service: &SelectionService,
+    store: &Store,
+    sync_port: u16,
+    selection_http_port: Option<u16>,
+    self_ip: &str,
+    known: &mut BTreeSet<String>,
+    changes_rx: &mut watch::Receiver<u64>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    match selection_http_port {
+        Some(selection_http_port) => {
+            recover_initial_index(
+                service,
+                store,
+                sync_port,
+                selection_http_port,
+                self_ip,
+                known,
+                changes_rx,
+                cancel,
+                INITIAL_RECOVERY_BACKOFF,
+                MAX_RECOVERY_BACKOFF,
+            )
+            .await?;
+            tracing::info!("EPP peer discovery and KV-index bootstrap complete");
+        }
+        None => {
+            // The peer Service predates the dump endpoint. Reconcile the
+            // replica-agg peer set and keep its watch active; only KV-index
+            // recovery is unavailable, so this replica starts with an empty
+            // index while retaining peer load/lifecycle synchronization.
+            reconcile_once(service, store, sync_port, self_ip, known).await;
+            tracing::info!(
+                "EPP peer discovery and replica synchronization active; KV-index recovery unavailable"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1563,6 +1603,45 @@ mod tests {
         let ports = peer_ports([&slice].into_iter()).expect("resolve ports");
         assert_eq!(ports.replica_sync, 9092);
         assert_eq!(ports.selection_http, None);
+    }
+
+    #[tokio::test]
+    async fn missing_selection_http_still_registers_replica_peer() {
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+
+        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
+            .indexer_threads(1)
+            .replica_sync(free_tcp_port(), Vec::new())
+            .build()
+            .await
+            .expect("build replica-sync selection service");
+        let peer = "10.0.0.2";
+        let sync_port = 9092;
+        let store = store_from_slices(vec![slice_with(&[peer], false, "IPv4")]);
+        let (_changes_tx, mut changes_rx) = watch::channel(0u64);
+        let cancel = CancellationToken::new();
+        let mut known = BTreeSet::new();
+
+        initialize_peer_state(
+            &service,
+            &store,
+            sync_port,
+            None,
+            "10.0.0.1",
+            &mut known,
+            &mut changes_rx,
+            &cancel,
+        )
+        .await
+        .expect("peer discovery must continue without KV recovery");
+
+        assert!(
+            service
+                .list_replica_peers()
+                .contains(&format!("tcp://{peer}:{sync_port}"))
+        );
+        service.shutdown().await;
     }
 
     #[test]
