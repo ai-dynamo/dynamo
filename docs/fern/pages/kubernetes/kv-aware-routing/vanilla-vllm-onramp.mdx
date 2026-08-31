@@ -177,7 +177,8 @@ creates the workload layer in `$NAMESPACE`:
 - Two stock vLLM workers with prefix caching, KV events, and readiness probes.
 - A `vllm-qwen-render` Service that selects those same workers and exposes their HTTP port for
   `/v1/chat/completions/render`.
-- Namespaced read-only RBAC for pods, `InferencePool`, and `EndpointSlice` resources.
+- Namespaced RBAC: `get`, `list`, and `watch` for pods, `InferencePool`, and `EndpointSlice`
+  resources; `get` for the EPP peer Service.
 - Two standalone EPP replicas and their gRPC and replica-synchronization Service.
 - An `InferencePool` and an `HTTPRoute` that attaches to the cross-namespace Gateway.
 
@@ -320,8 +321,13 @@ corresponding URL for the existing Service you reuse.
 ### Deploy a Replacement EPP
 
 Create a ServiceAccount with namespaced `get`, `list`, and `watch` access to pods, `InferencePool`
-resources, and `EndpointSlice` resources. Then create the replacement Deployment with the Dynamo EPP
-image. The environment variables belong to the EPP container in
+resources, and `EndpointSlice` resources. When you set `DYN_EPP_PEER_SERVICE`, also grant `get`
+access to Services. Create the replacement `dynamo-epp` Service with gRPC port `9002` before its
+Deployment. The complete ServiceAccount, RBAC, Deployment, and Service definitions are available in
+the [`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
+
+Then create the replacement Deployment with the Dynamo EPP image. The environment variables belong
+to the EPP container in
 `spec.template.spec.containers[].env`:
 
 ```yaml
@@ -377,11 +383,6 @@ configuration.
 
 The model name, block size, event port, and maximum batched-token values in the example are one
 coherent configuration. Change them together when adapting another model or vLLM deployment.
-
-Create the replacement `dynamo-epp` Service with gRPC port `9002` and, for two replicas, the named
-`replica-agg` port. The complete ServiceAccount, RBAC, Deployment, and Service definitions are
-available in the
-[`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
 ### Connect the InferencePool
 
@@ -459,10 +460,11 @@ show no selection, the route is bypassing the `InferencePool`.
 
 ## EPP Replication
 
-Each EPP replica has an in-process selector and KV index. When `DYN_EPP_PEER_SERVICE` is set, replicas
-watch their own Service's `EndpointSlice` resources and discover its named TCP `replica-agg` port.
-They synchronize admission, prefill-complete, and free events so active-load accounting converges
-across replicas.
+Each EPP replica has an in-process selector and KV index. When `DYN_EPP_PEER_SERVICE` is set, the EPP
+validates that Service at startup, then watches its `EndpointSlice` resources for sibling Pod IPs. Each
+replica binds and dials `DYN_EPP_REPLICA_SYNC_PORT`, which defaults to TCP port `9092`; every EPP
+selected by the Service must use the same value. They synchronize admission, prefill-complete, and free
+events so active-load accounting converges across replicas.
 
 ```mermaid
 flowchart LR
@@ -473,15 +475,14 @@ flowchart LR
     Slices -. "discover sibling pod IPs" .-> ReplicaB
     Workers["Ready vLLM pods"] -. "KV events :5557<br/>independent index warm-up" .-> ReplicaA
     Workers -. "KV events :5557<br/>independent index warm-up" .-> ReplicaB
-    ReplicaA <-->|"replica-agg :9092<br/>admission, prefill-complete, free"| ReplicaB
+    ReplicaA <-->|"replica sync TCP :9092<br/>admission, prefill-complete, free"| ReplicaB
 ```
 
 Replica synchronization does not copy the full KV index to a new EPP. A new replica warms its index
 from live worker events and optional replay. For consistency details, see
 [Standalone Selection Service](../../developer-guide/knowledge-base/modular-components/router/standalone-selection.md).
 
-For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVICE`, `POD_IP`, and the
-`replica-agg` Service port.
+For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVICE` and `POD_IP`.
 
 ## Standalone EPP Configuration Reference
 
@@ -502,7 +503,8 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | No | Render request timeout; defaults to `5000`. |
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
 | `DYN_EPP_MAX_INFLIGHT_REQUESTS` | No | Concurrent EPP request guardrail; defaults to `1024`, and excess requests receive `503`. |
-| `DYN_EPP_PEER_SERVICE` | No | EPP Service used to discover sibling replicas. |
+| `DYN_EPP_PEER_SERVICE` | No | Existing EPP Service used to discover sibling replicas. Enables replica sync. |
+| `DYN_EPP_REPLICA_SYNC_PORT` | No | ZMQ port every replica binds and dials for replica sync; defaults to `9092`. All replicas selected by `DYN_EPP_PEER_SERVICE` must use the same value. |
 | `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |
 
 ## Scope and Limitations
@@ -521,7 +523,9 @@ operator-generated resource contract; that contract does not configure standalon
 | Symptom | Check |
 |---|---|
 | EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-rust-epp` revision. |
-| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch all three resource types. |
+| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch pods and `InferencePool` resources. |
+| EPP replicas do not sync active load | Confirm `DYN_EPP_PEER_SERVICE` names the EPP Service and EPP RBAC grants `list` and `watch` access to `EndpointSlice` resources. |
+| EPP exits while validating its peer Service | Confirm the Service exists and EPP RBAC grants `get` access to Services. |
 | EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
 | Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |
 | Tokenization fails | Check the render Service endpoints and call `/v1/chat/completions/render` from the EPP namespace. |

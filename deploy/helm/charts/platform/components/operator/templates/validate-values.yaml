@@ -38,6 +38,50 @@ After:
 ` }}
 {{- end }}
 
+{{/* ---- NATS TLS requires a tls:// server address ---- */}}
+
+{{- $natsTLS := or .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath }}
+{{- if and $natsTLS (hasKey .Values "natsAddr") (not (hasPrefix "tls://" .Values.natsAddr)) }}
+  {{- fail `
+CONFIGURATION ERROR: NATS TLS is configured (natsTLS*) but natsAddr is not a tls:// URL.
+The runtime fails closed at startup when NATS TLS env vars are set without a tls:// server.
+Set natsAddr to a tls:// URL, e.g.:
+  dynamo-operator:
+    natsAddr: "tls://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+    natsTLSCAPath: /etc/certs/ca/ca.pem
+` }}
+{{- end }}
+
+{{/* ---- TCP TLS cert/key must be set together ---- */}}
+
+{{- if and .Values.tcpTLSCertPath (not .Values.tcpTLSKeyPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSCertPath is set but tcpTLSKeyPath is not.
+Both must be set together to enable TCP server TLS.
+` }}
+{{- end }}
+{{- if and .Values.tcpTLSKeyPath (not .Values.tcpTLSCertPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSKeyPath is set but tcpTLSCertPath is not.
+Both must be set together to enable TCP server TLS.
+` }}
+{{- end }}
+
+{{/* ---- TCP TLS client cert/key must be set together ---- */}}
+
+{{- if and .Values.tcpTLSClientCertPath (not .Values.tcpTLSClientKeyPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSClientCertPath is set but tcpTLSClientKeyPath is not.
+Both must be set together to present a TCP client identity.
+` }}
+{{- end }}
+{{- if and .Values.tcpTLSClientKeyPath (not .Values.tcpTLSClientCertPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSClientKeyPath is set but tcpTLSClientCertPath is not.
+Both must be set together to present a TCP client identity.
+` }}
+{{- end }}
+
 {{/* ---- Webhook enabled toggle (removed, webhooks are always enabled) ---- */}}
 
 {{- if and (hasKey .Values "webhook") (hasKey .Values.webhook "enabled") }}

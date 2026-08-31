@@ -76,7 +76,7 @@ data:
     {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
       {{- $etcdAddr = printf "%s-etcd.%s.svc.cluster.local:2379" .Release.Name .Release.Namespace }}
     {{- end }}
-    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint }}
+    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath .Values.tcpTLSCertPath .Values.tcpTLSKeyPath .Values.tcpTLSCAPath .Values.tcpTLSClientCertPath .Values.tcpTLSClientKeyPath .Values.tcpTLSClientCAPath .Values.tcpTLSServerName }}
     infrastructure:
       {{- if $natsAddr }}
       natsAddress: {{ $natsAddr | quote }}
@@ -89,6 +89,36 @@ data:
       {{- end }}
       {{- if .Values.dynamo.metrics.prometheusEndpoint }}
       prometheusEndpoint: {{ .Values.dynamo.metrics.prometheusEndpoint | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSCAPath }}
+      natsTLSCAPath: {{ .Values.natsTLSCAPath | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSClientCertPath }}
+      natsTLSClientCertPath: {{ .Values.natsTLSClientCertPath | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSClientKeyPath }}
+      natsTLSClientKeyPath: {{ .Values.natsTLSClientKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSCertPath }}
+      tcpTLSCertPath: {{ .Values.tcpTLSCertPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSKeyPath }}
+      tcpTLSKeyPath: {{ .Values.tcpTLSKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSCAPath }}
+      tcpTLSCAPath: {{ .Values.tcpTLSCAPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientCertPath }}
+      tcpTLSClientCertPath: {{ .Values.tcpTLSClientCertPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientKeyPath }}
+      tcpTLSClientKeyPath: {{ .Values.tcpTLSClientKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientCAPath }}
+      tcpTLSClientCAPath: {{ .Values.tcpTLSClientCAPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSServerName }}
+      tcpTLSServerName: {{ .Values.tcpTLSServerName | quote }}
       {{- end }}
     {{- end }}
     {{- $vsGateway := "" }}
