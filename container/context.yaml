@@ -90,8 +90,8 @@ vllm:
     # runtime_image_tag directly above it. A single global ref would install
     # 0.28.0rc1 into the xpu/cpu images, which are still on vLLM 0.27.1, and
     # reproduce the very mismatch this pins away from.
-    vllm_omni_ref: "v0.28.0rc1"
-    # MUST stay <5.15 while vLLM-Omni is pinned to 0.28.0rc1: that release
+    vllm_omni_ref: "v0.28.0"
+    # MUST stay <5.15 while vLLM-Omni is pinned to 0.28.0: that release
     # declares `transformers>=5.10.1,<5.15`, so 5.15.x makes the image
     # unbuildable -- "No solution found when resolving dependencies".
     # vllm#49797 (the Gemma 4 heterogeneous-config fix) IS in 0.28.0, which makes
