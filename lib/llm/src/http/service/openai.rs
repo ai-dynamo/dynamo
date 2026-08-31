@@ -3017,6 +3017,8 @@ async fn chat_completions(
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
+        let streaming_lifecycle = lifecycle.clone();
+        let streaming_request_lifecycle = request_lifecycle.clone();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -3025,6 +3027,7 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
+            let mut response_streaming = None;
 
             while let Some(mut response) = stream.next().await {
                 events.clear();
@@ -3049,6 +3052,7 @@ async fn chat_completions(
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
+                // Empty chunks are transport artifacts, not a streaming boundary.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
                     let _ = activity_tx.send(());
                     // Not forwarded, but the engine still generated these tokens,
@@ -3064,6 +3068,13 @@ async fn chat_completions(
                         &mut http_queue_guard,
                     );
                     continue;
+                }
+
+                if response_streaming.is_none() {
+                    let _entered_request_lifecycle = streaming_request_lifecycle.enter();
+                    response_streaming = Some(
+                        streaming_lifecycle.start(LifecycleStage::ResponseStreaming),
+                    );
                 }
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
@@ -3110,6 +3121,19 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
         );
+        let terminal = terminal.clone();
+        let stream = async_stream::stream! {
+            let _request_lifecycle = request_lifecycle;
+            let mut inner = Box::pin(stream);
+            while let Some(item) = inner.next().await {
+                yield item;
+            }
+            if ctx.is_killed() {
+                terminal.finish(TerminalOutcome::Cancelled);
+            } else {
+                terminal.finish(TerminalOutcome::Success);
+            }
+        };
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = keep_alive {
