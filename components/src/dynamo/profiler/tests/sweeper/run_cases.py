@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
+import importlib.metadata
+import json
 import os
 import shlex
 import subprocess
@@ -19,6 +22,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +141,10 @@ class ComparisonCase:
     @property
     def composed_sweeper_path(self) -> Path:
         return self.generated_dir / "sweeper-composed.yaml"
+
+    @property
+    def report_path(self) -> Path:
+        return self.generated_dir / "report.json"
 
 
 def _read_mapping(path: Path) -> dict[str, Any]:
@@ -708,6 +716,7 @@ def _run_sweeper_renderers(
     candidate_path.unlink(missing_ok=True)
     for renderer in _RENDERERS:
         (case.generated_dir / f"dgd-sweeper-{renderer}.yaml").unlink(missing_ok=True)
+        (case.generated_dir / f"error-sweeper-{renderer}.txt").unlink(missing_ok=True)
     renderers = _active_sweeper_renderers(entry)
     if not renderers:
         exception = entry.exception_for("render", "sweeper")
@@ -826,6 +835,187 @@ def run_case(case: ComparisonCase, entry: SuiteEntry | None = None) -> list[str]
     return failures
 
 
+def _git_revision() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        revision = os.environ.get("DYNAMO_COMMIT_SHA")
+        if revision:
+            return revision
+        raise RuntimeError(
+            "cannot determine the tested revision from git or DYNAMO_COMMIT_SHA"
+        )
+
+
+def _package_version(package: str) -> str:
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
+
+
+def _phase_result(
+    case: ComparisonCase,
+    entry: SuiteEntry,
+    *,
+    variant: str,
+    artifact: Path,
+    error: Path,
+    exception: SuiteException | None = None,
+) -> dict[str, Any]:
+    if exception is None:
+        exception = entry.exception_for("render", variant)
+    if artifact.is_file():
+        result: dict[str, Any] = {"status": "passed"}
+        if exception is not None and exception.status == "broken":
+            result["expectedStatus"] = "broken"
+        return result
+    if exception is not None and exception.status == "skipped":
+        return {"status": "skipped", "detail": exception.describe()}
+    if error.is_file():
+        return {
+            "status": (
+                "expected-failure"
+                if exception is not None and exception.status == "broken"
+                else "failed"
+            ),
+            "detail": error.read_text().strip(),
+        }
+    return {"status": "not-run"}
+
+
+def _generation_phases(
+    case: ComparisonCase, entry: SuiteEntry
+) -> dict[str, dict[str, Any]]:
+    phases = {
+        "profiler-v1beta1": _phase_result(
+            case,
+            entry,
+            variant="profiler-v1beta1",
+            artifact=case.generated_dir / "dgd-profiler-v1beta1.yaml",
+            error=case.generated_dir / "error-profiler-v1beta1.txt",
+        ),
+        "sweeper-search": _phase_result(
+            case,
+            entry,
+            variant="sweeper",
+            artifact=case.generated_dir / "candidate-sweeper.yaml",
+            error=case.generated_dir / "error-sweeper.txt",
+            exception=_sweeper_search_exception(entry),
+        ),
+    }
+    for renderer in _RENDERERS:
+        variant = f"sweeper-{renderer}"
+        phases[variant] = _phase_result(
+            case,
+            entry,
+            variant=variant,
+            artifact=case.generated_dir / f"dgd-{variant}.yaml",
+            error=case.generated_dir / f"error-{variant}.txt",
+        )
+    return phases
+
+
+def _overall_status(phases: dict[str, dict[str, Any]]) -> str:
+    statuses = {result["status"] for result in phases.values()}
+    if "failed" in statuses:
+        return "failed"
+    if "passed" in statuses:
+        return "passed"
+    if statuses == {"skipped"}:
+        return "skipped"
+    if "expected-failure" in statuses:
+        return "expected-failure"
+    return "not-run"
+
+
+def write_report(
+    case: ComparisonCase,
+    entry: SuiteEntry,
+    *,
+    tested_by: str,
+    command: str,
+    started_at: datetime,
+    finished_at: datetime,
+) -> None:
+    """Write a portable execution record beside generated diagnostics."""
+    phases = _generation_phases(case, entry)
+    search_space = case.sweeper_input["search_space"]
+    deployment_modes = search_space.get("deployment_mode", ["agg"])
+    report = {
+        "schemaVersion": 3,
+        "case": case.name,
+        "hardware": case.hardware.name,
+        "scope": "offline-generation",
+        "status": _overall_status(phases),
+        "testedBy": tested_by,
+        "revision": _git_revision(),
+        "startedAt": started_at.isoformat(),
+        "finishedAt": finished_at.isoformat(),
+        "command": command,
+        "intent": {
+            "model": search_space["model_name"],
+            "backend": _single_sweeper_backend(case.sweeper_input),
+            "deploymentMode": deployment_modes[0],
+            "gpuBudget": search_space["gpu_budget"],
+        },
+        "recipe": {
+            "source": case.recipe.source if case.recipe is not None else None,
+            "present": case.recipe is not None and case.recipe.path.is_file(),
+        },
+        "software": {
+            "ai-dynamo": _package_version("ai-dynamo"),
+            "aisimulate": _package_version("aisimulate"),
+        },
+        "phases": phases,
+    }
+    replace_text(case.report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
+def record_cluster_result(
+    output_dir: Path,
+    *,
+    variant: str,
+    status: str,
+    duration_seconds: float,
+    inventory: dict[str, Any],
+) -> None:
+    """Append one live deployment outcome to an offline report."""
+    report_path = output_dir / "report.json"
+    if not report_path.is_file():
+        return
+    lock_path = output_dir / ".report.lock"
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        report = json.loads(report_path.read_text())
+        cluster = report.setdefault(
+            "clusterValidation", {"inventory": inventory, "variants": {}}
+        )
+        cluster["inventory"] = inventory
+        cluster["variants"][variant] = {
+            "status": status,
+            "durationSeconds": duration_seconds,
+            "finishedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        report.setdefault("generationStatus", report["status"])
+        report["scope"] = "cluster-validation"
+        report["status"] = (
+            "failed"
+            if any(
+                result["status"] == "failed" for result in cluster["variants"].values()
+            )
+            else report["generationStatus"]
+        )
+        replace_text(report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate DGD goldens from v1beta1 and Sweeper for selected case/hardware pairs"
@@ -846,6 +1036,16 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="generated output root (default: suite-named goldens or generated/manual)",
     )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="write report.json beside each selected case's generated diagnostics",
+    )
+    parser.add_argument(
+        "--tested-by",
+        default=os.environ.get("GITHUB_ACTOR", "unknown"),
+        help="person or CI identity recorded in reports",
+    )
     return parser
 
 
@@ -863,7 +1063,9 @@ def _selections(args: Any) -> list[SuiteEntry]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = _parser().parse_args(raw_argv)
+    command = shlex.join([sys.executable, str(Path(__file__)), *raw_argv])
     output_root = args.output_dir
     if output_root is None:
         output_root = (
@@ -893,9 +1095,20 @@ def main(argv: list[str] | None = None) -> int:
                 hardware_cache[entry.hardware] = load_hardware(entry.hardware)
             hardware = hardware_cache[entry.hardware]
             case = load_case(entry.case, hardware, output_root=output_root)
+            started_at = datetime.now(timezone.utc)
+            case_failures = run_case(case, entry)
+            finished_at = datetime.now(timezone.utc)
+            if args.report:
+                write_report(
+                    case,
+                    entry,
+                    tested_by=args.tested_by,
+                    command=command,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
             failures.extend(
-                f"{entry.hardware}/{entry.case}: {failure}"
-                for failure in run_case(case, entry)
+                f"{entry.hardware}/{entry.case}: {failure}" for failure in case_failures
             )
     except (
         OSError,

@@ -30,7 +30,9 @@ python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
 
 ```bash
 python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
-  --suite components/src/dynamo/profiler/tests/sweeper/testsuite-issue-8469.yaml
+  --suite components/src/dynamo/profiler/tests/sweeper/testsuite-issue-8469.yaml \
+  --report \
+  --tested-by <github-handle>
 ```
 
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
@@ -58,8 +60,18 @@ kubectl apply -f \
   components/src/dynamo/profiler/tests/sweeper/generated/testsuite-issue-8469/h200-sxm-16gpu/qwen3-32b-vllm-disagg/dgd-sweeper-aic.yaml
 ```
 
-Composed inputs, the selected Candidate, caches, and error files are local ignored diagnostics.
-The suite intentionally defines no custom report format.
+Composed inputs, the selected Candidate, caches, error files, and optional `report.json` files are
+local ignored diagnostics. The final DGDs remain the comparison goldens; reports are execution
+records and are never used to decide whether generated output matches a golden.
+
+With `--report`, each selected combination writes:
+
+```text
+generated/<suite-name>/<hardware>/<case>/report.json
+```
+
+The report records the tested revision, contributor, software versions, deployment intent, and
+independent statuses for the v1beta1 profiler, Sweeper search, AIC renderer, and direct renderer.
 
 ## Validate generated DGDs on a cluster
 
@@ -76,6 +88,19 @@ Select a different set with `--sweeper-variants`, for example
 `--sweeper-variants profiler-v1beta1,sweeper-aic,sweeper-direct,recipe`. The test rejects a suite
 entry when its hardware family or total GPU budget is unavailable on the cluster.
 
+When the selected generated directory contains `report.json`, the deployment test appends each
+variant's status, elapsed test time, and sanitized GPU inventory. It does not create a report when
+offline generation was run without `--report`.
+
 To probe a recipe on hardware not yet listed in its `recipe.yaml`, add
 `--sweeper-discover-recipe-hardware`. After successful deployment and inference, the test writes
 the proposed requirement to the ignored adjacent `recipe.new.yaml`; it never edits `recipe.yaml`.
+
+## Run in GitHub Actions
+
+Start the `DGDR and Sweeper recipe matrix` workflow manually and select a suite file. The workflow
+runs the same offline generation command with `--report` and uploads the generated DGDs, reports,
+and diagnostics as a workflow artifact.
+
+The GitHub-hosted runner does not deploy the DGDs or claim cluster-validation results. Run
+`tests/deploy/test_sweeper_cases.py` on a compatible Kubernetes cluster for that evidence.

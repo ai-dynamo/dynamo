@@ -5,3 +5,5 @@ cases/*/recipe.new.yaml
 /generated/**/candidate-*.yaml
 /generated/**/*-composed.yaml
 /generated/**/error-*.txt
+/generated/**/report.json
+/generated/**/.report.lock

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,10 +28,11 @@ from dynamo.profiler.tests.sweeper.run_cases import (
     load_recipe,
     load_suite,
     missing_case_inputs,
+    record_cluster_result,
     recipe_gpu_count,
     write_discovered_recipe_requirement,
 )
-from tests.deploy.conftest import DeploymentTarget
+from tests.deploy.conftest import DeploymentTarget, _deploy_test_call_report_key
 from tests.deploy.dgd_utils import DeploymentSpec
 from tests.deploy.dgdr_utils import kubectl
 from tests.deploy.test_dgd import test_deployment as run_dgd_deployment_test
@@ -60,6 +62,7 @@ class SweeperDeploymentTarget:
     variant: str
     backend: str
     deployment_mode: str
+    output_dir: Path
     yaml_path: Path
     gpu_count: int
     gpu_sku: str
@@ -161,6 +164,7 @@ def _discover_targets(
                     variant=variant,
                     backend=backend,
                     deployment_mode=deployment_mode,
+                    output_dir=output_root / entry.hardware / entry.case,
                     yaml_path=yaml_path,
                     gpu_count=gpu_count,
                     gpu_sku=entry.hardware,
@@ -387,12 +391,45 @@ def prepared_deployment_path(
             )
 
 
+@pytest.fixture
+def cluster_result_recorder(
+    request: pytest.FixtureRequest,
+    sweeper_deployment_target: SweeperDeploymentTarget | None,
+):
+    """Append the pytest outcome to an existing optional JSON report."""
+    started_at = time.monotonic()
+    yield
+    if sweeper_deployment_target is None:
+        return
+    report = request.node.stash.get(_deploy_test_call_report_key, None)
+    if report is None:
+        return
+    if report.skipped:
+        status = (
+            "expected-failure"
+            if getattr(report, "wasxfail", None) is not None
+            else None
+        )
+        if status is None:
+            return
+    else:
+        status = "failed" if report.failed else "passed"
+    record_cluster_result(
+        sweeper_deployment_target.output_dir,
+        variant=sweeper_deployment_target.variant,
+        status=status,
+        duration_seconds=time.monotonic() - started_at,
+        inventory=_cluster_inventory(),
+    )
+
+
 async def test_sweeper_generated_dgd(
     sweeper_deployment_target: SweeperDeploymentTarget | None,
     image: str | None,
     namespace: str,
     skip_service_restart: bool,
     request: pytest.FixtureRequest,
+    cluster_result_recorder,
     prepared_deployment_path: Path | None,
 ) -> None:
     """Deploy one selected DGD and validate readiness and inference."""

@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-source: recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml
-requirements:
-  h100-sxm-2gpu:
-    gpus: 2
-  h200-sxm-2gpu:
-    gpus: 2
+search_space:
+  hardware_sku: h100_sxm
+  gpu_budget: 2

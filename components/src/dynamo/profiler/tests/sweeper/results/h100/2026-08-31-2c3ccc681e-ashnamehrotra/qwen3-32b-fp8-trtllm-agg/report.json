@@ -1,0 +1,100 @@
+{
+  "case": "qwen3-32b-fp8-trtllm-agg",
+  "clusterValidation": {
+    "inventory": {
+      "gpuProducts": {
+        "Standard_ND96isr_H100_v5": {
+          "gpus": 32,
+          "nodes": 4
+        }
+      }
+    },
+    "variants": {
+      "dgdr-v1beta1": {
+        "durationSeconds": 191.77054328564554,
+        "error": null,
+        "finishedAt": "2026-08-31T01:56:04.107246+00:00",
+        "status": "passed"
+      },
+      "reference": {
+        "durationSeconds": 127.63075413461775,
+        "error": null,
+        "finishedAt": "2026-08-31T02:07:56.554790+00:00",
+        "status": "passed"
+      },
+      "sweeper-aic": {
+        "durationSeconds": 211.58689764142036,
+        "error": null,
+        "finishedAt": "2026-08-31T01:59:35.828945+00:00",
+        "status": "passed"
+      }
+    }
+  },
+  "command": "/opt/dynamo/venv/bin/python components/src/dynamo/profiler/tests/sweeper/run_cases.py --hardware-profile /config/hardware-profile.yaml --output-dir /output --report --tested-by ashnamehrotra qwen3-32b-fp8-trtllm-agg",
+  "description": "Qwen3-32B FP8 TensorRT-LLM aggregated recipe regression.",
+  "environment": {
+    "provider": "azure",
+    "vmSize": "Standard_ND96isr_H100_v5"
+  },
+  "expectedHardware": {
+    "gpuCount": 2,
+    "gpuSkus": [
+      "h100",
+      "h200",
+      "a100"
+    ]
+  },
+  "finishedAt": "2026-08-31T01:52:36.697335+00:00",
+  "generationStatus": "passed",
+  "hardware": {
+    "gpuSku": "h100_sxm",
+    "interconnect": "nvlink",
+    "numGpusPerNode": 8,
+    "rdma": true,
+    "totalGpus": 2,
+    "vramMb": 81559
+  },
+  "hardwareProfile": "azure-h100-nd96isr",
+  "intent": {
+    "backend": "trtllm",
+    "deploymentMode": "agg",
+    "model": "Qwen3-32B FP8"
+  },
+  "phases": {
+    "existing-profiler-generation": {
+      "status": "passed"
+    },
+    "sweeper-aic-materialization": {
+      "status": "passed"
+    },
+    "sweeper-direct-materialization": {
+      "status": "passed"
+    },
+    "sweeper-search": {
+      "status": "passed"
+    }
+  },
+  "recipe": {
+    "present": true,
+    "source": "recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml"
+  },
+  "revision": "2c3ccc681e2e385708f7107bf94fa439731c3421",
+  "schemaVersion": 2,
+  "scope": "cluster-validation",
+  "software": {
+    "ai-dynamo": "1.5.0",
+    "aisimulate": "0.1.0.dev1",
+    "dynamo-planner": "not installed"
+  },
+  "startedAt": "2026-08-31T01:52:13.133863+00:00",
+  "status": "passed",
+  "sweeperSupport": {
+    "directRenderer": {
+      "reason": null,
+      "status": "supported"
+    },
+    "reason": null,
+    "status": "supported"
+  },
+  "testedBy": "ashnamehrotra"
+}

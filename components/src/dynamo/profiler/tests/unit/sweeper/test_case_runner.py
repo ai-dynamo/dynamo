@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -396,6 +398,8 @@ def test_sweeper_runs_once_and_renders_same_candidate_twice(
 
     monkeypatch.setattr(run_cases, "run_sweep", fake_sweep)
     monkeypatch.setattr(run_cases, "render_dgd", fake_render)
+    stale_error = case.generated_dir / "error-sweeper-direct.txt"
+    stale_error.write_text("stale\n")
 
     assert run_cases._run_sweeper_renderers(case) == []
     assert sweep_calls == [config]
@@ -404,6 +408,7 @@ def test_sweeper_runs_once_and_renders_same_candidate_twice(
     assert (case.generated_dir / "candidate-sweeper.yaml").is_file()
     assert (case.generated_dir / "dgd-sweeper-aic.yaml").is_file()
     assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()
+    assert not stale_error.exists()
 
 
 def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> None:
@@ -474,3 +479,74 @@ def test_broken_renderer_failure_does_not_fail_case(monkeypatch, tmp_path) -> No
     assert run_cases._run_sweeper_renderers(case, entry) == []
     assert (case.generated_dir / "dgd-sweeper-aic.yaml").is_file()
     assert not (case.generated_dir / "dgd-sweeper-direct.yaml").exists()
+
+
+def test_report_records_generation_and_cluster_status(monkeypatch, tmp_path) -> None:
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+    case.generated_dir.mkdir(parents=True)
+    (case.generated_dir / "dgd-profiler-v1beta1.yaml").write_text("kind: DGD\n")
+    (case.generated_dir / "candidate-sweeper.yaml").write_text("score: 1\n")
+    (case.generated_dir / "dgd-sweeper-aic.yaml").write_text("kind: DGD\n")
+    (case.generated_dir / "error-sweeper-direct.txt").write_text(
+        "unsupported topology\n"
+    )
+    entry = run_cases.SuiteEntry(
+        case="qwen",
+        hardware="h200-sxm-8gpu",
+        exceptions={
+            "render": {
+                "sweeper-direct": run_cases.SuiteException(
+                    status="broken", reason="Direct rendering lacks this topology."
+                )
+            }
+        },
+    )
+    monkeypatch.setattr(run_cases, "_git_revision", lambda: "abc123")
+    monkeypatch.setattr(
+        run_cases, "_package_version", lambda package: f"{package}-version"
+    )
+    timestamp = datetime(2026, 8, 31, tzinfo=timezone.utc)
+
+    run_cases.write_report(
+        case,
+        entry,
+        tested_by="contributor",
+        command="run comparison",
+        started_at=timestamp,
+        finished_at=timestamp,
+    )
+
+    report = json.loads(case.report_path.read_text())
+    assert report["status"] == "passed"
+    assert report["scope"] == "offline-generation"
+    assert report["phases"]["profiler-v1beta1"]["status"] == "passed"
+    assert report["phases"]["sweeper-direct"]["status"] == "expected-failure"
+
+    run_cases.record_cluster_result(
+        case.generated_dir,
+        variant="sweeper-aic",
+        status="passed",
+        duration_seconds=12.5,
+        inventory={"gpuProducts": {"NVIDIA H200": {"nodes": 1, "gpus": 8}}},
+    )
+
+    report = json.loads(case.report_path.read_text())
+    assert report["scope"] == "cluster-validation"
+    assert (
+        report["clusterValidation"]["variants"]["sweeper-aic"]["durationSeconds"]
+        == 12.5
+    )
+
+
+def test_git_revision_uses_container_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DYNAMO_COMMIT_SHA", "container-sha")
+
+    def missing_git(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(run_cases.subprocess, "run", missing_git)
+
+    assert run_cases._git_revision() == "container-sha"
