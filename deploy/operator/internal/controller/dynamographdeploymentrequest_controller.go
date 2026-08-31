@@ -107,7 +107,6 @@ const (
 	MessageInitialized              = "DGDR initialized successfully"
 	MessageDiscoveringHardware      = "Discovering GPU hardware and preparing profiling job"
 	MessageProfilingJobCreated      = "Profiling job created"
-	MessageAICProfilingJobCreated   = "AIC profiling job created"
 	MessageProfilingInProgress      = "Profiling is in progress"
 	MessageSpecGenerated            = "DynamoGraphDeployment spec generated successfully"
 	MessageSpecAvailable            = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
@@ -543,12 +542,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return ctrl.Result{}, nil
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageAICProfilingJobCreated)
-	}
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
 
 	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -1229,12 +1223,6 @@ func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) st
 // getOutputConfigMapName returns the ConfigMap name for profiling output
 func getOutputConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
-}
-
-// isOnlineProfiling returns true. In v1beta1, the profiler decides online vs AIC
-// mode internally based on its config. The controller always uses the same label.
-func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
-	return true
 }
 
 // validateSpec validates the DGDR spec
