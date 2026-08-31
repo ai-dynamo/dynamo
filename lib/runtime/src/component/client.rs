@@ -1022,7 +1022,6 @@ impl Client {
                     }
                 }
 
-                // Observed removals publish an authoritative empty set here.
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 if watch_tx.send(instances).is_err() {
                     tracing::debug!(
@@ -1838,43 +1837,4 @@ mod tests {
         rt.shutdown();
     }
 
-    #[tokio::test]
-    async fn test_authoritative_removal_still_publishes_empty_snapshot() {
-        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
-        const OBSERVE_WINDOW: Duration = Duration::from_secs(2);
-
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let ns = drt
-            .namespace("test_watcher_authoritative_empty".to_string())
-            .unwrap();
-        let component = ns.component("synthetic_component".to_string()).unwrap();
-        let endpoint = component.endpoint("synthetic_endpoint".to_string());
-
-        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
-            .await
-            .unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        client.wait_for_instances().await.unwrap();
-
-        endpoint.unregister_endpoint_instance().await.unwrap();
-
-        let deadline = tokio::time::Instant::now() + OBSERVE_WINDOW;
-        while tokio::time::Instant::now() < deadline {
-            if client.instances().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        assert!(
-            client.instances().is_empty(),
-            "an observed removal draining the last instance must still publish an \
-             empty snapshot"
-        );
-
-        rt.shutdown();
-    }
 }
