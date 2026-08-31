@@ -384,14 +384,6 @@ impl SelectionService {
         self.core.wait_for_indexer_listeners_active().await
     }
 
-    pub async fn wait_for_indexer_listeners_buffering(&self) -> anyhow::Result<()> {
-        self.core.wait_for_indexer_listeners_buffering().await
-    }
-
-    pub async fn wait_for_indexer_listeners_active(&self) -> anyhow::Result<()> {
-        self.core.wait_for_indexer_listeners_active().await
-    }
-
     pub async fn patch_worker(
         &self,
         worker_id: WorkerId,
