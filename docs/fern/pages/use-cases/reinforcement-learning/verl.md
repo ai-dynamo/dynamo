@@ -63,7 +63,7 @@ The smoke starts recipe-managed etcd, NATS, a Dynamo vLLM worker, and the shared
 
 ## Run a Training Iteration
 
-After the smoke passes, run at least one optimizer step with the same environment. This example selects the native Dynamo router explicitly:
+After the smoke passes, run at least one optimizer step with the same environment. Use the pinned upstream [Dynamo trainer configuration](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/config/dynamo_trainer.yaml) as the baseline, then make the model, data, resource, and routing overrides required for your environment. This example selects the native Dynamo router explicitly:
 
 ```bash
 export VERL_USE_EXTERNAL_MODULES=recipe.dynamo.register
@@ -129,5 +129,6 @@ See [Profile and Simulate RL Rollouts](operations-and-simulation.md) for request
 ## Upstream Resources
 
 - [Dynamo rollout backend](https://github.com/verl-project/verl-recipe/tree/461b830cfee4f5a67c21edc300c24373230babc7/dynamo)
+- [Dynamo trainer configuration](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/config/dynamo_trainer.yaml)
 - [Required verl version](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/REQUIRED_VERL.txt)
 - [Validation smoke](https://github.com/verl-project/verl-recipe/blob/461b830cfee4f5a67c21edc300c24373230babc7/dynamo/smoke_dynamo_v1.sh)

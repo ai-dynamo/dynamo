@@ -7,6 +7,9 @@ subtitle: Generation, worker discovery, administration, and compatibility contra
 
 Use this reference when implementing or reviewing a Dynamo rollout adapter. It defines the shared serving contract once; framework guides describe only what differs for that integration.
 
+> [!NOTE]
+> This reference tracks the current `dev` documentation and Dynamo `main`. For a released version, use the matching versioned documentation and confirm that the selected backend advertises the required routes.
+
 ## Separate the Three Planes
 
 | Plane | Endpoint | Use it for |

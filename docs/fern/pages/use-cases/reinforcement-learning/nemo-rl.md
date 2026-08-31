@@ -148,6 +148,7 @@ Keep new rollout admission gated after any refit or cache-control failure. See [
 
 ## Upstream Resources
 
+- [Dynamo generation backend source](https://github.com/NVIDIA-NeMo/RL/tree/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/models/generation/dynamo)
 - [Managed Dynamo generation guide](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/docs/guides/dynamo-generation.md)
 - [Two-GPU configuration](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/examples/configs/grpo_math_1B_dynamo.yaml)
 - [Dedicated functional test](https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/tests/functional/grpo_dynamo.sh)
