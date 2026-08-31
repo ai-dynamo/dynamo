@@ -34,7 +34,7 @@ Each target below is a Dynamo + vLLM deployment of [Qwen3.8-Flash-Next](https://
 <span><b>GPUs</b> 4x B200 prefill + 4x B200 decode (1P1D, colocated)</span>
 <span><b>Parallelism</b> TP4 + EP, both roles</span>
 <span><b>Spec decode</b> MTP3</span>
-<span><b>KV transfer</b> NIXL over UCX (cuda_copy + cuda_ipc + tcp)</span>
+<span><b>KV transfer</b> NIXL over InfiniBand RDMA (rc_x + rc + cuda_copy + cuda_ipc)</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
 </div>
@@ -93,7 +93,7 @@ kubectl apply -f vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 # 8-GPU aggregated (2 workers × TP4)
 kubectl apply -f vllm/agg-b200-agentic-8gpu/deploy.yaml -n ${NAMESPACE}
 
-# 8-GPU disaggregated (1P1D, requires hostIPC)
+# 8-GPU disaggregated (1P1D, InfiniBand RDMA)
 kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 

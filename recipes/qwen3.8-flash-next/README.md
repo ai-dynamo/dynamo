@@ -38,9 +38,12 @@ Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 O
 | **Speculative decoding** | MTP3                                         | MTP3                                            | MTP3                                            |
 | **Context length**       | 262,144                                      | 262,144                                          | 262,144                                         |
 | **N-gram embedding**     | Offloaded to host RAM                        | Offloaded to host RAM                           | Offloaded to host RAM                           |
-| **KV transfer**          | —                                            | —                                                | NIXL over UCX (cuda_ipc + cuda_copy + tcp)     |
+| **KV transfer**          | —                                            | —                                                | NIXL over UCX (rc_x + rc + cuda_copy + cuda_ipc) via InfiniBand RDMA |
 | **Prefix caching**       | Enabled                                      | Enabled                                          | Enabled                                         |
-| **hostIPC**              | —                                            | —                                                | Required for cross-pod NVLink                   |
+| **RDMA devices**         | —                                            | —                                                | `rdma/rdma_shared_device_a: 4` per worker      |
+| **hostIPC**              | —                                            | —                                                | Not required (RDMA handles cross-pod transfer)  |
+| **`--no-async-scheduling`** | —                                         | —                                                | Required (GDN hybrid model + TP>1 disagg race)  |
+| **Prefill `--max-num-seqs`** | —                                         | —                                                | 32 (reduced from 256 to avoid prefill OOM)      |
 
 ## Supported features
 
@@ -122,7 +125,7 @@ kubectl apply -f vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 # 8-GPU aggregated (2 workers × TP4)
 kubectl apply -f vllm/agg-b200-agentic-8gpu/deploy.yaml -n ${NAMESPACE}
 
-# 8-GPU disaggregated (1P1D, requires hostIPC)
+# 8-GPU disaggregated (1P1D, InfiniBand RDMA)
 kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -236,8 +239,11 @@ Benchmarked on B200, AIPerf trace-replay with 64K agentic trace (15% subset, 3,5
 |----------------------|------|---------|------|-------------|---------------------|---------------|-------------------------|---------------|--------------|-----------------|
 | Aggregated (15% subset) | B200 | 1 (TP4)  | 4  | 24 | 1,830  | 457.4 | 102.8 | 329 | 9.7 | 67.9% |
 | Aggregated (15% subset) | B200 | 2 (TP4×2) | 8  | 24 | 2,474  | 309.3 | 127.6 | 339 | 7.8 | 73.1% |
+| Disaggregated (15% subset) | B200 | 1P+1D (TP4×2) | 8  | 24 | 2,384  | 298.0 | 118.0 | 447 | 8.5 | 73.3% |
 
 > **Note:** The 8-GPU aggregated recipe uses 2 workers (2×TP4) on a single node. Per-GPU throughput is lower (309 vs 458 tok/s/GPU) because the ultra-sparse model (6B active) is already compute-light — adding more workers improves aggregate throughput (+35%) and prefix cache hit rate (+5pp) but doesn't scale linearly due to shared memory bandwidth. ITL improves from 9.7 to 7.8 ms with more GPU resources per request.
+>
+> **Disaggregated** uses 1 prefill (TP4) + 1 decode (TP4) on a single node with InfiniBand RDMA for KV transfer (~18 GB/s avg). The disagg recipe requires `--no-async-scheduling` on both workers because the GDN (Gated DeltaNet) hybrid model has a known race between async scheduling and NIXL RDMA writes on TP>1 (vLLM #42182, #37285; fixed in vLLM 0.26.0 but not yet in the `qwen38-flash-next` image). Prefill `--max-num-seqs` is reduced to 32 (from 256) to avoid OOM on large 260K-token prompts with only 4 GPUs. Disagg throughput (2,384 tok/s) is comparable to 8-GPU agg (2,474 tok/s) for this short-output agentic workload; disagg wins more on decode-heavy workloads with longer outputs.
 
 ## Configuration notes
 
@@ -269,10 +275,28 @@ Non-obvious knobs, all already set in the manifest:
   determine API compatibility.
 - **SYS_RESOURCE capability.** `capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]` is required for
   `ulimit -l unlimited` to work inside the container (needed for large pinned memory allocations).
-- **Disaggregated KV transfer.** The disagg recipe uses `UCX_TLS=cuda_ipc,cuda_copy,tcp` with
-  `hostIPC: true` on both worker pods. `hostIPC` shares the IPC namespace so `cuda_ipc` can open
-  GPU memory handles across pods on the same node (NVLink). Without `hostIPC`, UCX falls back to
-  `cuda_copy` + TCP (~50 MB/s instead of NVLink speeds).
+- **Disaggregated KV transfer over InfiniBand RDMA.** The disagg recipe uses
+  `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc` with `rdma/rdma_shared_device_a: 4` resource requests
+  on both worker pods. The `rdma/rdma_shared_device_a` resource (provided by the Nebius RDMA
+  device plugin) gives each pod direct access to InfiniBand HCAs for GPUDirect RDMA via DMA-BUF.
+  This achieves ~18 GB/s avg KV transfer throughput (peak 42 GB/s) without `hostIPC`.
+  NCCL is configured with `NCCL_IB_DISABLE=0`, `NCCL_IB_HCA=mlx5`, `NCCL_NET_GDR_LEVEL=5`
+  to enable InfiniBand for intra-pod TP communication as well.
+  **No `hostIPC`** is needed — Kubernetes pod isolation prevents cross-pod CUDA IPC (NVLink),
+  so `cuda_ipc` in `UCX_TLS` is only used for intra-pod transfers; cross-pod KV transfer
+  uses InfiniBand RDMA (`rc_x,rc`).
+- **`--no-async-scheduling` (disagg only).** Required for hybrid GDN/Mamba models at TP>1 in
+  disaggregated mode. vLLM's async scheduler races with NIXL RDMA writes: the zeroing kernel for
+  newly allocated attention blocks can erase KV that prefill just transferred (vLLM #42182, #37285).
+  The bug is silent — no error, no failed transfer — but the decode worker attends to zeros while
+  GDN state survives, producing plausible-looking but incorrect output. Fixed in vLLM 0.24-0.26
+  (#45357, #48481); the `qwen38-flash-next` image is built from an older vLLM dev branch, so the
+  workaround is required. See the Qwen3.5-122B recipe for the same pattern.
+- **Prefill `--max-num-seqs 32` (disagg only).** Reduced from 256 (used in aggregated mode) to
+  avoid OOM on the prefill worker. In disagg mode, the prefill worker has only 4 GPUs (vs 8 in
+  agg) and must hold large prefill activations for 260K-token prompts. With `--gpu-memory-utilization
+  0.90` and ~133 GB KV cache, there is limited headroom for large GDN prefill activations.
+  The decode worker keeps `--max-num-seqs 256` since decode is memory-light per request.
 - **kv_role.** Prefill uses `kv_producer`, decode uses `kv_consumer` (not `kv_both`). This is more
   precise than `kv_both` on both workers and matches the GLM-5.3-Flash pattern.
 - **Parser compatibility.** `--dyn-tool-call-parser qwen3_coder` is used instead of `qwen3_xml`
@@ -301,10 +325,10 @@ No `--quantization` flag is needed — vLLM auto-detects from the checkpoint con
 
 ## Limitations
 
-- **Disaggregated benchmark incomplete** — the disagg recipe was deployed and smoke-tested
-  (text, tool, image, video all passed), but the AIPerf benchmark encountered stability
-  issues with `hostIPC` + `cuda_ipc`. Partial results (800/3541 requests) are available but
-  not included in the performance table. A follow-up PR will address the disagg benchmark.
+- **Disaggregated throughput** — the disagg recipe (2,384 tok/s) is ~3.7% slower than 8-GPU
+  agg (2,474 tok/s) for this short-output agentic workload (400 OSL, 90% cache reuse). Disagg
+  wins more on decode-heavy workloads with longer outputs and lower cache reuse. The
+  `--no-async-scheduling` requirement (due to old vLLM) also reduces throughput vs agg.
 - **Single-node only** — all recipes use a single B200 node. Multi-node TP is not validated
   for this model on B200.
 - **N-gram offload on NVIDIA only** — the asynchronous host-memory offload currently runs on
