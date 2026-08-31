@@ -402,8 +402,10 @@ def test_sweeper_runs_once_and_renders_same_candidate_twice(
     assert [call[0] for call in render_calls] == [candidate, candidate]
     assert [call[-1] for call in render_calls] == ["aic", "direct"]
     assert (case.generated_dir / "candidate-sweeper.yaml").is_file()
-    assert (case.generated_dir / "dgd-sweeper-aic.yaml").is_file()
-    assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()
+    for renderer in ("aic", "direct"):
+        rendered = case.generated_dir / f"dgd-sweeper-{renderer}.yaml"
+        assert rendered.is_file()
+        assert rendered.read_text().startswith(run_cases._YAML_SPDX_HEADER)
 
 
 def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> None:
