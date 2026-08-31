@@ -14,6 +14,15 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const (
+	// HOME in the legacy Go EPP image, which runs as `nonroot`
+	// (useradd -r -u 65532). The standalone dynamo-epp image uses the same user.
+	legacyGoEPPHome = "/home/nonroot"
+	// HOME in the frontend image, where the native Rust EPP ships: that image
+	// does `useradd -m ... dynamo` + `ENV HOME=/home/dynamo` + `USER dynamo`.
+	nativeRustEPPHome = "/home/dynamo"
+)
+
 // EPPDefaults implements ComponentDefaults for EPP (Endpoint Picker Plugin) components
 type EPPDefaults struct {
 	*BaseComponentDefaults
@@ -107,9 +116,15 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	container.Command = []string{}
 
+	// HOME the hf-cache emptyDir is mounted under, below. Set per launch
+	// contract because the two EPP images disagree on it.
+	eppHome := nativeRustEPPHome
+
 	// Presence of eppConfig keeps the legacy Go EPP launch contract so existing
 	// DGDs survive operator upgrades unchanged until migration clears it.
 	if epp.IsLegacyGoEPP(context.EPPConfig) {
+		eppHome = legacyGoEPPHome
+
 		poolName := epp.GetPoolName(context.ParentGraphDeploymentName)
 		poolNamespace := epp.GetPoolNamespace(context.ParentGraphDeploymentNamespace)
 		configFilePath := epp.GetConfigFilePath()
@@ -133,12 +148,30 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		// config file. Leave Args empty and let the image ENTRYPOINT run.
 		// Users can still override args via extraPodSpec.mainContainer.args.
 		container.Args = []string{}
+
+		// Pin HOME rather than inheriting whatever the image sets. The native
+		// EPP's default image (frontend) uses /home/dynamo while the standalone
+		// dynamo-epp image runs as nonroot, so without this the mount below can
+		// only be right for one of them.
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "HOME",
+			Value: eppHome,
+		})
 	}
 
-	// Mount HuggingFace cache directory for model config downloads
+	// Mount the model-config cache the EPP writes while downloading model
+	// configs. The path must track the container's HOME: the Rust EPP resolves
+	// its MDC cache root from $HOME (lib/llm/src/model_card.rs), so a mount that
+	// does not match is silently inert -- no error, but the blobs land on the
+	// container's ephemeral writable layer, which grows unbounded toward node
+	// DiskPressure and fails outright under readOnlyRootFilesystem: true.
+	//
+	// A HOME supplied through podTemplate still wins over the one set above
+	// (MergeEnvs gives user env precedence), which would re-break the pairing;
+	// that is the caller's choice to make, the same as overriding args.
 	hfCacheMount := corev1.VolumeMount{
 		Name:      "hf-cache",
-		MountPath: "/home/nonroot/.cache",
+		MountPath: eppHome + "/.cache",
 	}
 	container.VolumeMounts = append(container.VolumeMounts, hfCacheMount)
 
