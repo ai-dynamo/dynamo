@@ -430,6 +430,10 @@ trap - EXIT
 
 Route request bodies and response fields are engine-specific. A callback can return `{"status":"error"}` with HTTP 200, while an exception in the callback produces HTTP 500. Check both the HTTP status and the JSON result before advancing the rollout state.
 
+SGLang direct administration uses SGLang-specific routes and response shapes. For example, call `/engine/control/update_weights_from_disk` directly when you already know the worker URL, or call `/engine/call_tokenizer_manager` with `{"method":"update_weights_from_disk", ...}` for tokenizer-manager passthrough behavior.
+
+The `/v1/rl/workers` endpoint is read-only. It intentionally does not expose `/v1/rl/engine` or `/v1/rl/engines` proxy routes, which prevents an accidental frontend fan-out of a mutating engine operation.
+
 ### Read and Declare the Weight Version
 
 A vLLM worker reports the last weight version declared to it through `get_weight_version`:
@@ -464,10 +468,6 @@ curl http://10.0.0.12:8081/engine/set_weight_version \
 ```
 
 The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
-
-SGLang direct administration uses SGLang-specific routes and response shapes. For example, call `/engine/control/update_weights_from_disk` directly when you already know the worker URL, or call `/engine/call_tokenizer_manager` with `{"method":"update_weights_from_disk", ...}` for tokenizer-manager passthrough behavior.
-
-The `/v1/rl/workers` endpoint is read-only. It intentionally does not expose `/v1/rl/engine` or `/v1/rl/engines` proxy routes, which prevents an accidental frontend fan-out of a mutating engine operation.
 
 ## Register a Custom Engine Route
 
