@@ -82,8 +82,8 @@ SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 # than fall back to two GPUs; hence ``-`` and not ``:-``.
 IFS=',' read -r -a _VISIBLE_GPUS <<< "${CUDA_VISIBLE_DEVICES-0,1}"
 if [ -z "${CUDA_VISIBLE_DEVICES-0,1}" ] || [ "${#_VISIBLE_GPUS[@]}" -lt 2 ]; then
-    echo "ERROR: this script needs 2 GPUs; CUDA_VISIBLE_DEVICES=" \
-         "'${CUDA_VISIBLE_DEVICES:-<unset>}' exposes ${#_VISIBLE_GPUS[@]}." >&2
+    echo "ERROR: this script needs 2 GPUs;" \
+         "CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES-<unset>}' exposes ${#_VISIBLE_GPUS[@]}." >&2
     exit 1
 fi
 WORKER1_GPU="${_VISIBLE_GPUS[0]}"
