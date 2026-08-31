@@ -26,6 +26,15 @@ from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
 
+try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ImportError:
+    # Fallback for sglang <= 0.5.18. Remove when min supported version includes
+    # the srt/utils move (sgl-project/sglang#36681).
+    from sglang.srt.server_args_config_parser import (  # type: ignore[no-redef]
+        ConfigArgumentMerger,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +186,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "override_server_args",
