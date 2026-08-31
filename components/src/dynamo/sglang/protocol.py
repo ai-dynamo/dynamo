@@ -57,10 +57,20 @@ class EmbeddingRequest(BaseModel):
     model: str
     input: EmbeddingInput
     user: Optional[str] = None
-    dimensions: Optional[
-        int
-    ] = None  # only supported in text-embedding-3 and later models from OpenAI
+    dimensions: Optional[int] = (
+        None  # only supported in text-embedding-3 and later models from OpenAI
+    )
     encoding_format: Literal["float", "base64"] = "float"
+
+
+class RerankRequest(BaseModel):
+    """SGLang-compatible text-only cross-encoder rerank request."""
+
+    model: str
+    query: str
+    documents: List[str]
+    top_n: Optional[int] = None
+    return_documents: bool = True
 
 
 class DisaggPreprocessedRequest(BaseModel):

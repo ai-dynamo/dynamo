@@ -14,6 +14,7 @@ _EXPORTS = {
     "PrefillWorkerHandler": ".llm",
     # Embedding handlers
     "EmbeddingWorkerHandler": ".embedding",
+    "RerankWorkerHandler": ".rerank",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler": ".image_diffusion",
     # Video generation handlers
@@ -45,6 +46,7 @@ __all__ = [
     "PrefillWorkerHandler",
     # Embedding handlers
     "EmbeddingWorkerHandler",
+    "RerankWorkerHandler",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler",
     # Video generation handlers

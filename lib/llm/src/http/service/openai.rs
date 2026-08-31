@@ -76,6 +76,7 @@ use crate::protocols::openai::{
         NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
         PoolingEndianness, PoolingOutput,
     },
+    rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
     responses::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
         chat_completion_to_response,
@@ -1636,7 +1637,92 @@ async fn classify(
     Ok(Json(response).into_response())
 }
 
-fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
+#[tracing::instrument(skip_all)]
+async fn rerank(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateRerankRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "rerank",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+        );
+        request.nvext = None;
+    }
+
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Rerank,
+        false,
+        &request_id,
+    );
+
+    if let Err(message) = request.validate_semantics() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_family_bad_request(message.to_string()));
+    }
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+    let engine = state.manager().get_rerank_engine(model).map_err(|error| {
+        let response = ErrorMessage::from_model_error(&error);
+        inflight.mark_error(extract_error_type_from_response(&response));
+        response
+    })?;
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+    let stream = engine.generate(request).await.map_err(|error| {
+        if super::metrics::request_was_rejected(error.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, Endpoint::Rerank);
+        }
+        let response = ErrorMessage::from_anyhow(error, "Failed to generate reranking");
+        inflight.mark_error(extract_error_type_from_response(&response));
+        response
+    })?;
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+    let response = NvCreateRerankResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|error| {
+            let response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(error),
+                "Failed to fold rerank stream",
+            );
+            inflight.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+fn pooling_family_bad_request(message: String) -> ErrorResponse {
     let code = StatusCode::BAD_REQUEST;
     (
         code,
@@ -1652,7 +1738,7 @@ fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
 
 fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResponse> {
     if cache_salt == Some("") {
-        return Err(pooling_or_classify_bad_request(
+        return Err(pooling_family_bad_request(
             "Parameter 'cache_salt' must be a non-empty string if provided.".to_string(),
         ));
     }
@@ -1866,7 +1952,7 @@ async fn pooling(
     // vLLM currently rejects dimensionality reduction on `/pooling`.
     if request.dimensions.is_some() {
         inflight.mark_error(ErrorType::Validation);
-        return Err(pooling_or_classify_bad_request(
+        return Err(pooling_family_bad_request(
             "dimensions is currently not supported".to_string(),
         ));
     }
@@ -4005,6 +4091,22 @@ pub fn classify_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(classify))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for SGLang-compatible cross-encoder reranking.
+/// If no path is provided, the default path is `/v1/rerank`.
+pub fn rerank_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/rerank".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(rerank))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);

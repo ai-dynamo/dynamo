@@ -62,6 +62,8 @@ bitflags! {
         /// mounts its `/pooling` alongside those surfaces for every
         /// pooling-runner model.
         const Pooling = 1 << 10;
+        /// Cross-encoder relevance scoring served on `/v1/rerank`.
+        const Rerank = 1 << 11;
     }
 }
 
@@ -107,6 +109,9 @@ impl ModelType {
     pub fn supports_pooling(&self) -> bool {
         self.contains(ModelType::Pooling)
     }
+    pub fn supports_rerank(&self) -> bool {
+        self.contains(ModelType::Rerank)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -142,6 +147,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push("pooling");
+        }
+        if self.supports_rerank() {
+            result.push("rerank");
         }
         result
     }
@@ -182,6 +190,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push(ModelType::Pooling);
+        }
+        if self.supports_rerank() {
+            result.push(ModelType::Rerank);
         }
         result
     }
@@ -232,6 +243,9 @@ impl ModelType {
         }
         if self.contains(Self::Pooling) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Pooling);
+        }
+        if self.contains(Self::Rerank) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Rerank);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
@@ -411,6 +425,18 @@ mod tests {
         assert_eq!(
             combined.as_endpoint_types(),
             vec![EndpointType::Classify, EndpointType::Pooling]
+        );
+    }
+
+    #[test]
+    fn rerank_capability_maps_to_endpoint() {
+        assert_eq!(ModelType::Rerank.bits(), 1 << 11);
+        assert!(ModelType::Rerank.supports_rerank());
+        assert_eq!(ModelType::Rerank.as_vec(), vec!["rerank"]);
+        assert_eq!(ModelType::Rerank.units(), vec![ModelType::Rerank]);
+        assert_eq!(
+            ModelType::Rerank.as_endpoint_types(),
+            vec![EndpointType::Rerank]
         );
     }
 
