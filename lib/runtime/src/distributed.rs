@@ -831,9 +831,7 @@ impl std::str::FromStr for RequestPlaneMode {
 impl RequestPlaneMode {
     /// Reads `DYN_REQUEST_PLANE`, defaulting only when it is absent or empty.
     fn from_env() -> Result<Self> {
-        match std::env::var(
-            crate::config::environment_names::request_plane::DYN_REQUEST_PLANE,
-        ) {
+        match std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE) {
             Err(std::env::VarError::NotPresent) => Ok(Self::default()),
             Ok(s) if s.is_empty() => Ok(Self::default()),
             Ok(s) => s.parse(),
