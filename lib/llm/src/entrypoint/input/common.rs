@@ -4,6 +4,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use dynamo_renderer::PromptFormatter;
 
 use crate::{
@@ -312,7 +313,9 @@ where
         load_context,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
-        prefill_router.set_decode_routing_host(routing_host.clone());
+        prefill_router
+            .set_decode_routing_host(routing_host.clone())
+            .context("install conditional-disagg decode RoutingHost")?;
     }
     let backend_engine: ServiceEngine<_, _> = routing_host;
     Ok(PreprocessedRouting {

@@ -353,6 +353,9 @@ where
                 Ok(None) => {
                     (req, context) = conditional_request.into_parts();
                 }
+                Err(error) if crate::kv_router::routing_host::is_cancelled(&error) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(
                         request_id = %request_id,
@@ -559,8 +562,24 @@ where
         self.conditional_disagg_policy.is_enabled()
     }
 
-    pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost<Sel>>) {
-        let _ = self.decode_routing_host.set(routing_host);
+    pub(crate) fn set_decode_routing_host(
+        &self,
+        routing_host: Arc<RoutingHost<Sel>>,
+    ) -> Result<()> {
+        match self.decode_routing_host.set(routing_host) {
+            Ok(()) => Ok(()),
+            Err(routing_host)
+                if self
+                    .decode_routing_host
+                    .get()
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &routing_host)) =>
+            {
+                Ok(())
+            }
+            Err(_) => anyhow::bail!(
+                "PrefillRouter already has a different decode RoutingHost; rebuild requires a new PrefillRouter"
+            ),
+        }
     }
 
     fn prepare_prefill_dispatch(
@@ -849,7 +868,6 @@ mod tests {
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
             16,
-            None,
             None,
             None,
             None,

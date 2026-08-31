@@ -7,7 +7,7 @@ use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::SingleIn;
 
 use super::PrefillRouter;
-use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals};
+use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
@@ -79,7 +79,18 @@ where
         let mut input =
             ConditionalDisaggDecisionInput::new(routing_token_ids.len(), signals.cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
-            let busy = self.peek_prefill_chosen_worker_busy(request).await;
+            let busy = match self.peek_prefill_chosen_worker_busy(request).await {
+                Ok(busy) => busy,
+                Err(error) if is_cancelled(&error) => return Err(error),
+                Err(error) => {
+                    tracing::debug!(
+                        request_id,
+                        %error,
+                        "Conditional disagg prefill-load probe failed; treating load as unavailable"
+                    );
+                    None
+                }
+            };
             tracing::debug!(
                 request_id,
                 prefill_chosen_worker_busy = ?busy,
@@ -147,14 +158,19 @@ where
     async fn peek_prefill_chosen_worker_busy(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-    ) -> Option<bool> {
-        let threshold = self.conditional_disagg_prefill_busy_threshold?;
-        let binding = self.binding.load_full()?;
-        binding
-            .router
-            .prefill_worker_busy(request, threshold)
-            .await
-            .ok()
+    ) -> Result<Option<bool>> {
+        let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
+            return Ok(None);
+        };
+        let Some(binding) = self.binding.load_full() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            binding
+                .router
+                .prefill_worker_busy(request, threshold)
+                .await?,
+        ))
     }
 }
 

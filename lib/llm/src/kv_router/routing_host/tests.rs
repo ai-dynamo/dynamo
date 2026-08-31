@@ -722,13 +722,17 @@ async fn track_request(
 
 #[tokio::test]
 #[serial_test::serial]
-async fn route_plan_holds_and_releases_the_decode_reservation() {
+async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
     let requests_started_before = router.request_metrics.requests_started_total().get();
 
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one request");
     let plan = router
-        .plan_kv_route(&request, RequestPhase::Decode)
+        .plan_kv_route_from_preview(&request, preview)
         .await
         .expect("decode plan should admit one request");
     assert_eq!(plan.signals().worker.worker_id, 7);
@@ -873,8 +877,12 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
     let requests_started_before = router.request_metrics.requests_started_total().get();
     let request = Context::new(request());
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
     let plan = router
-        .plan_kv_route(&request, RequestPhase::Decode)
+        .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
 
@@ -924,8 +932,12 @@ async fn aborted_route_plan_drops_pending_affinity_initialization() {
     let mut request = Context::new(request());
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
     router
-        .plan_kv_route(&request, RequestPhase::Decode)
+        .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap()
         .abort()

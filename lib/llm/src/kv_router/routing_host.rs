@@ -59,7 +59,7 @@ use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
-fn is_cancelled(error: &Error) -> bool {
+pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
 
@@ -250,7 +250,7 @@ where
         self.signals
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn abort(mut self) {
         self.cleanup.finish().await;
     }

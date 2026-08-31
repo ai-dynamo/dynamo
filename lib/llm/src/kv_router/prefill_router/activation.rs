@@ -24,9 +24,7 @@ use dynamo_runtime::{
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager},
-    kv_router::{
-        KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory,
-    },
+    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -124,7 +122,6 @@ impl PrefillRouter<DefaultWorkerSelector> {
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        _decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,

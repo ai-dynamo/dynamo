@@ -99,34 +99,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn plan_kv_route(
-        &self,
-        request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-    ) -> Result<RoutePlan<Sel>, Error> {
-        if self.kv_router_if_enabled().is_none() {
-            return Err(anyhow::anyhow!("KV route plans require KV routing"));
-        }
-
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (selection, affinity) = self.select_with_affinity(request, phase, false).await?;
-        let signals = self.route_signals(&selection);
-        drop(route_guard);
-        Ok(RoutePlan {
-            signals,
-            cleanup: KvRequestCleanup::new(
-                Arc::clone(self.kv_router()),
-                request.context().id().to_string(),
-                selection.worker,
-                true,
-            ),
-            selection,
-            affinity,
-        })
-    }
-
     pub(crate) async fn preview_kv_route(
         &self,
         request: &SingleIn<PreprocessedRequest>,
