@@ -180,18 +180,6 @@ def register_engine_metrics_callback(
             f"namespace={namespace_name}, component={component_name}, endpoint={endpoint_name_final}, model={model_name}"
         )
 
-    def get_expfmt() -> str:
-        """Callback to return engine Prometheus metrics in exposition format"""
-        result = get_prometheus_expfmt(
-            registry,
-            metric_prefix_filters=metric_prefix_filters,
-            exclude_prefixes=exclude_prefixes,
-            inject_custom_labels=final_inject_labels if final_inject_labels else None,
-        )
-        return result
-
-    endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
-
     def get_typed() -> list:
         """Callback returning engine metrics as a typed structure."""
         return get_prometheus_typed(
@@ -200,20 +188,16 @@ def register_engine_metrics_callback(
             exclude_prefixes=exclude_prefixes,
         )
 
-    # Registered alongside the text callback, not instead of it: /metrics keeps
-    # serving the engine's own rendering while the structured path (OTLP) reads
-    # the typed form. Adopting typed therefore cannot change what scrapers see.
-    register_typed = getattr(
-        endpoint.metrics, "register_prometheus_typed_callback", None
-    )
-    if register_typed is not None:
-        register_typed(get_typed)
+    # The single mechanism: engine metrics cross as a structure and are
+    # rendered once, by Rust, for both /metrics and OTLP.
+    endpoint.metrics.register_prometheus_typed_callback(get_typed)
 
 
 def get_prometheus_typed(
     registry: "CollectorRegistry",
     metric_prefix_filters: Optional[list[str]] = None,
     exclude_prefixes: Optional[list[str]] = None,
+    inject_custom_labels: Optional[dict[str, str]] = None,
 ) -> list:
     """Collect a registry as a typed structure rather than exposition text.
 
@@ -226,8 +210,31 @@ def get_prometheus_typed(
     remains for ``/metrics``, where the engine's own rendering is what consumers
     already scrape.
     """
-    include = _compile_include_pattern(tuple(metric_prefix_filters or ()))
-    exclude = _compile_exclude_pattern(tuple(exclude_prefixes or ()))
+    # Compile only when a filter was actually requested: an empty prefix tuple
+    # compiles to a pattern that matches everything, which would exclude every
+    # family rather than none.
+    if inject_custom_labels:
+        # Injected at collection time, exactly as the text path does, so
+        # dynamo_namespace / dynamo_component / worker_id reach the typed form
+        # too. Dropping this would silently unlabel every engine metric.
+        from prometheus_client import CollectorRegistry as _Registry
+
+        from dynamo.common.utils.label_injecting_collector import (
+            LabelInjectingCollector,
+        )
+
+        wrapped = _Registry()
+        wrapped.register(LabelInjectingCollector(registry, inject_custom_labels))
+        registry = wrapped
+
+    include = (
+        _compile_include_pattern(tuple(metric_prefix_filters))
+        if metric_prefix_filters
+        else None
+    )
+    exclude = (
+        _compile_exclude_pattern(tuple(exclude_prefixes)) if exclude_prefixes else None
+    )
 
     out = []
     for metric in registry.collect():

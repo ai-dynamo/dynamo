@@ -6,29 +6,21 @@
 use dynamo_runtime::metrics::{MetricsRegistry, prom_typed};
 use std::sync::Arc;
 
-/// Families registered through the typed callback appear in the structured
-/// collection, and `/metrics` is untouched by them -- the two paths stay
-/// independent, so adopting typed cannot alter what scrapers already see.
+/// Typed families reach both surfaces from one collection: the structured
+/// path that OTLP consumes, and the rendered `/metrics` endpoint.
 #[test]
-fn typed_callback_feeds_structured_path_only() {
+fn typed_callback_feeds_both_surfaces() {
     let registry = MetricsRegistry::new();
-    let typed: Vec<prom_typed::TypedFamily> = serde_json::from_str(
-        r#"[{"name":"vllm:num_requests_running","help":"Running","type":"gauge",
-             "samples":[{"name":"vllm:num_requests_running",
-                         "labels":{"model_name":"llama"},"value":4.0}]}]"#,
-    )
-    .expect("fixture");
     registry.add_typed_callback(Arc::new(move || {
         Ok(prom_typed::build_families(
             serde_json::from_str(
                 r#"[{"name":"vllm:num_requests_running","help":"Running","type":"gauge",
                      "samples":[{"name":"vllm:num_requests_running",
-                                 "labels":{"model_name":"llama"},"value":4.0}]}]"#,
+                                 "labels":{"model_name":"llama"},"value":"4.0"}]}]"#,
             )
             .expect("fixture"),
         ))
     }));
-    drop(typed);
 
     let families = registry.metric_families_combined().expect("combined");
     let found = families
@@ -40,9 +32,10 @@ fn typed_callback_feeds_structured_path_only() {
 
     let text = registry.prometheus_expfmt_combined().expect("text");
     assert!(
-        !text.contains("vllm:num_requests_running"),
-        "typed families must not leak into /metrics; that surface stays the engine's own rendering"
+        text.contains("vllm:num_requests_running{model_name=\"llama\"} 4"),
+        "engine family missing from /metrics: {text}"
     );
+    assert!(text.contains("# HELP vllm:num_requests_running Running"));
 }
 
 /// A failing typed callback is skipped, not fatal: one broken engine must not

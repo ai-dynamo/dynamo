@@ -1918,8 +1918,58 @@ class MetricsPayload(BasePayload):
                         )
                     )
 
+    def _validate_rendering_fidelity(self, content: str) -> None:
+        """Assert the exposition output is well-formed, against a live engine.
+
+        These are the failure modes of *rendering* metrics rather than passing
+        the engine's own bytes through, so they only bite once Dynamo encodes
+        engine families itself. Each one has been observed:
+
+        - ``le="inf"`` instead of ``+Inf`` -- invalid exposition, produced by
+          formatting an infinite bucket bound through ``to_string()``.
+        - a histogram missing its ``+Inf`` bucket -- the bucket is implicit in
+          the family and has to be reconstructed on encode.
+        - a family losing ``# HELP`` / ``# TYPE`` -- metadata dropped in the
+          typed round trip.
+
+        Runs on raw content, before bucket lines are filtered out.
+        """
+        assert (
+            'le="inf"' not in content
+        ), 'Invalid histogram bound: exposition format requires le="+Inf", not le="inf"'
+
+        declared_types = {
+            line.split()[2]: line.split()[3]
+            for line in content.splitlines()
+            if line.startswith("# TYPE ") and len(line.split()) >= 4
+        }
+        documented = {
+            line.split()[2]
+            for line in content.splitlines()
+            if line.startswith("# HELP ") and len(line.split()) >= 3
+        }
+
+        histograms = {
+            n for n, t in declared_types.items() if t in ("histogram", "summary")
+        }
+        for name in histograms:
+            if f"{name}_bucket{{" not in content and f"{name}_bucket " not in content:
+                continue  # summary, or a histogram with no buckets emitted yet
+            assert 'le="+Inf"' in content, (
+                f"Histogram {name} has buckets but no +Inf bucket; the implicit "
+                "overflow bucket was not reconstructed on encode"
+            )
+
+        # Every family carrying samples must also carry its metadata.
+        undocumented = sorted(declared_types.keys() - documented)
+        assert not undocumented, (
+            f"{len(undocumented)} families declare # TYPE but lost # HELP, "
+            f"e.g. {undocumented[:5]}"
+        )
+
     def validate(self, response: Any, content: str) -> None:
         """Validate Prometheus metrics output"""
+        self._validate_rendering_fidelity(content)
         content = self._filter_bucket_metrics(content)
 
         # Collect all checks: common + backend-specific (+ lifecycle if opted in)

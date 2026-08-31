@@ -79,12 +79,14 @@ def register_engine_registry(
     multiproc-conflict case.
     """
     labels = metrics.auto_labels
-    metrics.register_prometheus_expfmt_callback(
-        lambda: gather_with_labels(
+    from dynamo.common.utils.prometheus import get_prometheus_typed
+
+    metrics.register_prometheus_typed_callback(
+        lambda: get_prometheus_typed(
             registry,
-            labels,
-            prefix_filters=prefix_filters,
+            metric_prefix_filters=prefix_filters,
             exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=dict(labels) if labels else None,
         )
     )
 

@@ -338,10 +338,11 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::prom_text::parse_exposition;
+    use crate::metrics::prom_typed::{TypedFamily, build_families};
 
-    fn export(text: &str) -> Vec<Metric> {
-        let families = parse_exposition(text).expect("parse");
+    fn export(typed_json: &str) -> Vec<Metric> {
+        let typed: Vec<TypedFamily> = serde_json::from_str(typed_json).expect("typed");
+        let families = build_families(typed);
         let rm = to_resource_metrics(&families, Vec::new(), UNIX_EPOCH);
         rm.scope_metrics.into_iter().next().expect("scope").metrics
     }
@@ -351,13 +352,12 @@ mod tests {
     #[test]
     fn histogram_buckets_are_de_cumulated() {
         let metrics = export(
-            r#"# TYPE d_seconds histogram
-d_seconds_bucket{le="0.1"} 2
-d_seconds_bucket{le="0.5"} 5
-d_seconds_bucket{le="+Inf"} 9
-d_seconds_sum 1.5
-d_seconds_count 9
-"#,
+            r#"[{"name":"d_seconds","help":"","type":"histogram","samples":[
+                 {"name":"d_seconds_bucket","labels":{"le":"0.1"},"value":"2"},
+                 {"name":"d_seconds_bucket","labels":{"le":"0.5"},"value":"5"},
+                 {"name":"d_seconds_bucket","labels":{"le":"+Inf"},"value":"9"},
+                 {"name":"d_seconds_sum","labels":{},"value":"1.5"},
+                 {"name":"d_seconds_count","labels":{},"value":"9"}]}]"#,
         );
 
         let Some(metric::Data::Histogram(h)) = &metrics[0].data else {
@@ -380,10 +380,8 @@ d_seconds_count 9
     #[test]
     fn counter_maps_to_monotonic_cumulative_sum_with_help() {
         let metrics = export(
-            r#"# HELP d_requests_total Total requests
-# TYPE d_requests_total counter
-d_requests_total{model="a"} 17
-"#,
+            r#"[{"name":"d_requests","help":"Total requests","type":"counter","samples":[
+                 {"name":"d_requests_total","labels":{"model":"a"},"value":"17"}]}]"#,
         );
 
         assert_eq!(metrics[0].name, "d_requests_total");
@@ -446,11 +444,10 @@ d_requests_total{model="a"} 17
     #[test]
     fn summary_quantiles_survive() {
         let metrics = export(
-            r#"# TYPE d_pause_seconds summary
-d_pause_seconds{quantile="0.99"} 0.2
-d_pause_seconds_sum 12.5
-d_pause_seconds_count 300
-"#,
+            r#"[{"name":"d_pause_seconds","help":"","type":"summary","samples":[
+                 {"name":"d_pause_seconds","labels":{"quantile":"0.99"},"value":"0.2"},
+                 {"name":"d_pause_seconds_sum","labels":{},"value":"12.5"},
+                 {"name":"d_pause_seconds_count","labels":{},"value":"300"}]}]"#,
         );
 
         let Some(metric::Data::Summary(s)) = &metrics[0].data else {
