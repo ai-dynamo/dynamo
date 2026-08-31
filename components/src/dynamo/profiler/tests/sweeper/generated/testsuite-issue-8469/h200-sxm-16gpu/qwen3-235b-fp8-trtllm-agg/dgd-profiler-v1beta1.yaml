@@ -1,0 +1,136 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-disagg-b5ee2aab
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: decode
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --tensor-parallel-size
+          - '8'
+          - --pipeline-parallel-size
+          - '1'
+          - --expert-parallel-size
+          - '8'
+          - --enable-attention-dp
+          - --max-batch-size
+          - '16'
+          - --max-num-tokens
+          - '32'
+          - --trtllm.moe_tensor_parallel_size
+          - '1'
+          - --trtllm.moe_config.backend
+          - CUTLASS
+          - --trtllm.kv_cache_config.dtype
+          - fp8
+          - --trtllm.kv_cache_config.tokens_per_block
+          - '32'
+          - --trtllm.kv_cache_config.enable_block_reuse
+          - 'false'
+          - --trtllm.cache_transceiver_config.backend
+          - DEFAULT
+          - --trtllm.cache_transceiver_config.max_tokens_in_buffer
+          - '4704'
+          - --trtllm.cuda_graph_config.enable_padding
+          - 'true'
+          - --trtllm.disable_overlap_scheduler
+          - 'false'
+          - --trtllm.print_iter_log
+          - 'false'
+          - --model-path
+          - Qwen/Qwen3-235B-A22B-FP8
+          - --served-model-name
+          - Qwen/Qwen3-235B-A22B-FP8
+          - --trtllm.enable_chunked_prefill
+          - 'true'
+          resources:
+            limits:
+              nvidia.com/gpu: '8'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: prefill
+    type: prefill
+    replicas: 4
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --tensor-parallel-size
+          - '2'
+          - --pipeline-parallel-size
+          - '1'
+          - --expert-parallel-size
+          - '2'
+          - --enable-attention-dp
+          - --max-batch-size
+          - '1'
+          - --max-num-tokens
+          - '4512'
+          - --trtllm.moe_tensor_parallel_size
+          - '1'
+          - --trtllm.moe_config.backend
+          - CUTLASS
+          - --trtllm.kv_cache_config.dtype
+          - fp8
+          - --trtllm.kv_cache_config.tokens_per_block
+          - '32'
+          - --trtllm.kv_cache_config.enable_block_reuse
+          - 'false'
+          - --trtllm.cache_transceiver_config.backend
+          - DEFAULT
+          - --trtllm.cache_transceiver_config.max_tokens_in_buffer
+          - '4704'
+          - --trtllm.cuda_graph_config.enable_padding
+          - 'false'
+          - --trtllm.disable_overlap_scheduler
+          - 'true'
+          - --trtllm.print_iter_log
+          - 'false'
+          - --model-path
+          - Qwen/Qwen3-235B-A22B-FP8
+          - --served-model-name
+          - Qwen/Qwen3-235B-A22B-FP8
+          - --trtllm.enable_chunked_prefill
+          - 'true'
+          resources:
+            limits:
+              nvidia.com/gpu: '4'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
