@@ -920,7 +920,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
 			wantWebhookErrs: []string{
@@ -933,7 +933,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
 			wantWebhookErrs: []string{
@@ -946,7 +946,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
 		},
@@ -956,7 +956,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 		},
 		{
@@ -970,7 +970,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 		},
@@ -980,7 +980,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -999,7 +999,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
@@ -1010,7 +1010,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1025,7 +1025,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
@@ -1036,7 +1036,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
@@ -1270,7 +1270,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1281,7 +1281,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1296,7 +1296,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -1306,7 +1306,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -1316,13 +1316,13 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 changing only component type to EPP validates the complete runtime contract",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
@@ -1333,7 +1333,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -1342,7 +1342,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "changed-epp-config"}},
 				}
@@ -1359,7 +1359,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1370,7 +1370,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
@@ -1384,13 +1384,13 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1408,7 +1408,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1419,7 +1419,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 		},
 		{
@@ -1430,13 +1430,13 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
-				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
@@ -1456,14 +1456,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
@@ -1480,14 +1480,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
 		},

@@ -147,7 +147,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -158,7 +158,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -171,7 +171,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/epp-image:1.4.0"
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -182,7 +182,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/epp-image:1.4.0"
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -196,7 +196,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -207,7 +207,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -221,7 +221,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -232,7 +232,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -243,14 +243,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
 			wantWebhookErrs: []string{"spec.components[1].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
@@ -261,7 +261,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -271,7 +271,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 		},
 		{
@@ -281,14 +281,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.Replicas = k8sptr.To(int32(1))
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
@@ -1424,7 +1424,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/epp-image:1.4.0"
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
@@ -1434,7 +1434,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/dynamo-frontend:1.5.0"
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
 				}
