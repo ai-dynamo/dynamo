@@ -1777,7 +1777,33 @@ mod tests {
         annotated_delta2.data.as_mut().expect("delta data").nvext =
             Some(serde_json::json!({ "stop_reason": 128001 }));
 
-        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let mut metadata = annotated_delta2.clone();
+        let metadata_data = metadata.data.as_mut().expect("metadata data");
+        metadata_data.inner.choices.clear();
+        metadata_data.nvext = Some(serde_json::json!({
+            "engine_data": {
+                "prompt_token_ids": [1, 2],
+                "completion_token_ids": [10, 11],
+                "completion_logprobs": [-0.1, -0.2],
+            }
+        }));
+
+        let mut usage = metadata.clone();
+        let usage_data = usage.data.as_mut().expect("usage data");
+        usage_data.nvext = None;
+        usage_data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 2,
+            completion_tokens: 2,
+            total_tokens: 4,
+            ..Default::default()
+        });
+
+        let stream = Box::pin(stream::iter(vec![
+            annotated_delta1,
+            annotated_delta2,
+            metadata,
+            usage,
+        ]));
         let response = DeltaAggregator::apply(stream, ParsingOptions::default())
             .await
             .expect("aggregate stream");
@@ -1785,9 +1811,18 @@ mod tests {
         assert_eq!(
             response.nvext,
             Some(serde_json::json!({
-                "engine_data": { "trace_id": "abc" },
+                "engine_data": {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [10, 11],
+                    "completion_logprobs": [-0.1, -0.2],
+                },
                 "stop_reason": 128001,
             }))
+        );
+        assert_eq!(response.inner.choices.len(), 1);
+        assert_eq!(
+            response.inner.usage.expect("aggregated usage").total_tokens,
+            4
         );
     }
 

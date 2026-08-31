@@ -32,14 +32,14 @@ frontend dials worker). All TLS env vars should be set on every pod.
 ### Server role (accepting connections)
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `DYN_TCP_TLS_CERT_PATH` | Path to the PEM certificate file. When set together with `DYN_TCP_TLS_KEY_PATH`, TLS is enabled on the TCP server. |
 | `DYN_TCP_TLS_KEY_PATH` | Path to the PEM private key for the server certificate. |
 
 ### Client role (dialing connections)
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `DYN_TCP_TLS_CA_CERT_PATH` | Path to the PEM CA certificate used to verify the peer's server certificate. |
 | `DYN_TCP_TLS_INSECURE` | Set to `1` or `true` to skip certificate verification. For local development only. |
 | `DYN_TCP_TLS_SERVER_NAME` | Override the TLS SNI hostname. Useful when connecting by IP to a server whose certificate has a DNS SAN. |
@@ -137,10 +137,9 @@ spec:
 Both components need the same TLS env vars because each acts as both TCP
 server and client depending on the stream direction.
 
-> **Note:** A future PR ([#10809](https://github.com/ai-dynamo/dynamo/issues/10809))
-> will add operator-level TLS configuration via `InfrastructureConfiguration`,
-> allowing TLS to be configured once at the platform level and auto-injected
-> into all DGD pods without per-component env var setup.
+For platform-wide TLS that the operator injects into every deployment
+automatically — instead of setting env vars on each component — see
+[Operator TLS](../../kubernetes/installation/tls.md).
 
 ## NATS TLS
 
@@ -149,7 +148,7 @@ request plane is set to NATS (`--request-plane nats`) — inference request
 distribution. TLS is configured separately from TCP:
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `NATS_TLS_CA_CERT_PATH` | CA certificate to verify the NATS server. When set, a custom TLS config is applied. |
 | `NATS_TLS_INSECURE` | Skip NATS server certificate verification (dev only). |
 
@@ -169,6 +168,83 @@ CLI flags (all backends via `DynamoRuntimeArgGroup`):
 
 The frontend (`dynamo.frontend`) also accepts `--nats-tls-ca-cert-path` and
 `--nats-tls-insecure`.
+
+### Enabling TLS on the NATS server
+
+The env vars above configure the **client** side (Dynamo verifying the NATS
+server). For TLS to work, the NATS server itself must also be configured to
+listen on TLS — otherwise a client that sets `NATS_TLS_CA_CERT_PATH` (or the
+operator-level `natsTLSCAPath`) will attempt a TLS handshake against a
+plaintext port and fail.
+
+When deploying Dynamo's platform chart, the bundled NATS subchart exposes this
+via `nats.config.nats.tls`. The certificates are typically delivered by a
+certificate management system such as cert-manager.
+
+**One-way TLS** (server presents a cert, clients verify it):
+
+```yaml
+# NATS server side — platform chart values
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        secretName: nats-server-tls   # Secret with tls.crt / tls.key (e.g. cert-manager)
+```
+
+Or, if the cert files are mounted into the pod by an external system, use the
+`merge` block to point at the on-disk paths directly:
+
+```yaml
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        merge:
+          cert_file: /etc/certs/server/cert.pem
+          key_file:  /etc/certs/server/key.pem
+          timeout:   2
+```
+
+Then point the Dynamo clients at the TLS endpoint and give them the CA.
+These are operator-subchart values, so nest them under `dynamo-operator:` when
+using the platform chart:
+
+```yaml
+dynamo-operator:
+  natsAddr: "tls://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+  natsTLSCAPath: /etc/certs/ca/ca.pem   # → NATS_TLS_CA_CERT_PATH
+```
+
+**mTLS** (server also verifies client certs) — add `ca_file` and `verify` to
+the server's `merge` block, and present a client identity from the Dynamo side:
+
+```yaml
+# NATS server side
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        merge:
+          cert_file: /etc/certs/server/cert.pem
+          key_file:  /etc/certs/server/key.pem
+          ca_file:   /etc/certs/client-ca/ca.pem   # verify client certs
+          verify:    true                          # require client certs
+```
+
+```yaml
+# Dynamo client side (operator-level, nested under dynamo-operator:)
+dynamo-operator:
+  natsTLSCAPath:         /etc/certs/ca/ca.pem
+  natsTLSClientCertPath: /etc/certs/client/cert.pem
+  natsTLSClientKeyPath:  /etc/certs/client/key.pem
+```
+
+See the [NATS TLS documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/tls)
+for the full server-side TLS schema.
 
 ## Mutual TLS (mTLS)
 
@@ -194,7 +270,7 @@ required is enforced by the **NATS server** configuration (e.g.
 ### TCP request/response streams
 
 | Variable | Role | Description |
-|---|---|---|
+| --- | --- | --- |
 | `DYN_TCP_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the server. Set with `DYN_TCP_TLS_CLIENT_KEY_PATH`. |
 | `DYN_TCP_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the client certificate. |
 | `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` | Server | PEM CA used to verify client certificates. When set, clients **must** present a certificate signed by this CA. |
@@ -202,7 +278,7 @@ required is enforced by the **NATS server** configuration (e.g.
 ### NATS
 
 | Variable | Role | Description |
-|---|---|---|
+| --- | --- | --- |
 | `NATS_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the NATS server. Set with `NATS_TLS_CLIENT_KEY_PATH`. |
 | `NATS_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the NATS client certificate. |
 
@@ -238,7 +314,7 @@ When TLS is configured, the following transports are encrypted (the ZMQ event
 plane is not covered):
 
 | Path | Direction | Data | Transport |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
