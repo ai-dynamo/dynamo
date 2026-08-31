@@ -376,7 +376,6 @@ class ReplayPlannerAdapter:
                     "scheduled_tick": asdict(tick),
                     "input": self._tick_input_record(tick_input),
                     "topology": self._topology_record(result),
-                    **self._scheduler_telemetry_record(result),
                     "effects": asdict(effects),
                     "runtime_decision": decision,
                 }
@@ -424,31 +423,6 @@ class ReplayPlannerAdapter:
                 "draining": draining_decode,
                 "draining_count": len(draining_decode),
             },
-        }
-
-    @staticmethod
-    def _scheduler_telemetry_record(result: dict[str, Any]) -> dict[str, Any]:
-        """Copy observability-only replay fields into the persisted tick record.
-
-        These values deliberately do not enter ``TickInput``: Planner behavior must
-        remain identical while replay consumers gain the raw rank-level cache and
-        queue timeline emitted by AISimulate.
-        """
-        return {
-            "prefill_scheduler_metrics": [
-                dict(snapshot)
-                for snapshot in result.get("prefill_scheduler_metrics", [])
-            ],
-            "decode_scheduler_metrics": [
-                dict(snapshot)
-                for snapshot in result.get("decode_scheduler_metrics", [])
-            ],
-            "router_pending_prefill_requests": int(
-                result.get("router_pending_prefill_requests", 0)
-            ),
-            "router_pending_decode_requests": int(
-                result.get("router_pending_decode_requests", 0)
-            ),
         }
 
     @staticmethod

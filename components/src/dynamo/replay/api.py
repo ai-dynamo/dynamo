@@ -4,7 +4,9 @@
 """Compatibility entry points spanning shared offline and Dynamo online replay."""
 
 import json
+import math
 import os
+from collections.abc import Callable
 from typing import Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
@@ -13,7 +15,11 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
-from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from dynamo.replay.report import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+)
 
 
 class _CommonReplayOptions(TypedDict, total=False):
@@ -36,6 +42,10 @@ class _CommonReplayOptions(TypedDict, total=False):
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
+    capture_telemetry: bool
+    telemetry_sample_interval_ms: float
+    telemetry_callback: Callable[[dict[str, Any]], None] | None
+    telemetry_jsonl_path: str | os.PathLike[str] | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
@@ -77,12 +87,52 @@ def _materialize_offline_report(
     *,
     planner: PlannerReplayDetails | None,
 ) -> ReplayReport:
+    native_telemetry = getattr(native, "telemetry", None)
+    telemetry = (
+        None
+        if native_telemetry is None
+        else ReplayTelemetryDetails(
+            sample_interval_ms=float(native_telemetry["sample_interval_ms"]),
+            samples=list(native_telemetry["samples"]),
+        )
+    )
     return ReplayReport(
         summary=native.summary,
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
+        telemetry=telemetry,
     )
+
+
+def _validate_telemetry_options(
+    *,
+    replay_mode: str,
+    capture_telemetry: bool,
+    telemetry_sample_interval_ms: float,
+    telemetry_callback: Callable[[dict[str, Any]], None] | None,
+    telemetry_jsonl_path: str | os.PathLike[str] | None,
+) -> None:
+    enabled = (
+        capture_telemetry
+        or telemetry_callback is not None
+        or telemetry_jsonl_path is not None
+    )
+    if not enabled:
+        return
+    if replay_mode != "offline":
+        raise ValueError("replay telemetry only supports replay_mode='offline'")
+    if (
+        not isinstance(telemetry_sample_interval_ms, (int, float))
+        or isinstance(telemetry_sample_interval_ms, bool)
+        or not math.isfinite(float(telemetry_sample_interval_ms))
+        or telemetry_sample_interval_ms <= 0.0
+    ):
+        raise ValueError(
+            "telemetry_sample_interval_ms must be a positive finite number"
+        )
+    if telemetry_callback is not None and not callable(telemetry_callback):
+        raise TypeError("telemetry_callback must be callable or None")
 
 
 @overload
@@ -145,6 +195,10 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    capture_telemetry=False,
+    telemetry_sample_interval_ms=1_000.0,
+    telemetry_callback=None,
+    telemetry_jsonl_path=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -178,12 +232,23 @@ def run_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "capture_telemetry": capture_telemetry,
+        "telemetry_sample_interval_ms": telemetry_sample_interval_ms,
+        "telemetry_callback": telemetry_callback,
+        "telemetry_jsonl_path": telemetry_jsonl_path,
     }
     if capture_per_request and replay_mode == "online":
         raise ValueError(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
         )
+    _validate_telemetry_options(
+        replay_mode=replay_mode,
+        capture_telemetry=capture_telemetry,
+        telemetry_sample_interval_ms=telemetry_sample_interval_ms,
+        telemetry_callback=telemetry_callback,
+        telemetry_jsonl_path=telemetry_jsonl_path,
+    )
     if planner_config is not None:
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
@@ -306,6 +371,10 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    capture_telemetry=False,
+    telemetry_sample_interval_ms=1_000.0,
+    telemetry_callback=None,
+    telemetry_jsonl_path=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
     replay_kwargs = {
@@ -334,9 +403,20 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "capture_telemetry": capture_telemetry,
+        "telemetry_sample_interval_ms": telemetry_sample_interval_ms,
+        "telemetry_callback": telemetry_callback,
+        "telemetry_jsonl_path": telemetry_jsonl_path,
     }
     if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
+    _validate_telemetry_options(
+        replay_mode=replay_mode,
+        capture_telemetry=capture_telemetry,
+        telemetry_sample_interval_ms=telemetry_sample_interval_ms,
+        telemetry_callback=telemetry_callback,
+        telemetry_jsonl_path=telemetry_jsonl_path,
+    )
     if planner_config is not None:
         if replay_mode != "offline":
             raise ValueError(

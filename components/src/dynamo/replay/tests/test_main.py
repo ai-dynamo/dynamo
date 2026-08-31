@@ -97,6 +97,43 @@ def test_offline_cli_serializes_report_and_per_request_jsonl(
     assert json.loads(per_request_path.read_text()) == {"request_id": "request-1"}
 
 
+def test_offline_cli_forwards_telemetry_capture_options(monkeypatch, tmp_path) -> None:
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    def run_synthetic(*args, **kwargs):
+        seen["native_kwargs"] = kwargs
+        return ReplayReport(summary={}, per_request=None, coverage={}, planner=None)
+
+    monkeypatch.setattr(replay_main, "run_synthetic_trace_replay", run_synthetic)
+    telemetry_path = tmp_path / "telemetry.jsonl"
+
+    assert (
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--capture-telemetry",
+                "--telemetry-sample-interval-seconds",
+                "2.5",
+                "--telemetry-jsonl",
+                str(telemetry_path),
+            ]
+        )
+        == 0
+    )
+
+    assert seen["native_kwargs"]["capture_telemetry"] is True
+    assert seen["native_kwargs"]["telemetry_sample_interval_ms"] == 2_500.0
+    assert seen["native_kwargs"]["telemetry_jsonl_path"] == telemetry_path
+
+
 def test_agentic_lanes_reject_synthetic_replay() -> None:
     args = replay_main.build_parser().parse_args(
         [

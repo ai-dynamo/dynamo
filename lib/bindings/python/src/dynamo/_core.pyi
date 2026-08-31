@@ -2413,6 +2413,63 @@ async def run_input(
     """
     ...
 
+class ReplaySchedulerMetricsSnapshot(TypedDict):
+    worker_id: int
+    dp_rank: int
+    active_blocks: int
+    inactive_blocks: int
+    total_blocks: int
+    active_cache_usage: float
+    physical_cache_usage: float
+    running_requests: int
+    waiting_requests: int
+
+class ReplaySchedulerIntervalMetrics(TypedDict):
+    cache_hit_tokens: int
+    cache_total_tokens: int
+    preemptions: int
+
+class ReplayTrafficMetricsSnapshot(TypedDict):
+    duration_s: float
+    arriving_requests: int
+    completed_requests: int
+    avg_isl: float
+    avg_osl: float
+    avg_ttft_ms: float
+    avg_itl_ms: float
+    ttft_count: int
+    itl_count: int
+    avg_router_kv_hit_rate: float
+    router_kv_hit_rate_count: int
+    avg_accept_length: Optional[float]
+    accept_length_forward_count: int
+
+class ReplayTelemetrySnapshot(TypedDict):
+    sample_ordinal: int
+    kind: Literal["baseline", "periodic", "final"]
+    interval_start_ms: float
+    sampled_at_ms: float
+    traffic: ReplayTrafficMetricsSnapshot
+    prefill_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    decode_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    prefill_interval_metrics: ReplaySchedulerIntervalMetrics
+    decode_interval_metrics: ReplaySchedulerIntervalMetrics
+    router_pending_prefill_requests: int
+    router_pending_decode_requests: int
+    active_prefill_ids: list[int]
+    active_decode_ids: list[int]
+    starting_prefill_ids: list[int]
+    starting_decode_ids: list[int]
+    draining_prefill_ids: list[int]
+    draining_decode_ids: list[int]
+
+class ReplayTelemetryDetails(TypedDict):
+    sample_interval_ms: float
+    samples: list[ReplayTelemetrySnapshot]
+
+class ReplayTelemetryCallback(Protocol):
+    def __call__(self, snapshot: ReplayTelemetrySnapshot, /) -> None: ...
+
 class _OfflineReplayResult:
     @property
     def summary(self) -> Dict[str, Any]: ...
@@ -2422,88 +2479,8 @@ class _OfflineReplayResult:
     def coverage(self) -> Dict[str, Any]: ...
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
-
-class ReplaySchedulerMetricsSnapshot(TypedDict):
-    """Rank-local scheduler telemetry at one replay scaling tick.
-
-    Occupancy and request counts are point-in-time state. ``cache_hit_tokens``
-    and ``cache_total_tokens`` cover the interval since the preceding tick.
-    They are currently SGLang-native; a zero total means unavailable rather
-    than a measured zero-percent hit rate.
-    """
-
-    worker_id: int
-    dp_rank: int
-    sampled_at_ms: float
-    active_blocks: int
-    inactive_blocks: int
-    total_blocks: int
-    active_cache_usage: float
-    physical_cache_usage: float
-    running_requests: int
-    waiting_requests: int
-    preemptions_total: int
-    cache_hit_tokens: int
-    cache_total_tokens: int
-
-class ReplayTrafficSnapshot(TypedDict):
-    duration_s: float
-    num_req: int
-    avg_isl: float
-    avg_osl: float
-    avg_ttft_ms: float
-    avg_itl_ms: float
-    shape_count: int
-    ttft_count: int
-    itl_count: int
-    avg_accept_length: Optional[float]
-    avg_kv_hit_rate: float
-    hit_rate_count: int
-    accept_length_forward_count: int
-
-class ReplayScalingSnapshot(TypedDict):
-    """Post-settlement state passed to an offline replay scaling callback.
-
-    Scheduler lists contain one row for every rank of every live worker,
-    including starting and draining workers. Router-pending counts describe
-    requests awaiting placement and are separate from each rank's
-    ``waiting_requests`` scheduler queue.
-    """
-
-    tick_ordinal: int
-    now_ms: float
-    prefill_fpm_snapshots: List[Dict[str, Any]]
-    decode_fpm_snapshots: List[Dict[str, Any]]
-    prefill_scheduler_metrics: List[ReplaySchedulerMetricsSnapshot]
-    decode_scheduler_metrics: List[ReplaySchedulerMetricsSnapshot]
-    router_pending_prefill_requests: int
-    router_pending_decode_requests: int
-    active_prefill_count: int
-    active_decode_count: int
-    active_prefill_ids: List[int]
-    active_decode_ids: List[int]
-    starting_prefill_count: int
-    starting_decode_count: int
-    starting_prefill_ids: List[int]
-    starting_decode_ids: List[int]
-    draining_prefill_count: int
-    draining_decode_count: int
-    draining_prefill_ids: List[int]
-    draining_decode_ids: List[int]
-    non_draining_prefill_count: int
-    non_draining_decode_count: int
-    total_prefill_count: int
-    total_decode_count: int
-    traffic: ReplayTrafficSnapshot
-
-class ReplayScalingDecision(TypedDict):
-    target_prefill: Optional[int]
-    target_decode: Optional[int]
-    next_tick_ms: Optional[float]
-
-class ReplayScalingPolicy(Protocol):
-    def initial_tick_ms(self) -> float: ...
-    def on_tick(self, snapshot: ReplayScalingSnapshot) -> ReplayScalingDecision: ...
+    @property
+    def telemetry(self) -> Optional[ReplayTelemetryDetails]: ...
 
 @overload
 def run_mocker_trace_replay(
@@ -2557,8 +2534,12 @@ def run_mocker_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
-    scaling_policy: Optional[ReplayScalingPolicy] = None,
+    scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2578,10 +2559,14 @@ def run_mocker_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``. Scheduler metric lists in the
-    snapshot contain all live worker/rank rows. Their cache-hit token counters
-    cover the preceding tick window; router-pending counts are placement
-    backlog and are separate from scheduler ``waiting_requests``.
+    policy in online mode raises ``ValueError``.
+
+    Replay telemetry is independent from ``scaling_policy``. Set
+    ``capture_telemetry`` to retain samples on the offline result, provide
+    ``telemetry_callback`` to consume each sample without retaining it, or set
+    ``telemetry_jsonl_path`` to stream one JSON object per sample. The positive
+    ``telemetry_sample_interval_ms`` cadence is measured in simulated time and
+    does not need to be a multiple of a Planner tick.
     """
     ...
 
@@ -2635,7 +2620,11 @@ def run_mocker_synthetic_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
-    scaling_policy: Optional[ReplayScalingPolicy] = None,
+    scaling_policy: Optional[Any] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2648,10 +2637,11 @@ def run_mocker_synthetic_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``. Scheduler metric lists in the
-    snapshot contain all live worker/rank rows. Their cache-hit token counters
-    cover the preceding tick window; router-pending counts are placement
-    backlog and are separate from scheduler ``waiting_requests``.
+    policy in online mode raises ``ValueError``.
+
+    Replay telemetry uses the same policy-neutral capture, callback, and JSONL
+    options as ``run_mocker_trace_replay``. Its cadence is simulated time and
+    is independent from Planner ticks.
     """
     ...
 

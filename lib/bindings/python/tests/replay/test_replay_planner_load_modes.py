@@ -131,7 +131,7 @@ def test_planner_callback_error_preserves_python_exception_type(callback_method)
         )
 
 
-def test_scaling_callback_receives_complete_scheduler_metrics_contract():
+def test_scaling_callback_contract_remains_planner_only():
     class _CapturingPolicy:
         def __init__(self):
             self.snapshots = []
@@ -148,7 +148,8 @@ def test_scaling_callback_receives_complete_scheduler_metrics_contract():
             }
 
     policy = _CapturingPolicy()
-    run_mocker_synthetic_trace_replay(
+    telemetry_samples = []
+    result = run_mocker_synthetic_trace_replay(
         64,
         16,
         4,
@@ -160,39 +161,54 @@ def test_scaling_callback_receives_complete_scheduler_metrics_contract():
         num_workers=2,
         replay_concurrency=2,
         scaling_policy=policy,
+        capture_telemetry=True,
+        telemetry_callback=telemetry_samples.append,
+        telemetry_sample_interval_ms=1.0,
     )
 
     assert len(policy.snapshots) == 1
     snapshot = policy.snapshots[0]
-    assert snapshot["prefill_scheduler_metrics"] == []
-    live_decode_ids = {
-        *snapshot["active_decode_ids"],
-        *snapshot["starting_decode_ids"],
-        *snapshot["draining_decode_ids"],
+    assert set(snapshot) == {
+        "tick_ordinal",
+        "now_ms",
+        "prefill_fpm_snapshots",
+        "decode_fpm_snapshots",
+        "active_prefill_count",
+        "active_decode_count",
+        "active_prefill_ids",
+        "active_decode_ids",
+        "starting_prefill_count",
+        "starting_decode_count",
+        "starting_prefill_ids",
+        "starting_decode_ids",
+        "draining_prefill_count",
+        "draining_decode_count",
+        "draining_prefill_ids",
+        "draining_decode_ids",
+        "non_draining_prefill_count",
+        "non_draining_decode_count",
+        "total_prefill_count",
+        "total_decode_count",
+        "traffic",
     }
-    rows = snapshot["decode_scheduler_metrics"]
-    assert {(row["worker_id"], row["dp_rank"]) for row in rows} == {
-        (worker_id, 0) for worker_id in live_decode_ids
+    assert set(snapshot["traffic"]) == {
+        "duration_s",
+        "num_req",
+        "avg_isl",
+        "avg_osl",
+        "avg_ttft_ms",
+        "avg_itl_ms",
+        "shape_count",
+        "ttft_count",
+        "itl_count",
+        "avg_accept_length",
+        "avg_kv_hit_rate",
+        "hit_rate_count",
+        "accept_length_forward_count",
     }
-    assert set(rows[0]) == {
-        "worker_id",
-        "dp_rank",
-        "sampled_at_ms",
-        "active_blocks",
-        "inactive_blocks",
-        "total_blocks",
-        "active_cache_usage",
-        "physical_cache_usage",
-        "running_requests",
-        "waiting_requests",
-        "preemptions_total",
-        "cache_hit_tokens",
-        "cache_total_tokens",
-    }
-    assert all(row["sampled_at_ms"] == snapshot["now_ms"] for row in rows)
-    assert all(row["total_blocks"] == 32 for row in rows)
-    assert isinstance(snapshot["router_pending_prefill_requests"], int)
-    assert isinstance(snapshot["router_pending_decode_requests"], int)
+    assert result.telemetry["samples"] == telemetry_samples
+    assert telemetry_samples[0]["kind"] == "baseline"
+    assert "tick_ordinal" not in telemetry_samples[0]
 
 
 class _DisabledScalingPolicy:
