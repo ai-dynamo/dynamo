@@ -5,7 +5,7 @@ use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
-pub(crate) use dynamo_kv_router::scheduling::queue::{
+pub use dynamo_kv_router::scheduling::queue::{
     SchedulerBookingCleanup, SchedulerBookingDescriptor,
 };
 pub use dynamo_kv_router::scheduling::{
@@ -17,6 +17,7 @@ pub use dynamo_kv_router::scheduling::{
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
+use super::SchedulerLoadSender;
 use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
 use super::sequence::{
     DeferredReplicaRequestLeaseObserver, RuntimeSequencePublisher, SequenceError, SequenceRequest,
@@ -71,6 +72,7 @@ where
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -86,7 +88,7 @@ where
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
-            worker_type,
+            scheduler_load,
             Some(observer),
             cancellation_token.child_token(),
         )
@@ -461,13 +463,13 @@ where
         self.inner.add_output_block(request_id, decay_fraction)
     }
 
-    pub(crate) async fn add_output_block_if_booking(
+    pub(crate) async fn enqueue_output_block_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.inner
-            .add_output_block_if_booking(booking, decay_fraction)
+            .enqueue_output_block_if_booking(booking, decay_fraction)
             .await
     }
 
@@ -599,6 +601,11 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
+            super::super::routing_load::scheduler_load_channel(
+                super::super::RouterLoadSource::Decode,
+                cancellation_token.child_token(),
+            )
+            .0,
             cancellation_token.clone(),
         )
         .await

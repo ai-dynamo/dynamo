@@ -528,12 +528,31 @@ sglang_configs = {
         ],
         delayed_start=0,
         timeout=360,
+        env={
+            "DYN_MM_ENABLE_LIBJPEG": "1",
+            "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST": "1",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             # Inline-base64 PNG: exercises strip_inline_data_urls in the
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image", "bus", "train", "streetcar"],
+                temperature=0.0,
+                max_tokens=100,
+            ),
             image_token_metrics_payload(),
         ],
     ),
@@ -633,6 +652,50 @@ sglang_configs = {
                     {
                         "type": "video_url",
                         "video_url": {"url": VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_agg_fd_qwen": SGLangConfig(
+        name="video_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(390),
+            pytest.mark.pre_merge,
+            # TODO: Enable media-ffmpeg in the SGLang container build, then
+            # remove this skip. Frontend video decoding requires the Dynamo
+            # binding to be built with media-ffmpeg support.
+            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+        },
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
                     },
                 ],
                 repeat_count=1,

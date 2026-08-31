@@ -663,6 +663,17 @@ where
             .await
     }
 
+    #[doc(hidden)]
+    pub async fn enqueue_output_block_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue
+            .enqueue_output_block_if_booking(booking.clone(), decay_fraction)
+            .await
+    }
+
     pub fn get_potential_loads(
         &self,
         token_seq: Option<Vec<SequenceHash>>,

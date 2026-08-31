@@ -55,10 +55,9 @@ pub trait OutputOptionsProvider {
 ///
 /// Deserialization also accepts the [`Display`] form, `"error: <message>"`,
 /// since Python engine adapters (e.g. `dynamo.vllm`'s custom-encoder path)
-/// report failures that way. A bare `"error"` with no message stays
-/// rejected on purpose — producers should raise
-/// `dynamo._core.InvalidArgument` instead, which yields a 400 carrying the
-/// real message.
+/// report failures that way. A bare `"error"` is accepted defensively with a
+/// diagnostic fallback message so a malformed backend error does not become a
+/// frontend deserialization failure.
 ///
 /// [`Display`]: std::fmt::Display
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -105,6 +104,9 @@ impl std::str::FromStr for FinishReason {
             "stop" => Ok(FinishReason::Stop),
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             "content_filter" => Ok(FinishReason::ContentFilter),
+            "error" => Ok(FinishReason::Error(
+                "backend emitted finish_reason=error without a message".into(),
+            )),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
@@ -133,7 +135,7 @@ impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            r#"a finish reason: "eos", "length", "stop", "cancelled", "abort", "content_filter", "error: <message>", or {"error": "<message>"}"#,
+            r#"a finish reason: "eos", "length", "stop", "cancelled", "abort", "content_filter", "error", "error: <message>", or {"error": "<message>"}"#,
         )
     }
 
@@ -874,13 +876,18 @@ mod tests {
         );
     }
 
-    /// A bare `"error"` stays rejected on purpose. Producers emitting it are
-    /// discarding a message they hold; accepting it here would paper over that
-    /// with invented text instead of leaving the defect visible.
+    #[test]
+    fn test_finish_reason_accepts_bare_error_from_msgpack() {
+        let msgpack = rmp_serde::to_vec_named("error").unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<FinishReason>(&msgpack).unwrap(),
+            FinishReason::Error("backend emitted finish_reason=error without a message".into())
+        );
+    }
+
     #[test]
     fn test_finish_reason_rejects_unknown_forms() {
         for json in [
-            r#""error""#,
             r#""nonsense""#,
             r#"{"nonsense":"boom"}"#,
             r#"{"error":"a","stop":"b"}"#,

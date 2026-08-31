@@ -10,11 +10,11 @@
 mod direct_zmq;
 
 pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SequenceError,
+    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError,
     SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
+    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
@@ -35,7 +35,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
-use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
 use dynamo_kv_router::protocols::PrefillLoadHint;
@@ -58,8 +58,8 @@ struct DeferredReplicaLeaseState {
     pending: Vec<DeferredReplicaLeaseEvent>,
 }
 
-/// Buffers the small construction-time event window until `KvRouter` installs
-/// its request lease manager. After installation, calls pass through directly.
+/// Buffers the construction-time event window until `KvRouter` installs its
+/// request lease manager. After installation, calls pass through directly.
 #[derive(Default)]
 pub(crate) struct DeferredReplicaRequestLeaseObserver {
     state: Mutex<DeferredReplicaLeaseState>,
@@ -67,27 +67,33 @@ pub(crate) struct DeferredReplicaRequestLeaseObserver {
 
 impl DeferredReplicaRequestLeaseObserver {
     pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
-        let mut state = self.state.lock().expect("replica lease observer poisoned");
-        if state.target.is_some() {
-            return false;
-        }
-        for event in state.pending.drain(..) {
-            match event {
-                DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
-                DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
-                DeferredReplicaLeaseEvent::Completed(booking) => target.completed(&booking),
+        let pending = {
+            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            if state.target.is_some() {
+                return false;
             }
+            state.target = Some(Arc::clone(&target));
+            std::mem::take(&mut state.pending)
+        };
+        for event in pending {
+            Self::notify(&target, event);
         }
-        state.target = Some(target);
         true
     }
 
     fn observe(&self, event: DeferredReplicaLeaseEvent) {
-        let mut state = self.state.lock().expect("replica lease observer poisoned");
-        let Some(target) = state.target.as_ref() else {
-            state.pending.push(event);
-            return;
+        let target = {
+            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            let Some(target) = state.target.clone() else {
+                state.pending.push(event);
+                return;
+            };
+            target
         };
+        Self::notify(&target, event);
+    }
+
+    fn notify(target: &Arc<dyn ReplicaRequestLeaseObserver>, event: DeferredReplicaLeaseEvent) {
         match event {
             DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
             DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
@@ -230,7 +236,7 @@ fn active_sequence_event_channel(
 /// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventPublisher>,
-    metrics_publisher: Arc<EventPublisher>,
+    scheduler_load: SchedulerLoadSender,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
@@ -242,32 +248,12 @@ impl SequencePublisher for RuntimeSequencePublisher {
         event_sender.enqueue(event)
     }
 
-    fn publish_load(&self, load: ActiveLoad) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher.publish(&load).await {
-                tracing::trace!(
-                    "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                    load.worker_id,
-                    load.dp_rank
-                );
-            }
-        });
+    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
+        self.scheduler_load.publish(snapshot);
     }
 
-    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            for load in loads {
-                if let Err(e) = publisher.publish(&load).await {
-                    tracing::trace!(
-                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                        load.worker_id,
-                        load.dp_rank
-                    );
-                }
-            }
-        });
+    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        self.scheduler_load.publish_batch(snapshots);
     }
 
     fn observe_load(
@@ -506,7 +492,7 @@ pub async fn create_multi_worker_sequences(
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
     router_id: u64,
-    worker_type: &'static str,
+    scheduler_load: SchedulerLoadSender,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     create_multi_worker_sequences_with_observer(
@@ -515,7 +501,7 @@ pub async fn create_multi_worker_sequences(
         workers_with_configs,
         replica_sync,
         router_id,
-        worker_type,
+        scheduler_load,
         None,
         cancellation_token,
     )
@@ -529,10 +515,11 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
     router_id: u64,
-    worker_type: &'static str,
+    scheduler_load: SchedulerLoadSender,
     replica_request_lease_observer: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
+    let worker_type = scheduler_load.metric_label();
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
         replica_sync,
@@ -566,13 +553,11 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     } else {
         None
     };
-    let metrics_publisher =
-        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
-        metrics_publisher,
+        scheduler_load,
         worker_status_metrics,
     };
 
@@ -641,6 +626,14 @@ mod tests {
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::time::Instant;
+
+    fn scheduler_load_sender() -> SchedulerLoadSender {
+        super::super::routing_load::scheduler_load_channel(
+            super::super::RouterLoadSource::Decode,
+            CancellationToken::new(),
+        )
+        .0
+    }
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         Some(PrefillLoadHint {
@@ -959,7 +952,7 @@ mod tests {
             workers.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -969,7 +962,7 @@ mod tests {
             workers.clone(),
             true,
             3,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -979,7 +972,7 @@ mod tests {
             workers,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -1051,7 +1044,7 @@ mod tests {
             HashMap::from([(worker_id, ModelRuntimeConfig::new())]),
             false,
             99,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -1115,7 +1108,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1125,7 +1118,7 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1271,7 +1264,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1281,7 +1274,7 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;

@@ -21,7 +21,7 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
-use super::selector::{DefaultWorkerSelector, WorkerSelector};
+use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
@@ -795,6 +795,24 @@ impl<
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
+    /// Enqueue a booking-fenced output update without waiting for the actor to
+    /// apply it. The bounded command queue still supplies backpressure when full.
+    pub(crate) async fn enqueue_output_block_if_booking(
+        &self,
+        booking: SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        let (ack_tx, _ack_rx) = oneshot::channel();
+        self.admission_tx
+            .send(AdmissionCommand::AddOutputBlock {
+                booking,
+                decay_fraction,
+                ack_tx,
+            })
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)
+    }
+
     async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
         if !self.queueing_enabled {
             return;
@@ -1278,7 +1296,12 @@ impl<
                 .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
                 .with_available_workers(available_worker_ids.as_deref());
             self.selector
-                .select_worker(&workers, request, eligibility, self.block_size)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    request,
+                    eligibility,
+                    self.block_size,
+                ))
                 .map(|selection| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
@@ -1595,8 +1618,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::{
-        ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult,
-        WorkerWithDpRank,
+        ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
     use crate::router_hint::RouterHintRootCandidates;
     use crate::scheduling::OverlapSignals;
@@ -1604,7 +1626,7 @@ mod tests {
     use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use crate::{DefaultWorkerSelector, WorkerSelector};
+    use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -1637,7 +1659,7 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, _load: ActiveLoad) {
+        fn publish_scheduler_load(&self, _load: crate::sequences::SchedulerLoadSnapshot) {
             self.response_rx.lock().unwrap().take();
         }
 
@@ -1673,13 +1695,15 @@ mod tests {
     }
 
     impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        }
+
         fn select_worker(
             &self,
-            workers: &HashMap<WorkerId, SimpleWorkerConfig>,
-            request: &SchedulingRequest,
-            eligibility: RoutingEligibility<'_>,
-            block_size: u32,
+            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            let (workers, request, eligibility, block_size) = input.into_configured()?;
             if let Some(rendezvous) = &self.rendezvous {
                 rendezvous.wait_for_peer();
             }
@@ -3392,7 +3416,8 @@ policy_classes:
                         ExternalSequenceBlockHash(101),
                         ExternalSequenceBlockHash(102),
                     ],
-                    owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0), 2)],
+                    owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
@@ -3473,7 +3498,7 @@ policy_classes:
                 .router_hint_candidates
                 .as_ref()
                 .map(|candidates| candidates.owner_prefix_blocks.as_slice()),
-            Some(&[(WorkerWithDpRank::new(1, 0), 2)][..])
+            Some(&[(WorkerWithDpRank::new(1, 0).into(), 2)][..])
         );
         assert_eq!(queue.pending_count(), 0);
     }
@@ -3489,7 +3514,8 @@ policy_classes:
             response: RefreshedOverlap {
                 router_hint_candidates: Some(RouterHintRootCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
-                    owner_prefix_blocks: vec![(worker, 1)],
+                    owner_prefix_blocks: vec![(worker.into(), 1)],
+                    routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),

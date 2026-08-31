@@ -32,8 +32,7 @@ use super::single::{
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
-    WorkerWithDpRank,
+    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::{AttemptId, queue::SchedulerBookingDescriptor};
 
@@ -90,6 +89,18 @@ fn active_request_expiry_duration_from_lookup(
 // Traits
 // ---------------------------------------------------------------------------
 
+/// Complete scheduler-owned load for one worker rank.
+///
+/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](crate::protocols::ActiveLoad)
+/// protocol. Scheduler publishers always own both active-load fields, while remote wire updates may
+/// contain only a subset of fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerLoadSnapshot {
+    pub worker: WorkerWithDpRank,
+    pub active_decode_blocks: u64,
+    pub active_prefill_tokens: u64,
+}
+
 /// Abstraction over event publishing and metrics observation.
 ///
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
@@ -103,13 +114,13 @@ pub trait SequencePublisher: Send + Sync {
     /// source for admission failures so callers can classify queue saturation and closure.
     fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()>;
 
-    /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
-    fn publish_load(&self, load: ActiveLoad);
+    /// Publish one complete scheduler-owned load snapshot without blocking the caller.
+    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot);
 
-    /// Fire-and-forget publish of a batch of [`ActiveLoad`] metric payloads.
-    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        for load in loads {
-            self.publish_load(load);
+    /// Publish a batch of complete scheduler-owned load snapshots without blocking the caller.
+    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        for snapshot in snapshots {
+            self.publish_scheduler_load(snapshot);
         }
     }
 
@@ -235,7 +246,7 @@ impl SequencePublisher for NoopSequencePublisher {
         Ok(())
     }
 
-    fn publish_load(&self, _load: ActiveLoad) {}
+    fn publish_scheduler_load(&self, _snapshot: SchedulerLoadSnapshot) {}
 
     fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
@@ -545,8 +556,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         load: WorkerLoadSnapshot,
         decay_now: Instant,
     ) {
-        let active_load = self.observe_worker_load_snapshot(worker, load, decay_now);
-        self.publisher.publish_load(active_load);
+        let snapshot = self.observe_worker_load_snapshot(worker, load, decay_now);
+        self.publisher.publish_scheduler_load(snapshot);
     }
 
     pub(super) fn observe_worker_load_snapshot(
@@ -554,19 +565,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         load: WorkerLoadSnapshot,
         decay_now: Instant,
-    ) -> ActiveLoad {
+    ) -> SchedulerLoadSnapshot {
         let active_blocks = load.active_blocks;
         let active_tokens = load.active_tokens(decay_now);
 
         self.publisher
             .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
 
-        ActiveLoad {
-            worker_id: worker.worker_id,
-            dp_rank: worker.dp_rank,
-            active_decode_blocks: Some(active_blocks as u64),
-            active_prefill_tokens: Some(active_tokens as u64),
-            kv_used_blocks: None,
+        SchedulerLoadSnapshot {
+            worker,
+            active_decode_blocks: active_blocks as u64,
+            active_prefill_tokens: active_tokens as u64,
         }
     }
 
@@ -980,26 +989,44 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
         visibility: BookingReleaseVisibility,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
-        {
-            return Ok(LifecycleMutationOutcome::NoChange);
-        }
-        let lora_name = self.request_index.lora_for(request_id);
-        let state_changed = match self.mutate_request_worker_prompt_state_local(
-            worker,
-            request_id,
-            decay_now,
-            |seqs, rid, decay_now| seqs.free(rid, decay_now),
-        ) {
-            Ok(outcome) => outcome,
-            Err(SequenceError::RequestNotFound { .. }) => {
-                return Ok(LifecycleMutationOutcome::Applied);
+        let expected = RequestBooking { worker, attempt_id };
+        let (state_changed, booking_removed, load, lora_name) = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                let removed = self
+                    .request_index
+                    .remove_request_if_booking(request_id, worker, attempt_id);
+                return Ok(if removed {
+                    LifecycleMutationOutcome::Applied
+                } else {
+                    LifecycleMutationOutcome::NoChange
+                });
+            };
+            let slot = &table.slots[idx];
+            let mut seq = slot.sequences.write();
+            // Recheck after taking the sequence lock. A replacement attempt may
+            // install its booking before it can update this same worker state.
+            if self.request_index.booking_for(request_id) != Some(expected) {
+                return Ok(LifecycleMutationOutcome::NoChange);
             }
-            Err(error) => return Err(error),
+            let lora_name = self.request_index.lora_for(request_id);
+            let delta = seq.free(request_id, decay_now);
+            let state_changed = delta.is_some();
+            let load = delta.map(|delta| {
+                let load = seq.worker_load_snapshot();
+                self.prompt_registry
+                    .apply_membership_delta_and_load(worker, delta, load);
+                load
+            });
+            let booking_removed = self
+                .request_index
+                .remove_request_if_booking(request_id, worker, attempt_id);
+            (state_changed, booking_removed, load, lora_name)
         };
-        let booking_removed = self
-            .request_index
-            .remove_request_if_booking(request_id, worker, attempt_id);
+        if let Some(load) = load {
+            self.publish_worker_load_snapshot(worker, load, decay_now);
+        }
         if booking_removed && matches!(visibility, BookingReleaseVisibility::Publish) {
             self.enqueue_publish_event(ActiveSequenceEvent {
                 request_id: request_id.clone(),
@@ -1009,7 +1036,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 lora_name,
             });
         }
-        Ok(if state_changed.is_applied() || booking_removed {
+        Ok(if state_changed || booking_removed {
             LifecycleMutationOutcome::Applied
         } else {
             LifecycleMutationOutcome::NoChange
@@ -1767,15 +1794,15 @@ mod tests {
     #[derive(Default)]
     struct RecordingPublisherState {
         events: Mutex<Vec<ActiveSequenceEventData>>,
-        single_loads: Mutex<Vec<ActiveLoad>>,
-        load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
+        single_loads: Mutex<Vec<SchedulerLoadSnapshot>>,
+        load_batches: Mutex<Vec<Vec<SchedulerLoadSnapshot>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
     }
 
     impl RecordingPublisherState {
-        fn load_batches(&self) -> Vec<Vec<ActiveLoad>> {
+        fn load_batches(&self) -> Vec<Vec<SchedulerLoadSnapshot>> {
             self.load_batches.lock().unwrap().clone()
         }
 
@@ -1799,12 +1826,12 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, load: ActiveLoad) {
-            self.state.single_loads.lock().unwrap().push(load);
+        fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
+            self.state.single_loads.lock().unwrap().push(snapshot);
         }
 
-        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-            self.state.load_batches.lock().unwrap().push(loads);
+        fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+            self.state.load_batches.lock().unwrap().push(snapshots);
         }
 
         fn observe_load(
@@ -1841,12 +1868,12 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, _load: ActiveLoad) {}
+        fn publish_scheduler_load(&self, _snapshot: SchedulerLoadSnapshot) {}
 
-        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-            if !loads
+        fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+            if !snapshots
                 .iter()
-                .any(|load| load.worker_id == self.blocked_worker_id)
+                .any(|snapshot| snapshot.worker.worker_id == self.blocked_worker_id)
             {
                 return;
             }
@@ -2318,6 +2345,26 @@ mod tests {
         assert_eq!(sequences.active_tokens(Instant::now())[&worker], 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert!(publisher.load_batches().is_empty());
+    }
+
+    #[test]
+    fn local_sequence_lifecycle_publishes_concrete_scheduler_snapshots() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "scheduler-load".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        let loads = state.single_loads.lock().unwrap();
+        assert_eq!(loads.len(), 2);
+        assert_eq!(loads[0].worker, worker);
+        assert!(loads[0].active_decode_blocks > 0);
+        assert_eq!(loads[1].worker, worker);
+        assert_eq!(loads[1].active_decode_blocks, 0);
+        assert_eq!(loads[1].active_prefill_tokens, 0);
     }
 
     #[test]
@@ -3007,10 +3054,9 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].worker_id, worker.worker_id);
-        assert_eq!(batches[0][0].dp_rank, worker.dp_rank);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
-        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(batches[0][0].worker, worker);
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
+        assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
         assert_eq!(
@@ -3043,8 +3089,8 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
-        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
+        assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
         assert_eq!(
@@ -3257,9 +3303,8 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].worker_id, worker.worker_id);
-        assert_eq!(batches[0][0].dp_rank, worker.dp_rank);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
+        assert_eq!(batches[0][0].worker, worker);
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
         assert_eq!(
             sequences
