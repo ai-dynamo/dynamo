@@ -89,18 +89,17 @@ targets:
     expected_performance:
       available: true
       metrics:
-        system_output_throughput: 2384
-        per_gpu_output_throughput: 298.0
-        user_output_throughput_p50: 118.0
-        ttft_p50_ms: 447
-        itl_p50_ms: 8.5
-        prefix_cache_hit_pct: 73.3
+        system_output_throughput: 2641
+        per_gpu_output_throughput: 330.2
+        user_output_throughput_p50: 132.8
+        ttft_p50_ms: 452
+        itl_p50_ms: 7.5
+        prefix_cache_hit_pct: 73.4
         concurrency: 24
 related_benchmarks: []
 maintainer: null
 gaps:
   - Uses upstream vllm/vllm-openai:qwen38-flash-next image (not a dynamo-built
     image); ai-dynamo is pip-installed at pod startup
-  - Disaggregated recipe requires --no-async-scheduling (GDN hybrid model race
-    in vLLM <0.26.0) and reduced prefill --max-num-seqs 32 (OOM avoidance on
-    260K-token prompts with 4 GPUs)
+  - Disaggregated recipe uses reduced prefill --max-num-seqs 32 (OOM avoidance
+    on 260K-token prompts with 4 GPUs); async scheduling is enabled

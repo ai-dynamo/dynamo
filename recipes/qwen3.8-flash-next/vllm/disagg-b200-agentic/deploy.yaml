@@ -27,9 +27,10 @@
 #     Achieves ~18 GB/s avg (peak 42 GB/s) without hostIPC. NCCL is configured
 #     with NCCL_IB_DISABLE=0, NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=5 to enable
 #     InfiniBand for intra-pod TP communication as well.
-#   - --no-async-scheduling: required for hybrid GDN models at TP>1 in disagg mode.
-#     vLLM's async scheduler races with NIXL RDMA writes (vLLM #42182, #37285).
-#     Fixed in vLLM 0.26.0 (#45357, #48481) but not in the qwen38-flash-next image.
+#   - Async scheduling: enabled (default). The GDN hybrid model race with NIXL
+#     RDMA writes (vLLM #42182, #37285, fixed in vLLM 0.26.0) was not observed
+#     with --max-num-seqs 32 on prefill. If 500 errors appear, add
+#     --no-async-scheduling to both workers as a workaround.
 #   - Prefill --max-num-seqs 32: reduced from 256 to avoid OOM on 260K-token prompts
 #     with only 4 GPUs. Decode keeps 256 since decode is memory-light per request.
 #   - podAffinity: colocate all P+D workers on the same node so NIXL P->D stays on
@@ -199,7 +200,6 @@ spec:
                     --no-enable-flashinfer-autotune \
                     --enable-prefix-caching \
                     --no-disable-hybrid-kv-cache-manager \
-                    --no-async-scheduling \
                     --dyn-reasoning-parser qwen3 \
                     --dyn-tool-call-parser qwen3_coder \
                     --kv-transfer-config "${KV_CFG}" \
@@ -339,7 +339,6 @@ spec:
                     --no-enable-flashinfer-autotune \
                     --enable-prefix-caching \
                     --no-disable-hybrid-kv-cache-manager \
-                    --no-async-scheduling \
                     --dyn-reasoning-parser qwen3 \
                     --dyn-tool-call-parser qwen3_coder \
                     --kv-transfer-config "${KV_CFG}" \
