@@ -2116,6 +2116,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-credential-types",
+ "aws-types",
  "axum",
  "axum-server",
  "base64 0.22.1",
