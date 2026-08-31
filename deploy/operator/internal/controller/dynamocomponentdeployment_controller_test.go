@@ -2341,7 +2341,11 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			var objects []client.Object
 			objects = append(objects, dcd)
 			for _, lws := range tt.existingLeaderWorkerSets {
-				objects = append(objects, lws)
+				ownedLWS := lws.DeepCopy()
+				ownedLWS.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+				objects = append(objects, ownedLWS)
 			}
 			// Add a mock ServiceAccount that the generateLeaderWorkerSet function needs
 			objects = append(objects, &corev1.ServiceAccount{
@@ -2665,7 +2669,11 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			var objects []client.Object
 			objects = append(objects, dcd)
 			if tt.existingDeployment != nil {
-				objects = append(objects, tt.existingDeployment)
+				ownedDeployment := tt.existingDeployment.DeepCopy()
+				ownedDeployment.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+				objects = append(objects, ownedDeployment)
 			}
 
 			// Set up fake client with the DCD and existing Deployment
@@ -2756,6 +2764,9 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 				},
 			},
 		},
+	}
+	deployment.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
 	}
 
 	fakeKubeClient := fake.NewClientBuilder().

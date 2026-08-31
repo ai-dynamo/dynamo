@@ -189,7 +189,8 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			}
 		}
 		logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
-		err = r.Delete(ctx, oldResource)
+		uid := oldResource.GetUID()
+		err = r.Delete(ctx, oldResource, client.Preconditions{UID: &uid})
 		if err != nil {
 			logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
 			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Delete", "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)

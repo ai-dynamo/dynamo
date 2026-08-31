@@ -1224,3 +1224,51 @@ func TestSyncResourceOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncResourceDeleteUsesObservedUIDPrecondition(t *testing.T) {
+	parent := syncResourceTestParent("parent-uid")
+	existing := syncResourceTestConfigMap("before", syncResourceTestControllerRef(parent))
+	existing.UID = "resource-uid"
+
+	var deleteUID *types.UID
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 to scheme: %v", err)
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+				options := (&client.DeleteOptions{}).ApplyOptions(opts)
+				if options.Preconditions == nil || options.Preconditions.UID == nil {
+					t.Fatal("SyncResource() delete has no UID precondition")
+				}
+				deleteUID = options.Preconditions.UID
+				return delegate.Delete(ctx, object, opts...)
+			},
+		}).
+		Build()
+	r := syncResourceTestReconciler{
+		Client:   kubeClient,
+		recorder: events.NewFakeRecorder(16),
+	}
+
+	modified, _, err := SyncResource(
+		context.Background(),
+		r,
+		parent,
+		func(context.Context) (*corev1.ConfigMap, bool, error) {
+			return syncResourceTestConfigMap("unused"), true, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("SyncResource() error = %v", err)
+	}
+	if !modified {
+		t.Fatal("SyncResource() modified = false, want true")
+	}
+	if deleteUID == nil || *deleteUID != existing.UID {
+		t.Fatalf("delete UID precondition = %v, want %q", deleteUID, existing.UID)
+	}
+}
