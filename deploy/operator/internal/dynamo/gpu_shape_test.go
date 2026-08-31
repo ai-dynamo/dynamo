@@ -90,7 +90,7 @@ func TestResolveGPUShapeSeparatesEngineWidthFromReplicaCost(t *testing.T) {
 	}
 }
 
-func TestResolveGPUShapeCountsNativeSidecarOnlyInReplicaCost(t *testing.T) {
+func TestResolveGPUShapeUsesEffectiveInitPeakForReplicaCost(t *testing.T) {
 	restartAlways := corev1.ContainerRestartPolicyAlways
 	main := gpuContainer(commonconsts.MainContainerName, "4")
 	nativeSidecar := gpuContainer("native-sidecar", "1")
@@ -118,7 +118,7 @@ func TestResolveGPUShapeCountsNativeSidecarOnlyInReplicaCost(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: 10}, shape)
+	assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: 18}, shape)
 }
 
 func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T) {

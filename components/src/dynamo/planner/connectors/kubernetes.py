@@ -412,6 +412,8 @@ class KubernetesConnector(PlannerConnector):
 
         Raises:
             DeploymentValidationError: If GPU shapes cannot be determined from DGD
+            GPUShapeUnavailableError: If an authoritative shape is stale, missing,
+                or explicitly zero for a required Planner worker
         """
         prefill_gpu_shape = None
         decode_gpu_shape = None
@@ -425,8 +427,9 @@ class KubernetesConnector(PlannerConnector):
                 )
                 prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
                 if prefill_gpu_shape.gpus_per_replica == 0:
-                    raise ValueError(
-                        f"Component '{prefill_service.name}' has an observed zero-GPU shape."
+                    raise GPUShapeUnavailableError(
+                        prefill_service.name,
+                        "operator published an authoritative zero-GPU shape",
                     )
             except GPUShapeUnavailableError:
                 raise
@@ -441,8 +444,9 @@ class KubernetesConnector(PlannerConnector):
                 )
                 decode_gpu_shape = decode_service.get_gpu_shape(deployment)
                 if decode_gpu_shape.gpus_per_replica == 0:
-                    raise ValueError(
-                        f"Component '{decode_service.name}' has an observed zero-GPU shape."
+                    raise GPUShapeUnavailableError(
+                        decode_service.name,
+                        "operator published an authoritative zero-GPU shape",
                     )
             except GPUShapeUnavailableError:
                 raise

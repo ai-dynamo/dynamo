@@ -129,7 +129,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
 
 
 @pytest.mark.asyncio
-async def test_run_retries_gpu_shape_catch_up_without_shutting_down():
+async def test_run_retries_authoritative_zero_shape_without_shutting_down():
     environment = MagicMock()
     config = PlannerConfig(
         mode="agg",
@@ -152,7 +152,9 @@ async def test_run_retries_gpu_shape_catch_up_without_shutting_down():
     planner._engine = engine
     planner._run_one_tick = AsyncMock(
         side_effect=[
-            GPUShapeUnavailableError("decode", "generation catch-up"),
+            GPUShapeUnavailableError(
+                "decode", "operator published an authoritative zero-GPU shape"
+            ),
             next_tick,
             asyncio.CancelledError(),
         ]

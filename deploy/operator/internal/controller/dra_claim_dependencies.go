@@ -35,7 +35,7 @@ func deploymentEventFilter(
 	})
 }
 
-// componentReferencesDRAClaim reports whether any runtime container in the
+// componentReferencesDRAClaim reports whether any application or init container in the
 // non-nil component references the named claim or claim template.
 func componentReferencesDRAClaim(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -46,7 +46,7 @@ func componentReferencesDRAClaim(
 		return false
 	}
 	containerClaimNames := make(map[string]struct{})
-	for _, container := range dra.RuntimeContainers(&component.PodTemplate.Spec) {
+	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
 		for _, claim := range container.Resources.Claims {
 			containerClaimNames[claim.Name] = struct{}{}
 		}
@@ -69,13 +69,13 @@ func componentReferencesDRAClaim(
 	return false
 }
 
-// componentUsesDRAClaims reports whether any runtime container in the non-nil
+// componentUsesDRAClaims reports whether any application or init container in the non-nil
 // component references DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if component.PodTemplate == nil {
 		return false
 	}
-	for _, container := range dra.RuntimeContainers(&component.PodTemplate.Spec) {
+	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
 		if len(container.Resources.Claims) > 0 {
 			return true
 		}

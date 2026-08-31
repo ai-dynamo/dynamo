@@ -251,6 +251,27 @@ def test_authoritative_gpu_shape_disappearance_fails_closed():
     assert environment.deployment_state().decode.gpus_per_replica == 5
 
 
+def test_authoritative_zero_gpu_shape_fails_closed_without_legacy_fallback():
+    controller = _controller()
+    controller.get_gpu_shapes.side_effect = GPUShapeUnavailableError(
+        "decode", "operator published an authoritative zero-GPU shape"
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+    )
+    environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().decode.gpus_per_replica = 5
+
+    with pytest.raises(GPUShapeUnavailableError, match="authoritative zero-GPU"):
+        environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 5
+
+
 @pytest.mark.asyncio
 async def test_refresh_replica_counts_legacy_connector_power_disabled():
     """Power-disabled mode keeps the ordinary connector protocol unchanged."""

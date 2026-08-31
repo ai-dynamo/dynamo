@@ -2181,7 +2181,7 @@ GPUsPerEngine is the number of GPUs assigned to one inference engine in a servic
 </ParamField>
 
 <ParamField path="gpusPerReplica" type="integer">
-GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, application and initialization phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod scheduling footprint; shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2545,7 +2545,7 @@ gpusPerEngine is the number of GPUs assigned to one inference engine in a compon
 </ParamField>
 
 <ParamField path="gpusPerReplica" type="integer">
-gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, runtime containers, and provider-owned Pods. Shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, application and initialization phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod scheduling footprint; shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 

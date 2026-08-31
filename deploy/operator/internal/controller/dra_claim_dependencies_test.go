@@ -77,11 +77,25 @@ func testNativeSidecarDRAClaimComponent(objectName string, template bool) nvidia
 	return component
 }
 
-func TestDRAClaimDependenciesIncludeNativeSidecars(t *testing.T) {
-	component := testNativeSidecarDRAClaimComponent("gpu-template", true)
+func testOneShotInitDRAClaimComponent(objectName string, template bool) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	component := testDRAClaimComponent(objectName, template)
+	claims := component.PodTemplate.Spec.Containers[0].Resources.Claims
+	component.PodTemplate.Spec.Containers[0].Resources.Claims = nil
+	component.PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name:      "one-shot-init",
+		Resources: corev1.ResourceRequirements{Claims: claims},
+	}}
+	return component
+}
 
-	assert.True(t, componentReferencesDRAClaim(&component, "gpu-template", true))
-	assert.True(t, componentUsesDRAClaims(&component))
+func TestDRAClaimDependenciesIncludeAllInitContainers(t *testing.T) {
+	nativeSidecar := testNativeSidecarDRAClaimComponent("gpu-template", true)
+	oneShotInit := testOneShotInitDRAClaimComponent("gpu-template", true)
+
+	assert.True(t, componentReferencesDRAClaim(&nativeSidecar, "gpu-template", true))
+	assert.True(t, componentUsesDRAClaims(&nativeSidecar))
+	assert.True(t, componentReferencesDRAClaim(&oneShotInit, "gpu-template", true))
+	assert.True(t, componentUsesDRAClaims(&oneShotInit))
 }
 
 func TestMapResourceClaimToDCDRequests(t *testing.T) {

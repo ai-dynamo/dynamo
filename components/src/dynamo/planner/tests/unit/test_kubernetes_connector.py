@@ -1279,6 +1279,32 @@ def test_missing_shape_falls_back_only_for_zero_gpu_native_sidecar(
             )
 
 
+@pytest.mark.parametrize("init_gpu", [0, 8])
+def test_missing_shape_falls_back_only_for_zero_gpu_one_shot_init(
+    kubernetes_connector, mock_kube_api, init_gpu
+):
+    component = _component("decode-worker", "decode", replicas=1, gpu=4)
+    component["podTemplate"]["spec"]["initContainers"] = [
+        {
+            "name": "one-shot-init",
+            "resources": {"limits": {"nvidia.com/gpu": str(init_gpu)}},
+        }
+    ]
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    if init_gpu == 0:
+        assert kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True
+        ) == (0, 4)
+    else:
+        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
+            kubernetes_connector.get_gpu_shapes(
+                require_prefill=False, require_decode=True
+            )
+
+
 def test_typed_worker_with_explicit_zero_shape_is_rejected(
     kubernetes_connector, mock_kube_api
 ):
@@ -1290,7 +1316,7 @@ def test_typed_worker_with_explicit_zero_shape_is_rejected(
     }
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    with pytest.raises(DeploymentValidationError, match="observed zero-GPU shape"):
+    with pytest.raises(GPUShapeUnavailableError, match="authoritative zero-GPU"):
         kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 

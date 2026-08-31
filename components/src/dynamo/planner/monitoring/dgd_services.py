@@ -281,11 +281,7 @@ class Service(BaseModel):
 
         pod_spec = self.service.get("podTemplate", {}).get("spec", {})
         containers = list(pod_spec.get("containers", []))
-        containers.extend(
-            container
-            for container in pod_spec.get("initContainers", [])
-            if container.get("restartPolicy") == "Always"
-        )
+        containers.extend(pod_spec.get("initContainers", []))
         for container in containers:
             resources = container.get("resources", {})
             if resources.get("claims"):

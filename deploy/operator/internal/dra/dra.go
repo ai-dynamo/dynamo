@@ -102,13 +102,21 @@ func ResourceClaimTemplateName(parentName, componentName string) string {
 }
 
 func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) (int, error) {
-	if name, q, ok := gpuResourceQuantity(resources.Limits); ok {
+	names := gpuResourceRequirementNames(resources)
+	if len(names) > 1 {
+		return 0, fmt.Errorf(
+			"multiple scalar GPU resource keys %q are ambiguous; specify exactly one per container",
+			names,
+		)
+	}
+	if len(names) == 0 {
+		return 0, nil
+	}
+	name := names[0]
+	if q, ok := resources.Limits[name]; ok {
 		return gpuCountFromQuantity(name, q)
 	}
-	if name, q, ok := gpuResourceQuantity(resources.Requests); ok {
-		return gpuCountFromQuantity(name, q)
-	}
-	return 0, nil
+	return gpuCountFromQuantity(name, resources.Requests[name])
 }
 
 // ResolveGPUCount returns the number of GPUs requested by a container, including
@@ -171,9 +179,8 @@ type PodSpecMultiplicity struct {
 	Count   int32
 }
 
-// RuntimeContainers returns regular containers plus restartable init
-// containers, which Kubernetes runs as native sidecars for the Pod lifetime.
-func RuntimeContainers(podSpec *corev1.PodSpec) []*corev1.Container {
+// AllContainers returns regular and init containers in one Pod spec.
+func AllContainers(podSpec *corev1.PodSpec) []*corev1.Container {
 	if podSpec == nil {
 		return nil
 	}
@@ -182,12 +189,44 @@ func RuntimeContainers(podSpec *corev1.PodSpec) []*corev1.Container {
 		containers = append(containers, &podSpec.Containers[i])
 	}
 	for i := range podSpec.InitContainers {
-		container := &podSpec.InitContainers[i]
-		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
-			containers = append(containers, container)
-		}
+		containers = append(containers, &podSpec.InitContainers[i])
 	}
 	return containers
+}
+
+// effectivePodScalarGPUCount mirrors Kubernetes Pod scheduling semantics for
+// scalar GPUs. Regular containers run concurrently. Restartable init
+// containers accumulate as native sidecars, while each one-shot init runs
+// alongside the native sidecars that precede it. The Pod footprint is the
+// maximum of every init phase and the steady-state application phase.
+func effectivePodScalarGPUCount(podSpec *corev1.PodSpec) (int, error) {
+	applicationGPUs := 0
+	for i := range podSpec.Containers {
+		container := &podSpec.Containers[i]
+		count, err := ExtractGPUCountFromResourceRequirements(container.Resources)
+		if err != nil {
+			return 0, fmt.Errorf("container %q: %w", container.Name, err)
+		}
+		applicationGPUs += count
+	}
+
+	nativeSidecarGPUs := 0
+	initPeakGPUs := 0
+	for i := range podSpec.InitContainers {
+		container := &podSpec.InitContainers[i]
+		count, err := ExtractGPUCountFromResourceRequirements(container.Resources)
+		if err != nil {
+			return 0, fmt.Errorf("init container %q: %w", container.Name, err)
+		}
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			nativeSidecarGPUs += count
+			initPeakGPUs = max(initPeakGPUs, nativeSidecarGPUs)
+			continue
+		}
+		initPeakGPUs = max(initPeakGPUs, nativeSidecarGPUs+count)
+	}
+
+	return max(initPeakGPUs, applicationGPUs+nativeSidecarGPUs), nil
 }
 
 type claimSelection struct {
@@ -215,9 +254,9 @@ func (s *claimSelection) add(claim corev1.ResourceClaim) {
 	s.claims = append(s.claims, claim)
 }
 
-// ResolvePodGPUCount returns the unique GPUs allocated to all regular
-// containers in one Pod. Scalar GPU resources and DRA allocations are
-// additive; repeated references to the same DRA request are counted once.
+// ResolvePodGPUCount returns one Pod's effective scalar GPU scheduling
+// footprint plus unique DRA allocations used by application or init
+// containers. Repeated references to the same DRA request are counted once.
 func ResolvePodGPUCount(
 	ctx context.Context,
 	cl client.Reader,
@@ -230,10 +269,10 @@ func ResolvePodGPUCount(
 	}})
 }
 
-// ResolvePodSetGPUCount returns the unique GPU allocation across all rendered
-// Pods in one component replica. ResourceClaimTemplates are charged per Pod;
-// repeated references to the same concrete ResourceClaim are charged once
-// across the whole set.
+// ResolvePodSetGPUCount returns the effective scalar GPU scheduling footprint
+// plus unique DRA allocations across all rendered Pods in one component
+// replica. ResourceClaimTemplates are charged per Pod; repeated references to
+// the same concrete ResourceClaim are charged once across the whole set.
 func ResolvePodSetGPUCount(
 	ctx context.Context,
 	cl client.Reader,
@@ -255,15 +294,15 @@ func ResolvePodSetGPUCount(
 		for _, podClaim := range pod.PodSpec.ResourceClaims {
 			podClaims[podClaim.Name] = podClaim
 		}
+		scalarCount, err := effectivePodScalarGPUCount(pod.PodSpec)
+		if err != nil {
+			return 0, err
+		}
+		total += scalarCount * int(pod.Count)
+
 		claimOrder := make([]string, 0)
 		claimSelections := make(map[string]*claimSelection)
-		for _, container := range RuntimeContainers(pod.PodSpec) {
-			scalarCount, err := ExtractGPUCountFromResourceRequirements(container.Resources)
-			if err != nil {
-				return 0, fmt.Errorf("container %q: %w", container.Name, err)
-			}
-			total += scalarCount * int(pod.Count)
-
+		for _, container := range AllContainers(pod.PodSpec) {
 			for _, claim := range container.Resources.Claims {
 				selection, ok := claimSelections[claim.Name]
 				if !ok {
@@ -532,14 +571,6 @@ func RemoveGPUResources(resources corev1.ResourceList) {
 	}
 }
 
-func gpuResourceQuantity(resources corev1.ResourceList) (corev1.ResourceName, resource.Quantity, bool) {
-	names := gpuResourceNames(resources)
-	if len(names) == 0 {
-		return "", resource.Quantity{}, false
-	}
-	return names[0], resources[names[0]], true
-}
-
 func gpuCountFromQuantity(name corev1.ResourceName, q resource.Quantity) (int, error) {
 	value := q.Value()
 	if q.CmpInt64(value) != 0 {
@@ -567,6 +598,25 @@ func gpuResourceNames(resources corev1.ResourceList) []corev1.ResourceName {
 	sort.Strings(matches)
 	result := make([]corev1.ResourceName, 0, len(matches))
 	for _, name := range matches {
+		result = append(result, corev1.ResourceName(name))
+	}
+	return result
+}
+
+func gpuResourceRequirementNames(resources corev1.ResourceRequirements) []corev1.ResourceName {
+	unique := make(map[corev1.ResourceName]struct{})
+	for _, resourceList := range []corev1.ResourceList{resources.Limits, resources.Requests} {
+		for _, name := range gpuResourceNames(resourceList) {
+			unique[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(unique))
+	for name := range unique {
+		names = append(names, string(name))
+	}
+	sort.Strings(names)
+	result := make([]corev1.ResourceName, 0, len(names))
+	for _, name := range names {
 		result = append(result, corev1.ResourceName(name))
 	}
 	return result

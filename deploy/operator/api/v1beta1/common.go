@@ -784,10 +784,11 @@ type ComponentReplicaStatus struct {
 	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
 
 	// gpusPerReplica is the unique GPU allocation added when this component
-	// scales by one replica, across all nodes, runtime containers, and
-	// provider-owned Pods. Shared DRA claims are counted once. A present zero
-	// records a successful non-GPU resolution; omission means no current shape
-	// is available.
+	// scales by one replica, across all nodes, application and initialization
+	// phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+	// Pod scheduling footprint; shared DRA claims are counted once. A present
+	// zero records a successful non-GPU resolution; omission means no current
+	// shape is available.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
