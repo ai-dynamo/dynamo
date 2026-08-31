@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+hardware:
+  gpuSku: gb300
+  totalGpus: 4
+  numGpusPerNode: 4
+  interconnect: nvlink
+  rdma: true
