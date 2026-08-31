@@ -69,7 +69,7 @@ provided through the environment.
 sidecar next to a TensorRT-LLM engine and serves `Qwen/Qwen3-0.6B` on one GPU.
 
 There is no published sidecar image yet (see [Packaging](#packaging)), so build
-and push the image from `lib/sidecar/Dockerfile`. It contains all three
+and push the image from `lib/sidecar/Dockerfile`. It contains all four
 engine-specific sidecar executables; this manifest runs `dynamo-trtllm-sidecar`
 as the container command.
 

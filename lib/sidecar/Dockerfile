@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# CPU-only image containing the vLLM, SGLang, and TensorRT-LLM Rust sidecars.
+# CPU-only image containing the OpenEngine, vLLM, SGLang, and TensorRT-LLM Rust sidecars.
 # The dynamo-sidecar entrypoint selects an engine-specific binary; the GPU
 # engine continues to run in a separate container.
 #
@@ -42,7 +42,7 @@ FROM builder-base AS vllm-builder
 
 ARG TARGETARCH
 
-# The three builders share one target cache per architecture, so each backend
+# The four builders share one target cache per architecture, so each backend
 # reuses the dependency artifacts the previous one compiled. sharing=locked
 # serializes them, which is required for correctness — cargo's .package-cache
 # lock lives in $CARGO_HOME, outside these mounts, so it cannot coordinate
@@ -56,6 +56,18 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
+
+# ---- OpenEngine builder -----------------------------------------------------
+FROM builder-base AS openengine-builder
+
+ARG TARGETARCH
+
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    cargo build --release --locked -p dynamo-openengine-sidecar \
+    && strip target/release/dynamo-openengine-sidecar \
+    && install -D target/release/dynamo-openengine-sidecar /out/dynamo-openengine-sidecar
 
 # ---- SGLang builder ---------------------------------------------------------
 FROM builder-base AS sglang-builder
@@ -94,6 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --create-home --uid 1000 --gid 0 dynamo
 
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
+COPY --from=openengine-builder /out/dynamo-openengine-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
 COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /usr/local/bin/
 

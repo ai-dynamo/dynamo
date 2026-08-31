@@ -30,6 +30,7 @@ members = [
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
     "lib/sidecar/common",
+    "lib/sidecar/openengine",
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",
@@ -213,4 +214,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
