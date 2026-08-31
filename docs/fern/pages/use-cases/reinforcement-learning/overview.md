@@ -34,7 +34,7 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 
 ## Where Dynamo Fits
 
-![The reinforcement learning loop from prompts through rollout generation, rewards, and optimization. Dynamo owns rollout-serving orchestration, inference backends execute generation and apply weights, and the RL framework owns every training decision.](./_assets/rl-serving-ownership.svg)
+![The reinforcement learning loop from prompts through rollout generation, rewards, and optimization. Dynamo owns rollout-serving orchestration, inference backends execute generation and apply weights, and the RL framework owns every training decision.](./_assets/rl-serving-ownership-v2.svg)
 
 > [!IMPORTANT]
 > Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
