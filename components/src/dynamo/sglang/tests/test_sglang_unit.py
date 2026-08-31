@@ -99,7 +99,26 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
     assert "master_port" not in kwargs
 
 
-def test_override_server_args_supports_sglang_0_5_17():
+def test_override_server_args_uses_declarative_resolution(monkeypatch):
+    calls = []
+
+    def declare(server_args, source, **fields):
+        calls.append((server_args, source, fields))
+
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", declare)
+    server_args = SimpleNamespace()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [(server_args, "dynamo.test", {"enable_memory_saver": True})]
+    assert not hasattr(server_args, "enable_memory_saver")
+
+
+def test_override_server_args_supports_sglang_0_5_17(monkeypatch):
     calls = []
 
     class ServerArgs:
@@ -108,6 +127,7 @@ def test_override_server_args_supports_sglang_0_5_17():
             for name, value in fields.items():
                 object.__setattr__(self, name, value)
 
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = ServerArgs()
 
     override_server_args(
@@ -120,7 +140,8 @@ def test_override_server_args_supports_sglang_0_5_17():
     assert server_args.enable_memory_saver is True
 
 
-def test_override_server_args_supports_legacy_xpu_pin():
+def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
 
     override_server_args(

@@ -26,6 +26,12 @@ from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
 
+try:
+    from sglang.srt.arg_groups.overrides import declare_late_resolution
+except ImportError:
+    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+    declare_late_resolution = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,14 +88,19 @@ def ensure_sglang_tensor_image_size() -> None:
 
 
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
-    """Apply a post-resolution, pre-publish SGLang configuration update.
+    """Declare launcher-stage SGLang configuration fields.
 
-    SGLang 0.5.18 replaced ``ServerArgs.override`` with
-    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
-    of the instance must observe. SGLang 0.5.17 exposes the former API. The
-    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
-    preserve its legacy assignment behavior until its engine pin is upgraded.
+    SGLang 0.5.18+ resolves its effective configuration separately from raw
+    ``ServerArgs`` input. Declare pre-engine changes through its resolution API
+    so the engine's resolved projection observes them. SGLang 0.5.17 exposes
+    ``ServerArgs.override`` instead. The separately pinned XPU image still uses
+    SGLang 0.5.11, which predates both APIs; preserve its legacy assignment
+    behavior until its engine pin is upgraded.
     """
+    if declare_late_resolution is not None:
+        declare_late_resolution(server_args, source, **fields)
+        return
+
     late_resolution = getattr(server_args, "_late_resolution", None)
     if callable(late_resolution):
         late_resolution(source, **fields)
