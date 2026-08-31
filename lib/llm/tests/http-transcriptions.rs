@@ -216,7 +216,12 @@ impl TestService {
     }
 
     async fn transcribe(&self) -> reqwest::Response {
-        let form = reqwest::multipart::Form::new()
+        self.transcribe_with_form(reqwest::multipart::Form::new())
+            .await
+    }
+
+    async fn transcribe_with_form(&self, form: reqwest::multipart::Form) -> reqwest::Response {
+        let form = form
             .part(
                 "file",
                 reqwest::multipart::Part::bytes(b"audio".to_vec())
@@ -256,6 +261,25 @@ async fn annotated_invalid_argument_returns_bad_request() {
     let response = service.transcribe().await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn stream_field_is_parsed_strictly() {
+    let service = TestService::start(false).await;
+
+    for value in ["true", "invalid"] {
+        let response = service
+            .transcribe_with_form(reqwest::multipart::Form::new().text("stream", value))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "stream={value}");
+    }
+
+    let response = service
+        .transcribe_with_form(reqwest::multipart::Form::new().text("stream", "false"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
     service.shutdown().await;
 }
 

@@ -11,7 +11,10 @@ use axum::{
     routing::post,
 };
 use base64::Engine as _;
-use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+use dynamo_runtime::{
+    config::parse_bool,
+    pipeline::{AsyncEngineContextProvider, Context},
+};
 use futures::StreamExt;
 use tracing::Instrument;
 
@@ -80,10 +83,15 @@ impl TranscriptionForm {
                         form.timestamp_granularities.push(value);
                     }
                 }
-                "stream" if value.eq_ignore_ascii_case("true") || value == "1" => {
-                    return Err(ErrorMessage::bad_request(
-                        "Streaming transcriptions are not supported yet",
-                    ));
+                "stream" => {
+                    let stream = parse_bool(&value).map_err(|error| {
+                        ErrorMessage::bad_request(format!("Invalid `stream` value: {error}"))
+                    })?;
+                    if stream {
+                        return Err(ErrorMessage::bad_request(
+                            "Streaming transcriptions are not supported yet",
+                        ));
+                    }
                 }
                 _ => {}
             }
