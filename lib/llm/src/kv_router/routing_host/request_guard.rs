@@ -4,10 +4,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -689,13 +686,8 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest, phase: RequestPhase) {
-        if phase != RequestPhase::Decode
-            || request
-                .annotations
-                .iter()
-                .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION)
-        {
+    pub(super) fn record_prefill_start(&self, dispatch_includes_prefill: bool) {
+        if dispatch_includes_prefill {
             self.observability.record_prefill_start();
         }
     }

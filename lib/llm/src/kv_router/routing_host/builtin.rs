@@ -333,7 +333,11 @@ where
         drop(route_guard);
 
         guard.start_dispatch(&phase_label);
-        guard.record_prefill_start(&request, phase);
+        guard.record_prefill_start(dispatch_includes_prefill(
+            &request,
+            phase,
+            self.dispatch_worker_role(),
+        ));
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             cancel_on_stop(

@@ -530,6 +530,7 @@ where
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
+    worker_role: Option<WorkerType>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     cancellation_token: CancellationToken,
     client: Client,
@@ -841,6 +842,7 @@ where
             workers_with_configs,
             block_size,
             kv_router_config,
+            worker_role,
             prefill_load_estimator,
             cancellation_token,
             client,
@@ -1738,6 +1740,11 @@ where
         self.scheduler.worker_type()
     }
 
+    /// Return the typed role of the worker set this router targets, when discovery supplied one.
+    pub(crate) fn worker_role(&self) -> Option<WorkerType> {
+        self.worker_role
+    }
+
     /// Return the worker's unique global DP rank when it owns exactly one rank.
     pub fn unique_dp_rank_for_worker(&self, worker_id: WorkerId) -> Option<u32> {
         let configs = self.workers_with_configs.borrow();
@@ -2435,6 +2442,7 @@ mod tests {
         let router = make_router_without_membership(Some(WorkerType::Decode))
             .await
             .expect("ordinary decode must not require KV source membership");
+        assert_eq!(router.worker_role(), Some(WorkerType::Decode));
         assert!(router.kv_event_subscription.is_none());
 
         let error = make_router_without_membership(None)
