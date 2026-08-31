@@ -500,10 +500,64 @@ def _make_fused_moe_kernel(module: torch.nn.Module, quant_method) -> bool:
             quant_method.moe_kernel = maker(
                 **{k: v for k, v in kwargs.items() if k in accepted}
             )
-            return True
         except TypeError:
             continue
+        _run_moe_kernel_post_load(module, quant_method)
+        return True
     return False
+
+
+# Layers whose MoE post-load has already run in this process. The TRTLLM
+# experts' process_weights_after_loading folds input scales into the weight
+# scales in place (w13_weight_scale_2.mul_(w13_input_scale)), so running it
+# twice squares them.
+_moe_post_load_done: set[int] = set()
+
+
+def _run_moe_kernel_post_load(module: torch.nn.Module, quant_method) -> None:
+    """Register the rebuilt MoE kernel's derived params on an imported layer.
+
+    Read mode skips vLLM's process_weights_after_loading, but for the TRTLLM
+    MoE experts that step registers g1_scale_c and gemm1_clamp_limit on the
+    layer. Those are created by ``register_parameter`` during post-load, so the
+    meta model has no slot for them and name-keyed materialization drops them
+    even though the writer published them. Without them the experts run with
+    unscaled GEMM1 output and no activation clamp, which does not fail - it
+    degrades generation into repetition, so nothing upstream reports it.
+
+    Post-load also folds the input scales into the weight scales in place
+    (``w13_weight_scale_2.mul_(w13_input_scale)``). The writer already did that
+    before publishing, so repeating it here would square the scales - and,
+    because those scales live in the shared GMS mapping, would corrupt them for
+    every other reader, cumulatively on every restart. Neutralise the fold by
+    substituting ones for the input scales, which leaves the derived
+    registrations correct because they are computed from the already-folded
+    values.
+    """
+    kernel = getattr(quant_method, "moe_kernel", None)
+    post_load = getattr(kernel, "process_weights_after_loading", None)
+    if not callable(post_load):
+        return
+    if id(module) in _moe_post_load_done:
+        return
+
+    saved: dict[str, torch.Tensor] = {}
+    for attr in ("w13_input_scale", "w2_input_scale"):
+        t = getattr(module, attr, None)
+        if torch.is_tensor(t):
+            saved[attr] = t
+            setattr(module, attr, torch.ones_like(t))
+    try:
+        post_load(module)
+        _moe_post_load_done.add(id(module))
+    except Exception:
+        logger.exception(
+            "[GMS] Read mode: MoE post-load failed for a rebuilt kernel; "
+            "expect degraded generation from this layer"
+        )
+    finally:
+        for attr, t in saved.items():
+            setattr(module, attr, t)
 
 
 def _process_fused_moe_kernels_after_gms_materialization(

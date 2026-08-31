@@ -474,6 +474,99 @@ def torch_compiler_disable(fn):
     return disable(fn) if callable(disable) else fn
 
 
+_dsv4_weight_digest_patched = False
+
+
+def patch_dsv4_weight_digest() -> None:
+    """Checksum the loaded weights so RW and RO loads can be compared.
+
+    A read-only import can serve degenerate output while every load-time check
+    passes, because the damage is a stale alias pointing at a tensor nobody
+    wrote rather than a bad value in a tensor that was written. Comparing a
+    digest of the same tensors across a write-mode load and a read-mode load
+    localises that to the exact parameter.
+
+    Logs one line per rank at the end of load. Enable with
+    DYN_GMS_DSV4_WEIGHT_DIGEST.
+    """
+    global _dsv4_weight_digest_patched
+
+    if _dsv4_weight_digest_patched:
+        return
+
+    if os.environ.get("DYN_GMS_DSV4_WEIGHT_DIGEST", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    _dsv4_weight_digest_patched = True
+
+    def digest(model) -> None:
+        import torch
+
+        rows = []
+        for name, t in list(model.named_parameters()) + list(model.named_buffers()):
+            if not torch.is_tensor(t) or t.is_meta or not t.is_cuda:
+                continue
+            # Sample rather than reduce the whole tensor: this runs on the
+            # restore critical path and a few elements are enough to catch a
+            # stale alias or an unwritten buffer.
+            flat = t.detach().flatten()
+            n = flat.numel()
+            if n == 0:
+                continue
+            # Build sample indices on the host: linspace on device then
+            # .long() can round the endpoint past n-1 and trip a device-side
+            # assert, which poisons the context for everything after it.
+            step = max(1, n // 8)
+            picks = sorted({min(i, n - 1) for i in range(0, n, step)})[:8]
+            idx = torch.tensor(picks, device=flat.device, dtype=torch.long)
+            vals = flat[idx].to(torch.float64)
+            rows.append(
+                f"{name}|{t.dtype}|{tuple(t.shape)}|"
+                f"{float(vals.sum()):.6e}|{float(vals.abs().max()):.6e}"
+            )
+        import hashlib
+
+        blob = "\n".join(rows).encode()
+        logger.warning(
+            "[GMS Digest] %d tensors, sha256=%s",
+            len(rows),
+            hashlib.sha256(blob).hexdigest()[:32],
+        )
+        # Full rows go to a file: comparing two loads needs every tensor, and
+        # 1845 log lines per rank would be unusable.
+        try:
+            import os as _os
+
+            path = _os.environ.get(
+                "DYN_GMS_DSV4_WEIGHT_DIGEST_PATH", "/tmp/gms_digest"
+            )
+            dev = getattr(getattr(model, "device", None), "index", None)
+            if dev is None:
+                dev = torch.cuda.current_device()
+            with open(f"{path}.rank{dev}.txt", "w") as fh:
+                fh.write("\n".join(rows))
+            logger.warning("[GMS Digest] wrote %s.rank%s.txt", path, dev)
+        except Exception:
+            logger.exception("[GMS Digest] could not write digest file")
+
+    globals()["_gms_dsv4_weight_digest"] = digest
+    logger.info("[GMS Patch] weight digest enabled (DYN_GMS_DSV4_WEIGHT_DIGEST)")
+
+
+def gms_dsv4_weight_digest(model) -> None:
+    """Run the weight digest when it is enabled; no-op otherwise."""
+    fn = globals().get("_gms_dsv4_weight_digest")
+    if fn is not None:
+        try:
+            fn(model)
+        except Exception:
+            logger.exception("[GMS Digest] failed")
+
+
 _dsv4_hash_topk_probe_patched = False
 
 

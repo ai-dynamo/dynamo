@@ -52,6 +52,8 @@ from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_dsv4_gather_k_cache_check,
     patch_dsv4_hash_topk_probe,
+    gms_dsv4_weight_digest,
+    patch_dsv4_weight_digest,
     patch_dsv4_layer_probe,
     patch_dsv4_gather_k_cache_triton,
     patch_dsv4_topk_clone_inputs,
@@ -87,6 +89,8 @@ patch_dsv4_gather_k_cache_check()
 patch_dsv4_layer_probe()
 # Diagnostic: report operand dtypes reaching the hash-MoE top-k op.
 patch_dsv4_hash_topk_probe()
+# Diagnostic: checksum weights so RW and RO loads can be compared.
+patch_dsv4_weight_digest()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
@@ -445,6 +449,8 @@ class GMSWorker(Worker):
         except Exception:
             logger.exception("[GMS] CUDA error immediately after load_model")
             raise
+
+        gms_dsv4_weight_digest(self.model_runner.model)
 
         # Correct memory accounting for GMS-imported weights
         try:
