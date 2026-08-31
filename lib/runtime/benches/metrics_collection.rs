@@ -66,8 +66,8 @@ fn bench_collection(c: &mut Criterion) {
             b.iter(|| black_box(registry.prometheus_expfmt_combined().expect("expfmt")))
         });
 
-        // The export path: same collection, plus parsing engine text into
-        // families instead of appending it as a string.
+        // The export path: same collection, with the typed engine families
+        // merged into the native ones instead of appended as a string.
         group.bench_function(format!("families_combined/{label}"), |b| {
             b.iter(|| black_box(registry.metric_families_combined().expect("families")))
         });

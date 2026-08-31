@@ -186,6 +186,7 @@ def register_engine_metrics_callback(
             registry,
             metric_prefix_filters=metric_prefix_filters,
             exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=final_inject_labels or None,
         )
 
     # The single mechanism: engine metrics cross as a structure and are

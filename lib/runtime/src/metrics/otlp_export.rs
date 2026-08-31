@@ -275,10 +275,13 @@ fn export_interval() -> Duration {
 
 /// Collect and export until `cancel` fires.
 ///
-/// Collection reads through a TTL cache because expfmt callbacks take the
-/// Python GIL and `/metrics` is scraped independently. Export failures are
-/// logged and retried on the next tick: metrics are resendable, so a
-/// transient collector outage should not tear down the task.
+/// Export failures are logged and retried on the next tick: metrics are
+/// resendable, so a transient collector outage should not tear down the task.
+///
+/// Both the connect and the export are bounded by an explicit deadline and
+/// raced against `cancel`. Tonic applies no default RPC timeout, so a
+/// collector that accepts the connection but never answers would otherwise
+/// hold this task past shutdown.
 pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: CancellationToken) {
     let attrs = vec![KeyValue {
         key: "service.name".to_string(),
@@ -290,6 +293,9 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
     // reset on every export.
     let start_time = SystemTime::now();
 
+    // One interval is the natural deadline: a call still outstanding when the
+    // next collection is due has already missed its window.
+    let rpc_deadline = config.interval;
     let mut ticker = tokio::time::interval(config.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut client: Option<MetricsServiceClient<tonic::transport::Channel>> = None;
@@ -304,8 +310,20 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         // would strand the exporter for the process lifetime if the collector
         // happened to be down when this worker started.
         if client.is_none() {
-            match MetricsServiceClient::connect(config.endpoint.clone()).await {
-                Ok(connected) => client = Some(connected),
+            let connecting = async {
+                tonic::transport::Endpoint::from_shared(config.endpoint.clone())?
+                    .connect_timeout(rpc_deadline)
+                    .timeout(rpc_deadline)
+                    .connect()
+                    .await
+                    .map_err(anyhow::Error::from)
+            };
+            let connected = tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = connecting => result,
+            };
+            match connected {
+                Ok(channel) => client = Some(MetricsServiceClient::new(channel)),
                 Err(error) => {
                     tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics connect failed");
                     continue;
@@ -324,13 +342,17 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![to_resource_metrics(&families, attrs.clone(), start_time)],
         };
-        if let Some(connected) = client.as_mut()
-            && let Err(error) = connected.export(request).await
-        {
-            tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
-            // Drop the channel so the next tick reconnects; a broken transport
-            // will not recover on its own.
-            client = None;
+        if let Some(connected) = client.as_mut() {
+            let exported = tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = connected.export(request) => result,
+            };
+            if let Err(error) = exported {
+                tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
+                // Drop the channel so the next tick reconnects; a broken
+                // transport will not recover on its own.
+                client = None;
+            }
         }
     }
 }
