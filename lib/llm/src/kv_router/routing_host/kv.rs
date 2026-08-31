@@ -171,6 +171,8 @@ where
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
+        let includes_prefill =
+            dispatch_includes_prefill(&request, phase, self.dispatch_worker_role());
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
@@ -191,8 +193,8 @@ where
                 "Failed to attach router_hint to backend request"
             );
         }
+        guard.record_prefill_start(includes_prefill);
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start();
 
         let dispatch = self
             .inner

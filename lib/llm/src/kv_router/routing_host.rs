@@ -26,14 +26,15 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
-        to_worker_selection_session_context,
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        scheduler::DefaultWorkerSelector, to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
+        extensions::{LOCAL_PREFILL_EXECUTION_CONTEXT_KEY, LocalPrefillExecution},
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
@@ -41,6 +42,7 @@ use crate::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
         invalid_argument,
     },
+    worker_type::WorkerType,
 };
 
 mod builtin;
@@ -58,6 +60,48 @@ use request_guard::{LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+fn dispatch_includes_prefill(
+    request: &SingleIn<PreprocessedRequest>,
+    phase: RequestPhase,
+    worker_role: Option<WorkerType>,
+) -> bool {
+    let includes_prefill = match phase {
+        RequestPhase::Prefill => true,
+        RequestPhase::Decode => false,
+        // Standalone routers recreate the skipped tracker with its default phase. The target
+        // worker role recovers the split topology without putting the tracker on the wire.
+        RequestPhase::Aggregated => match worker_role {
+            Some(WorkerType::Decode) => false,
+            Some(WorkerType::Prefill | WorkerType::Aggregated | WorkerType::Encode) => true,
+            None => request.prefill_result.is_none(),
+        },
+    };
+    if includes_prefill {
+        return true;
+    }
+
+    // These markers identify decode-shaped dispatches that execute prefill locally.
+    if request
+        .annotations
+        .iter()
+        .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION)
+    {
+        return true;
+    }
+
+    match request.get_optional::<LocalPrefillExecution>(LOCAL_PREFILL_EXECUTION_CONTEXT_KEY) {
+        Ok(marker) => marker.is_some(),
+        Err(error) => {
+            tracing::warn!(
+                request_id = request.context().id(),
+                %error,
+                "Ignoring invalid local-prefill context marker"
+            );
+            false
+        }
+    }
+}
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -393,6 +437,16 @@ where
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => None,
         }
+    }
+
+    fn dispatch_worker_role(&self) -> Option<WorkerType> {
+        self.kv_router_if_enabled()
+            .and_then(|router| router.worker_role())
+            .or_else(|| {
+                self.routing_context
+                    .as_ref()
+                    .map(|context| context.source().worker_type())
+            })
     }
 
     pub(crate) fn peek_next_worker(&self) -> Option<u64> {

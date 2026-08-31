@@ -47,6 +47,15 @@ impl RouterLoadSource {
         }
     }
 
+    pub(crate) const fn worker_type(self) -> WorkerType {
+        match self {
+            Self::Decode => WorkerType::Decode,
+            Self::Aggregated => WorkerType::Aggregated,
+            Self::Prefill => WorkerType::Prefill,
+            Self::Encode => WorkerType::Encode,
+        }
+    }
+
     pub(crate) fn from_worker_role_or_metric(
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,

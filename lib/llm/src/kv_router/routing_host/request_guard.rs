@@ -686,8 +686,10 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self) {
-        self.observability.record_prefill_start();
+    pub(super) fn record_prefill_start(&self, dispatch_includes_prefill: bool) {
+        if dispatch_includes_prefill {
+            self.observability.record_prefill_start();
+        }
     }
 
     pub(super) fn mark_dispatched(&mut self) {

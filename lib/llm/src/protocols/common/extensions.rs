@@ -393,6 +393,15 @@ pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
 pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
 
+/// In-process marker for a request that bypassed an unavailable prefill router and will run
+/// prefill locally on the downstream worker. This lives in the pipeline context registry rather
+/// than [`PreprocessedRequest`](super::preprocessor::PreprocessedRequest), so it is never
+/// serialized across process boundaries.
+pub(crate) const LOCAL_PREFILL_EXECUTION_CONTEXT_KEY: &str = "dynamo.llm.local_prefill_execution";
+
+#[derive(Debug)]
+pub(crate) struct LocalPrefillExecution;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionAffinityId(String);
 

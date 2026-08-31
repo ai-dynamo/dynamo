@@ -33,7 +33,10 @@ use crate::{
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        extensions::{
+            LOCAL_PREFILL_EXECUTION_CONTEXT_KEY, LocalPrefillExecution,
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        },
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
@@ -282,7 +285,7 @@ where
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (mut req, context) = request.into_parts();
+        let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let policy_class = context.metadata().get("policy-class").cloned();
@@ -301,6 +304,7 @@ where
         // deactivated (all prefill workers died), route directly to the backend. Model admission
         // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
+            context.insert(LOCAL_PREFILL_EXECUTION_CONTEXT_KEY, LocalPrefillExecution);
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -700,7 +704,14 @@ fn merge_decode_topology_constraints(
 mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
-    use std::collections::{HashMap, HashSet};
+    use dynamo_runtime::{
+        engine::AsyncEngine,
+        pipeline::{Error, ResponseStream},
+    };
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use crate::protocols::common::{
         FinishReason,
@@ -708,6 +719,32 @@ mod tests {
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[derive(Default)]
+    struct LocalPrefillCapture {
+        saw_local_prefill: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for LocalPrefillCapture
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> std::result::Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let saw_local_prefill = request
+                .get_optional::<LocalPrefillExecution>(LOCAL_PREFILL_EXECUTION_CONTEXT_KEY)
+                .expect("local-prefill context marker must have the expected type")
+                .is_some();
+            self.saw_local_prefill
+                .store(saw_local_prefill, Ordering::Relaxed);
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::empty()),
+                request.context(),
+            ))
+        }
+    }
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
@@ -863,6 +900,30 @@ mod tests {
                 assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_prefill_router_marks_downstream_local_prefill() {
+        let router = PrefillRouter::disabled(
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            None,
+        );
+        let downstream = Arc::new(LocalPrefillCapture::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            downstream.clone();
+        let tracker = Arc::new(RequestTracker::new());
+        let _phase_permit = tracker.set_phase(RequestPhase::Decode).await;
+        let mut request = request_with_constraints(None);
+        request.tracker = Some(Arc::clone(&tracker));
+
+        router
+            .generate(Context::new(request), next)
+            .await
+            .expect("inactive prefill router should dispatch to the downstream worker");
+
+        assert!(downstream.saw_local_prefill.load(Ordering::Relaxed));
+        assert_eq!(tracker.phase(), RequestPhase::Decode);
     }
 
     #[tokio::test]

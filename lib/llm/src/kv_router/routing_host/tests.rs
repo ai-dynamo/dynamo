@@ -32,11 +32,19 @@ use tokio::sync::watch;
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::RoutingLoadContext,
+    kv_router::{RoutingLoadContext, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
-    protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    protocols::common::{
+        extensions::{
+            LOCAL_PREFILL_EXECUTION_CONTEXT_KEY, LocalPrefillExecution,
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        },
+        preprocessor::PrefillResult,
+        timing::RequestTracker,
+    },
+    worker_type::WorkerType,
 };
 
 fn request() -> PreprocessedRequest {
@@ -724,6 +732,121 @@ async fn track_request(
 async fn session_affinity_disabled_does_not_create_coordinator() {
     let (router, runtime) = router(None).await;
     assert!(router.affinity.is_none());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[test]
+fn dispatch_prefill_classification_uses_phase_and_topology() {
+    let normal_request = Context::new(request());
+
+    for (phase, worker_role, expected) in [
+        (RequestPhase::Prefill, Some(WorkerType::Decode), true),
+        (RequestPhase::Decode, Some(WorkerType::Decode), false),
+        (RequestPhase::Aggregated, Some(WorkerType::Aggregated), true),
+        (RequestPhase::Aggregated, Some(WorkerType::Prefill), true),
+        (RequestPhase::Aggregated, None, true),
+    ] {
+        assert_eq!(
+            dispatch_includes_prefill(&normal_request, phase, worker_role),
+            expected,
+            "unexpected classification for {phase}, role={worker_role:?}"
+        );
+    }
+
+    let mut legacy_handoff = Context::new(request());
+    legacy_handoff.prefill_result = Some(PrefillResult {
+        disaggregated_params: serde_json::json!({}),
+        prompt_tokens_details: None,
+    });
+    assert!(!dispatch_includes_prefill(
+        &legacy_handoff,
+        RequestPhase::Aggregated,
+        None,
+    ));
+}
+
+#[tokio::test]
+async fn split_decode_router_recovers_phase_from_worker_role() {
+    let tracker = Arc::new(RequestTracker::new());
+    let _phase_permit = tracker.set_phase(RequestPhase::Decode).await;
+    let mut frontend_request = request();
+    frontend_request.tracker = Some(tracker);
+    let wire_request = serde_json::to_value(frontend_request).unwrap();
+    let router_request: PreprocessedRequest = serde_json::from_value(wire_request).unwrap();
+
+    assert!(router_request.tracker.is_none());
+    let router_request = Context::new(router_request);
+    let phase = router_request
+        .tracker
+        .as_ref()
+        .map(|tracker| tracker.phase())
+        .unwrap_or(RequestPhase::Aggregated);
+    assert!(!dispatch_includes_prefill(
+        &router_request,
+        phase,
+        Some(WorkerType::Decode),
+    ));
+}
+
+#[test]
+fn explicit_local_prefill_signals_override_decode_phase() {
+    let mut bypass = Context::new(request());
+    bypass
+        .annotations
+        .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+    assert!(dispatch_includes_prefill(
+        &bypass,
+        RequestPhase::Decode,
+        Some(WorkerType::Decode),
+    ));
+
+    let mut fallback = Context::new(request());
+    fallback.insert(LOCAL_PREFILL_EXECUTION_CONTEXT_KEY, LocalPrefillExecution);
+    assert!(dispatch_includes_prefill(
+        &fallback,
+        RequestPhase::Decode,
+        Some(WorkerType::Decode),
+    ));
+}
+
+#[tokio::test]
+async fn prefill_start_recording_is_phase_aware_and_first_write_wins() {
+    let (router, runtime) = router(None).await;
+
+    let tracker = Arc::new(RequestTracker::new());
+    let mut tracked_request = request();
+    tracked_request.tracker = Some(Arc::clone(&tracker));
+    let tracked_request = Context::new(tracked_request);
+    let mut guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "prefill-start-prefill-decode".to_string(),
+        WorkerWithDpRank::new(7, 0),
+        &tracked_request,
+        false,
+    );
+
+    let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+    guard.record_prefill_start(dispatch_includes_prefill(
+        &tracked_request,
+        tracker.phase(),
+        None,
+    ));
+    let prefill_start = tracker
+        .prefill_wait_time_ms()
+        .expect("prefill phase should record prefill start");
+    drop(prefill_permit);
+
+    let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+    guard.record_prefill_start(dispatch_includes_prefill(
+        &tracked_request,
+        tracker.phase(),
+        None,
+    ));
+    assert_eq!(tracker.prefill_wait_time_ms(), Some(prefill_start));
+    guard.abort().await;
 
     drop(router);
     runtime.shutdown();
