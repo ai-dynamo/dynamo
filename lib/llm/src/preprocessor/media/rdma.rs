@@ -46,10 +46,9 @@ pub struct RdmaMediaDataDescriptor {
     #[serde(flatten)]
     pub(crate) tensor_info: MediaTensorInfo,
 
-    /// Canonical xxh3-64 key for decoded media content. Image identity covers
-    /// `(shape, dtype, bytes)`; video additionally covers typed metadata.
+    /// Canonical xxh3-64 key for `(shape, dtype, decoded image byte payload)`.
     /// Serialized once so routing and backend embedding caches consume the
-    /// same hash without rescanning the payload on the async request path.
+    /// exact same hash without reimplementing the payload contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
 
@@ -71,42 +70,6 @@ impl RdmaMediaDataDescriptor {
         self.content_hash_key()
             .and_then(|key| u64::from_str_radix(key, 16).ok())
     }
-}
-
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-fn hash_video_content(tensor_info: &MediaTensorInfo, bytes: &[u8]) -> Result<u64> {
-    use xxhash_rust::xxh3::Xxh3;
-
-    anyhow::ensure!(!bytes.is_empty(), "decoded video payload is empty");
-    let metadata = tensor_info
-        .metadata
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("decoded video metadata is missing"))?;
-    let DecodedMediaMetadata::Video(metadata) = metadata else {
-        anyhow::bail!("decoded media metadata is not video metadata");
-    };
-    let metadata_bytes = serde_json::to_vec(metadata)
-        .map_err(|error| anyhow::anyhow!("failed to serialize video metadata: {error}"))?;
-
-    let mut hasher = Xxh3::new();
-    update_len_prefixed(&mut hasher, b"video");
-    hasher.update(&(tensor_info.shape.len() as u64).to_le_bytes());
-    for &dim in &tensor_info.shape {
-        hasher.update(&(dim as u64).to_le_bytes());
-    }
-    let dtype_byte = match tensor_info.dtype {
-        DataType::UINT8 => 0,
-    };
-    hasher.update(&[dtype_byte]);
-    update_len_prefixed(&mut hasher, &metadata_bytes);
-    update_len_prefixed(&mut hasher, bytes);
-    Ok(hasher.digest())
-}
-
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-fn update_len_prefixed(hasher: &mut xxhash_rust::xxh3::Xxh3, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
 }
 
 fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64 {
@@ -131,29 +94,29 @@ fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64
 fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStorage) -> Option<u64> {
     use dynamo_memory::{MemoryDescriptor, actions::Slice};
 
-    if storage.size() == 0 {
+    // The current consumers cache and route images only. Avoid an otherwise
+    // unused full-buffer pass over decoded videos.
+    if !matches!(
+        tensor_info.metadata.as_ref(),
+        Some(DecodedMediaMetadata::Image(_))
+    ) || storage.size() == 0
+    {
         return None;
     }
 
     // SAFETY: storage owns this stable buffer and is only read while the
     // descriptor is being built, before NIXL can access it concurrently.
     let bytes = unsafe { storage.as_slice().ok()? };
-    match tensor_info.metadata.as_ref()? {
-        DecodedMediaMetadata::Image(_) => Some(canonical_content_hash(
-            &tensor_info.shape,
-            tensor_info.dtype,
-            bytes,
-        )),
-        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-        DecodedMediaMetadata::Video(_) => hash_video_content(tensor_info, bytes).ok(),
-        #[allow(unreachable_patterns)]
-        _ => None,
-    }
+    Some(canonical_content_hash(
+        &tensor_info.shape,
+        tensor_info.dtype,
+        bytes,
+    ))
 }
 
 impl DecodedMediaData {
-    /// Precompute the canonical media hash while still running on the decode
-    /// thread so request preprocessing never scans a large pixel buffer.
+    /// Precompute the canonical image hash while still running on the decode
+    /// thread. Videos and empty buffers intentionally remain unkeyed.
     pub(crate) fn compute_content_hash(&mut self) {
         self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data);
     }
@@ -242,64 +205,5 @@ mod tests {
 
         assert_eq!(hash, 0x7a9b_bcb1_1a89_8630);
         assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
-    }
-}
-
-#[cfg(all(test, feature = "mm-routing", feature = "media-ffmpeg"))]
-mod video_tests {
-    use super::*;
-    use crate::preprocessor::media::decoders::VideoMetadata;
-
-    fn video_info(sampled_timestamps: Vec<f64>) -> MediaTensorInfo {
-        MediaTensorInfo {
-            shape: vec![2, 1, 2, 3],
-            dtype: DataType::UINT8,
-            metadata: Some(DecodedMediaMetadata::Video(VideoMetadata {
-                source_fps: 24.0,
-                source_duration: 10.0,
-                sampled_timestamps,
-            })),
-        }
-    }
-
-    #[test]
-    fn video_hash_covers_metadata_shape_and_rgb_bytes() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let expected = hash_video_content(&info, &bytes).unwrap();
-
-        assert_eq!(hash_video_content(&info, &bytes).unwrap(), expected);
-
-        let changed_metadata = video_info(vec![0.0, 5.1]);
-        assert_ne!(
-            hash_video_content(&changed_metadata, &bytes).unwrap(),
-            expected
-        );
-
-        let mut changed_shape = info.clone();
-        changed_shape.shape = vec![1, 2, 2, 3];
-        assert_ne!(
-            hash_video_content(&changed_shape, &bytes).unwrap(),
-            expected
-        );
-
-        let mut changed_bytes = bytes;
-        changed_bytes[0] = 42;
-        assert_ne!(hash_video_content(&info, &changed_bytes).unwrap(), expected);
-    }
-
-    #[test]
-    fn video_hash_is_precomputed_from_decoded_storage() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let mut storage = SystemStorage::new(bytes.len()).unwrap();
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), storage.as_mut_ptr(), bytes.len());
-        }
-
-        assert_eq!(
-            content_hash_for_storage(&info, &storage),
-            Some(hash_video_content(&info, &bytes).unwrap())
-        );
     }
 }

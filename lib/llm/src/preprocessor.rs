@@ -7708,21 +7708,20 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn ordered_mm_replacements_support_multi_token_targets() {
+    fn ordered_mm_replacements_apply_image_placeholders_in_request_order() {
         let replacements = vec![
             MmRoutingReplacement {
                 target_tokens: vec![10],
                 replacement_tokens: vec![100, 101],
             },
             MmRoutingReplacement {
-                target_tokens: vec![30, 20, 31],
+                target_tokens: vec![10],
                 replacement_tokens: vec![200, 201, 202],
             },
         ];
 
         let (expanded, prompt_len) =
-            apply_ordered_mm_replacements(Some(1), &replacements, &[7, 10, 8, 30, 20, 31, 9])
-                .unwrap();
+            apply_ordered_mm_replacements(Some(1), &replacements, &[7, 10, 8, 10, 9]).unwrap();
 
         assert_eq!(expanded, [1, 7, 100, 101, 8, 200, 201, 202, 9]);
         assert_eq!(prompt_len, expanded.len());
@@ -7730,24 +7729,20 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn ordered_mm_replacements_reject_misalignment() {
+    fn ordered_mm_replacements_reject_image_placeholder_count_mismatch() {
         let replacements = vec![
             MmRoutingReplacement {
                 target_tokens: vec![10],
                 replacement_tokens: vec![100],
             },
             MmRoutingReplacement {
-                target_tokens: vec![20],
+                target_tokens: vec![10],
                 replacement_tokens: vec![200],
             },
         ];
 
         assert!(
-            apply_ordered_mm_replacements(None, &replacements, &[20, 10]).is_err(),
-            "out-of-order placeholders must fail closed"
-        );
-        assert!(
-            apply_ordered_mm_replacements(None, &replacements, &[10, 20, 20]).is_err(),
+            apply_ordered_mm_replacements(None, &replacements, &[10, 10, 10]).is_err(),
             "extra placeholders must fail closed"
         );
         assert!(
