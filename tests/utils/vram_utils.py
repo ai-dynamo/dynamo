@@ -210,7 +210,12 @@ def write_test_meta(items, dest_dir: str | None = None) -> None:
     test_meta: dict[str, dict] = {}
     for item in items:
         meta: dict = {}
-        gpu_count = gpu_count_from_marker_names(m.name for m in item.iter_markers())
+        try:
+            gpu_count = gpu_count_from_marker_names(m.name for m in item.iter_markers())
+        except ValueError as exc:
+            # Raised during collection, where pytest reports an INTERNALERROR
+            # without the nodeid. Name the test so the typo is actionable.
+            raise ValueError(f"{item.nodeid}: {exc}") from exc
         if gpu_count is not None:
             meta["gpu_count"] = gpu_count
         profiled_mark = item.get_closest_marker("profiled_vram_gib")
