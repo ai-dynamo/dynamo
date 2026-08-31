@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# This recipe references an upstream third-party vLLM container image. NVIDIA does not publish or distribute this image. Users should review the upstream image’s open-source license and codec terms before use or redistribution.
 
 # For performance testing, use the following speculative config:
 # --speculative-config '{"method":"mtp","num_speculative_tokens":7, "rejection_sample_method":"synthetic", "synthetic_acceptance_length":3.9764}'

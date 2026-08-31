@@ -3,6 +3,8 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
+This recipe references an upstream third-party vLLM container image. NVIDIA does not publish or distribute this image. Users should review the upstream image’s open-source license and codec terms before use or redistribution.
+
 # GLM-5.3-Flash Recipes
 
 Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash), a mixture-of-experts model with 320B total parameters, 18B active parameters, hybrid sparse and linear attention, and Manifold-Constrained Hyper-Connections (mHC).

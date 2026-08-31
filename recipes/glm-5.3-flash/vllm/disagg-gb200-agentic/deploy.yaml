@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# This recipe references an upstream third-party vLLM container image. NVIDIA does not publish or distribute this image. Users should review the upstream image’s open-source license and codec terms before use or redistribution.
+#
 # GLM-5.3-Flash — disaggregated 1P1D, 4x GB200 per worker (8 GPUs total), agentic workload (64K ISL / 400 OSL).
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
