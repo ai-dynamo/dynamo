@@ -761,6 +761,7 @@ mod tests {
             }),
             None,
             None,
+            SessionAffinityMode::Hard,
             "model".to_string(),
             "namespace".to_string(),
             crate::discovery::LoadThresholdHandle::new(Default::default()),

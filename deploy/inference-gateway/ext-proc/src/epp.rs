@@ -182,7 +182,6 @@ impl Router {
             Some(prefill_config),
             None,
             None,
-            None,
             dynamo_llm::session_affinity::SessionAffinityMode::Hard,
             model_name.clone(),
             actual_namespace.to_string(),
