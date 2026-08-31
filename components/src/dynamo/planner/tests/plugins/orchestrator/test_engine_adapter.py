@@ -22,12 +22,19 @@ Covers bugs caught after K8s smoke / plugin-path review:
 
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
+import dynamo.planner.plugins.orchestrator.engine_adapter as engine_adapter_module
+import pytest
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
+    BatchDispatcherFeedback,
+    BatchDrainLimitDecision,
+    BatchJobDemand,
+    BatchSchedulingObservation,
     EngineCapabilities,
     FpmObservations,
+    PoolTrafficDemand,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -66,6 +73,40 @@ def _agg_config_throughput_on() -> PlannerConfig:
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
+    )
+
+
+def _enable_batch_for_test(
+    config: PlannerConfig,
+):
+    """Attach the minimal batch config seam without coupling these tests to
+    environment/Redis source validation owned by PlannerConfig tests.
+    """
+
+    policy_config = object()
+    batch_config = SimpleNamespace(
+        enabled=True,
+        to_policy_config=lambda: policy_config,
+    )
+    object.__setattr__(config, "batch_scheduling", batch_config)
+    return policy_config
+
+
+def _batch_plan(
+    *,
+    replica_floor: int = 4,
+    max_admission_rps: float = 3.5,
+    valid_until_s: float = 65.0,
+    decision_id: str = "d-5.0",
+):
+    return SimpleNamespace(
+        replica_floor=replica_floor,
+        drain_limit=BatchDrainLimitDecision(
+            pool_id="pool-a",
+            max_admission_rps=max_admission_rps,
+            valid_until_s=valid_until_s,
+            decision_id=decision_id,
+        ),
     )
 
 
@@ -384,6 +425,48 @@ def test_project_scale_to_non_apply_action_returns_none():
         assert adapter._project_scale_to(outcome, wc) is None
 
 
+def test_project_scale_to_merges_batch_floor_after_plugin_proposal():
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    wc = WorkerCounts(ready_num_decode=5)
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=2)])
+
+    decision = adapter._project_scale_to(outcome, wc, batch_replica_floor=4)
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 4
+
+
+def test_project_scale_to_synthesizes_batch_floor_on_skip_no_targets():
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    outcome = PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    decision = adapter._project_scale_to(
+        outcome,
+        WorkerCounts(ready_num_decode=2),
+        batch_replica_floor=4,
+    )
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 4
+
+
+@pytest.mark.parametrize("action", ["skip_short_circuit", "skip_tick_timeout"])
+def test_project_scale_to_never_scales_from_batch_floor_on_pipeline_failure(action):
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    outcome = PipelineOutcome(execute_action=action, final_proposal=None)
+
+    assert (
+        adapter._project_scale_to(
+            outcome,
+            WorkerCounts(ready_num_decode=2),
+            batch_replica_floor=10,
+        )
+        is None
+    )
+
+
 def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
     cfg = PlannerConfig(
         mode="disagg",
@@ -612,6 +695,56 @@ def test_tick_input_to_context_maps_observations_and_fpm():
     assert back.worker_id == "w1"
 
 
+def test_tick_input_to_context_maps_batch_observations():
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    ti = TickInput(
+        now_s=1_700_000_010.0,
+        batch=BatchSchedulingObservation(
+            job_demands=[
+                BatchJobDemand(
+                    observed_at_s=1_700_000_000.0,
+                    pool_id="pool-a",
+                    job_id="batch-123",
+                    status="in_progress",
+                    total_requests=1_000,
+                    completed_requests=275,
+                    failed_requests=25,
+                    deadline_at_s=1_700_003_600.0,
+                    work_class="chat-8k",
+                )
+            ],
+            pool_traffic=[
+                PoolTrafficDemand(
+                    observed_at_s=1_700_000_001.0,
+                    pool_id="pool-a",
+                    online_offered_rps=90.0,
+                )
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedback(
+                    observed_at_s=1_700_000_002.0,
+                    pool_id="pool-a",
+                    observation_window_s=30.0,
+                    queued_requests=700,
+                    inflight_requests=20,
+                    actual_dispatch_rps=9.5,
+                    applied_max_admission_rps=10.0,
+                )
+            ],
+        ),
+    )
+
+    ctx = adapter._tick_input_to_context(ti)
+    assert ctx.observations.batch is not None
+    assert ctx.observations.batch.job_demands[0].remaining_requests == 700
+    assert ctx.observations.batch.job_demands[0].deadline_at_s == 1_700_003_600.0
+    assert ctx.observations.batch.pool_traffic[0].online_offered_rps == 90.0
+    assert ctx.observations.batch.dispatcher_feedback[0].queued_requests == 700
+    assert (
+        ctx.observations.batch.dispatcher_feedback[0].applied_max_admission_rps == 10.0
+    )
+
+
 def test_initial_tick_with_throughput_scaling_enabled_does_not_attribute_error():
     """``initial_tick`` used to read the non-existent
     ``throughput_adjustment_interval`` attribute (canonical name has a
@@ -634,6 +767,216 @@ def test_initial_tick_with_throughput_scaling_enabled_does_not_attribute_error()
     # got past the buggy attribute read.
     assert tick.at_s > 0.0
     assert tick.run_load_scaling or tick.run_throughput_scaling
+
+
+def test_batch_scheduling_runs_on_every_pipeline_tick_when_enabled():
+    config = _agg_config_throughput_on()
+    config.scheduling.scale_interval_seconds = 5.0
+    _enable_batch_for_test(config)
+    adapter = OrchestratorEngineAdapter(config, _caps(), clock=VirtualClock())
+
+    first = adapter.initial_tick(start_s=0.0)
+    assert first.at_s == pytest.approx(5.0)
+    assert first.need_batch_scheduling is True
+
+    adapter._last_tick_s = first.at_s
+    adapter._last_tick_monotonic = first.at_monotonic_s
+    second = adapter._compute_next_scheduled_tick()
+    assert second.at_s == pytest.approx(10.0)
+    assert second.need_batch_scheduling is True
+
+
+@pytest.mark.asyncio
+async def test_tick_computes_one_batch_plan_and_projects_both_outputs(monkeypatch):
+    config = _agg_config_throughput_on()
+    config.scheduling.scale_interval_seconds = 5.0
+    policy_config = _enable_batch_for_test(config)
+    adapter = OrchestratorEngineAdapter(config, _caps(), clock=VirtualClock())
+
+    calls = []
+
+    def fake_plan(tick_input, passed_config, *, decision_id):
+        calls.append((tick_input, passed_config, decision_id))
+        return _batch_plan(
+            replica_floor=4,
+            max_admission_rps=3.5,
+            valid_until_s=tick_input.now_s + 60.0,
+            decision_id=decision_id,
+        )
+
+    monkeypatch.setattr(engine_adapter_module, "plan_batch_schedule", fake_plan)
+
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+
+    scheduled = adapter.initial_tick(start_s=0.0)
+    assert scheduled.need_batch_scheduling is True
+    tick_input = TickInput(
+        now_s=scheduled.at_s,
+        worker_counts=WorkerCounts(ready_num_decode=2),
+    )
+
+    effects = await adapter.tick(scheduled, tick_input)
+
+    assert calls == [(tick_input, policy_config, "d-5.0")]
+    assert effects.scale_to is not None
+    assert effects.scale_to.num_decode == 4
+    assert effects.batch_drain_limits == [
+        BatchDrainLimitDecision(
+            pool_id="pool-a",
+            max_admission_rps=3.5,
+            valid_until_s=65.0,
+            decision_id="d-5.0",
+        )
+    ]
+    assert effects.next_tick is not None
+    assert effects.next_tick.need_batch_scheduling is True
+    assert any(
+        event.startswith("batch_drain_limit_decision:")
+        for event in effects.diagnostics.audit_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_tick_pauses_batch_drain_when_final_budget_blocks_floor(monkeypatch):
+    config = _agg_config_throughput_on()
+    config.scheduling.scale_interval_seconds = 5.0
+    config.min_gpu_budget = -1
+    config.max_gpu_budget = 2
+    _enable_batch_for_test(config)
+    adapter = OrchestratorEngineAdapter(config, _caps(), clock=VirtualClock())
+
+    def fake_plan(tick_input, passed_config, *, decision_id):
+        return _batch_plan(
+            replica_floor=4,
+            max_admission_rps=3.5,
+            valid_until_s=tick_input.now_s + 60.0,
+            decision_id=decision_id,
+        )
+
+    monkeypatch.setattr(engine_adapter_module, "plan_batch_schedule", fake_plan)
+
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+    scheduled = adapter.initial_tick(start_s=0.0)
+
+    effects = await adapter.tick(
+        scheduled,
+        TickInput(
+            now_s=scheduled.at_s,
+            worker_counts=WorkerCounts(ready_num_decode=1),
+        ),
+    )
+
+    assert effects.scale_to is not None
+    assert effects.scale_to.num_decode == 2
+    assert effects.batch_drain_limits[0].max_admission_rps == 0.0
+    assert any(
+        event.startswith("batch_floor_blocked_by_final_budget:")
+        for event in effects.diagnostics.audit_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_tick_pauses_batch_drain_when_budget_clamps_floor_to_current_noop(
+    monkeypatch,
+):
+    config = _agg_config_throughput_on()
+    config.scheduling.scale_interval_seconds = 5.0
+    config.min_gpu_budget = -1
+    config.max_gpu_budget = 1
+    _enable_batch_for_test(config)
+    adapter = OrchestratorEngineAdapter(config, _caps(), clock=VirtualClock())
+
+    def fake_plan(tick_input, passed_config, *, decision_id):
+        return _batch_plan(
+            replica_floor=2,
+            max_admission_rps=3.5,
+            valid_until_s=tick_input.now_s + 60.0,
+            decision_id=decision_id,
+        )
+
+    monkeypatch.setattr(engine_adapter_module, "plan_batch_schedule", fake_plan)
+
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+    scheduled = adapter.initial_tick(start_s=0.0)
+
+    effects = await adapter.tick(
+        scheduled,
+        TickInput(
+            now_s=scheduled.at_s,
+            worker_counts=WorkerCounts(ready_num_decode=1),
+        ),
+    )
+
+    # Final GPU clamping returned the current ready count, so scale projection
+    # correctly suppressed it as a no-op. Drain still fails closed because the
+    # effective count remains below the plan's floor.
+    assert effects.scale_to is None
+    assert effects.batch_drain_limits[0].max_admission_rps == 0.0
+    assert any(
+        "replica_floor=2:effective_decode=1" in event
+        for event in effects.diagnostics.audit_events
+        if event.startswith("batch_floor_blocked_by_final_budget:")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["skip_short_circuit", "skip_tick_timeout"])
+async def test_tick_emits_fresh_batch_pause_on_pipeline_failure(monkeypatch, action):
+    config = _agg_config_throughput_on()
+    config.scheduling.scale_interval_seconds = 5.0
+    _enable_batch_for_test(config)
+    adapter = OrchestratorEngineAdapter(config, _caps(), clock=VirtualClock())
+
+    calls = []
+
+    def fake_plan(tick_input, passed_config, *, decision_id):
+        calls.append(decision_id)
+        return _batch_plan(
+            replica_floor=10,
+            max_admission_rps=7.0,
+            valid_until_s=tick_input.now_s + 60.0,
+            decision_id=decision_id,
+        )
+
+    monkeypatch.setattr(engine_adapter_module, "plan_batch_schedule", fake_plan)
+
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
+        return PipelineOutcome(execute_action=action, final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+    scheduled = adapter.initial_tick(start_s=0.0)
+
+    effects = await adapter.tick(
+        scheduled,
+        TickInput(
+            now_s=scheduled.at_s,
+            worker_counts=WorkerCounts(ready_num_decode=2),
+        ),
+    )
+
+    assert calls == ["d-5.0"]
+    assert effects.scale_to is None
+    assert effects.batch_drain_limits == [
+        BatchDrainLimitDecision(
+            pool_id="pool-a",
+            max_admission_rps=0.0,
+            valid_until_s=65.0,
+            decision_id="d-5.0",
+        )
+    ]
+    assert any(
+        event.startswith(f"batch_drain_limit_safety_pause:pipeline_action={action}:")
+        for event in effects.diagnostics.audit_events
+    )
 
 
 def test_orchestrator_path_honours_configured_protocol_version_range():
@@ -1376,15 +1719,15 @@ def test_lazy_traffic_pull_matches_dot_path_sub_paths_of_observations_traffic():
         "p_sibling", ["observations.traffic_legacy"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert (
-        sched.need_traffic_metrics is False
-    ), "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
+    assert sched.need_traffic_metrics is False, (
+        "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
+    )
 
     # --- Case 4: completely unrelated needs must NOT match ---
     adapter._orchestrator._registry._plugins["p_other"] = _make_traffic_plugin(
         "p_other", ["observations.fpm", "predictions"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert (
-        sched.need_traffic_metrics is False
-    ), "unrelated needs must not trigger the traffic pull"
+    assert sched.need_traffic_metrics is False, (
+        "unrelated needs must not trigger the traffic pull"
+    )

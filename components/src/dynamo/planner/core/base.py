@@ -564,6 +564,7 @@ class NativePlannerBase:
         traffic = None
         worker_counts = None
         fpm_obs = None
+        batch = None
 
         if tick.need_traffic_metrics:
             if tick.use_full_traffic_metrics:
@@ -576,11 +577,22 @@ class NativePlannerBase:
             worker_counts = await self._collect_worker_counts()
         if tick.need_worker_fpm:
             fpm_obs = self._collect_fpm()
+        if tick.need_batch_scheduling:
+            try:
+                batch = await self.environment.collect_batch_scheduling()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Batch scheduling observation failed; continuing fail-closed"
+                )
+            now = time.time()
         return TickInput(
             now_s=now,
             traffic=traffic,
             worker_counts=worker_counts,
             fpm_observations=fpm_obs,
+            batch=batch,
         )
 
     async def _observe_tick(
@@ -803,6 +815,7 @@ class NativePlannerBase:
             tick.run_load_scaling
             or tick.run_throughput_scaling
             or effects.scale_to is not None
+            or bool(effects.batch_drain_limits)
             or bool(diag.audit_events)
             or bool(diag.short_circuit_reason)
         )
@@ -822,7 +835,29 @@ class NativePlannerBase:
         # lock is released before connector rollouts that may take minutes.
         async with self._config_lock:
             effects = await engine.tick(tick, tick_input)
-        await self._apply_effects(effects)
+        batch_actuation_succeeded = True
+        if effects.batch_drain_limits and not self.config.advisory:
+            try:
+                # Apply the leased admission decision before any replica
+                # mutation. If Redis is unavailable, retain the current fleet;
+                # the previous lease expires fail-closed and the next tick
+                # retries without terminating the Planner loop.
+                await self.environment.apply_batch_drain_limits(
+                    effects.batch_drain_limits
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                batch_actuation_succeeded = False
+                logger.exception(
+                    "Batch drain-limit actuation failed; skipping replica "
+                    "actuation for this tick"
+                )
+                effects.diagnostics.audit_events.append(
+                    f"batch_drain_actuation_failed:{type(exc).__name__}"
+                )
+        if batch_actuation_succeeded:
+            await self._apply_effects(effects)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
             self._report_diagnostics(tick, effects.diagnostics)

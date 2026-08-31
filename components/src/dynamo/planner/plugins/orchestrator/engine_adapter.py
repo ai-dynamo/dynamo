@@ -34,7 +34,9 @@ Internal responsibilities
    Extracts ``traffic`` into ``TrafficMetrics``, ``worker_counts``
    (counts + scaling-in-progress flags) into ``WorkerState``, and
    per-engine FPM observations into ``FpmData`` (msgspec/msgpack-
-   encoded, keyed by ``"<worker_id>/<dp_rank>"``) on ``ObservationData``.
+   encoded, keyed by ``"<worker_id>/<dp_rank>"``), plus generic batch
+   scheduling observations into ``BatchSchedulingData`` on
+   ``ObservationData``.
    External plugins declaring ``needs=["observations.fpm"]`` receive
    the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
@@ -68,6 +70,7 @@ from dynamo.planner.config.planner_config import resolve_min_endpoint
 if TYPE_CHECKING:
     import grpc.aio
 
+from dynamo.planner.core.batch_policy import plan_batch_schedule
 from dynamo.planner.core.budget import (
     apply_power_budget,
     proportional_clamp_pair,
@@ -75,6 +78,8 @@ from dynamo.planner.core.budget import (
 )
 from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
     FpmObservations,
     PlannerEffects,
     ScalingDecision,
@@ -103,11 +108,21 @@ from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
 from dynamo.planner.plugins.types import (
+    BatchDispatcherFeedback as BatchDispatcherFeedbackData,
+)
+from dynamo.planner.plugins.types import (
+    BatchJobDemand as BatchJobDemandData,
+)
+from dynamo.planner.plugins.types import (
+    BatchSchedulingData,
     FpmData,
     ObservationData,
     PipelineContext,
     TrafficMetrics,
     WorkerState,
+)
+from dynamo.planner.plugins.types import (
+    PoolTrafficDemand as PoolTrafficDemandData,
 )
 
 log = logging.getLogger(__name__)
@@ -175,6 +190,14 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic: float = 0.0
         self._last_load_loop_monotonic: float = 0.0
         self._last_throughput_loop_monotonic: float = 0.0
+
+        # Batch scheduling is a native planner decision made on every pipeline
+        # tick when enabled, independent of whether any plugin is due.
+        # ``getattr`` plus the strict bool check keeps legacy tests/config
+        # mocks (which predate the config subtree) disabled instead of
+        # accidentally enabling the path through a truthy ``MagicMock``.
+        batch_config = getattr(config, "batch_scheduling", None)
+        self._batch_scheduling_enabled = getattr(batch_config, "enabled", False) is True
         # Emit one rollout-hold warning per continuous mid-rollout stretch;
         # reset when the deployment is stable again so the next rollout warns.
         self._power_rollout_hold_warned: bool = False
@@ -580,6 +603,22 @@ class OrchestratorEngineAdapter:
 
         # 3. Build PipelineContext + baseline and drive the orchestrator.
         ctx = self._tick_input_to_context(tick_input)
+        batch_plan = None
+        if getattr(scheduled_tick, "need_batch_scheduling", False):
+            batch_config = getattr(self._config, "batch_scheduling", None)
+            to_policy_config = getattr(batch_config, "to_policy_config", None)
+            if not callable(to_policy_config):
+                raise RuntimeError(
+                    "batch scheduling tick is due but "
+                    "batch_scheduling.to_policy_config() is unavailable"
+                )
+            # Compute exactly once. Both the replica floor and drain lease
+            # below must be projections of the same input snapshot/decision.
+            batch_plan = plan_batch_schedule(
+                tick_input,
+                to_policy_config(),
+                decision_id=ctx.decision_id,
+            )
         baseline = self._baseline_from_worker_counts(tick_input.worker_counts)
         outcome = await self._orchestrator.tick(
             ctx,
@@ -588,8 +627,16 @@ class OrchestratorEngineAdapter:
         )
 
         # 4. Project PipelineOutcome onto PlannerEffects.
+        worker_counts = tick_input.worker_counts or WorkerCounts()
         scale_to = self._project_scale_to(
-            outcome, tick_input.worker_counts or WorkerCounts()
+            outcome,
+            worker_counts,
+            batch_replica_floor=(
+                batch_plan.replica_floor if batch_plan is not None else None
+            ),
+        )
+        batch_drain_limits, batch_audit_event = self._project_batch_drain_limits(
+            outcome, batch_plan, scale_to, worker_counts
         )
 
         # 5. Populate diagnostics from the shared scaling state. Consumed by
@@ -628,11 +675,14 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+        if batch_audit_event is not None:
+            diagnostics.audit_events.append(batch_audit_event)
 
         return PlannerEffects(
             scale_to=scale_to,
             next_tick=self._compute_next_scheduled_tick(),
             diagnostics=diagnostics,
+            batch_drain_limits=batch_drain_limits,
         )
 
     async def observe(self, scheduled_tick: ScheduledTick, now_s: float) -> TickInput:
@@ -706,6 +756,7 @@ class OrchestratorEngineAdapter:
                 at_monotonic,
             )
         )
+        batch_loop_due = self._batch_scheduling_enabled
 
         # Lazy traffic pull: only when some currently-registered,
         # currently-due plugin actually consumes
@@ -772,6 +823,7 @@ class OrchestratorEngineAdapter:
             at_monotonic_s=at_monotonic,
             run_load_scaling=load_loop_due,
             run_throughput_scaling=throughput_loop_due,
+            need_batch_scheduling=batch_loop_due,
             need_worker_states=True,
             need_worker_fpm=bool(fpm_consumers_due) or internal_fpm_due,
             need_traffic_metrics=need_traffic,
@@ -840,10 +892,62 @@ class OrchestratorEngineAdapter:
         # and could not implement load-based decisions through
         # the public PipelineContext API.
         fpm = self._encode_fpm(ti.fpm_observations)
+        batch = self._encode_batch(ti.batch)
         return PipelineContext(
             request_id=f"tick-{ti.now_s}",
             decision_id=f"d-{ti.now_s}",
-            observations=ObservationData(traffic=traffic, fpm=fpm, workers=workers),
+            observations=ObservationData(
+                traffic=traffic,
+                fpm=fpm,
+                workers=workers,
+                batch=batch,
+            ),
+        )
+
+    @staticmethod
+    def _encode_batch(
+        obs: Optional[BatchSchedulingObservation],
+    ) -> Optional[BatchSchedulingData]:
+        """Project generic core batch observations onto the plugin contract."""
+
+        if obs is None:
+            return None
+        return BatchSchedulingData(
+            job_demands=[
+                BatchJobDemandData(
+                    observed_at_s=job.observed_at_s,
+                    pool_id=job.pool_id,
+                    job_id=job.job_id,
+                    status=job.status,
+                    total_requests=job.total_requests,
+                    completed_requests=job.completed_requests,
+                    failed_requests=job.failed_requests,
+                    deadline_at_s=job.deadline_at_s,
+                    work_class=job.work_class,
+                    remaining_requests=job.remaining_requests,
+                )
+                for job in obs.job_demands
+            ],
+            pool_traffic=[
+                PoolTrafficDemandData(
+                    observed_at_s=pool.observed_at_s,
+                    pool_id=pool.pool_id,
+                    online_offered_rps=pool.online_offered_rps,
+                )
+                for pool in obs.pool_traffic
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedbackData(
+                    observed_at_s=feedback.observed_at_s,
+                    pool_id=feedback.pool_id,
+                    observation_window_s=feedback.observation_window_s,
+                    queued_requests=feedback.queued_requests,
+                    inflight_requests=feedback.inflight_requests,
+                    actual_dispatch_rps=feedback.actual_dispatch_rps,
+                    applied_max_admission_rps=feedback.applied_max_admission_rps,
+                )
+                for feedback in obs.dispatcher_feedback
+            ],
         )
 
     @staticmethod
@@ -909,7 +1013,109 @@ class OrchestratorEngineAdapter:
             out[ComponentKey(sub_component_type="decode")] = counts.ready_num_decode
         return out
 
-    def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
+    @staticmethod
+    def _project_batch_drain_limits(
+        outcome, batch_plan, scale_to, worker_counts: WorkerCounts
+    ):
+        """Project one batch plan to a leased dispatcher decision.
+
+        A rejected/timed-out plugin pipeline must not leave a positive prior
+        lease live until expiry. The policy was still evaluated on this tick,
+        so reuse its newly computed lease identity/expiry while forcing
+        admission to zero. ``skip_no_targets`` is not a rejection: it means
+        the plugin pipeline had no scaling opinion, while the native batch
+        decision remains valid.
+        """
+
+        if batch_plan is None:
+            return [], None
+
+        drain_limit = batch_plan.drain_limit
+        effective_decode = (
+            scale_to.num_decode
+            if scale_to is not None and scale_to.num_decode is not None
+            else worker_counts.ready_num_decode
+        )
+        if outcome.execute_action in ("skip_short_circuit", "skip_tick_timeout"):
+            drain_limit = BatchDrainLimitDecision(
+                pool_id=drain_limit.pool_id,
+                max_admission_rps=0.0,
+                valid_until_s=drain_limit.valid_until_s,
+                decision_id=drain_limit.decision_id,
+            )
+            audit_event = (
+                "batch_drain_limit_safety_pause:"
+                f"pipeline_action={outcome.execute_action}:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.warning(
+                "Batch scheduling safety pause: pipeline_action=%s "
+                "pool_id=%s decision_id=%s valid_until_s=%s",
+                outcome.execute_action,
+                drain_limit.pool_id,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+        elif (
+            effective_decode is not None and effective_decode < batch_plan.replica_floor
+        ):
+            # GPU/power caps are the final scaling boundary and are allowed to
+            # make the requested floor infeasible. Never pair that reduced
+            # capacity target with a positive drain lease.
+            drain_limit = BatchDrainLimitDecision(
+                pool_id=drain_limit.pool_id,
+                max_admission_rps=0.0,
+                valid_until_s=drain_limit.valid_until_s,
+                decision_id=drain_limit.decision_id,
+            )
+            audit_event = (
+                "batch_floor_blocked_by_final_budget:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"replica_floor={batch_plan.replica_floor}:"
+                f"effective_decode={effective_decode}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.warning(
+                "Batch scheduling drain paused because final budget blocked "
+                "the replica floor: pool_id=%s replica_floor=%s "
+                "effective_decode=%s decision_id=%s valid_until_s=%s",
+                drain_limit.pool_id,
+                batch_plan.replica_floor,
+                effective_decode,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+        else:
+            audit_event = (
+                "batch_drain_limit_decision:"
+                f"pipeline_action={outcome.execute_action}:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"max_admission_rps={drain_limit.max_admission_rps}:"
+                f"replica_floor={batch_plan.replica_floor}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.info(
+                "Batch scheduling decision: pipeline_action=%s pool_id=%s "
+                "replica_floor=%s max_admission_rps=%s decision_id=%s "
+                "valid_until_s=%s",
+                outcome.execute_action,
+                drain_limit.pool_id,
+                batch_plan.replica_floor,
+                drain_limit.max_admission_rps,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+
+        return [drain_limit], audit_event
+
+    def _project_scale_to(
+        self,
+        outcome,
+        worker_counts: WorkerCounts,
+        *,
+        batch_replica_floor: Optional[int] = None,
+    ):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
         with planner "no change -> None" detection.
 
@@ -918,12 +1124,27 @@ class OrchestratorEngineAdapter:
         actually targeted before that merge, so the power path can charge
         baseline peers without treating them as adjustable targets.
         """
-        if outcome.execute_action != "apply" or outcome.final_proposal is None:
+        if batch_replica_floor is not None and (
+            isinstance(batch_replica_floor, bool)
+            or not isinstance(batch_replica_floor, int)
+            or batch_replica_floor < 0
+        ):
+            raise ValueError("batch_replica_floor must be a non-negative integer")
+
+        pipeline_has_proposal = (
+            outcome.execute_action == "apply" and outcome.final_proposal is not None
+        )
+        batch_floor_allowed = batch_replica_floor is not None and (
+            outcome.execute_action in ("apply", "skip_no_targets")
+        )
+        if not pipeline_has_proposal and not batch_floor_allowed:
             return None
 
-        by_comp = {
-            t.sub_component_type: t.replicas for t in outcome.final_proposal.targets
-        }
+        by_comp = (
+            {t.sub_component_type: t.replicas for t in outcome.final_proposal.targets}
+            if pipeline_has_proposal
+            else {}
+        )
         num_p = by_comp.get("prefill")
         num_d = by_comp.get("decode")
 
@@ -961,13 +1182,29 @@ class OrchestratorEngineAdapter:
             and current_d is not None
             and current_d < decode_min_endpoint
         )
-        floor_reconcile = mode == "disagg" and (
-            prefill_floor_needed or decode_floor_needed
-        )
         if prefill_floor_needed:
             num_p = max(num_p or 0, prefill_min_endpoint)
         if decode_floor_needed:
             num_d = max(num_d or 0, decode_min_endpoint)
+
+        # The batch policy floor is a native, dynamic final invariant. It can
+        # raise an explicit plugin target or synthesize a decode target when
+        # the plugin pipeline has no opinion. Do not echo the ready baseline
+        # when it already satisfies the floor: that remains a true no-op.
+        batch_floor_needed = False
+        if batch_floor_allowed and mode in ("disagg", "decode", "agg"):
+            batch_floor_baseline = num_d if num_d is not None else current_d
+            if batch_floor_baseline is None:
+                if batch_replica_floor > 0:
+                    num_d = batch_replica_floor
+                    batch_floor_needed = True
+            elif batch_floor_baseline < batch_replica_floor:
+                num_d = batch_replica_floor
+                batch_floor_needed = True
+
+        floor_reconcile = mode == "disagg" and (
+            prefill_floor_needed or decode_floor_needed or batch_floor_needed
+        )
 
         prefill_key = ComponentKey(sub_component_type="prefill")
         decode_key = ComponentKey(sub_component_type="decode")
@@ -985,7 +1222,12 @@ class OrchestratorEngineAdapter:
                 and not floor_reconcile
             ):
                 num_p = None
-            if not decode_proposed and not decode_floor_needed and not floor_reconcile:
+            if (
+                not decode_proposed
+                and not decode_floor_needed
+                and not batch_floor_needed
+                and not floor_reconcile
+            ):
                 num_d = None
             if num_p is None and num_d is None:
                 return None
@@ -1013,6 +1255,7 @@ class OrchestratorEngineAdapter:
                 and num_d == current_d
                 and not decode_proposed
                 and not decode_floor_needed
+                and not batch_floor_needed
             ):
                 num_d = None
 

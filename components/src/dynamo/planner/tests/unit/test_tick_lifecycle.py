@@ -10,7 +10,13 @@ import pytest
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.adapters import AggPlanner
-from dynamo.planner.core.types import PlannerEffects, ScalingDecision, ScheduledTick
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    PlannerEffects,
+    ScalingDecision,
+    ScheduledTick,
+    TickInput,
+)
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.monitoring.worker_info import WorkerInfo
@@ -124,3 +130,143 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     else:
         assert applied_targets == []
     assert events == expected_events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advisory", [False, True])
+async def test_batch_drain_is_applied_before_scaling_and_respects_advisory(advisory):
+    events = []
+    state = DeploymentState()
+    state.decode.info = WorkerInfo(k8s_name="decode-worker")
+    state.decode.replicas.active = 1
+
+    environment = MagicMock()
+    environment.deployment_state.return_value = state
+    environment.metrics_state.return_value = Metrics()
+    environment.refresh = AsyncMock(return_value=state)
+    environment.apply_batch_drain_limits = AsyncMock(
+        side_effect=lambda _decisions: events.append("drain")
+    )
+    environment.apply_scaling = AsyncMock(
+        side_effect=lambda _targets, blocking=False: events.append("scale")
+    )
+
+    next_tick = ScheduledTick(at_s=20.0)
+    drain = BatchDrainLimitDecision(
+        pool_id="pool",
+        max_admission_rps=5.0,
+        valid_until_s=100.0,
+        decision_id="decision",
+    )
+
+    class Engine:
+        async def tick(self, _scheduled_tick, _tick_input):
+            return PlannerEffects(
+                scale_to=ScalingDecision(num_decode=2),
+                next_tick=next_tick,
+                batch_drain_limits=[drain],
+            )
+
+    # Keep this test focused on effect ordering; observation composition is
+    # covered by the EnvironmentObservePlugin tests.
+    engine = Engine()
+
+    async def observe(_scheduled_tick, now_s):
+        return TickInput(
+            now_s=now_s,
+            worker_counts=EnvironmentObservePlugin(
+                environment,
+                require_prefill=False,
+                require_decode=True,
+            )._collect_worker_counts(),
+        )
+
+    engine.observe = observe
+
+    config = PlannerConfig(
+        mode="agg",
+        advisory=advisory,
+        namespace="test-namespace",
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = AggPlanner(None, config, environment)
+
+    await planner._run_one_tick(
+        engine,
+        ScheduledTick(at_s=10.0, need_worker_states=True),
+    )
+
+    if advisory:
+        assert events == []
+    else:
+        assert events == ["drain", "scale"]
+
+
+@pytest.mark.asyncio
+async def test_batch_actuation_failure_skips_scaling_without_stopping_tick():
+    state = DeploymentState()
+    state.decode.info = WorkerInfo(k8s_name="decode-worker")
+    state.decode.replicas.active = 1
+    environment = MagicMock()
+    environment.deployment_state.return_value = state
+    environment.metrics_state.return_value = Metrics()
+    environment.refresh = AsyncMock(return_value=state)
+    environment.apply_batch_drain_limits = AsyncMock(
+        side_effect=RuntimeError("redis unavailable")
+    )
+    environment.apply_scaling = AsyncMock()
+
+    next_tick = ScheduledTick(at_s=20.0)
+
+    class Engine:
+        async def observe(self, _scheduled_tick, now_s):
+            return TickInput(
+                now_s=now_s,
+                worker_counts=EnvironmentObservePlugin(
+                    environment,
+                    require_prefill=False,
+                    require_decode=True,
+                )._collect_worker_counts(),
+            )
+
+        async def tick(self, _scheduled_tick, _tick_input):
+            return PlannerEffects(
+                scale_to=ScalingDecision(num_decode=2),
+                next_tick=next_tick,
+                batch_drain_limits=[
+                    BatchDrainLimitDecision(
+                        pool_id="pool",
+                        max_admission_rps=5.0,
+                        valid_until_s=100.0,
+                        decision_id="decision",
+                    )
+                ],
+            )
+
+    config = PlannerConfig(
+        mode="agg",
+        namespace="test-namespace",
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = AggPlanner(None, config, environment)
+
+    engine = Engine()
+    result = await planner._run_one_tick(
+        engine,
+        ScheduledTick(at_s=10.0, need_worker_states=True),
+    )
+
+    assert result is next_tick
+    environment.apply_scaling.assert_not_awaited()
