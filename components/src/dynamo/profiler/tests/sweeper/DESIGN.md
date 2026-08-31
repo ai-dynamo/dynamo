@@ -51,6 +51,7 @@ Kustomize matrices. They can be composed with a generated Kustomize base for liv
 ```text
 components/src/dynamo/profiler/tests/sweeper/
 ├── DESIGN.md
+├── testsuite-gb300.yaml
 ├── testsuite-issue-8469.yaml
 ├── cases/
 │   └── qwen3-32b-vllm-disagg/
@@ -59,10 +60,14 @@ components/src/dynamo/profiler/tests/sweeper/
 │       ├── recipe.yaml                  # optional
 │       └── recipe.new.yaml              # ignored discovery result
 ├── hardware/
+│   ├── gb300-4gpu/
+│   │   ├── dgdr-v1beta1.patch.yaml
+│   │   └── sweeper.patch.yaml
 │   └── h200-sxm-16gpu/
 │       ├── dgdr-v1beta1.patch.yaml
 │       └── sweeper.patch.yaml
 └── generated/
+    ├── testsuite-gb300/
     ├── testsuite-issue-8469/
     │   └── h200-sxm-16gpu/
     │       └── qwen3-32b-vllm-disagg/
@@ -139,6 +144,10 @@ GPU SKU and GPU budget.
 
 Hardware patches apply only to profiler inputs. They never repair a generated DGD. Provider
 specialization, when needed, is a subsequent Kustomize composition rather than part of profiling.
+
+Hardware support may differ between profilers. For example, AI Simulate recognizes `gb300`, while
+the DGDR v1beta1 `gpuSku` enum does not. A suite using that profile skips only the unsupported v1
+render phase and still exercises Sweeper; it does not rename GB300 to a different supported SKU.
 
 ## Suites and individual runs
 
@@ -272,6 +281,11 @@ status.
 Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
 CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
 a stochastic search an exact-diff gate.
+
+A generated DGD also does not prove runtime compatibility. Sweeper performance data names an engine
+version, while the comparison runner derives a deployable runtime image from the case's v1 profiler
+image. When those versions do not match exactly, the suite may retain the renderer golden for
+inspection but must document and skip live deployment until that binding is validated.
 
 ## Live validation
 
