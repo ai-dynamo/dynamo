@@ -489,6 +489,7 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }),
     }
 }
