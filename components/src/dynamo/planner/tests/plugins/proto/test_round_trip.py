@@ -46,9 +46,9 @@ def test_class_coverage_pydantic_side():
     }
     registered = set(_PYD_TO_PROTO.keys())
     missing = pyd_classes - registered
-    assert (
-        not missing
-    ), f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
+    assert not missing, (
+        f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
+    )
 
 
 def test_class_coverage_proto_side():
@@ -229,6 +229,72 @@ def test_pipeline_context_full():
     _round_trip_wire(msg)
 
 
+def test_batch_scheduling_data_full():
+    msg = pyd.BatchSchedulingData(
+        job_demands=[
+            pyd.BatchJobDemand(
+                observed_at_s=1_700_000_000.125,
+                pool_id="pool-a",
+                job_id="batch-123",
+                status="in_progress",
+                total_requests=1_000,
+                completed_requests=275,
+                failed_requests=25,
+                deadline_at_s=1_700_003_600.5,
+                work_class="chat-8k",
+                remaining_requests=700,
+            )
+        ],
+        pool_traffic=[
+            pyd.PoolTrafficDemand(
+                observed_at_s=1_700_000_001.25,
+                pool_id="pool-a",
+                online_offered_rps=90.5,
+            )
+        ],
+        dispatcher_feedback=[
+            pyd.BatchDispatcherFeedback(
+                observed_at_s=1_700_000_002.5,
+                pool_id="pool-a",
+                observation_window_s=30.0,
+                queued_requests=700,
+                inflight_requests=20,
+                actual_dispatch_rps=9.75,
+                applied_max_admission_rps=10.0,
+            )
+        ],
+    )
+
+    _round_trip_pyd(msg)
+    _round_trip_wire(msg)
+    observation = pyd.ObservationData(batch=msg)
+    _round_trip_pyd(observation)
+    _round_trip_wire(observation)
+
+
+def test_batch_dispatcher_applied_cap_preserves_unset_vs_zero():
+    common = dict(
+        observed_at_s=1_700_000_000.0,
+        pool_id="pool-a",
+        observation_window_s=30.0,
+        queued_requests=100,
+        inflight_requests=5,
+        actual_dispatch_rps=0.0,
+    )
+
+    unreported = pydantic_to_proto(pyd.BatchDispatcherFeedback(**common))
+    assert not unreported.HasField("applied_max_admission_rps")
+
+    paused = pydantic_to_proto(
+        pyd.BatchDispatcherFeedback(**common, applied_max_admission_rps=0.0)
+    )
+    assert paused.HasField("applied_max_admission_rps")
+    assert paused.applied_max_admission_rps == 0.0
+    _round_trip_pyd(
+        pyd.BatchDispatcherFeedback(**common, applied_max_admission_rps=0.0)
+    )
+
+
 def test_prediction_data_optional_unset_vs_zero():
     """Critical invariant: optional float fields distinguish None
     ("no opinion") from 0.0 ("I assert zero"). Removing the
@@ -246,9 +312,9 @@ def test_prediction_data_optional_unset_vs_zero():
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
     pb2 = pydantic_to_proto(p2)
-    assert pb2.HasField(
-        "predicted_num_req"
-    ), "predicted_num_req=0.0 must round-trip as set"
+    assert pb2.HasField("predicted_num_req"), (
+        "predicted_num_req=0.0 must round-trip as set"
+    )
     assert pb2.predicted_num_req == 0.0
     assert not pb2.HasField("predicted_isl")  # still unset
 
