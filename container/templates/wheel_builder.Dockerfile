@@ -236,7 +236,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
