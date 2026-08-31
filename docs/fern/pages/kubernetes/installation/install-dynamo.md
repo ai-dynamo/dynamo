@@ -381,18 +381,66 @@ Add to the helm install command:
 --set "etcd.image.repository=bitnamilegacy/etcd" --set "etcd.global.security.allowInsecureImages=true"
 ```
 
-**Clean uninstall?**
+**Uninstall the platform chart?**
+
+In the default cluster-wide installation, the operator image applies Dynamo CRDs outside Helm's
+normal resource ownership, so `helm uninstall` leaves them in the cluster. Keep the CRDs by
+default. The chart also contains the cluster-wide operator and shared services, so do not use this
+procedure for namespace cleanup.
+
+Before uninstalling the chart, inventory the CRDs stamped by Dynamo's `crd-apply` process and their
+scope:
 
 ```bash
-# Uninstall the platform
-helm uninstall dynamo-platform --namespace $NAMESPACE
-
-# List Dynamo CRDs
-kubectl get crd | grep "dynamo.*nvidia.com"
-
-# Delete each CRD
-kubectl delete crd <crd-name>
+kubectl get crd -o json | jq -r '
+  .items[]
+  | select(.metadata.annotations["dynamo.nvidia.com/operator-version"] != null)
+  | [.metadata.name, .spec.scope]
+  | @tsv'
 ```
+
+Back up every listed custom resource before decommissioning. Use the CRD name from the first column
+and choose the command that matches its scope. The output can contain sensitive workload
+configuration, so store it accordingly.
+
+```bash
+# Example for a Namespaced row; set this to each CRD name from the inventory
+CRD_NAME=dynamographdeployments.nvidia.com
+kubectl get "$CRD_NAME" --all-namespaces -o yaml > "${CRD_NAME}.backup.yaml"
+```
+
+For a `Cluster`-scoped row, set `CRD_NAME` to that row's CRD name and omit
+`--all-namespaces`:
+
+```bash
+kubectl get "$CRD_NAME" -o yaml > "${CRD_NAME}.backup.yaml"
+```
+
+If the workloads are also being decommissioned, first delete any DGDRs so they cannot create or
+update deployments. Deleting a DGDR does not delete the DGD it generated, so explicitly delete
+every DGD and any other top-level Dynamo custom resources being decommissioned through the normal
+Kubernetes API while the operator is still running. Verify that their child workloads are gone
+before uninstalling the platform. If workloads must remain running, do not uninstall this chart
+until a supported replacement control plane has assumed their reconciliation and dependencies.
+
+```bash
+helm uninstall dynamo-platform --namespace $NAMESPACE
+```
+
+For a namespace-restricted development or test installation, do not treat the shared CRDs as owned
+by that release: `dynamo-operator.upgradeCRD=false` makes the cluster-wide operator responsible for
+them. Remove or hand off only the target namespace's workloads, verify reconciliation has moved to a
+supported operator if they remain, and then uninstall the namespace-restricted release. Do not
+delete the shared CRDs.
+
+> [!WARNING]
+> Do not delete Dynamo CRDs as routine release or namespace cleanup. CRDs are cluster-scoped, and
+> [deleting a CRD deletes every custom object stored in it across all
+> namespaces](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#delete-a-customresourcedefinition).
+> Recreating the CRD starts with no stored custom objects. For a full cluster-wide Dynamo
+> decommission, complete the inventory, backup, and workload cleanup above. Treat CRD deletion as a
+> separate destructive cluster-administrator action.
+
 ## Reference
 
 - [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
