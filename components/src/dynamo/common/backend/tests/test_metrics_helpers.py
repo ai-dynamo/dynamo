@@ -20,9 +20,10 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 class _StubMetrics:
     def __init__(self, auto_labels: dict[str, str] | None = None) -> None:
         self.auto_labels = dict(auto_labels) if auto_labels is not None else {}
-        self.callbacks: list[Callable[[], str]] = []
+        # Callbacks now return typed families rather than exposition text.
+        self.callbacks: list[Callable[[], list]] = []
 
-    def register_prometheus_expfmt_callback(self, cb: Callable[[], str]) -> None:
+    def register_prometheus_typed_callback(self, cb: Callable[[], list]) -> None:
         self.callbacks.append(cb)
 
 
