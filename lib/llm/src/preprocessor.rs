@@ -5437,7 +5437,7 @@ impl OpenAIPreprocessor {
             metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
             nvext: Option<serde_json::Value>,
-            prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
+            prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
             response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
@@ -7605,7 +7605,7 @@ mod tests {
             ]))
             .expect("valid prompt logprobs");
         let mut chunk = terminal_chat_stream_chunk();
-        chunk.data.as_mut().unwrap().prompt_logprobs = Some(expected.clone());
+        chunk.data.as_mut().unwrap().prompt_logprobs = Some(Arc::new(expected.clone()));
 
         let output = OpenAIPreprocessor::apply_tool_calling_jail(
             None,
@@ -7622,7 +7622,7 @@ mod tests {
             output
                 .iter()
                 .filter_map(|response| response.data.as_ref())
-                .find_map(|data| data.prompt_logprobs.as_ref()),
+                .find_map(|data| data.prompt_logprobs.as_deref()),
             Some(&expected)
         );
     }
