@@ -68,7 +68,7 @@ class SnapshotConfig:
 
         if event == "restore":
             # Stay paused so backends can refresh restore env, create the
-            # runtime, then call wake_restored_engine().
+            # runtime, then call elect_and_wake().
             logger.info("Restore sentinel detected; returning application-paused")
             os.environ.pop("HF_HUB_OFFLINE", None)
             return True
@@ -174,48 +174,54 @@ class EngineSnapshotController(Generic[EngineT]):
         )
 
 
-async def wake_restored_engine(
+async def elect_and_wake(
     pause_controller: Any,
     runtime: Any | None = None,
     *,
     lock_path: str | None = None,
+    failover_metrics: Any = None,
 ) -> Any | None:
-    """Resume a restore-paused engine after ``create_runtime()``.
+    """Elect a single engine via flock, then wake it.
 
-    When ``FAILOVER_LOCK_PATH`` is set, mark the process healthy, elect via
-    flock, then resume. Keep the returned lock for the process lifetime.
+    Shared by both failover flows. The engine must already be paused: a
+    snapshot-restored engine arrives that way, and a cold-start shadow sleeps
+    itself before calling. With no ``lock_path`` there is no election and the
+    engine simply resumes.
+
+    Returns the acquired lock, or None when no election ran. The flock lives on
+    the lock's open fd, so callers need not retain it: the kernel releases it
+    when the process exits.
     """
     if lock_path is None:
         lock_path = os.environ.get("FAILOVER_LOCK_PATH")
 
     lock = None
     if lock_path:
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
         if runtime is not None:
             # Healthy while paused, so Kubernetes does not kill the standby
-            # during a long outage. Nothing watches it for death until the
-            # monitor is built with the handler; an operator-side liveness
-            # probe is the durable fix.
+            # during a long outage.
+            # TODO(failover): no engine monitor watches this engine while we
+            # block below, so a standby that dies here keeps reporting healthy
+            # until it wins the lock and fails to wake.
             runtime.set_health_status(True)
         logger.info(
-            "[Shadow][snapshot] Engine restored paused, startup probe now passing, "
-            "waiting for failover lock"
+            "[Shadow] Engine paused, startup probe now passing, waiting for lock"
         )
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{os.environ.get('ENGINE_ID', '0')}")
-        logger.info("[Shadow][snapshot] Lock acquired, waking engine")
+        logger.info("[Shadow] Lock acquired, waking engine")
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if lock.was_contended:
+                # Only a contended acquire is a failover; a bootup is not a switch.
+                failover_metrics.record_switch_attempt()
 
-    try:
-        await pause_controller.resume()
-        pause_controller.mark_resumed()
-    except Exception:
-        if lock is not None:
-            logger.critical(
-                "[Shadow][snapshot] Engine wake failed after lock acquisition; "
-                "terminating process while retaining the lock"
-            )
-            os._exit(1)
-        raise
-
+    await pause_controller.resume()
+    pause_controller.mark_resumed()
+    if lock is not None:
+        logger.info("[Shadow] Engine awake, registering with discovery")
     return lock

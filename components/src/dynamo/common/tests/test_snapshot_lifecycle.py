@@ -13,7 +13,7 @@ from dynamo.common.snapshot.constants import (
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
 )
-from dynamo.common.snapshot.lifecycle import SnapshotConfig, wake_restored_engine
+from dynamo.common.snapshot.lifecycle import SnapshotConfig, elect_and_wake
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -22,9 +22,11 @@ class _PauseController:
     def __init__(self) -> None:
         self.paused = False
         self.resumed = False
+        self.paused_with = None
 
-    async def pause(self) -> None:
+    async def pause(self, level: int | None = None) -> None:
         self.paused = True
+        self.paused_with = level
 
     async def resume(self) -> None:
         self.resumed = True
@@ -94,11 +96,11 @@ async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
                 await lifecycle
 
 
-async def test_wake_restored_engine_resumes_without_lock(monkeypatch):
+async def test_elect_and_wake_resumes_without_lock(monkeypatch):
     monkeypatch.delenv("FAILOVER_LOCK_PATH", raising=False)
     controller = _PauseController()
 
-    lock = await wake_restored_engine(controller)
+    lock = await elect_and_wake(controller)
 
     assert lock is None
     assert controller.resumed is True
@@ -111,7 +113,7 @@ def _patch_flock_lock(monkeypatch, fake_lock):
     return lock_cls
 
 
-async def test_wake_restored_engine_elects_then_resumes(monkeypatch):
+async def test_elect_and_wake_elects_then_resumes(monkeypatch):
     controller = _PauseController()
     runtime = SimpleNamespace(healthy=False)
     runtime.set_health_status = lambda ok: setattr(runtime, "healthy", ok)
@@ -120,9 +122,7 @@ async def test_wake_restored_engine_elects_then_resumes(monkeypatch):
     monkeypatch.setenv("ENGINE_ID", "3")
     lock_cls = _patch_flock_lock(monkeypatch, fake_lock)
 
-    lock = await wake_restored_engine(
-        controller, runtime, lock_path="/tmp/failover.lock"
-    )
+    lock = await elect_and_wake(controller, runtime, lock_path="/tmp/failover.lock")
 
     lock_cls.assert_called_once_with("/tmp/failover.lock")
     fake_lock.acquire.assert_awaited_once_with(engine_id="engine-3")
@@ -131,24 +131,46 @@ async def test_wake_restored_engine_elects_then_resumes(monkeypatch):
     assert controller.resumed is True
 
 
-async def test_wake_restored_engine_exits_if_wake_fails_after_lock(monkeypatch):
+async def test_elect_and_wake_propagates_wake_failure_after_lock(monkeypatch):
+    """A failed wake raises, matching the cold-start path. The process exits
+    through normal shutdown, which releases the flock with its fd."""
+
     class BoomController(_PauseController):
         async def resume(self) -> None:
             raise RuntimeError("wake failed")
 
-    def _exit(code: int) -> None:
-        raise SystemExit(code)
-
     runtime = SimpleNamespace(set_health_status=lambda _ok: None)
     fake_lock = Mock()
     fake_lock.acquire = AsyncMock()
-    monkeypatch.setattr(os, "_exit", _exit)
     _patch_flock_lock(monkeypatch, fake_lock)
 
-    with pytest.raises(SystemExit) as exc_info:
-        await wake_restored_engine(
-            BoomController(), runtime, lock_path="/tmp/failover.lock"
-        )
+    with pytest.raises(RuntimeError, match="wake failed"):
+        await elect_and_wake(BoomController(), runtime, lock_path="/tmp/failover.lock")
 
-    assert exc_info.value.code == 1
     fake_lock.acquire.assert_awaited_once()
+
+
+async def test_elect_and_wake_reports_contended_acquire(monkeypatch):
+    """A contended acquire is a real failover and drives the metric states."""
+    controller = _PauseController()
+    runtime = SimpleNamespace(set_health_status=lambda _ok: None)
+    fake_lock = Mock()
+    fake_lock.acquire = AsyncMock()
+    fake_lock.was_contended = True
+    metrics = Mock()
+    _patch_flock_lock(monkeypatch, fake_lock)
+
+    lock = await elect_and_wake(
+        controller,
+        runtime,
+        lock_path="/tmp/failover.lock",
+        failover_metrics=metrics,
+    )
+
+    # The caller owns the pause; the helper only elects and wakes.
+    assert controller.paused is False
+    assert controller.resumed is True
+    assert lock.was_contended is True
+    metrics.set_state.assert_any_call("standby")
+    metrics.set_state.assert_any_call("waking")
+    metrics.record_switch_attempt.assert_called_once()

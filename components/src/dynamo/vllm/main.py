@@ -26,7 +26,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
-from dynamo.common.snapshot.lifecycle import wake_restored_engine
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -228,7 +228,7 @@ async def worker(argv: list[str] | None = None) -> None:
     if snapshot_controller is not None:
         # The flock lives on the open fd, not on any Python reference; the
         # kernel releases it when the process exits.
-        await wake_restored_engine(snapshot_controller.pause_controller, runtime)
+        await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
