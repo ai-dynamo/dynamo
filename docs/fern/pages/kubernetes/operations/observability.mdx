@@ -377,7 +377,7 @@ kubectl logs -n dynamo-system <pod-name> --all-containers=true
 ```
 
 If startup is delayed by downloading model weights, prefer
-[Model Caching](../model-deployment/model-loading/model-caching.mdx) over extending the probe indefinitely.
+[shared model storage](../installation/model-storage/overview.md) over extending the probe indefinitely.
 
 </Step>
 <Step title="Override the probes" id="override-health-probes">
@@ -422,7 +422,7 @@ For a startup budget, calculate `failureThreshold` as the expected startup time 
 `periodSeconds`. Change paths or ports only when a custom engine exposes health differently.
 
 Multinode deployments adjust probes by backend and node role. Review
-[Multinode Deployments](../model-deployment/multinode-deployments.md) before overriding probes on a
+[Multinode Orchestration](../installation/multinode-orchestration.md) before overriding probes on a
 multinode worker.
 
 See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,

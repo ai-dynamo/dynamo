@@ -26,11 +26,10 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -357,23 +356,14 @@ func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
 }
 
 func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
-	t.Log("Inject an unsupported-path metadata failure before shared reconciliation")
-	reconcileErr := errors.New("reconcile failed")
+	t.Log("Inject a shared-resource failure before the PodCliqueSet sync")
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	})
 	dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology"}
-	pcs := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
-	}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithObjects(dgd, pcs).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
-				return reconcileErr
-			},
-		}).
+		WithObjects(dgd).
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
@@ -392,25 +382,15 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify failed primary mutation returns failure status without mutating request.DGD.Status")
-	require.ErrorIs(t, err, reconcileErr)
+	t.Log("Verify the failed shared reconciliation returns failure status without mutating request.DGD.Status")
+	require.ErrorContains(t, err, "RBAC manager not initialized")
 	assert.Equal(t, previous.Components, result.Status.Components)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
 	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
-	topologyCondition := meta.FindStatusCondition(
-		result.Status.Conditions,
-		nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-	)
-	require.NotNil(t, topologyCondition)
-	assert.Equal(t, metav1.ConditionUnknown, topologyCondition.Status)
-	assert.Equal(t, nvidiacomv1beta1.ConditionReasonTopologyConditionPending, topologyCondition.Reason)
+	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
-	reason, ok := workloadProgramFailureReason(err)
-	require.True(t, ok)
-	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
 }
 
 func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *testing.T) {
@@ -422,7 +402,7 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 		},
 	})
 	dgd.Annotations = map[string]string{
-		commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+		commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 	}
 	reconciler := createTestDGDReconcilerWithStatus(dgd)
 	program := reconciler.newComponentProgram()
@@ -466,7 +446,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				},
 			})
 			dgd.Annotations = map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+				commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 			}
 			kubeClient := fake.NewClientBuilder().
 				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -485,11 +465,12 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			require.NoError(t, reconciler.ReconcileUnsupported(
+			err := reconciler.ReconcileUnsupported(
 				context.Background(),
 				dgd,
 				true,
-			))
+			)
+			require.NoError(t, err)
 
 			t.Log("Verify the warning reflects a successfully persisted primary mutation")
 			if tt.wantEvent {
@@ -541,7 +522,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		dgd.Annotations = map[string]string{
-			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
 		reconciler := createTestDGDReconcilerWithStatus(dgd)
 		program := reconciler.newComponentProgram()
@@ -552,7 +533,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
 		assert.Nil(t, dgd.Status.RollingUpdate)
-		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
 	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {

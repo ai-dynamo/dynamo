@@ -5,18 +5,23 @@
 
 from __future__ import annotations
 
-import os
 import time
+from functools import partial
 from typing import Any, Generator
 from urllib.parse import urlparse, urlunparse
 
 import pytest
 import requests
 
+from tests.rl.utils import (
+    check_model_registered,
+    check_ready,
+    prepare_log_dir,
+    process_env,
+    vllm_gpu_mem_args,
+)
 from tests.utils.constants import QWEN
-from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
-from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts, allocate_port, deallocate_port
 
 TEST_MODEL = QWEN
@@ -34,20 +39,6 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(6.9),
     pytest.mark.requested_vllm_kv_cache_bytes(331_801_000),
 ]
-
-
-def _check_ready(response: requests.Response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
-
-
-def _check_model_registered(response: requests.Response) -> bool:
-    if not check_models_api(response):
-        return False
-    data = response.json()
-    return any(model.get("id") == TEST_MODEL for model in data.get("data", []))
 
 
 def _status_is_ok(payload: dict[str, Any]) -> bool:
@@ -82,34 +73,6 @@ def _normalize_local_url(url: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc)).rstrip("/")
 
 
-def _process_env(**extra: str) -> dict[str, str]:
-    env = os.environ.copy()
-    env.setdefault("HF_HUB_OFFLINE", "1")
-    env.setdefault("TRANSFORMERS_OFFLINE", "1")
-    env["DYN_LOG"] = "debug"
-    env["DYN_NAMESPACE"] = "dynamo"
-    env.update(extra)
-    return env
-
-
-def _prepare_log_dir(request: pytest.FixtureRequest, suffix: str) -> str:
-    # Use pytest's per-test temp dir instead of a repo-relative path so process logs
-    # never land in the repo tree and never collide across parallel runs.
-    tmp_path = request.getfixturevalue("tmp_path")
-    log_dir = tmp_path / suffix
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return str(log_dir)
-
-
-def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
-    # Honor the GPU scheduler's per-worker KV-cache budget under bin-packing;
-    # fall back to a conservative utilization for serial runs.
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
-
-
 class RLVllmWorkerProcess(ManagedProcess):
     def __init__(
         self,
@@ -118,7 +81,7 @@ class RLVllmWorkerProcess(ManagedProcess):
         frontend_port: int,
         system_port: int,
     ):
-        env = _process_env(
+        env = process_env(
             DYN_ENABLE_RL="true",
             DYN_SYSTEM_PORT=str(system_port),
             DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
@@ -132,7 +95,7 @@ class RLVllmWorkerProcess(ManagedProcess):
                 "--model",
                 TEST_MODEL,
                 "--enforce-eager",
-                *_vllm_gpu_mem_args("0.4"),
+                *vllm_gpu_mem_args(),
                 "--max-model-len",
                 "2048",
                 "--max-num-seqs",
@@ -143,17 +106,17 @@ class RLVllmWorkerProcess(ManagedProcess):
             ],
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready),
+                (f"http://localhost:{system_port}/health", check_ready),
                 (
                     f"http://localhost:{frontend_port}/v1/models",
-                    _check_model_registered,
+                    partial(check_model_registered, model=TEST_MODEL),
                 ),
             ],
             timeout=600,
             display_output=True,
             terminate_all_matching_process_names=False,
             straggler_commands=["-m dynamo.vllm"],
-            log_dir=_prepare_log_dir(request, "rl-vllm-worker"),
+            log_dir=prepare_log_dir(request, "rl-vllm-worker"),
             display_name="rl-vllm-worker",
         )
 
@@ -182,7 +145,7 @@ def start_rl_services(
     with DynamoFrontendProcess(
         request,
         frontend_port=frontend_port,
-        extra_env=_process_env(
+        extra_env=process_env(
             DYN_ENABLE_RL="true",
             DYN_RL_PORT=str(rl_discovery_port),
         ),

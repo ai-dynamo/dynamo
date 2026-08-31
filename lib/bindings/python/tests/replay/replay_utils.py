@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,16 @@ AIC_PARITY_BACKENDS = [
     pytest.param("vllm", id="vllm"),
     pytest.param("sglang", id="sglang"),
 ]
+
+
+def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
+    try:
+        distribution("aisimulate")
+    except PackageNotFoundError:
+        pytest.skip(
+            "Dynamo replay integration tests require the optional AISimulate distribution",
+            allow_module_level=allow_module_level,
+        )
 
 
 def _vllm_args_payload():

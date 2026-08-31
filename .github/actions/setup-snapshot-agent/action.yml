@@ -1,5 +1,5 @@
 name: 'Setup Snapshot Agent'
-description: 'Install the Dynamo snapshot-agent Helm chart in a vCluster namespace'
+description: 'Install the github.com/ai-dynamo/snapshot Helm chart (agent + operator) in a vCluster namespace'
 
 inputs:
   kubeconfig_base64:
@@ -13,9 +13,10 @@ inputs:
     description: 'Helm release name'
     required: false
     default: snapshot
-  snapshot_agent_image:
-    description: 'Full snapshot-agent image reference'
-    required: true
+  chart_version:
+    description: 'github.com/ai-dynamo/snapshot chart version to install (pinned, never latest)'
+    required: false
+    default: 0.1.0-alpha.1
   storage_size:
     description: 'Checkpoint PVC size for agentMount mode'
     required: false
@@ -55,7 +56,7 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         RELEASE_NAME: ${{ inputs.release_name }}
-        SNAPSHOT_AGENT_IMAGE: ${{ inputs.snapshot_agent_image }}
+        CHART_VERSION: ${{ inputs.chart_version }}
         STORAGE_SIZE: ${{ inputs.storage_size }}
         STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
@@ -65,22 +66,15 @@ runs:
         echo "::group::Install snapshot-agent"
         set -euo pipefail
 
-        SNAPSHOT_IMAGE_REPO="${SNAPSHOT_AGENT_IMAGE%:*}"
-        SNAPSHOT_IMAGE_TAG="${SNAPSHOT_AGENT_IMAGE##*:}"
-        if [[ -z "${SNAPSHOT_IMAGE_REPO}" || -z "${SNAPSHOT_IMAGE_TAG}" || "${SNAPSHOT_IMAGE_REPO}" == "${SNAPSHOT_AGENT_IMAGE}" ]]; then
-          echo "::error::snapshot_agent_image must include an explicit tag: ${SNAPSHOT_AGENT_IMAGE}"
-          exit 1
-        fi
-
-        helm upgrade --install "${RELEASE_NAME}" ./deploy/helm/charts/snapshot \
+        # Install the externally published github.com/ai-dynamo/snapshot chart
+        # at a pinned version, using its own default (pinned-to-chart-appVersion)
+        # images.
+        helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+          --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \
           --create-namespace \
           --wait \
           --timeout 15m \
-          --set daemonset.image.repository="${SNAPSHOT_IMAGE_REPO}" \
-          --set daemonset.image.tag="${SNAPSHOT_IMAGE_TAG}" \
-          --set daemonset.image.pullPolicy=Always \
-          --set-json=daemonset.imagePullSecrets=[] \
           --set rbac.namespaceRestricted=true \
           --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
           --set storage.pvc.name="${STORAGE_PVC_NAME}" \

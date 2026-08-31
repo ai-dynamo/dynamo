@@ -175,7 +175,7 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}
 
-	rollingUpdateInProgress := p.rollout.isRollingUpdateInProgress(status)
+	rollingUpdateInProgress := isRollingUpdateInProgress(status)
 	triggerRollingUpdate := false
 	if !rollingUpdateInProgress {
 		var err error

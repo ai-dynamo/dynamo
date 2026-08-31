@@ -24,6 +24,12 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::engine::{LiveEngineScheduler, create_engine_with_event_sender};
+#[cfg(test)]
+use crate::grouped_scheduler::CompletionBoundaryTestControl;
+use crate::grouped_scheduler::{
+    CompletionBoundaryDrain, GroupedSchedulerRankEventSinks, GroupedSchedulers,
+    create_grouped_scheduler_with_event_senders,
+};
 use crate::scheduler::{
     LiveEngineEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
     SchedulerCommandEnvelope, SchedulerCommandResult, SchedulerEventSender, SchedulerHandle,
@@ -46,6 +52,33 @@ use request::{
 const SCHEDULER_EVENT_CAPACITY: usize = 8;
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
 
+/// Controls how much output one live request may retain before it is consumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestOutputBuffering {
+    /// Cancel the request when its output queue reaches `capacity`.
+    CancelOnOverflow { capacity: NonZeroUsize },
+    /// Buffer the request's full declared response.
+    FullResponse,
+}
+
+impl Default for RequestOutputBuffering {
+    fn default() -> Self {
+        Self::CancelOnOverflow {
+            capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY).unwrap(),
+        }
+    }
+}
+
+impl RequestOutputBuffering {
+    fn capacity_for(self, output_length: usize) -> usize {
+        let output_length = output_length.max(1);
+        match self {
+            Self::CancelOnOverflow { capacity } => output_length.min(capacity.get()),
+            Self::FullResponse => output_length,
+        }
+    }
+}
+
 /// Runtime publishers used by one live Mocker scheduler.
 #[derive(Clone, Default)]
 pub struct LiveEngineConfig {
@@ -58,24 +91,13 @@ pub(crate) struct ObservedAdmission {
     pub(crate) observed_at: tokio::time::Instant,
 }
 
+#[derive(Default)]
 pub(crate) struct LiveEngineOptions {
     pub(crate) kv_event_publishers: KvEventPublishers,
     pub(crate) admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
     pub(crate) fpm_publisher: FpmPublisher,
-    pub(crate) request_output_capacity: Option<NonZeroUsize>,
+    pub(crate) request_output_buffering: RequestOutputBuffering,
     pub(crate) allow_zero_output: bool,
-}
-
-impl Default for LiveEngineOptions {
-    fn default() -> Self {
-        Self {
-            kv_event_publishers: KvEventPublishers::default(),
-            admission_tx: None,
-            fpm_publisher: FpmPublisher::default(),
-            request_output_capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY),
-            allow_zero_output: false,
-        }
-    }
 }
 
 /// Map a wire-protocol request ID to a deterministic scheduler UUID.
@@ -118,8 +140,9 @@ struct LiveEngineInner {
     routes: Routes,
     handoff_routes: SharedHandoffRoutes,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
-    request_output_capacity: Option<NonZeroUsize>,
+    request_output_buffering: RequestOutputBuffering,
     allow_zero_output: bool,
+    group: Arc<LiveEngineGroup>,
     cancel: CancellationToken,
     runtime: Handle,
     tasks: Mutex<LiveEngineTasks>,
@@ -129,13 +152,67 @@ struct LiveEngineInner {
 }
 
 struct LiveEngineTasks {
-    scheduler_actor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     dispatcher_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     lifecycle_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     shutdown: Option<SharedShutdown>,
 }
 
 type SharedShutdown = Shared<BoxFuture<'static, Result<(), Arc<str>>>>;
+
+struct LiveEngineGroup {
+    cancel: CancellationToken,
+    actor: Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>,
+    shutdown: Mutex<Option<SharedShutdown>>,
+    completion_drain: CompletionBoundaryDrain,
+}
+
+impl LiveEngineGroup {
+    fn new(
+        cancel: CancellationToken,
+        actor: tokio::task::JoinHandle<anyhow::Result<()>>,
+        completion_drain: CompletionBoundaryDrain,
+    ) -> Self {
+        Self {
+            cancel,
+            actor: Mutex::new(Some(actor)),
+            shutdown: Mutex::new(None),
+            completion_drain,
+        }
+    }
+
+    fn shutdown(&self) -> SharedShutdown {
+        self.cancel.cancel();
+        let mut shutdown = self.shutdown.lock().unwrap();
+        if let Some(shutdown) = shutdown.as_ref() {
+            return shutdown.clone();
+        }
+        let actor = self.actor.lock().unwrap().take();
+        let future = async move {
+            let Some(actor) = actor else {
+                return Ok(());
+            };
+            match actor.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(Arc::from(format!(
+                    "live Mocker scheduler failed: {error:#}"
+                ))),
+                Err(error) => Err(Arc::from(format!(
+                    "live Mocker scheduler task failed: {error}"
+                ))),
+            }
+        }
+        .boxed()
+        .shared();
+        *shutdown = Some(future.clone());
+        future
+    }
+}
+
+impl Drop for LiveEngineGroup {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
 
 impl LiveEngine {
     /// Start one live scheduler at `dp_rank`.
@@ -149,33 +226,134 @@ impl LiveEngine {
         dp_rank: u32,
         config: LiveEngineConfig,
     ) -> anyhow::Result<Self> {
+        Self::start_with_config_and_request_output_buffering(
+            args,
+            dp_rank,
+            config,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start one live scheduler with runtime-owned publishers and an explicit
+    /// per-request output buffering policy.
+    pub fn start_with_config_and_request_output_buffering(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        config: LiveEngineConfig,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Self> {
         Self::start_internal(
             args,
             dp_rank,
             LiveEngineOptions {
                 kv_event_publishers: config.kv_event_publishers,
                 fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
                 ..LiveEngineOptions::default()
             },
             None,
         )
     }
 
+    /// Start all attention-DP ranks as one logical grouped engine.
+    ///
+    /// Each returned [`LiveEngine`] retains the latest-main rank-scoped request
+    /// and handoff API, while all ranks share one scheduler actor and one
+    /// [`aisimulate_core::engine::generalized::GeneralizedMockerEngine`] barrier.
+    pub fn start_grouped_with_configs(
+        args: MockEngineArgs,
+        configs: Vec<LiveEngineConfig>,
+    ) -> anyhow::Result<Vec<Self>> {
+        Self::start_grouped_with_configs_and_request_output_buffering(
+            args,
+            configs,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start all attention-DP ranks with an explicit per-request output
+    /// buffering policy.
+    pub fn start_grouped_with_configs_and_request_output_buffering(
+        args: MockEngineArgs,
+        configs: Vec<LiveEngineConfig>,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Vec<Self>> {
+        let options = configs
+            .into_iter()
+            .map(|config| LiveEngineOptions {
+                kv_event_publishers: config.kv_event_publishers,
+                fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
+                ..LiveEngineOptions::default()
+            })
+            .collect();
+        Self::start_grouped_with_options(args, options, None)
+    }
+
+    pub(crate) fn start_grouped_with_options(
+        args: MockEngineArgs,
+        options: Vec<LiveEngineOptions>,
+        output_gate: Option<watch::Receiver<bool>>,
+    ) -> anyhow::Result<Vec<Self>> {
+        let runtime = Handle::try_current()
+            .context("LiveEngine::start_grouped_with_options requires an active Tokio runtime")?;
+        let args = args
+            .normalized()
+            .context("invalid Mocker engine arguments")?;
+        anyhow::ensure!(
+            options.len() == args.dp_size as usize,
+            "grouped live Mocker requires one options value per DP rank: expected {}, got {}",
+            args.dp_size,
+            options.len()
+        );
+
+        let cancel = CancellationToken::new();
+        let mut event_receivers = Vec::with_capacity(options.len());
+        let mut rank_sinks = Vec::with_capacity(options.len());
+        for options_for_rank in &options {
+            let (event_tx, event_rx) = mpsc::channel(SCHEDULER_EVENT_CAPACITY);
+            rank_sinks.push(GroupedSchedulerRankEventSinks {
+                event_tx: Some(SchedulerEventSender::Ordered {
+                    tx: event_tx,
+                    forward_admissions: options_for_rank.admission_tx.is_some(),
+                    cancel: cancel.clone(),
+                }),
+                kv_event_publishers: options_for_rank.kv_event_publishers.clone(),
+                fpm_publisher: options_for_rank.fpm_publisher.clone(),
+            });
+            event_receivers.push(event_rx);
+        }
+
+        let GroupedSchedulers {
+            schedulers,
+            actor,
+            completion_drain,
+        } = create_grouped_scheduler_with_event_senders(args, rank_sinks, Some(cancel.clone()))?;
+        let group = Arc::new(LiveEngineGroup::new(cancel, actor, completion_drain));
+        schedulers
+            .into_iter()
+            .zip(event_receivers)
+            .zip(options)
+            .map(|((scheduler, event_rx), options)| {
+                Self::from_scheduler(
+                    runtime.clone(),
+                    scheduler,
+                    Arc::clone(&group),
+                    event_rx,
+                    options,
+                    output_gate.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn start_with_options(
         args: MockEngineArgs,
         dp_rank: u32,
         options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
         Self::start_internal(args, dp_rank, options, None)
-    }
-
-    pub(crate) fn start_with_options_and_output_gate(
-        args: MockEngineArgs,
-        dp_rank: u32,
-        options: LiveEngineOptions,
-        output_gate: watch::Receiver<bool>,
-    ) -> anyhow::Result<Self> {
-        Self::start_internal(args, dp_rank, options, Some(output_gate))
     }
 
     #[cfg(test)]
@@ -191,7 +369,9 @@ impl LiveEngine {
             args,
             dp_rank,
             LiveEngineOptions {
-                request_output_capacity: Some(request_output_capacity),
+                request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                    capacity: request_output_capacity,
+                },
                 ..LiveEngineOptions::default()
             },
             output_gate,
@@ -209,23 +389,42 @@ impl LiveEngine {
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
-        let cancel = CancellationToken::new();
+        let group_cancel = CancellationToken::new();
         let (event_tx, event_rx) = mpsc::channel::<LiveEngineEvent>(SCHEDULER_EVENT_CAPACITY);
         let forward_admissions = options.admission_tx.is_some();
         let LiveEngineScheduler {
-            handle: mut scheduler,
+            handle: scheduler,
             actor: scheduler_actor,
+            completion_drain,
         } = create_engine_with_event_sender(
             args,
             dp_rank,
             Some(SchedulerEventSender::Ordered {
                 tx: event_tx,
                 forward_admissions,
+                cancel: group_cancel.clone(),
             }),
-            options.kv_event_publishers,
-            Some(cancel.clone()),
-            options.fpm_publisher,
-        );
+            options.kv_event_publishers.clone(),
+            Some(group_cancel.clone()),
+            options.fpm_publisher.clone(),
+        )?;
+        let group = Arc::new(LiveEngineGroup::new(
+            group_cancel,
+            scheduler_actor,
+            completion_drain,
+        ));
+        Self::from_scheduler(runtime, scheduler, group, event_rx, options, output_gate)
+    }
+
+    fn from_scheduler(
+        runtime: Handle,
+        mut scheduler: Box<dyn SchedulerHandle>,
+        group: Arc<LiveEngineGroup>,
+        event_rx: mpsc::Receiver<LiveEngineEvent>,
+        options: LiveEngineOptions,
+        output_gate: Option<watch::Receiver<bool>>,
+    ) -> anyhow::Result<Self> {
+        let cancel = group.cancel.child_token();
         let command_tx = scheduler.command_sender();
         let cancellation_tx = scheduler.cancellation_sender();
         let metrics_rx = scheduler.metrics_receiver();
@@ -237,9 +436,6 @@ impl LiveEngine {
         let dispatcher = runtime.spawn(run_event_dispatcher(
             event_rx,
             Arc::clone(&routes),
-            command_tx.clone(),
-            cancellation_tx.clone(),
-            runtime.clone(),
             cancel.clone(),
             output_gate,
             options.admission_tx,
@@ -269,12 +465,12 @@ impl LiveEngine {
                 routes,
                 handoff_routes,
                 metrics_rx,
-                request_output_capacity: options.request_output_capacity,
+                request_output_buffering: options.request_output_buffering,
                 allow_zero_output: options.allow_zero_output,
+                group,
                 cancel,
                 runtime,
                 tasks: Mutex::new(LiveEngineTasks {
-                    scheduler_actor: Some(scheduler_actor),
                     dispatcher_supervisor: Some(dispatcher_supervisor),
                     lifecycle_supervisor: Some(lifecycle_supervisor),
                     shutdown: None,
@@ -306,10 +502,10 @@ impl LiveEngine {
         let client_id = request.uuid.unwrap_or_else(Uuid::new_v4);
         let scheduler_id = Uuid::new_v4();
         request.uuid = Some(scheduler_id);
-        let output_capacity = self.inner.request_output_capacity.map_or_else(
-            || output_length.max(1),
-            |capacity| output_length.max(1).min(capacity.get()),
-        );
+        let output_capacity = self
+            .inner
+            .request_output_buffering
+            .capacity_for(output_length);
         let (tx, rx) = mpsc::channel(output_capacity);
         let route = Arc::new(RequestRoute::new(client_id, scheduler_id, tx));
         match self.inner.routes.by_client.entry(client_id) {
@@ -439,7 +635,22 @@ impl LiveEngine {
         self.inner.routes.by_client.len()
     }
 
+    pub(crate) async fn drain_completion_boundary(&self) -> anyhow::Result<()> {
+        self.inner.group.completion_drain.wait().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_completion_boundary_before_finish(&self) -> CompletionBoundaryTestControl {
+        self.inner.group.completion_drain.pause_before_finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_is_cancelled(&self) -> bool {
+        self.inner.group.cancel.is_cancelled()
+    }
+
     pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let group_shutdown = self.inner.group.shutdown();
         self.inner.cancel.cancel();
         shutdown_routes(&self.inner.routes);
         shutdown_handoff_routes(&self.inner.handoff_routes);
@@ -449,7 +660,7 @@ impl LiveEngine {
                 shutdown.clone()
             } else {
                 let shutdown = shutdown_engine(
-                    tasks.scheduler_actor.take(),
+                    group_shutdown,
                     tasks.dispatcher_supervisor.take(),
                     tasks.lifecycle_supervisor.take(),
                     Arc::clone(&self.inner.routes),
@@ -466,20 +677,13 @@ impl LiveEngine {
 }
 
 async fn shutdown_engine(
-    scheduler_actor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    group_shutdown: SharedShutdown,
     dispatcher_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     lifecycle_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     routes: Routes,
     handoff_routes: SharedHandoffRoutes,
 ) -> Result<(), Arc<str>> {
-    let mut first_error = None;
-    if let Some(scheduler_actor) = scheduler_actor {
-        match scheduler_actor.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => first_error = Some(error.context("live Mocker scheduler failed")),
-            Err(error) => first_error = Some(anyhow!("live Mocker scheduler task failed: {error}")),
-        }
-    }
+    let mut first_error = group_shutdown.await.err().map(|error| anyhow!("{error}"));
     if let Some(dispatcher_supervisor) = dispatcher_supervisor {
         match dispatcher_supervisor.await {
             Ok(Ok(())) => {}
@@ -675,13 +879,9 @@ impl Drop for LiveRequest {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_event_dispatcher(
     mut event_rx: mpsc::Receiver<LiveEngineEvent>,
     routes: Routes,
-    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
-    cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
-    runtime: Handle,
     cancel: CancellationToken,
     mut output_gate: Option<watch::Receiver<bool>>,
     admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
@@ -694,8 +894,10 @@ async fn run_event_dispatcher(
             return Ok(());
         }
 
-        if matches!(pending_event.as_ref(), Some(LiveEngineEvent::Outputs(_)))
-            && output_gate.as_ref().is_some_and(|gate| !*gate.borrow())
+        if matches!(
+            pending_event.as_ref(),
+            Some(LiveEngineEvent::Outputs { .. })
+        ) && output_gate.as_ref().is_some_and(|gate| !*gate.borrow())
         {
             let Some(gate) = output_gate.as_mut() else {
                 unreachable!("the output gate was checked above");
@@ -734,22 +936,20 @@ async fn run_event_dispatcher(
             LiveEngineEvent::Admissions(batch) => {
                 dispatch_admission_batch(batch, &routes, admission_tx.as_ref())?;
             }
-            LiveEngineEvent::Outputs(batch)
+            LiveEngineEvent::Outputs { signals, delivered }
                 if output_gate.as_ref().is_some_and(|gate| !*gate.borrow()) =>
             {
-                pending_event = Some(LiveEngineEvent::Outputs(batch));
+                pending_event = Some(LiveEngineEvent::Outputs { signals, delivered });
             }
-            LiveEngineEvent::Outputs(batch) => {
-                if !dispatch_output_batch(
-                    batch,
-                    &routes,
-                    &runtime,
-                    &command_tx,
-                    &cancellation_tx,
-                    &cancel,
-                ) {
+            LiveEngineEvent::Outputs { signals, delivered } => {
+                let Some(failed) = dispatch_output_batch(signals, &routes, &cancel) else {
                     return Ok(());
-                }
+                };
+                // This is the route-delivery boundary, not merely the
+                // scheduler-to-dispatcher enqueue boundary. Failed routes are
+                // returned to the grouped dispatcher, which applies native
+                // cleanup synchronously through `GroupedPassBoundary`.
+                let _ = delivered.send(failed);
             }
         }
     }
@@ -809,16 +1009,15 @@ async fn supervise_event_dispatcher(
 fn dispatch_output_batch(
     batch: Vec<OutputSignal>,
     routes: &Routes,
-    runtime: &Handle,
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    cancellation_tx: &mpsc::Sender<SchedulerCancellationEnvelope>,
     cancel: &CancellationToken,
-) -> bool {
+) -> Option<Vec<OutputSignal>> {
     let observed_at = tokio::time::Instant::now();
+    let mut failed = Vec::new();
     for mut signal in batch {
         if cancel.is_cancelled() {
-            return false;
+            return None;
         }
+        let scheduler_signal = signal.clone();
         let scheduler_id = signal.uuid;
         let terminal = signal.completed;
         let Some(route) = routes
@@ -834,28 +1033,29 @@ fn dispatch_output_batch(
             event: signal,
             observed_at,
         });
-        if delivery != OutputDelivery::Delivered && route.abandon_stream() {
-            if delivery == OutputDelivery::Full {
+        if delivery != OutputDelivery::Delivered {
+            let newly_abandoned = route.abandon_stream();
+            if newly_abandoned && delivery == OutputDelivery::Full {
                 tracing::debug!(
                     client_id = %route.client_id,
                     scheduler_id = %route.scheduler_id,
                     "cancelling live Mocker request with a full output stream"
                 );
             }
-            drop(spawn_cancellation(
-                runtime,
-                command_tx.clone(),
-                cancellation_tx.clone(),
-                Arc::clone(routes),
-                Arc::clone(&route),
-                true,
-            ));
+            // The scheduler-side sender converts this acknowledgement into
+            // `OutputClosed`; the grouped completion dispatcher cancels the
+            // native request before releasing the pass boundary. Retire the
+            // Dynamo route now so a replacement cannot receive stale output.
+            route.shutdown();
+            remove_route(routes, &route);
+            failed.push(scheduler_signal);
+            continue;
         }
         if terminal && route.observe_terminal() {
             remove_route(routes, &route);
         }
     }
-    true
+    Some(failed)
 }
 
 fn spawn_cancellation(
