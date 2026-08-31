@@ -327,6 +327,30 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
 
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
+/// Read one histogram bucket bound, reporting a value that cannot be used.
+///
+/// The combined-config check below already warns when the resulting min/max/count
+/// are inconsistent. A single unparseable value never reached it: it fell back to
+/// the default, the combination stayed valid, and the operator got default buckets
+/// with nothing said. Blank is treated as unset, matching the other env readers.
+fn bucket_bound_from_env<T: std::str::FromStr>(name: &str, default: T) -> T {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return default;
+    }
+    trimmed.parse::<T>().unwrap_or_else(|_| {
+        tracing::warn!(
+            env_var = name,
+            value = %raw,
+            "Invalid histogram bucket value; using the default"
+        );
+        default
+    })
+}
+
 fn parse_bucket_config(
     env_prefix: &str,
     default_min: f64,
@@ -343,18 +367,9 @@ fn parse_bucket_config(
         return (1.0, 10.0, 10);
     }
     let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_bound_from_env(&format!("{env_prefix}_MIN"), default_min);
+    let mut max = bucket_bound_from_env(&format!("{env_prefix}_MAX"), default_max);
+    let mut count = bucket_bound_from_env(&format!("{env_prefix}_COUNT"), default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
