@@ -367,8 +367,7 @@ impl DeltaAggregator {
                                             function: None,
                                         }
                                     });
-                                // The merge outcome is ignored: only the streaming
-                                // dispatch acts on identity conflicts.
+                                // Only the streaming dispatch acts on identity conflicts.
                                 let _ = merge_tool_call_chunk(entry, chunk);
                             }
                         }

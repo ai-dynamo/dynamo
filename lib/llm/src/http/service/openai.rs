@@ -2828,7 +2828,6 @@ fn is_exact_replay(entry: &ToolCallAssembly, chunk: &ChatCompletionMessageToolCa
     accumulated_args == incoming_args
 }
 
-/// Emit the dispatch event for `entry` and tombstone it.
 fn emit_tool_call_dispatch(
     choice_index: u32,
     entry: &mut ToolCallAssembly,
@@ -2937,7 +2936,7 @@ fn update_tool_call_assembly(
                     .as_ref()
                     .and_then(|f| f.arguments.as_deref())
                     .unwrap_or("");
-                if serde_json::from_str::<serde_json::Value>(accumulated_args).is_err() {
+                if serde_json::from_str::<serde::de::IgnoredAny>(accumulated_args).is_err() {
                     tracing::warn!(
                         choice_index,
                         tool_call_index = chunk.index,
@@ -3004,7 +3003,7 @@ fn finalize_choice_assemblies(
             // here, where the choice has stopped producing arguments.
             None | Some("") => true,
             Some(args) => {
-                entry.json_confirmed || serde_json::from_str::<serde_json::Value>(args).is_ok()
+                entry.json_confirmed || serde_json::from_str::<serde::de::IgnoredAny>(args).is_ok()
             }
         };
 
@@ -8168,7 +8167,6 @@ mod tests {
         }
     }
 
-    /// Build a choice carrying the given tool-call chunks and finish reason.
     fn make_choice_with_tool_calls(
         index: u32,
         tool_calls: Vec<ChatCompletionMessageToolCallChunk>,
@@ -8194,13 +8192,10 @@ mod tests {
         }
     }
 
-    /// A choice whose only content is a terminal `finish_reason`.
     fn make_finish_choice(index: u32, finish: FinishReason) -> ChatChoiceStream {
         make_choice_with_tool_calls(index, vec![], Some(finish))
     }
 
-    /// Feed one delta and then a `finish_reason: "tool_calls"` terminator,
-    /// returning the events from both, in order.
     fn drive_to_tool_calls_finish(
         choices: Vec<ChatChoiceStream>,
         finish_choice_index: u32,
@@ -8559,8 +8554,6 @@ mod tests {
         assert!(events.is_empty(), "duplicate id should not dispatch twice");
     }
 
-    // ── #13972: fragmented tool-call assembly ──
-
     /// Read the assembled arguments for a key directly, so quoted-brace
     /// payloads never go through `extract_sse_data_json`'s brace-only,
     /// string-unaware scan.
@@ -8586,7 +8579,6 @@ mod tests {
         (events, assemblies)
     }
 
-    // Case 2: an identity opener followed by argument-only fragments.
     #[test]
     fn test_13972_identity_opener_then_argument_fragments() {
         let (events, assemblies) = feed_fragments(&[
@@ -8612,7 +8604,6 @@ mod tests {
         );
     }
 
-    // Case 6 (truncated JSON): the prefix must never dispatch on its own.
     #[test]
     fn test_13972_truncated_prefix_never_dispatches() {
         let (events, _) = feed_fragments(&[(
@@ -8626,7 +8617,6 @@ mod tests {
         );
     }
 
-    // Case 3: `Some("")` is an opener, not a completion.
     #[test]
     fn test_13972_empty_opener_then_fragments_does_not_dispatch_early() {
         let (events, assemblies) = feed_fragments(&[
@@ -8643,7 +8633,6 @@ mod tests {
         );
     }
 
-    // Case 4: id, name, and arguments arriving on three different chunks.
     #[test]
     fn test_13972_identity_after_arguments_still_assembles() {
         let (events, _) = feed_fragments(&[
@@ -8662,7 +8651,43 @@ mod tests {
         assert_eq!(json["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
     }
 
-    // Case 4 (second half): a conflicting repeated identity fails closed.
+    // A magnitude `f64` cannot hold is still valid JSON syntax. Confirmation
+    // is a syntax check, so such a call dispatches; deserializing into
+    // `serde_json::Value` would reject it as `number out of range` and drop a
+    // call the model legitimately made.
+    #[test]
+    fn test_13972_out_of_range_exponent_dispatches() {
+        let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"{"a":1e400}"#))]);
+        assert_eq!(
+            early.len(),
+            1,
+            "an out-of-range exponent is syntactically valid and must dispatch early"
+        );
+        let json = extract_sse_data_json(early[0].as_ref().unwrap());
+        assert_eq!(
+            json["tool_call"]["function"]["arguments"], r#"{"a":1e400}"#,
+            "the argument string is forwarded verbatim, not renormalized"
+        );
+
+        // The terminal pass confirms independently when the scanner never
+        // reached a candidate boundary, so it needs the same syntax-only rule.
+        let terminal = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_2"),
+                Some("f"),
+                Some("-1e400"),
+            )],
+            0,
+        );
+        assert_eq!(
+            terminal.len(),
+            1,
+            "a top-level out-of-range scalar resolves at the terminal pass"
+        );
+    }
+
     #[test]
     fn test_13972_conflicting_identity_fails_closed() {
         let (events, _) = feed_fragments(&[
@@ -8676,8 +8701,8 @@ mod tests {
         );
     }
 
-    // Case 5: quoted braces, escaped quotes, and a split backslash must not
-    // create a false boundary. Asserted on typed state.
+    // Quoted braces, escaped quotes, and a split backslash must not create a
+    // false boundary. Asserted on typed state.
     #[test]
     fn test_13972_quoted_and_escaped_braces_do_not_close_early() {
         let (events, assemblies) = feed_fragments(&[
@@ -8692,7 +8717,6 @@ mod tests {
         );
     }
 
-    // Case 5 (containers): nested objects and a top-level array.
     #[test]
     fn test_13972_nested_and_array_roots_complete() {
         let (nested, _) = feed_fragments(&[
@@ -8708,7 +8732,6 @@ mod tests {
         assert_eq!(array.len(), 1, "a top-level array is self-delimiting");
     }
 
-    // Case 6: trailing junk in the completing fragment never dispatches.
     #[test]
     fn test_13972_trailing_junk_never_dispatches() {
         let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some("{}junk"))]);
@@ -8718,8 +8741,8 @@ mod tests {
         );
     }
 
-    // Case 6: mismatched containers. `}{\"x\":1}` read as complete under
-    // #6845's depth-clamping scanner; it must be a permanent non-dispatch.
+    // `}{\"x\":1}` read as complete under #6845's depth-clamping scanner; it
+    // must be a permanent non-dispatch.
     #[test]
     fn test_13972_mismatched_containers_never_dispatch() {
         let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"}{"x":1}"#))]);
@@ -8742,14 +8765,12 @@ mod tests {
         );
     }
 
-    // Case 6: leading junk never dispatches.
     #[test]
     fn test_13972_leading_junk_never_dispatches() {
         let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"junk{"a":1}"#))]);
         assert!(events.is_empty(), "leading junk must not dispatch");
     }
 
-    // Case 2/6 boundary: a canonical parameterless `{}` may dispatch early.
     #[test]
     fn test_13972_canonical_empty_object_dispatches_early() {
         let (events, _) = feed_fragments(&[(Some("call_1"), Some("no_params"), Some("{}"))]);
@@ -8760,7 +8781,6 @@ mod tests {
         );
     }
 
-    // Case 7: two calls in one choice interleave and complete in reverse order.
     #[test]
     fn test_13972_interleaved_inner_indexes_complete_out_of_order() {
         let mut assemblies = ToolCallAssemblies::new();
@@ -8802,7 +8822,6 @@ mod tests {
         assert_eq!(second["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
     }
 
-    // Case 8: two choices sharing inner index 0 and the same call id.
     #[test]
     fn test_13972_same_id_and_inner_index_across_choices_do_not_collide() {
         let mut assemblies = ToolCallAssemblies::new();
@@ -8906,7 +8925,6 @@ mod tests {
             "truncated arguments must not dispatch on a `Stop` finish either"
         );
 
-        // Invalid non-empty JSON does not.
         let invalid = drive_to_tool_calls_finish(
             vec![make_choice_with_tool_call(
                 0,
@@ -8939,41 +8957,8 @@ mod tests {
         );
     }
 
-    // Case 12: ordering. Every ordinary fragment stays an ordinary event, and
-    // exactly one dispatch event precedes the fragment that closes the JSON.
-    #[test]
-    fn test_13972_dispatch_event_precedes_the_completing_fragment() {
-        let mut assemblies = ToolCallAssemblies::new();
-        let fragments = [
-            (Some("call_1"), Some("create_file"), None),
-            (None, None, Some(r#"{"path""#)),
-            (None, None, Some(r#":"/a/very"#)),
-            (None, None, Some(r#"/long/file"}"#)),
-        ];
-
-        // Mirrors the handler loop: side-channel events are collected first,
-        // then the ordinary data event is appended.
-        let mut wire: Vec<String> = Vec::new();
-        for (i, (id, name, args)) in fragments.iter().enumerate() {
-            let response =
-                make_stream_response(vec![make_choice_with_tool_call(0, 0, *id, *name, *args)]);
-            let side = collect_tool_dispatch_events(&response, &mut assemblies);
-            for event in &side {
-                assert_event_type(event.as_ref().unwrap(), "tool_call_dispatch");
-                wire.push("tool_call_dispatch".to_string());
-            }
-            wire.push(format!("data:{i}"));
-        }
-
-        assert_eq!(
-            wire,
-            vec!["data:0", "data:1", "data:2", "tool_call_dispatch", "data:3",],
-            "the dispatch event precedes the ordinary fragment that completes the JSON, \
-             and every ordinary fragment survives"
-        );
-    }
-
-    // ── JsonStructureScanner unit coverage ──
+    // Ordering is a property of the handler loop rather than of assembly, so it
+    // is covered over real SSE frames in `tests/streaming_tool_dispatch_http.rs`.
 
     fn scan_all(fragments: &[&str]) -> ScanOutcome {
         let mut scanner = JsonStructureScanner::default();
