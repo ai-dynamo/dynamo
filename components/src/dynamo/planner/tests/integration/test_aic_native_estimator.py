@@ -128,7 +128,11 @@ def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
 
     diagnostics = model._engine_diagnostics()
     assert diagnostics["source"] == "fallback_regression"
-    assert diagnostics["readiness"] == "insufficient_data"
+    # The canonical constructor first attempts the requested native identity.
+    # With no Planner AIC config that identity is deliberately unsupported, but
+    # the regression fallback remains tunable and becomes ready below.
+    assert diagnostics["readiness"] == "unsupported_config"
+    assert diagnostics["last_warning"]
 
     for counter_id, (requests, kv_tokens, wall_time) in enumerate(
         ((1, 100, 0.01), (2, 200, 0.02)),
