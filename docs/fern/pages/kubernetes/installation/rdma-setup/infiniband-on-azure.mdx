@@ -6,7 +6,7 @@ title: RDMA / InfiniBand on AKS
 
 This guide covers setting up RDMA over InfiniBand on AKS for high-performance disaggregated inference with Dynamo. RDMA enables direct memory access between GPUs across nodes, bypassing CPU and kernel overhead — critical for low-latency KV cache transfer between prefill and decode workers.
 
-Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). See the [Disaggregated Communication Guide](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) for details on transport options and performance expectations.
+Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). See [RDMA Setup](overview.md) for the transport overview.
 
 <Note>
 The Network Operator and NicClusterPolicy steps in this guide are based on the [Azure AKS RDMA InfiniBand](https://github.com/Azure/aks-rdma-infiniband) repository. That project is open-source and not covered by Microsoft Azure support — file issues on the GitHub repository.
@@ -422,4 +422,4 @@ The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/
 - [Set up InfiniBand on Azure HPC VMs — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/setup-infiniband)
 - [Enable InfiniBand VM extension — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/enable-infiniband)
 - [NVIDIA Network Operator Documentation](https://docs.nvidia.com/networking/display/kubernetes25100/index.html)
-- [Disaggregated Communication Guide](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) — transport options, UCX configuration, performance expectations
+- [RDMA Setup](overview.md) — transport requirements and platform guides

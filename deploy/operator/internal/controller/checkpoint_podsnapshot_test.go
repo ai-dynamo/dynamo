@@ -143,7 +143,7 @@ func foreignPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *snapshotv1alp
 			Labels:    map[string]string{consts.SnapshotOwnerLabel: ckpt.Name},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "someone-else"}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "someone-else", Containers: []string{"main"}}},
 		},
 	}
 }

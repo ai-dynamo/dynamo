@@ -243,9 +243,14 @@ impl ActiveSequences {
     }
 
     /// Mark prefill as completed for a request, removing it from prompt-load tracking.
-    pub(super) fn mark_prefill_completed(&mut self, request_id: &RequestId, decay_now: Instant) {
-        let _ = self.prefill.remove(request_id, decay_now);
+    pub(super) fn mark_prefill_completed(
+        &mut self,
+        request_id: &RequestId,
+        decay_now: Instant,
+    ) -> bool {
+        let changed = self.prefill.remove(request_id, decay_now).is_some();
         self.validate_state();
+        changed
     }
 
     /// Free all blocks associated with a request.
@@ -256,13 +261,10 @@ impl ActiveSequences {
         &mut self,
         request_id: &RequestId,
         decay_now: Instant,
-    ) -> PromptMembershipDelta {
+    ) -> Option<PromptMembershipDelta> {
         let _ = self.prefill.remove(request_id, decay_now);
 
-        let Some(request_state) = self.requests.remove(request_id) else {
-            tracing::warn!("Trying to free non-existent request {request_id}");
-            return PromptMembershipDelta::default();
-        };
+        let request_state = self.requests.remove(request_id)?;
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
@@ -270,7 +272,7 @@ impl ActiveSequences {
         membership_delta.push_remove(self.blocks.release(blocks));
 
         self.validate_state();
-        membership_delta
+        Some(membership_delta)
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
@@ -331,7 +333,9 @@ impl ActiveSequences {
 
         for request_id in &outcome.expired_request_ids {
             tracing::warn!("Expiring stale request: {}", request_id);
-            outcome.membership_delta.extend(self.free(request_id, now));
+            if let Some(delta) = self.free(request_id, now) {
+                outcome.membership_delta.extend(delta);
+            }
         }
 
         self.validate_state();
@@ -445,11 +449,15 @@ mod tests {
             }
         );
 
-        let first_free = seq_manager.free(&"r1".to_string(), decay_now);
+        let first_free = seq_manager
+            .free(&"r1".to_string(), decay_now)
+            .expect("request exists");
         assert!(first_free.removes.is_empty());
         assert!(first_free.stores.is_empty());
 
-        let second_free = seq_manager.free(&"r2".to_string(), decay_now);
+        let second_free = seq_manager
+            .free(&"r2".to_string(), decay_now)
+            .expect("request exists");
         assert!(second_free.stores.is_empty());
         assert_eq!(
             second_free.removes,
@@ -500,7 +508,9 @@ mod tests {
             [1, 2, 3, output_hash].into_iter().collect()
         );
 
-        let free_delta = seq_manager.free(&"r1".to_string(), decay_now);
+        let free_delta = seq_manager
+            .free(&"r1".to_string(), decay_now)
+            .expect("request exists");
         assert_eq!(
             free_delta.removes,
             vec![PromptMembershipRemove {

@@ -16,6 +16,7 @@ use validator::ValidationError;
 use crate::vllm_render_client::parse_tokenizer_service_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
+const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -82,14 +83,31 @@ impl std::str::FromStr for TokenizerProtocol {
     }
 }
 
+/// Complete replica synchronization configuration. Its presence enables
+/// replica-sync; its fields are validated together when parsing the environment.
+#[derive(Debug, Clone, Validate)]
+pub struct PeerReplicationConfig {
+    /// EPP Service used for peer discovery and state synchronization.
+    pub service_name: String,
+    /// Local EPP Pod IP from `POD_IP` (downward API), used to exclude self.
+    pub pod_ip: String,
+    /// ZMQ listener and peer dial port. Every EPP selected by `service_name`
+    /// must use the same port.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
+    ))]
+    pub sync_port: u16,
+}
+
 #[derive(Debug, Clone, Validate)]
 pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization. The eventual
-    /// selector resolves its named `replica-agg` port from EndpointSlices.
-    pub peer_service: Option<String>,
+    /// Enables replica synchronization when set.
+    #[validate(nested)]
+    pub peer_replication: Option<PeerReplicationConfig>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
@@ -151,11 +169,30 @@ impl EppStandaloneConfig {
         let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
+        let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
+        let pod_ip = trimmed(get("POD_IP"));
+        let sync_port = opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
+            .unwrap_or(DEFAULT_REPLICA_SYNC_PORT);
+        let peer_replication = peer_service
+            .map(|service_name| -> anyhow::Result<_> {
+                let pod_ip = pod_ip.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                         inject POD_IP via the downward API (fieldRef status.podIP)"
+                    )
+                })?;
+                Ok(PeerReplicationConfig {
+                    service_name,
+                    pod_ip,
+                    sync_port,
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
-            peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
+            peer_replication,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
@@ -183,7 +220,8 @@ impl EppStandaloneConfig {
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
-            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+        Ok(())
     }
 }
 
@@ -290,7 +328,7 @@ mod tests {
         .expect("config should parse");
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
-        assert!(cfg.peer_service.is_none());
+        assert!(cfg.peer_replication.is_none());
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
@@ -325,21 +363,92 @@ mod tests {
     }
 
     #[test]
-    fn peer_service_config_parsed() {
-        let cfg = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+    fn peer_replication_config() {
+        type ExtraEnv = &'static [(&'static str, &'static str)];
+        type Expected = Result<(u16, usize), &'static str>;
+        type Case = (&'static str, ExtraEnv, Expected);
+
+        let required = [
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect("peer service config should parse");
-        assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.selector_threads, 8);
-        assert_eq!(cfg.namespace, "inference");
+        ];
+        let cases: [Case; 6] = [
+            (
+                "default port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+                ],
+                Ok((DEFAULT_REPLICA_SYNC_PORT, 8)),
+            ),
+            (
+                "overridden port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
+                ],
+                Ok((9192, DEFAULT_SELECTOR_THREADS)),
+            ),
+            (
+                "missing pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp")],
+                Err("POD_IP"),
+            ),
+            (
+                "blank pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp"), ("POD_IP", " ")],
+                Err("POD_IP"),
+            ),
+            (
+                "zero port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+            (
+                "out of range port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "65536"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+        ];
+
+        for (name, extra, expected) in cases {
+            let mut env = required.to_vec();
+            env.extend_from_slice(extra);
+            match expected {
+                Ok((port, selector_threads)) => {
+                    let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
+                    let replication = cfg
+                        .peer_replication
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{name}: replication should be enabled"));
+                    assert_eq!(replication.service_name, "dynamo-epp", "{name}");
+                    assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
+                    assert_eq!(replication.sync_port, port, "{name}");
+                    assert_eq!(cfg.selector_threads, selector_threads, "{name}");
+                }
+                Err(expected_error) => {
+                    let error = parse_cfg(&env).expect_err(name);
+                    assert!(
+                        error.to_string().contains(expected_error),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

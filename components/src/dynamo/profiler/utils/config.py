@@ -573,6 +573,27 @@ def set_unique_argument_value(args: list[str], arg_name: str, value: str) -> lis
     return append_argument(filtered, [arg_name, value])
 
 
+def set_unique_env_value(
+    env: list[dict[str, Any]] | None, name: str, value: str
+) -> list[dict[str, Any]]:
+    """Set one canonical ``name``/``value`` env entry, dropping any duplicates.
+
+    Mutates and returns a list of Kubernetes-style ``{"name", "value"}`` env
+    dicts. Existing entries for ``name`` (including ``valueFrom`` variants) are
+    removed before the canonical literal value is appended, so callers can set
+    identity-bearing env vars idempotently without leaving a stale entry for the
+    downstream process to read.
+    """
+    env_list = env if isinstance(env, list) else []
+    env_list[:] = [
+        entry
+        for entry in env_list
+        if not (isinstance(entry, dict) and entry.get("name") == name)
+    ]
+    env_list.append({"name": name, "value": value})
+    return env_list
+
+
 def update_image(config: dict, image: str) -> dict:
     """Update container image for non-planner DGD services.
 

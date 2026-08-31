@@ -224,7 +224,7 @@ jobs:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
       - name: Docker Login
-        uses: ./.github/actions/docker-login
+        uses: $/.github/actions/docker-login
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
@@ -301,7 +301,7 @@ jobs:
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
           fi
       - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+        uses: $/.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
@@ -443,7 +443,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.epp-sbom/sbom-go-licenses" 2>/dev/null | head -40
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}
-        uses: ./.github/actions/builder-refresher
+        uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
@@ -490,7 +490,7 @@ jobs:
       - name: Build and Push Image
         id: build-image
         if: ${{ !inputs.compliance_only }}
-        uses: ./.github/actions/docker-remote-build
+        uses: $/.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
@@ -573,7 +573,7 @@ jobs:
       # re-route first or the extract just dies on buildx's 20s connect timeout.
       - name: Refresh BuildKit builder
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
-        uses: ./.github/actions/builder-refresher
+        uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
@@ -582,7 +582,7 @@ jobs:
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
-        uses: ./.github/actions/compliance-extract
+        uses: $/.github/actions/compliance-extract
         with:
           # Diff baseline resolved above (empty when diffing is disabled or no
           # baseline applies); gh_token lets the action fetch it cross-run.
@@ -617,7 +617,7 @@ jobs:
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
-        uses: ./.github/actions/builder-refresher
+        uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
@@ -644,10 +644,21 @@ jobs:
             TEST_TARGET="test_planner"
           fi
 
+          PYPI_SECRET_ARGS=()
+          if [ -n "${PIP_INDEX_URL:-}" ] \
+            && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+            && [ -n "${NETRC:-}" ] \
+            && [ -f "${NETRC}" ]; then
+            PYPI_SECRET_ARGS+=(--secret id=pip-index-url,env=PIP_INDEX_URL)
+            PYPI_SECRET_ARGS+=(--secret id=uv-default-index,env=UV_DEFAULT_INDEX)
+            PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
+            "${PYPI_SECRET_ARGS[@]}" \
             --platform ${{ inputs.platform }} \
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \

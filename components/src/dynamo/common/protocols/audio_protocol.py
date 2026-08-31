@@ -17,6 +17,17 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class AudioNvExt(BaseModel):
+    """NVIDIA extensions for audio generation requests."""
+
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
+
+
 class NvCreateAudioSpeechRequest(BaseModel):
     """Request for audio speech generation (/v1/audio/speech endpoint).
 
@@ -63,6 +74,9 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
+
+    nvext: Optional[AudioNvExt] = None
+    """NVIDIA extensions."""
 
 
 class AudioData(BaseModel):

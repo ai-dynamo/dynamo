@@ -579,6 +579,23 @@ class PlannerConfig(BaseModel):
             "regardless of ssl_verify."
         ),
     )
+    metric_pulling_prometheus_request_timeout_seconds: float = Field(
+        default_factory=lambda: float(
+            os.environ.get(
+                "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds,
+            )
+        ),
+        validate_default=True,
+        gt=0,
+        exclude=True,
+        description=(
+            "Connection and read inactivity timeout in seconds for each Prometheus "
+            "API request. This is not a total wall-clock deadline: a response that "
+            "continues delivering data can run longer. Failed requests are not "
+            "retried within the same collection cycle."
+        ),
+    )
 
     @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
     @classmethod
