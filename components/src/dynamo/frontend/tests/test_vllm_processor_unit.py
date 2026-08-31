@@ -1504,6 +1504,56 @@ class TestRoutedEnginePath:
         assert "CUDA out of memory" in last["comment"][0]
 
     @pytest.mark.asyncio
+    async def test_unregistered_choice_index_ends_the_stream(
+        self, vllm_processor_module
+    ):
+        """An unknown choice index ends the stream instead of reading on."""
+
+        class _WrongIndexOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                # Index 1 is never registered below, so the lookup misses.
+                return SimpleNamespace(
+                    reqs_to_abort=[],
+                    request_outputs=[
+                        SimpleNamespace(outputs=[SimpleNamespace(index=1)])
+                    ],
+                )
+
+        # Two frames: with `continue` the second one yields a second error.
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _WrongIndexOutputProcessor()
+        preproc = _base_preproc()
+        vllm_preproc = SimpleNamespace(
+            sampling_params=SimpleNamespace(n=1),
+            request_id="vllm-request",
+            external_req_id=None,
+        )
+
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                {"model": MODEL},
+                preproc,
+                preproc["token_ids"],
+                vllm_preproc,
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        assert len(chunks) == 1, f"stream continued after the error: {chunks}"
+        assert chunks[0]["event"] == "error"
+        assert "Invalid postprocessor choice index 1" in chunks[0]["comment"][0]
+
+    @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()
         processor = _make_processor(vllm_processor_module, routed_engine)
