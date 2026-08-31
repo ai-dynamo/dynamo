@@ -1401,10 +1401,24 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         guided = build_tool_call_guided_decoding(
             {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
                 "tool_choice": {
                     "type": "function",
                     "function": {"name": "get_server_time"},
-                }
+                },
             },
             tool_call_parser_name="hermes",
             sglang_tools=tools,

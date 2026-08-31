@@ -579,6 +579,9 @@ def build_tool_call_guided_decoding(
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if named_closed_zero_arg_tool(request) is not None:
+            return {"regex": r"\{\}"}
+
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
@@ -625,8 +628,6 @@ def build_tool_call_guided_decoding(
 
     if isinstance(constraint, tuple) and len(constraint) == 2:
         if constraint[0] == "json_schema":
-            if named_closed_zero_arg_tool(request) is not None:
-                return {"regex": r"\{\}"}
             return {"json": constraint[1]}
         if constraint[0] == "structural_tag":
             tag_value = constraint[1]
