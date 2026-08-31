@@ -18,7 +18,8 @@ cluster:
 - A Kubernetes 1.30 or later cluster with NVIDIA GPU nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](managed-kubernetes/eks/eks-setup.mdx) | [Azure AKS](managed-kubernetes/azure/aks-setup.mdx) | [Google GKE](managed-kubernetes/gcp/gke-setup.mdx)
   - For local development: [Minikube Setup](../../cli/installation/minikube-setup.mdx)
-- `kubectl` 1.30 or later.
+- `kubectl` 1.30 or later and within one minor version of the Kubernetes API server, as required by
+  the [Kubernetes version skew policy](https://kubernetes.io/releases/version-skew-policy/#kubectl).
 
 > [!IMPORTANT]
 > The GPU Operator in the first installation step can install NVIDIA drivers. Do not also enable
@@ -39,10 +40,10 @@ cluster:
 </Tab>
 </Tabs>
 
-Verify the client tools:
+Verify the client tools and the Kubernetes API server version:
 
 ```bash
-kubectl version --client
+kubectl version
 helm version
 ```
 
