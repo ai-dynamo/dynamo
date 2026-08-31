@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from dynamo.profiler.tests.sweeper.run_cases import (
+    SuiteException,
     default_suite_output_root,
     load_case,
     load_hardware,
@@ -62,6 +63,7 @@ class SweeperDeploymentTarget:
     yaml_path: Path
     gpu_count: int
     gpu_sku: str
+    expected_failure: SuiteException | None = None
 
     @property
     def test_id(self) -> str:
@@ -89,6 +91,8 @@ def _discover_targets(
     targets = []
     hardware_cache = {}
     for entry in load_suite(suite_path):
+        if entry.status is not None and entry.status.status == "skipped":
+            continue
         case = None
         if not missing_case_inputs(entry.case):
             if entry.hardware not in hardware_cache:
@@ -100,9 +104,18 @@ def _discover_targets(
             )
         recipe = load_recipe(entry.case)
         for variant in variants:
+            deploy_exception = entry.exception_for("deploy", variant)
+            if deploy_exception is not None and deploy_exception.status == "skipped":
+                continue
             if variant == "recipe":
-                if recipe is None or not recipe.path.is_file():
+                if recipe is None:
                     continue
+                if not recipe.path.is_file():
+                    if deploy_exception is not None:
+                        continue
+                    raise pytest.UsageError(
+                        f"{entry.case}: recipe source is missing: {recipe.path}"
+                    )
                 requirement = recipe.requirements.get(entry.hardware)
                 if requirement is None and not discover_recipe_hardware:
                     continue
@@ -132,6 +145,11 @@ def _discover_targets(
                     else "agg"
                 )
             if not yaml_path.is_file():
+                render_exception = entry.exception_for("render", variant)
+                if render_exception is None and variant.startswith("sweeper-"):
+                    render_exception = entry.exception_for("render", "sweeper")
+                if render_exception is not None:
+                    continue
                 raise pytest.UsageError(
                     f"{entry.hardware}/{entry.case}: requested {variant} artifact is missing: "
                     f"{yaml_path}"
@@ -146,6 +164,7 @@ def _discover_targets(
                     yaml_path=yaml_path,
                     gpu_count=gpu_count,
                     gpu_sku=entry.hardware,
+                    expected_failure=deploy_exception,
                 )
             )
     if not targets:
@@ -198,9 +217,20 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         ),
         metafunc.config.getoption("--sweeper-discover-recipe-hardware", default=False),
     )
-    metafunc.parametrize(
-        "sweeper_deployment_target", targets, ids=[target.test_id for target in targets]
-    )
+    parameters = []
+    for target in targets:
+        marks = []
+        if (
+            target.expected_failure is not None
+            and target.expected_failure.status == "broken"
+        ):
+            marks.append(
+                pytest.mark.xfail(
+                    reason=target.expected_failure.describe(), strict=False
+                )
+            )
+        parameters.append(pytest.param(target, marks=marks, id=target.test_id))
+    metafunc.parametrize("sweeper_deployment_target", parameters)
 
 
 def _gpu_family(value: str) -> str:

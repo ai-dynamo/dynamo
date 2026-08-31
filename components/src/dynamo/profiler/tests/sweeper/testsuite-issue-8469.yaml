@@ -6,81 +6,245 @@ source: https://github.com/ai-dynamo/dynamo/issues/8469
 tests:
   - case: deepseek-r1-sglang-disagg-16gpu
     hardware: h200-sxm-32gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler refuses to trust remote code from the model's mutable revision.
+        sweeper:
+          status: broken
+          reason: Sweeper's SGLang H200 performance data has no feasible FP8 context-MLA configuration.
 
   - case: deepseek-r1-sglang-disagg-8gpu
     hardware: h200-sxm-16gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler refuses to trust remote code from the model's mutable revision.
+        sweeper:
+          status: broken
+          reason: Sweeper's SGLang H200 performance data has no feasible FP8 context-MLA configuration.
 
   - case: deepseek-r1-trtllm-disagg-wide-ep
     hardware: gb200-sxm-36gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no runner-compatible disaggregated configuration within the 36-GPU budget.
 
   - case: deepseek-r1-vllm-disagg
     hardware: h200-sxm-32gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler refuses to trust remote code from the model's mutable revision.
 
   - case: deepseek-v32-fp4-trtllm-agg
     hardware: gb200-sxm-32gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM DEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical DeepSeek V3.2 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: deepseek-v32-fp4-trtllm-disagg
     hardware: gb200-sxm-32gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no runner-compatible disaggregated configuration within the 32-GPU budget.
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical DeepSeek V3.2 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: glm-5-nvfp4-sglang-disagg
     hardware: gb200-sxm-20gpu
 
   - case: gpt-oss-120b-trtllm-agg
     hardware: gb200-sxm-4gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: gpt-oss-120b-trtllm-disagg
     hardware: gb200-sxm-5gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no viable parallel configuration within the five-GPU budget.
+          links: [https://github.com/ai-dynamo/dynamo/issues/8469]
 
   - case: kimi-k2-5-nvfp4-trtllm-agg-kvbm
     hardware: b200-sxm-8gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Kimi K2.5 KVBM recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/8476]
 
   - case: kimi-k2-5-nvfp4-trtllm-agg-specdec
     hardware: b200-sxm-32gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: kimi-k2-5-nvfp4-trtllm-agg
     hardware: b200-sxm-8gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: llama-3-3-70b-fp8-vllm-agg-gaie
     hardware: h200-sxm-4gpu
+    exceptions:
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Llama 3.3 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-agg
     hardware: h200-sxm-4gpu
+    exceptions:
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Llama 3.3 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-gaie
     hardware: h200-sxm-8gpu
+    exceptions:
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Llama 3.3 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-multi-node
     hardware: h200-sxm-16gpu
+    exceptions:
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Llama 3.3 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-single-node
     hardware: h200-sxm-8gpu
+    exceptions:
+      deploy:
+        recipe:
+          status: skipped
+          reason: The historical Llama 3.3 recipe was removed from the repository.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: nemotron-3-super-fp8-sglang-agg
     hardware: h200-sxm-4gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler exits successfully without producing a final DGD.
+        sweeper:
+          status: broken
+          reason: Sweeper's SGLang H200 performance data has no feasible configuration for this MoE model.
 
   - case: nemotron-3-super-fp8-sglang-disagg
     hardware: h200-sxm-4gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler exits successfully without producing a final DGD.
+        sweeper:
+          status: broken
+          reason: Sweeper's SGLang H200 performance data has no feasible configuration for this MoE model.
 
   - case: nemotron-3-super-fp8-trtllm-disagg
     hardware: h200-sxm-4gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no runner-compatible disaggregated configuration within the four-GPU budget.
 
   - case: nemotron-3-super-fp8-vllm-agg
     hardware: h200-sxm-4gpu
+    exceptions:
+      render:
+        profiler-v1beta1:
+          status: broken
+          reason: The v1 profiler exits successfully without producing a final DGD.
+        sweeper:
+          status: broken
+          reason: Sweeper's vLLM H200 performance data has no feasible configuration for this MoE model.
 
   - case: qwen3-235b-fp8-trtllm-agg
     hardware: h200-sxm-16gpu
+    exceptions:
+      render:
+        sweeper-direct:
+          status: broken
+          reason: The direct renderer does not support the TRT-LLM DEP topology selected by Sweeper.
+          links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: qwen3-235b-fp8-trtllm-disagg
     hardware: h200-sxm-16gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no viable parallel configuration within the GPU budget.
+          links: [https://github.com/ai-dynamo/dynamo/issues/8469]
 
   - case: qwen3-32b-fp8-trtllm-agg
     hardware: h200-sxm-2gpu
 
   - case: qwen3-32b-fp8-trtllm-disagg
     hardware: h200-sxm-8gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no viable parallel configuration within the GPU budget.
+          links: [https://github.com/ai-dynamo/dynamo/issues/8469]
 
   - case: qwen3-32b-fp8-vllm-disagg
     hardware: a100-sxm-8gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper's vLLM A100 performance data does not cover the model's FP8-block GEMM configuration.
 
   - case: qwen3-32b-vllm-agg
     hardware: h200-sxm-16gpu
@@ -90,3 +254,8 @@ tests:
 
   - case: qwen3-vl-30b-fp8-vllm-agg
     hardware: gb200-sxm-1gpu
+    exceptions:
+      render:
+        sweeper:
+          status: broken
+          reason: Sweeper finds no viable aggregated configuration within the one-GPU budget.

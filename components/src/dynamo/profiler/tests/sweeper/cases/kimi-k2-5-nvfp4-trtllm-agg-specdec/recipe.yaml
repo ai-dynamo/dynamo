@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-source: recipes/kimi-k2.5/trtllm/agg/nvidia/deploy-specdec.yaml
+source: recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml
 requirements:
   b200-sxm-32gpu:
     gpus: 32

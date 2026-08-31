@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import os
 import shlex
 import subprocess
@@ -38,6 +39,22 @@ _SWEEPER_INPUT = "sweeper.yaml"
 _DGDR_HARDWARE_PATCH = "dgdr-v1beta1.patch.yaml"
 _SWEEPER_HARDWARE_PATCH = "sweeper.patch.yaml"
 _RENDERERS = ("aic", "direct")
+_MAX_DGDR_NAME_LENGTH = 28
+_EXCEPTION_STATUSES = {"broken", "skipped"}
+_PHASE_VARIANTS = {
+    "render": {
+        "profiler-v1beta1",
+        "sweeper",
+        "sweeper-aic",
+        "sweeper-direct",
+    },
+    "deploy": {
+        "profiler-v1beta1",
+        "sweeper-aic",
+        "sweeper-direct",
+        "recipe",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -61,11 +78,35 @@ class Recipe:
 
 
 @dataclass(frozen=True)
+class SuiteException:
+    """One documented exception to the suite's strict default behavior."""
+
+    status: str
+    reason: str
+    links: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        """Return a concise diagnostic including optional evidence links."""
+        suffix = f" ({', '.join(self.links)})" if self.links else ""
+        return f"{self.reason}{suffix}"
+
+
+@dataclass(frozen=True)
 class SuiteEntry:
-    """One explicit case and hardware selection."""
+    """One explicit case/hardware selection and its exceptional behavior."""
 
     case: str
     hardware: str
+    status: SuiteException | None = None
+    exceptions: dict[str, dict[str, SuiteException]] | None = None
+
+    def exception_for(self, phase: str, variant: str) -> SuiteException | None:
+        """Return the case-wide or phase-specific exception for one variant."""
+        if self.status is not None:
+            return self.status
+        if self.exceptions is None:
+            return None
+        return self.exceptions.get(phase, {}).get(variant)
 
 
 @dataclass(frozen=True)
@@ -109,6 +150,15 @@ def _required_name(value: Any, *, field: str, path: Path) -> str:
     if not isinstance(value, str) or not value or Path(value).name != value:
         raise ValueError(f"{path}: {field} must be one non-empty directory name")
     return value
+
+
+def _dgd_name(case_name: str) -> str:
+    """Return a stable case-derived name that leaves room for DGD components."""
+    if len(case_name) <= _MAX_DGDR_NAME_LENGTH:
+        return case_name
+    digest = hashlib.sha1(case_name.encode(), usedforsecurity=False).hexdigest()[:8]
+    prefix = case_name[: _MAX_DGDR_NAME_LENGTH - len(digest) - 1].rstrip("-")
+    return f"{prefix}-{digest}"
 
 
 def _case_path(name: str) -> Path:
@@ -386,8 +436,83 @@ def load_case(
     )
 
 
+def _load_suite_exception(value: Any, *, field: str, path: Path) -> SuiteException:
+    if not isinstance(value, dict):
+        raise TypeError(f"{path}: {field} must be a mapping")
+    status = value.get("status")
+    if status not in _EXCEPTION_STATUSES:
+        choices = ", ".join(sorted(_EXCEPTION_STATUSES))
+        raise ValueError(f"{path}: {field}.status must be one of: {choices}")
+    reason = value.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(f"{path}: {field}.reason must be a non-empty string")
+    links = value.get("links", [])
+    if not isinstance(links, list) or any(
+        not isinstance(link, str) or not link.startswith(("https://", "http://"))
+        for link in links
+    ):
+        raise TypeError(f"{path}: {field}.links must be a list of HTTP URLs")
+    unknown = sorted(set(value) - {"status", "reason", "links"})
+    if unknown:
+        raise ValueError(f"{path}: {field} has unknown fields: {', '.join(unknown)}")
+    return SuiteException(status=status, reason=reason.strip(), links=tuple(links))
+
+
+def _load_entry_status(
+    item: dict[str, Any], *, field: str, path: Path
+) -> SuiteException | None:
+    status = item.get("status")
+    if status is None:
+        if "reason" in item or "links" in item:
+            raise ValueError(f"{path}: {field}.reason/links require {field}.status")
+        return None
+    return _load_suite_exception(
+        {
+            "status": status,
+            "reason": item.get("reason"),
+            "links": item.get("links", []),
+        },
+        field=field,
+        path=path,
+    )
+
+
+def _load_entry_exceptions(
+    value: Any, *, field: str, path: Path
+) -> dict[str, dict[str, SuiteException]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{path}: {field} must be a mapping")
+    unknown_phases = sorted(set(value) - set(_PHASE_VARIANTS))
+    if unknown_phases:
+        raise ValueError(
+            f"{path}: {field} has unknown phases: {', '.join(unknown_phases)}"
+        )
+    result = {}
+    for phase, variants in value.items():
+        phase_field = f"{field}.{phase}"
+        if not isinstance(variants, dict):
+            raise TypeError(f"{path}: {phase_field} must be a mapping")
+        unknown_variants = sorted(set(variants) - _PHASE_VARIANTS[phase])
+        if unknown_variants:
+            raise ValueError(
+                f"{path}: {phase_field} has unknown variants: "
+                + ", ".join(unknown_variants)
+            )
+        result[phase] = {
+            variant: _load_suite_exception(
+                exception,
+                field=f"{phase_field}.{variant}",
+                path=path,
+            )
+            for variant, exception in variants.items()
+        }
+    return result
+
+
 def load_suite(path: Path) -> list[SuiteEntry]:
-    """Load an explicit list of case and hardware combinations."""
+    """Load explicit case/hardware combinations and documented exceptions."""
     value = _read_mapping(path)
     tests = value.get("tests")
     if not isinstance(tests, list) or not tests:
@@ -396,14 +521,30 @@ def load_suite(path: Path) -> list[SuiteEntry]:
     for index, item in enumerate(tests):
         if not isinstance(item, dict):
             raise TypeError(f"{path}: tests[{index}] must be a mapping")
+        field = f"tests[{index}]"
+        unknown = sorted(
+            set(item) - {"case", "hardware", "status", "reason", "links", "exceptions"}
+        )
+        if unknown:
+            raise ValueError(
+                f"{path}: {field} has unknown fields: {', '.join(unknown)}"
+            )
+        status = _load_entry_status(item, field=field, path=path)
+        exceptions = _load_entry_exceptions(
+            item.get("exceptions"), field=f"{field}.exceptions", path=path
+        )
+        if status is not None and exceptions:
+            raise ValueError(
+                f"{path}: {field} cannot combine case-wide status with exceptions"
+            )
         entries.append(
             SuiteEntry(
-                case=_required_name(
-                    item.get("case"), field=f"tests[{index}].case", path=path
-                ),
+                case=_required_name(item.get("case"), field=f"{field}.case", path=path),
                 hardware=_required_name(
-                    item.get("hardware"), field=f"tests[{index}].hardware", path=path
+                    item.get("hardware"), field=f"{field}.hardware", path=path
                 ),
+                status=status,
+                exceptions=exceptions or None,
             )
         )
     return entries
@@ -465,7 +606,7 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
         ]
         environment = os.environ.copy()
         environment.update(_cache_environment(case))
-        environment["DGDR_NAME"] = case.name
+        environment["DGDR_NAME"] = _dgd_name(case.name)
         print(
             f"[{case.hardware.name}/{case.name}] v1beta1: {shlex.join(command)}",
             flush=True,
@@ -499,11 +640,80 @@ def _best_scalar_candidate(candidates: list[Any]) -> Any:
     )
 
 
-def _run_sweeper_renderers(case: ComparisonCase) -> list[str]:
+def _is_skipped(entry: SuiteEntry, phase: str, variant: str) -> bool:
+    exception = entry.exception_for(phase, variant)
+    return exception is not None and exception.status == "skipped"
+
+
+def _record_failure(
+    failures: list[str],
+    entry: SuiteEntry,
+    *,
+    phase: str,
+    variant: str,
+    message: str,
+) -> None:
+    exception = entry.exception_for(phase, variant)
+    if exception is not None and exception.status == "broken":
+        print(
+            f"[{entry.hardware}/{entry.case}] expected failure: {phase}/{variant}: "
+            f"{message} — {exception.describe()}",
+            file=sys.stderr,
+        )
+        return
+    failures.append(f"{variant}: {message}")
+
+
+def _report_unexpected_pass(entry: SuiteEntry, phase: str, variant: str) -> None:
+    exception = entry.exception_for(phase, variant)
+    if exception is not None and exception.status == "broken":
+        print(
+            f"[{entry.hardware}/{entry.case}] XPASS: {phase}/{variant}: "
+            f"{exception.describe()}",
+            file=sys.stderr,
+        )
+
+
+def _active_sweeper_renderers(entry: SuiteEntry) -> list[str]:
+    if _is_skipped(entry, "render", "sweeper"):
+        return []
+    return [
+        renderer
+        for renderer in _RENDERERS
+        if not _is_skipped(entry, "render", f"sweeper-{renderer}")
+    ]
+
+
+def _sweeper_search_exception(entry: SuiteEntry) -> SuiteException | None:
+    exception = entry.exception_for("render", "sweeper")
+    if exception is not None:
+        return exception
+    renderers = _active_sweeper_renderers(entry)
+    exceptions = [
+        entry.exception_for("render", f"sweeper-{renderer}") for renderer in renderers
+    ]
+    if exceptions and all(
+        item is not None and item.status == "broken" for item in exceptions
+    ):
+        return exceptions[0]
+    return None
+
+
+def _run_sweeper_renderers(
+    case: ComparisonCase, entry: SuiteEntry | None = None
+) -> list[str]:
+    if entry is None:
+        entry = SuiteEntry(case=case.name, hardware=case.hardware.name)
     candidate_path = case.generated_dir / "candidate-sweeper.yaml"
     candidate_path.unlink(missing_ok=True)
     for renderer in _RENDERERS:
         (case.generated_dir / f"dgd-sweeper-{renderer}.yaml").unlink(missing_ok=True)
+    renderers = _active_sweeper_renderers(entry)
+    if not renderers:
+        exception = entry.exception_for("render", "sweeper")
+        reason = f": {exception.describe()}" if exception is not None else ""
+        print(f"[{case.hardware.name}/{case.name}] sweeper skipped{reason}", flush=True)
+        return []
 
     config = load_sweep_config(case.composed_sweeper_path)
     if config.goal.is_pareto:
@@ -515,6 +725,7 @@ def _run_sweeper_renderers(case: ComparisonCase) -> list[str]:
     result = run_sweep(config)
     if not result.candidates:
         raise RuntimeError("Sweeper returned no feasible candidate")
+    _report_unexpected_pass(entry, "render", "sweeper")
     candidate = _best_scalar_candidate(result.candidates)
     replace_text(
         candidate_path,
@@ -522,7 +733,7 @@ def _run_sweeper_renderers(case: ComparisonCase) -> list[str]:
     )
 
     failures = []
-    for renderer in _RENDERERS:
+    for renderer in renderers:
         output_path = case.generated_dir / f"dgd-sweeper-{renderer}.yaml"
         error_path = case.generated_dir / f"error-sweeper-{renderer}.txt"
         print(f"[{case.hardware.name}/{case.name}] renderer: {renderer}", flush=True)
@@ -531,48 +742,85 @@ def _run_sweeper_renderers(case: ComparisonCase) -> list[str]:
                 candidate,
                 config.workload,
                 case.generation_options,
-                dgd_name=case.name,
+                dgd_name=_dgd_name(case.name),
                 renderer=renderer,
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            failures.append(f"{renderer}: {exc}")
             replace_text(error_path, f"{exc}\n")
             print(
                 f"[{case.hardware.name}/{case.name}] renderer failed: {renderer}: {exc}",
                 file=sys.stderr,
             )
+            _record_failure(
+                failures,
+                entry,
+                phase="render",
+                variant=f"sweeper-{renderer}",
+                message=str(exc),
+            )
             continue
         error_path.unlink(missing_ok=True)
         replace_text(output_path, rendered)
+        _report_unexpected_pass(entry, "render", f"sweeper-{renderer}")
     return failures
 
 
-def run_case(case: ComparisonCase) -> list[str]:
+def run_case(case: ComparisonCase, entry: SuiteEntry | None = None) -> list[str]:
     """Generate every available DGD variant for one case and hardware target."""
+    if entry is None:
+        entry = SuiteEntry(case=case.name, hardware=case.hardware.name)
     print(
         f"[{case.hardware.name}/{case.name}] output: {case.generated_dir}", flush=True
     )
     _write_composed_inputs(case)
     failures = []
     with _case_environment(case):
-        try:
-            _run_v1_profiler(case)
-        except (
-            OSError,
-            RuntimeError,
-            subprocess.CalledProcessError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            failures.append(f"v1beta1: {exc}")
-            replace_text(case.generated_dir / "error-profiler-v1beta1.txt", f"{exc}\n")
+        if _is_skipped(entry, "render", "profiler-v1beta1"):
+            (case.generated_dir / "dgd-profiler-v1beta1.yaml").unlink(missing_ok=True)
+            exception = entry.exception_for("render", "profiler-v1beta1")
+            print(
+                f"[{case.hardware.name}/{case.name}] profiler-v1beta1 skipped: "
+                f"{exception.describe()}",
+                flush=True,
+            )
         else:
-            (case.generated_dir / "error-profiler-v1beta1.txt").unlink(missing_ok=True)
+            try:
+                _run_v1_profiler(case)
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                replace_text(
+                    case.generated_dir / "error-profiler-v1beta1.txt", f"{exc}\n"
+                )
+                _record_failure(
+                    failures,
+                    entry,
+                    phase="render",
+                    variant="profiler-v1beta1",
+                    message=str(exc),
+                )
+            else:
+                (case.generated_dir / "error-profiler-v1beta1.txt").unlink(
+                    missing_ok=True
+                )
+                _report_unexpected_pass(entry, "render", "profiler-v1beta1")
         try:
-            failures.extend(_run_sweeper_renderers(case))
+            failures.extend(_run_sweeper_renderers(case, entry))
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            failures.append(f"sweeper: {exc}")
             replace_text(case.generated_dir / "error-sweeper.txt", f"{exc}\n")
+            exception = _sweeper_search_exception(entry)
+            if exception is not None and exception.status == "broken":
+                print(
+                    f"[{entry.hardware}/{entry.case}] expected failure: "
+                    f"render/sweeper: {exc} — {exception.describe()}",
+                    file=sys.stderr,
+                )
+            else:
+                failures.append(f"sweeper: {exc}")
         else:
             (case.generated_dir / "error-sweeper.txt").unlink(missing_ok=True)
     return failures
@@ -628,26 +876,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         hardware_cache: dict[str, HardwareConfig] = {}
         for entry in _selections(args):
-            missing = missing_case_inputs(entry.case)
-            if missing:
-                if load_recipe(entry.case) is None:
-                    raise ValueError(
-                        f"{entry.case}: missing {', '.join(missing)} and recipe.yaml"
-                    )
+            if entry.status is not None and entry.status.status == "skipped":
                 print(
-                    f"[{entry.hardware}/{entry.case}] coverage gap: "
-                    f"missing {', '.join(missing)}",
+                    f"[{entry.hardware}/{entry.case}] skipped: "
+                    f"{entry.status.describe()}",
                     flush=True,
                 )
                 skipped += 1
                 continue
+            missing = missing_case_inputs(entry.case)
+            if missing:
+                raise ValueError(
+                    f"{entry.case}: missing required input(s): {', '.join(missing)}"
+                )
             if entry.hardware not in hardware_cache:
                 hardware_cache[entry.hardware] = load_hardware(entry.hardware)
             hardware = hardware_cache[entry.hardware]
             case = load_case(entry.case, hardware, output_root=output_root)
             failures.extend(
                 f"{entry.hardware}/{entry.case}: {failure}"
-                for failure in run_case(case)
+                for failure in run_case(case, entry)
             )
     except (
         OSError,
@@ -664,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     if skipped:
-        print(f"sweeper comparison: {skipped} coverage gap(s) not run", flush=True)
+        print(f"sweeper comparison: {skipped} case(s) skipped", flush=True)
     return 0
 
 

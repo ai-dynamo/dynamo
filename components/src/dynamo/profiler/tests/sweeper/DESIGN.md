@@ -15,15 +15,15 @@ The comparison suite generates DynamoGraphDeployments for the same deployment in
 
 An existing recipe may be deployed as a fourth, independently maintained variant. The suite learns
 whether each result is runnable; it does not require the generators to choose identical topologies.
-The issue #8469 suite retains all 29 recipe-matrix rows. Eight currently have both native profiler
-inputs and can run the comparison; the other 21 remain visible as coverage gaps.
+The issue #8469 suite retains all 29 recipe-matrix rows. Every row has native v1beta1 and Sweeper
+inputs, even when a known renderer or deployment failure is documented by the suite.
 
 ## Attribution
 
 This implementation builds on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031). In particular, it reuses:
 
-- the eight runnable issue #8469 DGDR and Sweeper input pairs;
+- the initial eight issue #8469 DGDR and Sweeper input pairs;
 - the idea of exercising the existing profiler, Sweeper-AIC, and Sweeper-direct paths together;
 - cluster GPU-inventory validation and isolated preparation of multi-document manifests; and
 - model discovery when a DGD passes `--model` through a container environment variable.
@@ -103,9 +103,13 @@ goal:
   target: goodput_per_gpu
 ```
 
-A matrix row without one or both native inputs is a coverage gap, not a fabricated runnable case.
-It contains only `recipe.yaml`; suite execution prints the missing filenames and continues with the
-other rows.
+Issue #8469 does not define one comparable workload for all recipes. Cases without a historical
+workload use the suite baseline (`isl: 1024`, `osl: 1024`, `requestRate: 10`, TTFT 2000 ms, ITL
+25 ms) in both native inputs. This makes renderer comparison explicit; it does not claim that the
+workload represents the recipe's production use.
+
+Both native inputs are mandatory. A missing `dgdr-v1beta1.yaml` or `sweeper.yaml` is an invalid
+case, not an implicit skip.
 
 ## Hardware configurations
 
@@ -150,6 +154,44 @@ tests:
 
 The same combination can be generated without a suite by naming its case and hardware directly.
 Suites are batch selection, not another source of case metadata.
+
+The normal row stays intentionally small:
+
+```yaml
+- case: qwen3-32b-vllm-disagg
+  hardware: h200-sxm-16gpu
+```
+
+Known exceptions are opt-in. `skipped` never runs the selected scope. `broken` runs it, records the
+failure as expected, and reports an unexpected pass without failing the suite. Every exception
+requires a concrete reason; evidence links are optional.
+
+```yaml
+- case: gpt-oss-120b-trtllm-agg
+  hardware: gb200-sxm-4gpu
+  exceptions:
+    render:
+      sweeper-direct:
+        status: broken
+        reason: Direct rendering does not support the selected TRT-LLM topology.
+        links:
+          - https://github.com/ai-dynamo/dynamo/issues/8469
+    deploy:
+      recipe:
+        status: skipped
+        reason: The historical recipe is no longer present in the repository.
+```
+
+Supported scopes are:
+
+| Phase | Variant |
+| --- | --- |
+| `render` | `profiler-v1beta1`, `sweeper`, `sweeper-aic`, `sweeper-direct` |
+| `deploy` | `profiler-v1beta1`, `sweeper-aic`, `sweeper-direct`, `recipe` |
+
+For the exceptional case where none of its variants should run, a row may put `status`, `reason`,
+and optional `links` directly beside `case` and `hardware`. A row cannot combine that case-wide
+status with narrower `exceptions`.
 
 ## Optional recipes
 
@@ -203,8 +245,8 @@ generated/<suite-name>/<hardware>/<case>/
 ```
 
 These are the possible variants, not three mandatory files per case. A failed search or renderer
-does not produce a placeholder golden; the absent variant and the runner failure make the coverage
-gap explicit.
+does not produce a placeholder golden. Its absence must agree with a documented render exception,
+or suite rendering fails.
 
 The suite name is the suite filename without `.yaml`, so every checked-in golden has one owning
 testsuite. Individual `--hardware` runs default to the ignored `generated/manual/` tree. All final
