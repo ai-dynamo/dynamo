@@ -861,13 +861,18 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 /// pod identity alone, so per-container ids would invent phantom workers that
 /// `register_workers` defaults to zero load and zero KV overlap — making them
 /// the most attractive candidates the scheduler sees.
+///
+/// An unnamed pod yields nothing at all, container ids included:
+/// `hash_container_name("", …)` is the same value for every unnamed pod, so
+/// they would alias each other's endpoints in [`WorkerEndpointIndex`].
 fn pod_worker_ids(
     pod: &k8s_openapi::api::core::v1::Pod,
     container_discovery: bool,
 ) -> impl Iterator<Item = u64> + '_ {
     let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-    let pod_id = (!pod_name.is_empty()).then(|| hash_pod_name(pod_name));
-    let container_ids = container_discovery
+    let named = !pod_name.is_empty();
+    let pod_id = named.then(|| hash_pod_name(pod_name));
+    let container_ids = (container_discovery && named)
         .then_some(pod.status.as_ref())
         .flatten()
         .and_then(|s| s.container_statuses.as_ref())
@@ -2050,6 +2055,67 @@ mod tests {
             3,
             "container discovery must still be in effect after a clear"
         );
+    }
+
+    /// A pod carrying ready containers but no `metadata.name`. Only the API
+    /// server's own guarantees keep this out of the reflector store, so the
+    /// index defends against it rather than relying on that.
+    fn unnamed_pod(ip: &str) -> Pod {
+        let mut pod = pod_mode_worker_pod();
+        pod.metadata.name = None;
+        pod.status.as_mut().expect("status").pod_ip = Some(ip.to_string());
+        pod
+    }
+
+    /// `hash_container_name("", …)` is a constant per container name, so an
+    /// unnamed pod must contribute no ids in either mode — otherwise every
+    /// unnamed pod claims the same worker ids.
+    #[test]
+    fn pod_worker_ids_are_empty_for_an_unnamed_pod() {
+        for container_discovery in [false, true] {
+            let ids: Vec<u64> =
+                pod_worker_ids(&unnamed_pod("10.0.0.1"), container_discovery).collect();
+            assert!(
+                ids.is_empty(),
+                "unnamed pod yielded {ids:?} with container_discovery={container_discovery}"
+            );
+        }
+    }
+
+    /// Two unnamed pods used to alias: both keyed under `by_pod[""]`, so the
+    /// second upsert retracted the first's entries and reinstalled the same ids
+    /// against its own endpoint, silently making the first unreachable.
+    #[test]
+    fn worker_index_unnamed_pods_do_not_alias_each_other() {
+        let mut index = WorkerEndpointIndex::new(true);
+        index.upsert(&unnamed_pod("10.0.0.1"));
+        index.upsert(&unnamed_pod("10.0.0.2"));
+
+        assert!(
+            index.endpoints.is_empty(),
+            "unnamed pods must not be indexed: {:?}",
+            index.endpoints
+        );
+        assert!(
+            index.by_pod.is_empty(),
+            "an unnamed pod must not occupy the \"\" key"
+        );
+    }
+
+    /// The guard must not cost a named pod its container ids.
+    #[test]
+    fn worker_index_named_pod_still_indexed_alongside_unnamed_ones() {
+        let mut index = WorkerEndpointIndex::new(true);
+        index.upsert(&unnamed_pod("10.0.0.1"));
+        index.upsert(&pod_mode_worker_pod());
+        index.upsert(&unnamed_pod("10.0.0.2"));
+
+        assert_eq!(
+            index.endpoints.get(&hash_pod_name("worker-0")),
+            Some(&"10.0.0.1:8000".to_string()),
+            "an unnamed pod's upsert must not retract a named pod's entries"
+        );
+        assert_eq!(index.endpoints.len(), 3);
     }
 
     /// A minimal pod exposing an `http`-named port, for
