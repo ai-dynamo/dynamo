@@ -20,10 +20,30 @@ use prometheus::proto::{
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// Accept a float as either a JSON number or a string, parsing strings with
+/// `str::parse`, which is correctly rounded.
+fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    use serde::Deserialize as _;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Text(String),
+        Num(f64),
+    }
+    match Repr::deserialize(d)? {
+        Repr::Text(t) => t.parse().map_err(serde::de::Error::custom),
+        Repr::Num(v) => Ok(v),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TypedSample {
     pub name: String,
     pub labels: BTreeMap<String, String>,
+    /// Fixtures carry this as a string: JSON float parsing can land a ULP off
+    /// the correctly-rounded value, and a test fixture must not introduce error
+    /// the real path -- a native f64 across PyO3 -- never has.
+    #[serde(deserialize_with = "de_f64")]
     pub value: f64,
     /// Present in the exposition format and in `prometheus_client`'s model.
     /// Nothing populates it today, but the boundary should not narrow the

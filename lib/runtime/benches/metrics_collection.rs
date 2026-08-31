@@ -35,22 +35,20 @@ fn registry(native_families: usize, engine_families: usize) -> MetricsRegistry {
             .expect("register");
     }
 
-    let mut text = String::new();
+    let mut typed_families = Vec::new();
     for i in 0..engine_families {
-        text.push_str(&format!(
-            "# HELP vllm:metric_{i} Engine gauge {i}\n\
-             # TYPE vllm:metric_{i} gauge\n\
-             vllm:metric_{i}{{engine=\"0\",model_name=\"llama\"}} {i}\n\
-             # HELP vllm:latency_{i}_seconds Engine histogram {i}\n\
-             # TYPE vllm:latency_{i}_seconds histogram\n\
-             vllm:latency_{i}_seconds_bucket{{model_name=\"llama\",le=\"0.1\"}} 1\n\
-             vllm:latency_{i}_seconds_bucket{{model_name=\"llama\",le=\"1\"}} 4\n\
-             vllm:latency_{i}_seconds_bucket{{model_name=\"llama\",le=\"+Inf\"}} 9\n\
-             vllm:latency_{i}_seconds_sum{{model_name=\"llama\"}} 2.5\n\
-             vllm:latency_{i}_seconds_count{{model_name=\"llama\"}} 9\n"
-        ));
+        let mut family = prometheus::proto::MetricFamily::new();
+        family.set_name(format!("vllm:metric_{i}"));
+        family.set_help(format!("Engine gauge {i}"));
+        family.set_field_type(prometheus::proto::MetricType::GAUGE);
+        let mut metric = prometheus::proto::Metric::new();
+        let mut gauge = prometheus::proto::Gauge::new();
+        gauge.set_value(i as f64);
+        metric.set_gauge(gauge);
+        family.mut_metric().push(metric);
+        typed_families.push(family);
     }
-    registry.add_expfmt_callback(Arc::new(move || Ok(text.clone())));
+    registry.add_typed_callback(Arc::new(move || Ok(typed_families.clone())));
 
     registry
 }
