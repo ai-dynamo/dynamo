@@ -3846,10 +3846,12 @@ def test_synthetic_content_chain_mode_routes_through_kvwarm_chains(monkeypatch):
     stub._bench_vocab_size = 1_000
     stub._fpm_dp_rank = 0
     seen = []
-    stub._kvwarm_chain_token_ids = lambda idx, depth: seen.append((idx, depth)) or [7] * depth
+    stub._kvwarm_chain_token_ids = (
+        lambda idx, depth: seen.append((idx, depth)) or [7] * depth
+    )
     out = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 9)
     assert out == [7] * 9
-    (idx, depth), = seen
+    ((idx, depth),) = seen
     # Derived chain indices stay clear of the grid's own chain range and are
     # deterministic per seed.
     assert depth == 9 and 20_000_000 <= idx < 21_000_000

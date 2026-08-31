@@ -3864,10 +3864,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_start_timing()
         self._bench_build_grid()
 
-        if (
-            self._bench_phase == _BenchPhase.DECODE_SWEEP
-            and self._kvwarm_step_busy()
-        ):
+        if self._bench_phase == _BenchPhase.DECODE_SWEEP and self._kvwarm_step_busy():
             return None  # chain fleet under construction: defer to real chunked prefill
         if self._bench_phase == _BenchPhase.WARMUP:
             return self._bench_step_warmup()
@@ -4039,7 +4036,6 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         return None
 
-
     # ------------------------------------------------------------------
     # KVWARM -- real-content KV warmup (design: FIX_DESIGN_DECODE_SWEEP.md #4.5)
     # Mechanism: one fleet of mutually distinct real-text chains per decode
@@ -4059,7 +4055,9 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _kvwarm_flag_on(self) -> bool:
         return os.environ.get("DYN_BENCH_KV_WARMUP", "on").lower() not in (
-            "off", "0", "false",
+            "off",
+            "0",
+            "false",
         )
 
     def _kvwarm_giant_threshold(self) -> int:
@@ -4284,9 +4282,7 @@ class InstrumentedScheduler(AsyncScheduler):
         points = list(self._bench_grid)
         decode_pts = [p for p in points if p.point_type == "decode"]
         other_pts = [p for p in points if p.point_type != "decode"]
-        decode_pts.sort(
-            key=lambda p: (-p.batch_size, -p.total_kv_read_tokens)
-        )
+        decode_pts.sort(key=lambda p: (-p.batch_size, -p.total_kv_read_tokens))
         self._bench_grid = deque(other_pts + decode_pts)
         # Warmup depth per batch rung = max(ctx) of its deepest warmable point
         # + 1 + steady-write headroom (headroom = giant-point repeat count,
@@ -4371,9 +4367,7 @@ class InstrumentedScheduler(AsyncScheduler):
             return self._kvwarm_monitor_build()
         if self._kvwarm_stage_batch != nxt.batch_size:
             self._kvwarm_shed_chains()
-            self._kvwarm_start_stage(
-                nxt.batch_size, self._kvwarm_plan[nxt.batch_size]
-            )
+            self._kvwarm_start_stage(nxt.batch_size, self._kvwarm_plan[nxt.batch_size])
             return True
         return False
 
@@ -4386,9 +4380,7 @@ class InstrumentedScheduler(AsyncScheduler):
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=tokens,
-                sampling_params=SamplingParams(
-                    max_tokens=100_000, ignore_eos=True
-                ),
+                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
                 # Salts are stable per (rank, chain index): a new generation's chain
@@ -4411,7 +4403,9 @@ class InstrumentedScheduler(AsyncScheduler):
             if req is None:
                 # Length-stop / exception reclaim: drop the chain and degrade
                 # (points that lose coverage fall back to fake) -- not fatal.
-                logger.warning("KVWARM: chain %s vanished during build; degrading", req_id)
+                logger.warning(
+                    "KVWARM: chain %s vanished during build; degrading", req_id
+                )
                 vanished.append(req_id)
                 continue
             if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
@@ -4434,9 +4428,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._kvwarm_meta_init()["stages"].append(
             {
                 "batch": self._kvwarm_stage_batch,
-                "depth": max(
-                    len(v) for v in self._kvwarm_chain_prompts.values()
-                ),
+                "depth": max(len(v) for v in self._kvwarm_chain_prompts.values()),
                 "build_seconds": round(secs, 3),
             }
         )
@@ -4546,17 +4538,13 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(new_reqs_data),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=(
-                [0] * self.kv_cache_manager.num_kv_cache_groups
-            ),
+            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=None,
         )
         if self.connector is not None:
-            output.kv_connector_metadata = self.connector.build_connector_meta(
-                output
-            )
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
         if self.ec_connector is not None:
             output.ec_connector_metadata = self.ec_connector.build_connector_meta(
                 output
@@ -4727,8 +4715,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_extra_steps_left = 1
         self._bench_expected_fpms = 2
         if self._kvwarm_flag_on() and (
-            kvwarm_real
-            or point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
+            kvwarm_real or point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
         ):
             # Warmed points allocate nothing at steady state, so extra steps are
             # nearly free: median protection covers all of them, eliminating
@@ -4808,9 +4795,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 # steady step; with only admission left, fall back to the
                 # original path and let shape validation skip the point.
                 steadies = local_fpms[1:expected_fpms]
-                walls = sorted(
-                    float(f.get("wall_time", 0.0)) for f in steadies
-                )
+                walls = sorted(float(f.get("wall_time", 0.0)) for f in steadies)
                 chosen = dict(steadies[0])
                 chosen["wall_time"] = walls[len(walls) // 2]
                 chosen["kvwarm_giant_median_of"] = len(steadies)
