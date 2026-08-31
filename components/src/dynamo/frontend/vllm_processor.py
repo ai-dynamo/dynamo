@@ -1023,7 +1023,8 @@ class VllmProcessor:
                             choices.append(choice)
 
                 if postprocess_error:
-                    continue
+                    # Stop: the error frame is terminal, so do not read more.
+                    break
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.

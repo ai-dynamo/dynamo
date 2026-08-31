@@ -245,7 +245,9 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        // The text must survive: `to_pyerr` only keeps `Display`.
+        let err = result.expect_err("first output error");
+        assert!(err.to_string().contains("prefill failed"), "{err}");
         assert!(tracker.record_prefill_complete());
     }
 
@@ -262,7 +264,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let err = result.expect_err("later output error");
+        assert!(err.to_string().contains("prefill stream failed"), "{err}");
         assert!(!tracker.record_prefill_complete());
     }
 
