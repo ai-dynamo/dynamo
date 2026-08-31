@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,7 @@ const (
 	// context and sleep instead of cold-starting the workload. Generic
 	// images that do not honor this env must still provide their own inert
 	// restore command.
-	RestoreStandbyModeEnv          = "DYN_SNAPSHOT_RESTORE_STANDBY"
+	RestoreStandbyModeEnv          = podcontract.RestoreStandbyModeEnv
 	restoreStartupFailureThreshold = 1800 // 30 minutes at 1s cadence.
 )
 
@@ -59,7 +60,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 
 // PrepareRestorePodSpec applies restore shaping to annotated target containers.
 // It does not change container command/args. Once the checkpoint is ready, it
-// sets DYN_SNAPSHOT_RESTORE_STANDBY=1 so Dynamo standby entrypoints
+// sets SNAPSHOT_RESTORE_STANDBY=1 so Dynamo standby entrypoints
 // sleep before CRIU restore; generic images that do not honor the env must
 // still provide their own inert restore command.
 func PrepareRestorePodSpec(

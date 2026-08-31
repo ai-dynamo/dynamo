@@ -343,8 +343,8 @@ func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.Containe
 			)
 		}
 		for _, env := range container.Env {
-			if env.Name == podcontract.LegacyRestoreStandbyModeEnv && (env.Value != "1" || env.ValueFrom != nil) {
-				return fmt.Errorf("restore destination container %q has conflicting %s", mapping.Destination, podcontract.LegacyRestoreStandbyModeEnv)
+			if env.Name == podcontract.RestoreStandbyModeEnv && (env.Value != "1" || env.ValueFrom != nil) {
+				return fmt.Errorf("restore destination container %q has conflicting %s", mapping.Destination, podcontract.RestoreStandbyModeEnv)
 			}
 		}
 	}
@@ -355,14 +355,14 @@ func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.Containe
 		container := containers[mapping.Destination]
 		found := false
 		for _, env := range container.Env {
-			if env.Name == podcontract.LegacyRestoreStandbyModeEnv {
+			if env.Name == podcontract.RestoreStandbyModeEnv {
 				found = true
 				break
 			}
 		}
 		if !found {
 			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  podcontract.LegacyRestoreStandbyModeEnv,
+				Name:  podcontract.RestoreStandbyModeEnv,
 				Value: "1",
 			})
 		}
@@ -371,7 +371,7 @@ func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.Containe
 }
 
 // usesSupportedDynamoRestoreEntrypoint recognizes only direct Python module
-// invocations that are known to consume DYN_SNAPSHOT_RESTORE_STANDBY. Shell and
+// invocations that are known to consume SNAPSHOT_RESTORE_STANDBY. Shell and
 // custom wrappers are rejected because admission cannot prove they honor it.
 func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 	if len(container.Command) == 0 {
