@@ -79,6 +79,11 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
+    // Callers that wrap a worker error MUST fold its text into this message --
+    // see `consume_prefill_stream`. Everything downstream of a disaggregated
+    // prefill reaches the frontend through `to_pyerr`, which formats with
+    // `Display` only (`lib/bindings/python/rust/lib.rs`) and drops the error
+    // chain, so a `#[source]` alone is invisible past that boundary.
     #[error("Prefill execution failed: {0}")]
     PrefillError(
         String,

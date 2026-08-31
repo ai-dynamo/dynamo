@@ -45,6 +45,7 @@ from dynamo.vllm.errors import vllm_client_error_to_http_error
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    as_error_envelope,
     backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
@@ -947,20 +948,24 @@ class VllmProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
                 if engine_response is None:
                     if dynamo_response.is_error():
-                        yield handle_engine_error(engine_response, request_id, logger)
+                        yield as_error_envelope(
+                            handle_engine_error(engine_response, request_id, logger)
+                        )
                         break
                     # No data or error fields, means we may have a comment or other kind of event.
                     # I'm not sure what those are used for, so TODO. Skip for now.
                     continue
 
                 if "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 # Count before any choice gate — tool/reasoning parsers may
@@ -1085,7 +1090,7 @@ class VllmProcessor:
                 )
                 raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            yield as_error_envelope(make_internal_error(request_id, str(e)))
         finally:
             for output_request_id in registered_request_ids:
                 if output_request_id in self.output_processor.request_states:
