@@ -712,7 +712,7 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 /// Returns already-built families, so engine metrics reach the structured
 /// path without being rendered to text and parsed back.
 pub type PrometheusTypedCallback =
-    Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync>;
+    Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync + 'static>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
 ///
@@ -743,10 +743,9 @@ pub struct MetricsRegistry {
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
 
-    /// Callbacks that return Prometheus exposition text appended to metrics output.
-    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
-
-    /// Callbacks returning typed families; see [`PrometheusTypedCallback`].
+    /// Callbacks returning engine metric families; see [`PrometheusTypedCallback`].
+    /// Wrapped in Arc to preserve callbacks across clones (e.g. vLLM callbacks
+    /// registered at Endpoint remain reachable at DRT).
     pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
 }
 

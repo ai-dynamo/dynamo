@@ -26,37 +26,41 @@ fn wrap_py_typed_callback(
     source: &'static str,
 ) -> crate::rs::metrics::PrometheusTypedCallback {
     Arc::new(move || {
-        Python::with_gil(|py| {
+        // Hold the GIL only for the call and the extraction. Building families
+        // is pure Rust, and the point of the typed contract is to give the
+        // engine its GIL time back.
+        let typed: PyTypedFamilies = Python::with_gil(|py| {
             let result = callback
                 .call0(py)
                 .map_err(|e| anyhow::anyhow!("{source} typed callback raised: {e}"))?;
-            let typed: PyTypedFamilies = result.extract(py).map_err(|e| {
+            result.extract(py).map_err(|e| {
                 anyhow::anyhow!("{source} typed callback returned an unexpected shape: {e}")
-            })?;
-            Ok(crate::rs::metrics::prom_typed::build_families(
-                typed
-                    .into_iter()
-                    .map(|(name, help, kind, samples)| {
-                        crate::rs::metrics::prom_typed::TypedFamily {
-                            name,
-                            help,
-                            kind,
-                            samples: samples
-                                .into_iter()
-                                .map(|(name, labels, value)| {
-                                    crate::rs::metrics::prom_typed::TypedSample {
-                                        name,
-                                        labels: labels.into_iter().collect(),
-                                        value,
-                                        timestamp: None,
-                                    }
-                                })
-                                .collect(),
-                        }
-                    })
-                    .collect(),
-            ))
-        })
+            })
+        })?;
+
+        Ok(crate::rs::metrics::prom_typed::build_families(
+            typed
+                .into_iter()
+                .map(
+                    |(name, help, kind, samples)| crate::rs::metrics::prom_typed::TypedFamily {
+                        name,
+                        help,
+                        kind,
+                        samples: samples
+                            .into_iter()
+                            .map(|(name, labels, value)| {
+                                crate::rs::metrics::prom_typed::TypedSample {
+                                    name,
+                                    labels: labels.into_iter().collect(),
+                                    value,
+                                    timestamp: None,
+                                }
+                            })
+                            .collect(),
+                    },
+                )
+                .collect(),
+        ))
     })
 }
 
