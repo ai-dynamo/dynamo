@@ -20,6 +20,7 @@ import base64
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -295,6 +296,23 @@ async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
         await loader.load_image_batch(
             [{URL_VARIANT_KEY: "https://example.com/image.png"}]
         )
+
+
+async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
+    loader: ImageLoader,
+) -> None:
+    loader._nixl_connector = object()
+    grayscale = np.full((2, 3, 1), 127, dtype=np.uint8)
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=grayscale),
+    ):
+        image = await loader._read_and_convert_nixl_image({})
+
+    assert image.mode == "RGB"
+    assert image.size == (3, 2)
+    assert image.getpixel((0, 0)) == (127, 127, 127)
 
 
 async def test_unsupported_format_batch_data_url_raises_415(

@@ -178,6 +178,20 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    if dynamo_config.embedding_worker_processes > 1:
+        if engine_config.data_parallel_size != 1:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 currently requires "
+                "--data-parallel-size=1. The embedding process pool shares one "
+                "local EngineCore."
+            )
+        if engine_config.enable_lora:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with --enable-lora. Runtime LoRA state is not "
+                "synchronized across embedding endpoint processes."
+            )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
