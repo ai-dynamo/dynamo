@@ -1454,7 +1454,7 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
-                max_cached_tokens: request.best_cached_tokens(),
+                max_cached_tokens: SchedulingContext::new(request, workers).best_cached_tokens(),
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })
