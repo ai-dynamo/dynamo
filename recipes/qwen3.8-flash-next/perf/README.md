@@ -41,7 +41,7 @@ The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake
 
 For shorter runs (smoke tests, faster iteration), use a smaller subset. Typical staging:
 
-```
+```text
 /model-cache/traces/<flavour>.jsonl                 # full
 /model-cache/traces/<flavour>_short_30perc.jsonl    # ~30% subset
 /model-cache/traces/<flavour>_short_15perc.jsonl    # ~15% subset
@@ -143,11 +143,12 @@ Edit the `env` block on the `Job` to adjust:
 
 Results are written to:
 
-```
+```text
 /model-cache/perf/<epoch>_<job-name>/
   warmup/
   Qwen3.8-Flash-Next-NVFP4_trace_c<concurrency>_<timestamp>/
-    profile_export.json
+    profile_export_aiperf.json
+    profile_export_aiperf.csv
     inputs.json
     ...
 ```

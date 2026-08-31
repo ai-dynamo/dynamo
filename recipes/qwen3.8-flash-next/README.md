@@ -179,7 +179,7 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 
 ```bash
 # Download a sample image
-curl -s -o /tmp/test.jpg https://raw.githubusercontent.com/ai-dynamo/dynamo/main/docs/fern/assets/img/logo.svg
+curl -s -o /tmp/test.jpg https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Google_2015_logo.svg/250px-Google_2015_logo.svg.png
 
 # Send multimodal request
 curl -s http://localhost:8000/v1/chat/completions \
@@ -276,9 +276,11 @@ Non-obvious knobs, all already set in the manifest:
   `ulimit -l unlimited` to work inside the container (needed for large pinned memory allocations).
 - **Disaggregated KV transfer over InfiniBand RDMA.** The disagg recipe uses
   `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc` with `rdma/rdma_shared_device_a: 4` resource requests
-  on both worker pods. The `rdma/rdma_shared_device_a` resource (provided by the Nebius RDMA
-  device plugin) gives each pod direct access to InfiniBand HCAs for GPUDirect RDMA via DMA-BUF.
-  This achieves ~18 GB/s avg KV transfer throughput (peak 42 GB/s) without `hostIPC`.
+  on both worker pods. The RDMA resource name (`rdma/rdma_shared_device_a`) is
+  cluster-specific — adjust to match your device plugin (e.g. `rdma/ib` on other
+  clusters). See the [Dynamo RDMA Setup](../../docs/fern/pages/kubernetes/installation/rdma-setup/overview.md)
+  guide for configuration details. This achieves ~18 GB/s avg KV transfer throughput
+  (peak 42 GB/s) without `hostIPC`.
   NCCL is configured with `NCCL_IB_DISABLE=0`, `NCCL_IB_HCA=mlx5`, `NCCL_NET_GDR_LEVEL=5`
   to enable InfiniBand for intra-pod TP communication as well.
   **No `hostIPC`** is needed — Kubernetes pod isolation prevents cross-pod CUDA IPC (NVLink),

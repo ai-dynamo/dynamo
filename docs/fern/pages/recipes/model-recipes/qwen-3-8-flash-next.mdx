@@ -103,8 +103,8 @@ kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 # Aggregated
 kubectl port-forward svc/qwen38fn-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
 
-# Disaggregated
-kubectl port-forward svc/qwen38fn-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+# Disaggregated (if using disagg instead of agg)
+# kubectl port-forward svc/qwen38fn-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
 
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \

@@ -27,7 +27,7 @@ kind: DynamoGraphDeployment
 metadata:
   name: qwen38fn-agg-b200-agentic-8gpu
   labels:
-    app.kubernetes.io/name: qwen38fn-agg-b200-agentic-8gpu-8gpu
+    app.kubernetes.io/name: qwen38fn-agg-b200-agentic-8gpu
     app.kubernetes.io/part-of: qwen3.8-flash-next
     engine: vllm
     hardware: b200

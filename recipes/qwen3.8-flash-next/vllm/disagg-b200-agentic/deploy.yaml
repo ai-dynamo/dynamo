@@ -22,11 +22,14 @@
 #   - --no-disable-hybrid-kv-cache-manager: required for multimodal (GDN + attention layers).
 #   - VLLM_SSM_CONV_STATE_LAYOUT=DS: GDN state layout, MUST match on prefill and decode.
 #   - KV transfer: NixlConnector over UCX (rc_x + rc + cuda_copy + cuda_ipc).
-#   - InfiniBand RDMA: rdma/rdma_shared_device_a (4 per worker) provides direct
-#     InfiniBand HCA access for cross-pod KV transfers via GPUDirect RDMA (DMA-BUF).
-#     Achieves ~18 GB/s avg (peak 42 GB/s) without hostIPC. NCCL is configured
-#     with NCCL_IB_DISABLE=0, NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=5 to enable
-#     InfiniBand for intra-pod TP communication as well.
+#   - InfiniBand RDMA: requires an RDMA device plugin that exposes InfiniBand
+#     HCAs as a Kubernetes extended resource. The resource name
+#     (rdma/rdma_shared_device_a) is cluster-specific — adjust to match your
+#     device plugin (e.g. rdma/ib on other clusters). See the Dynamo RDMA Setup
+#     guide for configuration details. Achieves ~18 GB/s avg (peak 42 GB/s)
+#     without hostIPC. NCCL is configured with NCCL_IB_DISABLE=0,
+#     NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=5 to enable InfiniBand for intra-pod
+#     TP communication as well.
 #   - Async scheduling: enabled (default). The GDN hybrid model race with NIXL
 #     RDMA writes (vLLM #42182, #37285, fixed in vLLM 0.26.0) was not observed
 #     with --max-num-seqs 32 on prefill. If 500 errors appear, add
