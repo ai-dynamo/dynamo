@@ -183,7 +183,6 @@ spec:
                 - |
                   set -e
                   pip install --no-cache-dir ai-dynamo==1.4.1
-                  pip install --no-cache-dir sentencepiece tiktoken
 
                   # WAR: disable cudnn globally to prevent segfault in GLM _kpool_* kernels.
                   mkdir -p /opt/glm53-workarounds
@@ -338,7 +337,6 @@ spec:
                 - |
                   set -e
                   pip install --no-cache-dir ai-dynamo==1.4.1
-                  pip install --no-cache-dir sentencepiece tiktoken
 
                   # WAR: disable cudnn globally to prevent segfault in GLM _kpool_* kernels.
                   mkdir -p /opt/glm53-workarounds
