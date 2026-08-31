@@ -1320,6 +1320,32 @@ def test_typed_worker_with_explicit_zero_shape_is_rejected(
         kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
+def test_typed_mocker_worker_with_zero_physical_shape_uses_configured_fallback(
+    kubernetes_connector, mock_kube_api
+):
+    component = _component(
+        "decode-worker",
+        "decode",
+        replicas=1,
+        args=["-m", "dynamo.mocker", "--model-name", "test-model"],
+    )
+    deployment = _deployment(component)
+    deployment["metadata"]["generation"] = 2
+    deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    assert kubernetes_connector.get_gpu_shapes(
+        require_prefill=False, require_decode=True
+    ) == (None, None)
+    with pytest.raises(DeploymentValidationError, match="configured logical GPU"):
+        kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True, deployment=deployment
+        )
+
+
 @pytest.mark.parametrize("observed_generation", [1, 3])
 def test_get_gpu_counts_rejects_noncurrent_dra_status(
     kubernetes_connector, mock_kube_api, observed_generation

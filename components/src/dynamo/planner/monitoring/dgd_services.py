@@ -131,6 +131,14 @@ class Service(BaseModel):
     def number_replicas(self) -> int:
         return self.service.get("replicas", 0)
 
+    def is_mocker(self) -> bool:
+        """Whether the main container explicitly launches Dynamo mocker."""
+
+        container = get_main_container(self.service)
+        command = break_arguments(container.get("command"))
+        args = break_arguments(container.get("args"))
+        return "dynamo.mocker" in command + args
+
     def get_model_name(self) -> Optional[str]:
         args = get_main_container(self.service).get("args", [])
 

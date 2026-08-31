@@ -161,6 +161,25 @@ def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
     assert config.decode_engine_num_gpu == 4
 
 
+def test_mocker_zero_physical_shape_uses_configured_logical_shape():
+    config = _config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
+    controller = _controller()
+    controller.get_gpu_shapes.return_value = (None, None)
+    environment = PlannerEnvironmentImpl(
+        config=config,
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().prefill.num_gpus == 2
+    assert environment.deployment_state().prefill.gpus_per_replica == 2
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 4
+
+
 def test_gpu_shape_keeps_engine_width_separate_from_replica_cost():
     controller = _controller()
     controller.get_gpu_shapes.return_value = (

@@ -45,6 +45,7 @@ from dynamo.planner.errors import (
 from dynamo.planner.monitoring.dgd_services import (
     ComponentGPUShape,
     ComponentPowerConfig,
+    Service,
     get_component_from_type_or_name,
     get_component_type,
     get_components_by_name,
@@ -370,6 +371,13 @@ class KubernetesConnector(PlannerConnector):
             require_decode=require_decode,
             deployment=deployment,
         )
+        errors = []
+        if require_prefill and prefill_shape is None:
+            errors.append("Prefill mocker requires a configured logical GPU count")
+        if require_decode and decode_shape is None:
+            errors.append("Decode mocker requires a configured logical GPU count")
+        if errors:
+            raise DeploymentValidationError(errors)
         return (
             prefill_shape.gpus_per_engine if prefill_shape is not None else 0,
             decode_shape.gpus_per_engine if decode_shape is not None else 0,
@@ -426,11 +434,9 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.PREFILL,
                 )
                 prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
-                if prefill_gpu_shape.gpus_per_replica == 0:
-                    raise GPUShapeUnavailableError(
-                        prefill_service.name,
-                        "operator published an authoritative zero-GPU shape",
-                    )
+                prefill_gpu_shape = self._validate_required_gpu_shape(
+                    prefill_service, prefill_gpu_shape
+                )
             except GPUShapeUnavailableError:
                 raise
             except (PlannerError, ValueError) as e:
@@ -443,11 +449,9 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.DECODE,
                 )
                 decode_gpu_shape = decode_service.get_gpu_shape(deployment)
-                if decode_gpu_shape.gpus_per_replica == 0:
-                    raise GPUShapeUnavailableError(
-                        decode_service.name,
-                        "operator published an authoritative zero-GPU shape",
-                    )
+                decode_gpu_shape = self._validate_required_gpu_shape(
+                    decode_service, decode_gpu_shape
+                )
             except GPUShapeUnavailableError:
                 raise
             except (PlannerError, ValueError) as e:
@@ -457,6 +461,26 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
         return prefill_gpu_shape, decode_gpu_shape
+
+    @staticmethod
+    def _validate_required_gpu_shape(
+        service: Service, shape: ComponentGPUShape
+    ) -> Optional[ComponentGPUShape]:
+        """Fail closed on zero physical GPUs except for simulated workers."""
+
+        if shape.gpus_per_replica != 0:
+            return shape
+        if service.is_mocker():
+            logger.info(
+                "Component %s runs Dynamo mocker with zero physical GPUs; "
+                "using the configured logical GPU shape",
+                service.name,
+            )
+            return None
+        raise GPUShapeUnavailableError(
+            service.name,
+            "operator published an authoritative zero-GPU shape",
+        )
 
     def get_component_power_configs(
         self,
