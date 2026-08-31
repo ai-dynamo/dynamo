@@ -87,15 +87,15 @@ func (b *TRTLLMBackend) leaderCommand(container *corev1.Container, numberOfNodes
 	// Store original command/args for later use
 	var originalCommand string
 
-	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
+	if len(container.Command) > 0 && mutation.IsPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
 		var quotedParts []string
 		for _, part := range container.Command {
-			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+			quotedParts = append(quotedParts, mutation.ShellQuote(part))
 		}
 		for _, part := range container.Args {
-			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+			quotedParts = append(quotedParts, mutation.ShellQuote(part))
 		}
 		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {

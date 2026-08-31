@@ -284,7 +284,7 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 		return false
 	}
 
-	return containerCommandLineHasArg(&podSpec.Containers[0], vllmmutation.DistributedExecutorFlag, "mp")
+	return mutation.ContainerCommandLineHasArg(&podSpec.Containers[0], vllmmutation.DistributedExecutorFlag, "mp")
 }
 
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {

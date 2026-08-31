@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	sglangmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/sglang"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -19,10 +18,6 @@ const (
 )
 
 type SGLangBackend struct{}
-
-func isPythonCommand(command string) bool {
-	return mutation.IsPythonCommand(command)
-}
 
 func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	// Reserve the exporter ports before any early return: a single-node worker
