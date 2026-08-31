@@ -7708,46 +7708,95 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn ordered_mm_replacements_apply_image_placeholders_in_request_order() {
-        let replacements = vec![
-            MmRoutingReplacement {
-                target_tokens: vec![10],
-                replacement_tokens: vec![100, 101],
+    fn image_expansion_applies_placeholders_in_request_order() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+            fail_plain_text: false,
+        };
+        let images = [
+            MmImageEntry {
+                mm_hash: 0x1234,
+                width: 320,
+                height: 240,
             },
-            MmRoutingReplacement {
-                target_tokens: vec![10],
-                replacement_tokens: vec![200, 201, 202],
+            MmImageEntry {
+                mm_hash: 0x5678,
+                width: 640,
+                height: 480,
             },
         ];
+        let first_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[0].mm_hash);
+        let second_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[1].mm_hash);
 
-        let (expanded, prompt_len) =
-            apply_ordered_mm_replacements(Some(1), &replacements, &[7, 10, 8, 10, 9]).unwrap();
+        let (expanded, prompt_len) = expand_mm_routing_tokens(
+            &tokenizer,
+            RoutingImagePromptLayout::RepeatedPad,
+            Some(1),
+            10,
+            &images,
+            &[2, 3],
+            &[7, 10, 8, 10, 9],
+        )
+        .unwrap();
 
-        assert_eq!(expanded, [1, 7, 100, 101, 8, 200, 201, 202, 9]);
+        assert_eq!(
+            expanded,
+            [
+                1,
+                7,
+                first_fill,
+                first_fill,
+                8,
+                second_fill,
+                second_fill,
+                second_fill,
+                9,
+            ]
+        );
         assert_eq!(prompt_len, expanded.len());
     }
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn ordered_mm_replacements_reject_image_placeholder_count_mismatch() {
-        let replacements = vec![
-            MmRoutingReplacement {
-                target_tokens: vec![10],
-                replacement_tokens: vec![100],
-            },
-            MmRoutingReplacement {
-                target_tokens: vec![10],
-                replacement_tokens: vec![200],
-            },
-        ];
+    fn exact_routing_rejects_image_placeholder_count_mismatch() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let counter = lightseek_mm::LightseekMmCounter::try_new(
+            "Qwen/Qwen3-VL-2B-Instruct",
+            Some("qwen3_vl"),
+            model_dir.path(),
+        )
+        .unwrap();
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.image_token_counter = Some(counter);
+        preprocessor.routing_image_token_id = Some(10);
+        preprocessor.routing_image_prompt_layout = Some(RoutingImagePromptLayout::RepeatedPad);
+        preprocessor.kv_cache_block_size = 16;
+        let image = [MmImageEntry {
+            mm_hash: 0x1234,
+            width: 320,
+            height: 240,
+        }];
 
         assert!(
-            apply_ordered_mm_replacements(None, &replacements, &[10, 10, 10]).is_err(),
-            "extra placeholders must fail closed"
+            preprocessor
+                .build_mm_exact_routing_info(&image, &[7, 8])
+                .is_none(),
+            "missing placeholder must fail closed at the production boundary"
         );
         assert!(
-            apply_ordered_mm_replacements(None, &replacements, &[10]).is_err(),
-            "missing placeholders must fail closed"
+            preprocessor
+                .build_mm_exact_routing_info(&image, &[7, 10, 10, 8])
+                .is_none(),
+            "extra placeholder must fail closed at the production boundary"
         );
     }
 
