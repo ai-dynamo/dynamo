@@ -26,6 +26,10 @@ on:
         description: 'Build and push the vLLM checkpoint placeholder image (restore target for Dynamo Snapshot). Requires build_vllm=true so the placeholder is built FROM this run''s vllm-runtime.'
         type: boolean
         default: false
+      build_sglang_placeholder:
+        description: 'Build and push the SGLang checkpoint placeholder image (restore target for Dynamo Snapshot). Requires build_sglang=true so the placeholder is built FROM this run''s sglang-runtime.'
+        type: boolean
+        default: false
 
       snapshot_ref:
         description: 'Git ref of ai-dynamo/snapshot to build the CUDA VMM interposer (libcuinterposer.so) from, baked into the placeholder image. MUST match the snapshot agent build serving the cluster: the shim and the agent coordinator speak a versioned wire protocol.'
@@ -153,6 +157,42 @@ jobs:
       cuda_version: '["13.0"]'
       copy_timeout_minutes: 20
     secrets: inherit
+
+  # Checkpoint placeholder: the restore target image, built FROM the ACR
+  # sglang-runtime produced by this same run so the placeholder and the
+  # workload image share one tree (CRIU restores file-backed mappings by
+  # path). An SGLang workload therefore CANNOT be paired with the vLLM
+  # placeholder.
+  snapshot-placeholder-sglang:
+    name: SGLang Snapshot Placeholder
+    needs: [init, sglang-copy-to-acr]
+    if: inputs.build_sglang_placeholder
+    runs-on: prod-default-v2
+    outputs:
+      image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: $/.github/actions/build-deploy-component
+        with:
+          component: checkpoint-placeholder
+          image_tag: ${{ github.sha }}-sglang-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+            SNAPSHOT_REF=${{ inputs.snapshot_ref }}
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
