@@ -144,9 +144,7 @@ def _validate_jsonl_output_paths(
     if report_jsonl_path is None or telemetry_jsonl_path is None:
         return
     try:
-        same_existing_file = os.path.samefile(
-            report_jsonl_path, telemetry_jsonl_path
-        )
+        same_existing_file = os.path.samefile(report_jsonl_path, telemetry_jsonl_path)
     except OSError:
         same_existing_file = False
     report_target = os.path.realpath(os.path.abspath(os.fspath(report_jsonl_path)))

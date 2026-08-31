@@ -205,7 +205,9 @@ def test_native_rejects_colliding_jsonl_paths_before_truncation(tmp_path):
     assert not (tmp_path / "missing").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="directory symlinks require privileges on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="directory symlinks require privileges on Windows"
+)
 def test_native_rejects_colliding_jsonl_paths_through_symlink_parent(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     target_root = tmp_path / "target_root"
@@ -216,9 +218,7 @@ def test_native_rejects_colliding_jsonl_paths_through_symlink_parent(tmp_path):
     output = target_root / "samples.jsonl"
     output.write_text("sentinel")
     report_alias = target_root / "report_missing" / ".." / "samples.jsonl"
-    telemetry_alias = (
-        alias_parent / ".." / "telemetry_missing" / ".." / "samples.jsonl"
-    )
+    telemetry_alias = alias_parent / ".." / "telemetry_missing" / ".." / "samples.jsonl"
 
     with pytest.raises(ValueError, match="must refer to different files"):
         run_mocker_trace_replay(
@@ -232,7 +232,9 @@ def test_native_rejects_colliding_jsonl_paths_through_symlink_parent(tmp_path):
     assert not (target_root / "telemetry_missing").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="symlink creation requires privileges on Windows"
+)
 def test_native_resolves_symlink_after_cancelled_missing_component(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     base = tmp_path / "base"
@@ -275,7 +277,9 @@ def test_native_rejects_hard_linked_jsonl_paths_before_truncation(tmp_path):
     assert telemetry.read_text() == "sentinel"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="symlink creation requires privileges on Windows"
+)
 @pytest.mark.parametrize("intermediate", [False, True])
 def test_native_rejects_dangling_symlink_jsonl_alias(tmp_path, intermediate):
     trace_path = _write_multiturn_trace(tmp_path)
@@ -318,7 +322,9 @@ def test_native_output_alias_validation_fails_closed_on_file_parent(tmp_path):
     assert not (tmp_path / "samples.jsonl").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires privileges on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="symlink creation requires privileges on Windows"
+)
 def test_native_rejects_symlink_loop_with_bounded_error(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     first = tmp_path / "first.jsonl"

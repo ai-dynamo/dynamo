@@ -7,6 +7,12 @@ import pytest
 
 from dynamo.replay import api
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
+
 
 def _native_result(*, telemetry=None):
     return SimpleNamespace(
