@@ -814,6 +814,28 @@ fn build_engine_config(
         });
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
+    let enable_eagle = discovery
+        .server_info
+        .get("enable_eagle")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            discovery
+                .server_info
+                .get("is_eagle")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or_else(|| {
+            discovery
+                .server_info
+                .get("speculative_algorithm")
+                .and_then(Value::as_str)
+                .is_some_and(|algorithm| {
+                    matches!(
+                        algorithm.to_ascii_uppercase().as_str(),
+                        "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
+                    )
+                })
+        });
 
     let enable_dp_attention = discovery
         .server_info
@@ -851,6 +873,7 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            enable_eagle,
             data_parallel_size,
             data_parallel_start_rank,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
@@ -973,6 +996,7 @@ mod tests {
                 "page_size": 64,
                 "dcp_size": 8,
                 "max_total_num_tokens": 1024,
+                "speculative_algorithm": "EAGLE",
             })),
             DisaggregationMode::Decode,
             None,
@@ -983,6 +1007,7 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+        assert!(registration.enable_eagle);
     }
 
     #[test]

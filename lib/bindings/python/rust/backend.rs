@@ -168,6 +168,7 @@ impl LlmRegistration {
         total_kv_blocks = None,
         max_num_seqs = None,
         max_num_batched_tokens = None,
+        enable_eagle = false,
         data_parallel_size = None,
         data_parallel_start_rank = None,
         bootstrap_host = None,
@@ -180,6 +181,7 @@ impl LlmRegistration {
         total_kv_blocks: Option<u64>,
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
+        enable_eagle: bool,
         data_parallel_size: Option<u32>,
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
@@ -192,6 +194,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                enable_eagle,
                 data_parallel_size,
                 data_parallel_start_rank,
                 bootstrap_host,
@@ -219,6 +222,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -869,6 +876,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,

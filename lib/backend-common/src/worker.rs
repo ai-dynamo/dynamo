@@ -2054,6 +2054,7 @@ async fn build_local_model(
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
+        enable_eagle: llm.enable_eagle,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
         runtime_data,
@@ -2400,6 +2401,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                enable_eagle: true,
                 ..Default::default()
             }),
             ..EngineConfig::default()
@@ -2414,6 +2416,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert!(runtime_config.enable_eagle);
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert_eq!(
