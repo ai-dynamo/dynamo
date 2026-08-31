@@ -9,6 +9,9 @@ This directory compares DGDs generated for the same deployment intent by the exi
 v1beta1 profiler and AI Simulate Sweeper. See [DESIGN.md](DESIGN.md) for the file contracts and
 the distinction between cases, hardware configurations, suites, goldens, and local diagnostics.
 
+`testsuite-issue-8469.yaml` retains all 29 rows from issue #8469. Eight rows currently have paired
+v1beta1 and Sweeper inputs; the runner prints the missing inputs for the other 21 and continues.
+
 The portable runner and live-validation direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
 
@@ -69,3 +72,7 @@ The default variants are the v1beta1 profiler output, Sweeper-AIC output, and an
 Select a different set with `--sweeper-variants`, for example
 `--sweeper-variants profiler-v1beta1,sweeper-aic,sweeper-direct,recipe`. The test rejects a suite
 entry when its hardware family or total GPU budget is unavailable on the cluster.
+
+To probe a recipe on hardware not yet listed in its `recipe.yaml`, add
+`--sweeper-discover-recipe-hardware`. After successful deployment and inference, the test writes
+the proposed requirement to the ignored adjacent `recipe.new.yaml`; it never edits `recipe.yaml`.

@@ -56,6 +56,7 @@ class Recipe:
 
     source: str
     path: Path
+    metadata_path: Path
     requirements: dict[str, dict[str, Any]]
 
 
@@ -108,6 +109,24 @@ def _required_name(value: Any, *, field: str, path: Path) -> str:
     if not isinstance(value, str) or not value or Path(value).name != value:
         raise ValueError(f"{path}: {field} must be one non-empty directory name")
     return value
+
+
+def _case_path(name: str) -> Path:
+    name = _required_name(name, field="case", path=_CASES_ROOT)
+    path = _CASES_ROOT / name
+    if not path.is_dir():
+        raise ValueError(f"{path}: case directory does not exist")
+    return path
+
+
+def missing_case_inputs(name: str) -> tuple[str, ...]:
+    """Return native profiler inputs that keep one matrix row from running."""
+    path = _case_path(name)
+    return tuple(
+        filename
+        for filename in (_DGDR_INPUT, _SWEEPER_INPUT)
+        if not (path / filename).is_file()
+    )
 
 
 def _merge_patch(base: Any, patch: Any) -> Any:
@@ -165,7 +184,76 @@ def _load_recipe(case_path: Path) -> Recipe | None:
         raise TypeError(
             f"{recipe_path}: requirements must map hardware names to mappings"
         )
-    return Recipe(source=source, path=source_path, requirements=requirements)
+    return Recipe(
+        source=source,
+        path=source_path,
+        metadata_path=recipe_path,
+        requirements=requirements,
+    )
+
+
+def load_recipe(case_name: str) -> Recipe | None:
+    """Load the optional recipe provenance for one matrix row."""
+    return _load_recipe(_case_path(case_name))
+
+
+def write_discovered_recipe_requirement(
+    recipe: Recipe, hardware: str, gpus: int
+) -> Path | None:
+    """Write a proposed requirement without changing the checked-in recipe file."""
+    proposed = {"gpus": gpus}
+    original = _read_mapping(recipe.metadata_path)
+    if original.get("requirements", {}).get(hardware) == proposed:
+        return None
+    output_path = recipe.metadata_path.with_name("recipe.new.yaml")
+    value = _read_mapping(output_path) if output_path.is_file() else original
+    value.setdefault("requirements", {})[hardware] = proposed
+    replace_text(output_path, yaml.safe_dump(value, sort_keys=False))
+    return output_path
+
+
+def recipe_gpu_count(recipe: Recipe) -> int:
+    """Return the GPU footprint declared by one maintained DGD recipe."""
+    documents = [
+        document for document in yaml.safe_load_all(recipe.path.read_text()) if document
+    ]
+    dgds = [
+        document
+        for document in documents
+        if document.get("kind") == "DynamoGraphDeployment"
+    ]
+    if len(dgds) != 1:
+        raise ValueError(
+            f"{recipe.path} must contain exactly one DynamoGraphDeployment"
+        )
+    spec = dgds[0].get("spec", {})
+    total = 0
+    services = spec.get("services")
+    if isinstance(services, dict):
+        for service in services.values():
+            replicas = service.get("replicas", 1)
+            gpus = service.get("resources", {}).get("limits", {}).get("gpu", 0)
+            total += int(replicas) * int(gpus)
+    components = spec.get("components")
+    if isinstance(components, list):
+        for component in components:
+            replicas = component.get("replicas", 1)
+            containers = (
+                component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+            )
+            main = next(
+                (
+                    container
+                    for container in containers
+                    if container.get("name") == "main"
+                ),
+                containers[0] if containers else {},
+            )
+            gpus = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu", 0)
+            total += int(replicas) * int(gpus)
+    if total <= 0:
+        raise ValueError(f"cannot determine GPU requirement from {recipe.path}")
+    return total
 
 
 def _single_sweeper_backend(sweeper_input: dict[str, Any]) -> str:
@@ -242,8 +330,7 @@ def load_case(
     output_root: Path = _DEFAULT_MANUAL_OUTPUT_ROOT,
 ) -> ComparisonCase:
     """Compose and validate one conventional case for one hardware target."""
-    case_name = _required_name(case_name, field="case", path=_CASES_ROOT)
-    case_path = _CASES_ROOT / case_name
+    case_path = _case_path(case_name)
     dgdr_path = case_path / _DGDR_INPUT
     sweeper_path = case_path / _SWEEPER_INPUT
     missing = [
@@ -537,9 +624,23 @@ def main(argv: list[str] | None = None) -> int:
             else _DEFAULT_MANUAL_OUTPUT_ROOT
         )
     failures = []
+    skipped = 0
     try:
         hardware_cache: dict[str, HardwareConfig] = {}
         for entry in _selections(args):
+            missing = missing_case_inputs(entry.case)
+            if missing:
+                if load_recipe(entry.case) is None:
+                    raise ValueError(
+                        f"{entry.case}: missing {', '.join(missing)} and recipe.yaml"
+                    )
+                print(
+                    f"[{entry.hardware}/{entry.case}] coverage gap: "
+                    f"missing {', '.join(missing)}",
+                    flush=True,
+                )
+                skipped += 1
+                continue
             if entry.hardware not in hardware_cache:
                 hardware_cache[entry.hardware] = load_hardware(entry.hardware)
             hardware = hardware_cache[entry.hardware]
@@ -562,6 +663,8 @@ def main(argv: list[str] | None = None) -> int:
             "sweeper comparison failures:\n  " + "\n  ".join(failures), file=sys.stderr
         )
         return 2
+    if skipped:
+        print(f"sweeper comparison: {skipped} coverage gap(s) not run", flush=True)
     return 0
 
 

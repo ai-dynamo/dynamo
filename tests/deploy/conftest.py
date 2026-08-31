@@ -127,6 +127,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="profiler-v1beta1,sweeper-aic,recipe",
         help="Comma-separated generated or recipe DGD variants to validate.",
     )
+    parser.addoption(
+        "--sweeper-discover-recipe-hardware",
+        action="store_true",
+        default=False,
+        help="Try recipes without a matching requirement and write successful additions to recipe.new.yaml.",
+    )
 
 
 @dataclass(frozen=True)

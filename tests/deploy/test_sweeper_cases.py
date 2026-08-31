@@ -23,7 +23,11 @@ from dynamo.profiler.tests.sweeper.run_cases import (
     default_suite_output_root,
     load_case,
     load_hardware,
+    load_recipe,
     load_suite,
+    missing_case_inputs,
+    recipe_gpu_count,
+    write_discovered_recipe_requirement,
 )
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import DeploymentSpec
@@ -77,43 +81,56 @@ def _selected_variants(value: str) -> list[str]:
 
 
 def _discover_targets(
-    suite_path: Path, output_root: Path, variants: list[str]
+    suite_path: Path,
+    output_root: Path,
+    variants: list[str],
+    discover_recipe_hardware: bool,
 ) -> list[SweeperDeploymentTarget]:
     targets = []
     hardware_cache = {}
     for entry in load_suite(suite_path):
-        if entry.hardware not in hardware_cache:
-            hardware_cache[entry.hardware] = load_hardware(entry.hardware)
-        case = load_case(
-            entry.case,
-            hardware_cache[entry.hardware],
-            output_root=output_root,
-        )
-        hardware = case.dgdr_input["hardware"]
-        search_space = case.sweeper_input["search_space"]
-        deployment_modes = search_space.get("deployment_mode", ["agg"])
-        deployment_mode = (
-            deployment_modes[0]
-            if isinstance(deployment_modes, list) and deployment_modes
-            else "agg"
-        )
+        case = None
+        if not missing_case_inputs(entry.case):
+            if entry.hardware not in hardware_cache:
+                hardware_cache[entry.hardware] = load_hardware(entry.hardware)
+            case = load_case(
+                entry.case,
+                hardware_cache[entry.hardware],
+                output_root=output_root,
+            )
+        recipe = load_recipe(entry.case)
         for variant in variants:
             if variant == "recipe":
-                if (
-                    case.recipe is None
-                    or entry.hardware not in case.recipe.requirements
-                ):
+                if recipe is None or not recipe.path.is_file():
                     continue
-                yaml_path = case.recipe.path
-                recipe_gpus = case.recipe.requirements[entry.hardware].get("gpus")
+                requirement = recipe.requirements.get(entry.hardware)
+                if requirement is None and not discover_recipe_hardware:
+                    continue
+                yaml_path = recipe.path
+                recipe_gpus = (
+                    requirement.get("gpus") if isinstance(requirement, dict) else None
+                )
                 gpu_count = (
                     recipe_gpus
                     if isinstance(recipe_gpus, int)
-                    else hardware["totalGpus"]
+                    else recipe_gpu_count(recipe)
                 )
+                backend = _recipe_backend(recipe.source)
+                deployment_mode = _recipe_deployment_mode(recipe.source)
             else:
+                if case is None:
+                    continue
                 yaml_path = case.generated_dir / _VARIANT_FILES[variant]
-                gpu_count = hardware["totalGpus"]
+                gpu_count = case.dgdr_input["hardware"]["totalGpus"]
+                backend = case.dgdr_input["backend"]
+                deployment_modes = case.sweeper_input["search_space"].get(
+                    "deployment_mode", ["agg"]
+                )
+                deployment_mode = (
+                    deployment_modes[0]
+                    if isinstance(deployment_modes, list) and deployment_modes
+                    else "agg"
+                )
             if not yaml_path.is_file():
                 raise pytest.UsageError(
                     f"{entry.hardware}/{entry.case}: requested {variant} artifact is missing: "
@@ -124,16 +141,33 @@ def _discover_targets(
                     case_name=entry.case,
                     hardware_name=entry.hardware,
                     variant=variant,
-                    backend=case.dgdr_input["backend"],
+                    backend=backend,
                     deployment_mode=deployment_mode,
                     yaml_path=yaml_path,
                     gpu_count=gpu_count,
-                    gpu_sku=hardware["gpuSku"],
+                    gpu_sku=entry.hardware,
                 )
             )
     if not targets:
         raise pytest.UsageError(f"{suite_path}: no eligible deployment targets")
     return targets
+
+
+def _recipe_backend(source: str) -> str:
+    matches = [
+        name for name in ("vllm", "sglang", "trtllm") if name in Path(source).parts
+    ]
+    if len(matches) != 1:
+        raise pytest.UsageError(f"cannot determine recipe backend from {source!r}")
+    return matches[0]
+
+
+def _recipe_deployment_mode(source: str) -> str:
+    return (
+        "disagg"
+        if any(part.startswith("disagg") for part in Path(source).parts)
+        else "agg"
+    )
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -162,6 +196,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
                 default="profiler-v1beta1,sweeper-aic,recipe",
             )
         ),
+        metafunc.config.getoption("--sweeper-discover-recipe-hardware", default=False),
     )
     metafunc.parametrize(
         "sweeper_deployment_target", targets, ids=[target.test_id for target in targets]
@@ -227,6 +262,19 @@ def _replace_resource_names(value: Any, replacements: dict[str, str]) -> Any:
     if isinstance(value, str):
         return replacements.get(value, value)
     return value
+
+
+def _write_recipe_discovery(target: SweeperDeploymentTarget) -> None:
+    recipe = load_recipe(target.case_name)
+    if recipe is None:
+        raise pytest.UsageError(
+            f"{target.case_name}: recipe.yaml disappeared during test"
+        )
+    write_discovered_recipe_requirement(
+        recipe,
+        target.hardware_name,
+        target.gpu_count,
+    )
 
 
 @pytest.fixture
@@ -345,3 +393,5 @@ async def test_sweeper_generated_dgd(
     await run_dgd_deployment_test(
         target, deployment_spec, namespace, skip_service_restart, request
     )
+    if sweeper_deployment_target.variant == "recipe":
+        _write_recipe_discovery(sweeper_deployment_target)

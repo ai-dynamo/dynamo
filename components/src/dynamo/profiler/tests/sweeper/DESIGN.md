@@ -15,6 +15,8 @@ The comparison suite generates DynamoGraphDeployments for the same deployment in
 
 An existing recipe may be deployed as a fourth, independently maintained variant. The suite learns
 whether each result is runnable; it does not require the generators to choose identical topologies.
+The issue #8469 suite retains all 29 recipe-matrix rows. Eight currently have both native profiler
+inputs and can run the comparison; the other 21 remain visible as coverage gaps.
 
 ## Attribution
 
@@ -54,7 +56,8 @@ components/src/dynamo/profiler/tests/sweeper/
 │   └── qwen3-32b-vllm-disagg/
 │       ├── dgdr-v1beta1.yaml
 │       ├── sweeper.yaml
-│       └── recipe.yaml                  # optional
+│       ├── recipe.yaml                  # optional
+│       └── recipe.new.yaml              # ignored discovery result
 ├── hardware/
 │   └── h200-sxm-16gpu/
 │       ├── dgdr-v1beta1.patch.yaml
@@ -99,6 +102,10 @@ workload:
 goal:
   target: goodput_per_gpu
 ```
+
+A matrix row without one or both native inputs is a coverage gap, not a fabricated runnable case.
+It contains only `recipe.yaml`; suite execution prints the missing filenames and continues with the
+other rows.
 
 ## Hardware configurations
 
@@ -157,8 +164,13 @@ requirements:
 ```
 
 Recipe requirements only control whether that recipe is eligible for live deployment. A missing
-recipe or requirement never prevents either generator from running. A discovery run may show that
-a recipe works on another hardware profile, but normal execution never edits `recipe.yaml`.
+recipe or requirement never prevents either generator from running. Normal execution tries recipes
+only on hardware already listed in `requirements`.
+
+With `--sweeper-discover-recipe-hardware`, the live test may try a recipe on the suite entry's
+otherwise unknown hardware. Only a successful recipe deployment and inference request prove the
+combination. The test leaves `recipe.yaml` unchanged and writes the proposed merged requirements to
+the ignored adjacent `recipe.new.yaml`; a failed generated DGD does not establish recipe support.
 
 ## Composition
 

@@ -4,11 +4,68 @@
 source: https://github.com/ai-dynamo/dynamo/issues/8469
 
 tests:
+  - case: deepseek-r1-sglang-disagg-16gpu
+    hardware: h200-sxm-32gpu
+
+  - case: deepseek-r1-sglang-disagg-8gpu
+    hardware: h200-sxm-16gpu
+
+  - case: deepseek-r1-trtllm-disagg-wide-ep
+    hardware: gb200-sxm-36gpu
+
+  - case: deepseek-r1-vllm-disagg
+    hardware: h200-sxm-32gpu
+
+  - case: deepseek-v32-fp4-trtllm-agg
+    hardware: gb200-sxm-32gpu
+
+  - case: deepseek-v32-fp4-trtllm-disagg
+    hardware: gb200-sxm-32gpu
+
+  - case: glm-5-nvfp4-sglang-disagg
+    hardware: gb200-sxm-20gpu
+
   - case: gpt-oss-120b-trtllm-agg
     hardware: gb200-sxm-4gpu
 
   - case: gpt-oss-120b-trtllm-disagg
     hardware: gb200-sxm-5gpu
+
+  - case: kimi-k2-5-nvfp4-trtllm-agg-kvbm
+    hardware: b200-sxm-8gpu
+
+  - case: kimi-k2-5-nvfp4-trtllm-agg-specdec
+    hardware: b200-sxm-32gpu
+
+  - case: kimi-k2-5-nvfp4-trtllm-agg
+    hardware: b200-sxm-8gpu
+
+  - case: llama-3-3-70b-fp8-vllm-agg-gaie
+    hardware: h200-sxm-4gpu
+
+  - case: llama-3-3-70b-fp8-vllm-agg
+    hardware: h200-sxm-4gpu
+
+  - case: llama-3-3-70b-fp8-vllm-disagg-gaie
+    hardware: h200-sxm-8gpu
+
+  - case: llama-3-3-70b-fp8-vllm-disagg-multi-node
+    hardware: h200-sxm-16gpu
+
+  - case: llama-3-3-70b-fp8-vllm-disagg-single-node
+    hardware: h200-sxm-8gpu
+
+  - case: nemotron-3-super-fp8-sglang-agg
+    hardware: h200-sxm-4gpu
+
+  - case: nemotron-3-super-fp8-sglang-disagg
+    hardware: h200-sxm-4gpu
+
+  - case: nemotron-3-super-fp8-trtllm-disagg
+    hardware: h200-sxm-4gpu
+
+  - case: nemotron-3-super-fp8-vllm-agg
+    hardware: h200-sxm-4gpu
 
   - case: qwen3-235b-fp8-trtllm-agg
     hardware: h200-sxm-16gpu
@@ -22,8 +79,14 @@ tests:
   - case: qwen3-32b-fp8-trtllm-disagg
     hardware: h200-sxm-8gpu
 
+  - case: qwen3-32b-fp8-vllm-disagg
+    hardware: a100-sxm-8gpu
+
   - case: qwen3-32b-vllm-agg
     hardware: h200-sxm-16gpu
 
   - case: qwen3-32b-vllm-disagg
     hardware: h200-sxm-16gpu
+
+  - case: qwen3-vl-30b-fp8-vllm-agg
+    hardware: gb200-sxm-1gpu

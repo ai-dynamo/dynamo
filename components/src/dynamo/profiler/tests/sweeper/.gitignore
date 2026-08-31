@@ -1,4 +1,5 @@
 cases/*/generated/
+cases/*/recipe.new.yaml
 /generated/manual/
 /generated/**/.cache/
 /generated/**/candidate-*.yaml

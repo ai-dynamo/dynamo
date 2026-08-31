@@ -163,6 +163,122 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
     )
 
 
+def test_main_reports_recipe_only_case_as_coverage_gap(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    cases_root = tmp_path / "cases"
+    case_path = cases_root / "qwen"
+    case_path.mkdir(parents=True)
+    (case_path / "recipe.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "source": "recipes/qwen/deploy.yaml",
+                "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
+            }
+        )
+    )
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "tests": [{"case": "qwen", "hardware": "h200-sxm-8gpu"}],
+            }
+        )
+    )
+    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+
+    assert run_cases.main(["--suite", str(suite)]) == 0
+    output = capsys.readouterr().out
+    assert "coverage gap: missing dgdr-v1beta1.yaml, sweeper.yaml" in output
+    assert "1 coverage gap(s) not run" in output
+
+
+def test_recipe_hardware_discovery_writes_new_file_without_changing_source(
+    monkeypatch, tmp_path
+) -> None:
+    cases_root = tmp_path / "cases"
+    case_path = cases_root / "qwen"
+    case_path.mkdir(parents=True)
+    recipe_path = case_path / "recipe.yaml"
+    original = {
+        "source": "recipes/qwen/deploy.yaml",
+        "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
+    }
+    recipe_path.write_text(yaml.safe_dump(original, sort_keys=False))
+    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    recipe = run_cases.load_recipe("qwen")
+
+    assert recipe is not None
+    output = run_cases.write_discovered_recipe_requirement(recipe, "h100-sxm-4gpu", 4)
+
+    assert yaml.safe_load(recipe_path.read_text()) == original
+    assert output == case_path / "recipe.new.yaml"
+    assert yaml.safe_load(output.read_text()) == {
+        "source": "recipes/qwen/deploy.yaml",
+        "requirements": {
+            "h200-sxm-8gpu": {"gpus": 8},
+            "h100-sxm-4gpu": {"gpus": 4},
+        },
+    }
+
+
+@pytest.mark.parametrize("api_version", ["v1alpha1", "v1beta1"])
+def test_recipe_gpu_count_includes_replicas(monkeypatch, tmp_path, api_version) -> None:
+    cases_root = tmp_path / "cases"
+    case_path = cases_root / "qwen"
+    case_path.mkdir(parents=True)
+    recipe_dgd = tmp_path / "deploy.yaml"
+    if api_version == "v1alpha1":
+        spec = {
+            "services": {
+                "Worker": {
+                    "replicas": 3,
+                    "resources": {"limits": {"gpu": "2"}},
+                }
+            }
+        }
+    else:
+        spec = {
+            "components": [
+                {
+                    "name": "worker",
+                    "replicas": 3,
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {"limits": {"nvidia.com/gpu": "2"}},
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    recipe_dgd.write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": f"nvidia.com/{api_version}",
+                "kind": "DynamoGraphDeployment",
+                "metadata": {"name": "qwen"},
+                "spec": spec,
+            }
+        )
+    )
+    (case_path / "recipe.yaml").write_text(
+        yaml.safe_dump({"source": "deploy.yaml", "requirements": {}})
+    )
+    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    recipe = run_cases.load_recipe("qwen")
+
+    assert recipe is not None
+    assert run_cases.recipe_gpu_count(recipe) == 6
+
+
 def test_repository_learning_case_composes_without_case_local_hardware() -> None:
     hardware = run_cases.load_hardware("h200-sxm-16gpu")
     case = run_cases.load_case("qwen3-32b-vllm-disagg", hardware)
@@ -182,8 +298,15 @@ def test_repository_suite_resolves_every_ashna_case() -> None:
     suite_path = run_cases._ROOT / "testsuite-issue-8469.yaml"
     entries = run_cases.load_suite(suite_path)
 
-    assert len(entries) == 8
+    assert len(entries) == 29
+    runnable = []
     for entry in entries:
+        assert run_cases.load_recipe(entry.case) is not None
+        if not run_cases.missing_case_inputs(entry.case):
+            runnable.append(entry)
+
+    assert len(runnable) == 8
+    for entry in runnable:
         case = run_cases.load_case(entry.case, run_cases.load_hardware(entry.hardware))
         assert case.recipe is not None
         assert case.recipe.path.is_file()
