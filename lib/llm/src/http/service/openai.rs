@@ -50,7 +50,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
@@ -89,7 +89,9 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
-use dynamo_protocols::types::responses::ErrorObject;
+use dynamo_protocols::types::responses::{
+    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -1488,12 +1490,12 @@ async fn embeddings(
             err_response
         })?;
 
-    // Worker always emits Base64 -- convert back to Float when the client
-    // asked for float (or didn't specify, defaulting to float per spec).
+    // Convert an optimized internal Base64 payload back to Float when the
+    // client asked for float (or omitted the format, which defaults to float).
     if client_wants_float {
         for embedding_obj in response.inner.data.iter_mut() {
             if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
-                match decode_base64_embedding_to_floats(s) {
+                match decode_base64_to_floats(s) {
                     Ok(floats) => {
                         embedding_obj.embedding =
                             dynamo_protocols::types::EmbeddingVector::Float(floats);
@@ -1520,27 +1522,6 @@ async fn embeddings(
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
-}
-
-/// Decode a base64-encoded little-endian f32 byte string back into a float
-/// vector. The byte length must be a multiple of 4; trailing bytes are
-/// rejected. Mirrors the encoder in `lib/llm/src/preprocessor.rs` and the
-/// Python `_encode_floats_to_base64` helper in
-/// `components/src/dynamo/vllm/handlers.py`.
-fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let bytes = STANDARD.decode(s)?;
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        anyhow::bail!(
-            "base64-decoded byte length {} is not a multiple of 4",
-            bytes.len()
-        );
-    }
-    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
-    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(floats)
 }
 
 #[tracing::instrument(skip_all)]
@@ -2264,8 +2245,6 @@ impl BackendErrorInfo {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
-
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2363,30 +2342,6 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
             });
-        }
-
-        // Some adapter paths encode a typed backend error into the message of
-        // a generic DynamoError. Recover only the exact stable discriminator;
-        // unknown errors without it remain sanitized as 500s.
-        let serialized_invalid_argument = match event.error.as_ref() {
-            Some(error)
-                if matches!(
-                    error.error_type(),
-                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
-                ) =>
-            {
-                error
-                    .message()
-                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
-            }
-            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
-            _ => None,
-        };
-        if let Some(message) = serialized_invalid_argument {
-            return Some(BackendErrorInfo::from_status(
-                message.to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
         }
 
         return Some(BackendErrorInfo::from_status(
@@ -3259,6 +3214,25 @@ pub fn validate_completion_fields_generic(
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+/// OpenAI Responses input-token counting handler.
+///
+/// Handles `POST /v1/responses/input_tokens` and returns an estimated input
+/// token count using a len/3 heuristic.
+///
+/// Like the Anthropic `/v1/messages/count_tokens` handler, this deliberately
+/// performs neither a readiness nor a model-serving check: clients routinely
+/// send routing names this frontend does not serve, and a pre-flight estimate
+/// does not need a live model.
+async fn handler_responses_input_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
+    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
 }
 
 /// OpenAI Responses Request Handler
@@ -4244,7 +4218,8 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoints
+/// (`/v1/responses` and `/v1/responses/input_tokens`).
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
     state: Arc<service_v2::State>,
@@ -4252,13 +4227,23 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    // Derive the subroute from the parent with any trailing slash trimmed.
+    // `DYN_HTTP_SVC_RESPONSES_PATH=/custom/` is a working configuration for the
+    // parent — axum matches `POST /custom/` — but naively appending would
+    // register `/custom//input_tokens`, and axum does not treat that as
+    // equivalent to the `/custom/input_tokens` a client would actually call.
+    // The parent is registered verbatim, so trimming here changes only the
+    // derived path and leaves existing configurations behaving as they do now.
+    let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&input_tokens_path, post(handler_responses_input_tokens))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, input_tokens_doc], router)
 }
 
 async fn images(
@@ -8857,59 +8842,5 @@ mod tests {
         assert_eq!(response.inner.id, "test");
         assert_eq!(response.inner.choices[0].text, "content");
         assert!(response.inner.usage.is_none());
-    }
-
-    // ── decode_base64_embedding_to_floats ────────────────────────────────
-    //
-    // The Python embedding worker always emits ``embedding`` as a base64
-    // string in the new internal wire format; the HTTP handler decodes
-    // back to ``Vec<f32>`` at the response boundary when the client
-    // requested float. These tests cover the decoder's three invariants:
-    // little-endian f32 byte-for-byte equivalence, invalid base64
-    // rejection, and non-multiple-of-4 byte length rejection.
-
-    #[test]
-    fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
-        use base64::Engine as _;
-        // Avoid 3.14 to side-step ``clippy::approx_constant`` -- the lint
-        // would force importing ``std::f32::consts::PI``, which isn't the
-        // point of the test.
-        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 2.5, -42.5, f32::MIN, f32::MAX];
-        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
-        for f in &floats {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let decoded = decode_base64_embedding_to_floats(&encoded)
-            .expect("valid base64 of f32 bytes should decode");
-        assert_eq!(decoded, floats);
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_invalid_base64() {
-        // Padding and alphabet violations: standard base64 alphabet is
-        // A-Za-z0-9+/= -- the '!' byte forces a decode error.
-        let result = decode_base64_embedding_to_floats("not!valid!base64");
-        assert!(
-            result.is_err(),
-            "non-base64 input should fail decode, got Ok({:?})",
-            result.ok()
-        );
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_non_multiple_of_4_byte_length() {
-        // 5 raw bytes -> base64 string. The handler must reject because
-        // 5 is not a whole number of f32 values.
-        use base64::Engine as _;
-        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let result = decode_base64_embedding_to_floats(&encoded);
-        assert!(result.is_err(), "5-byte payload must fail, got Ok");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("not a multiple of 4"),
-            "error should mention the multiple-of-4 check, got: {err_msg}"
-        );
     }
 }
