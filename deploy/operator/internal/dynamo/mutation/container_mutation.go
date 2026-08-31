@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package render
+package mutation
 
 import (
 	"fmt"
@@ -11,7 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func validateContainerMutation(container *corev1.Container, containerName string) error {
+// ValidateContainer verifies that a mutation received its expected container.
+func ValidateContainer(container *corev1.Container, containerName string) error {
 	if container == nil {
 		return fmt.Errorf("container is nil")
 	}
@@ -28,7 +29,7 @@ type AppendEnvMutation struct {
 }
 
 func (m AppendEnvMutation) Apply(container *corev1.Container) error {
-	if err := validateContainerMutation(container, m.ContainerName); err != nil {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
 		return err
 	}
 	container.Env = append(container.Env, *m.Env.DeepCopy())
@@ -44,7 +45,7 @@ type RemoveProbesMutation struct {
 }
 
 func (m RemoveProbesMutation) Apply(container *corev1.Container) error {
-	if err := validateContainerMutation(container, m.ContainerName); err != nil {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
 		return err
 	}
 	if m.Liveness {
@@ -66,7 +67,7 @@ type SetReadinessProbeMutation struct {
 }
 
 func (m SetReadinessProbeMutation) Apply(container *corev1.Container) error {
-	if err := validateContainerMutation(container, m.ContainerName); err != nil {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
 		return err
 	}
 	container.ReadinessProbe = m.Probe.DeepCopy()
@@ -80,7 +81,7 @@ type AppendVolumeMountMutation struct {
 }
 
 func (m AppendVolumeMountMutation) Apply(container *corev1.Container) error {
-	if err := validateContainerMutation(container, m.ContainerName); err != nil {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
 		return err
 	}
 	container.VolumeMounts = append(container.VolumeMounts, *m.VolumeMount.DeepCopy())
@@ -95,7 +96,7 @@ type SetCommandMutation struct {
 }
 
 func (m SetCommandMutation) Apply(container *corev1.Container) error {
-	if err := validateContainerMutation(container, m.ContainerName); err != nil {
+	if err := ValidateContainer(container, m.ContainerName); err != nil {
 		return err
 	}
 	container.Command = append([]string(nil), m.Command...)

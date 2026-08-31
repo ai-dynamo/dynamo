@@ -7,9 +7,9 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
+	trtllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/trtllm"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -36,81 +36,27 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return nil
 	}
 
-	baseMutations := render.EngineMutations{
-		{
-			Applies: workerRole,
-			Mutation: render.RemoveProbesMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Liveness:      true,
-				Startup:       true,
-			},
-		},
-		{
-			Applies: workerRole,
-			Mutation: render.SetReadinessProbeMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Probe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-						},
-					},
-					InitialDelaySeconds: 20,
-					PeriodSeconds:       20,
-					TimeoutSeconds:      5,
-					FailureThreshold:    10,
-				},
-			},
-		},
-		{
-			Mutation: render.AppendVolumeMountMutation{
-				ContainerName: commonconsts.MainContainerName,
-				VolumeMount: corev1.VolumeMount{
-					Name: b.MpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true,
-				},
-			},
-		},
-		{
-			Mutation: render.AppendEnvMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Env: corev1.EnvVar{
-					Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1",
-				},
-			},
-		},
-	}
-	if err := baseMutations.Apply(component, role, container); err != nil {
-		return err
-	}
-
+	var launchMutations mutation.EngineMutations
 	switch role {
 	case RoleLeader:
 		containerGPUs, err := containerGPUCount()
 		if err != nil {
 			return fmt.Errorf("failed to resolve container GPUs: %w", err)
 		}
-		command, args := b.leaderCommand(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
-		return (render.EngineMutations{{
-			Applies: leaderRole,
-			Mutation: render.SetCommandMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Command:       command,
-				Args:          args,
-			},
-		}}).Apply(component, role, container)
+		launchContainer := container.DeepCopy()
+		launchContainer.Env = append(launchContainer.Env, trtllmmutation.MPIEnvironment())
+		command, args := b.leaderCommand(launchContainer, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+		launchMutations = trtllmmutation.LeaderLaunch(command, args)
 	case RoleWorker:
 		command, args := b.workerCommand()
-		return (render.EngineMutations{{
-			Applies: workerRole,
-			Mutation: render.SetCommandMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Command:       command,
-				Args:          args,
-			},
-		}}).Apply(component, role, container)
-	default:
-		return nil
+		launchMutations = trtllmmutation.WorkerLaunch(command, args)
 	}
+
+	mutations := mutation.Concat(
+		trtllmmutation.MultinodeWiring(b.MpiRunSecretName),
+		launchMutations,
+	)
+	return mutations.Apply(component, role, container)
 }
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
@@ -119,33 +65,18 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	if numberOfNodes <= 1 {
 		return nil
 	}
-	mode := int32(0644)
-	return (render.PodSpecMutations{{
-		Mutation: render.AppendVolumeMutation{
-			Volume: corev1.Volume{
-				Name: b.MpiRunSecretName,
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName:  b.MpiRunSecretName,
-						DefaultMode: &mode,
-					},
-				},
-			},
-		},
-	}}).Apply(component, role, podSpec)
+	return trtllmmutation.PodSpec(b.MpiRunSecretName).Apply(component, role, podSpec)
 }
 
 // addSSHVolumeMount adds the SSH keypair secret volume mount to the container
 func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
-	_ = (render.AppendVolumeMountMutation{VolumeMount: corev1.VolumeMount{
-		Name: b.MpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true,
-	}}).Apply(container)
+	_ = trtllmmutation.SSHVolumeMount(b.MpiRunSecretName).Apply(container)
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
 func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) {
 	command, args := b.leaderCommand(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
-	_ = (render.SetCommandMutation{Command: command, Args: args}).Apply(container)
+	_ = trtllmmutation.LeaderLaunch(command, args).Apply(nil, RoleLeader, container)
 }
 
 func (b *TRTLLMBackend) leaderCommand(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) ([]string, []string) {
@@ -229,7 +160,7 @@ func (b *TRTLLMBackend) leaderCommand(container *corev1.Container, numberOfNodes
 // setupWorkerContainer configures worker nodes with SSH setup and daemon
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	command, args := b.workerCommand()
-	_ = (render.SetCommandMutation{Command: command, Args: args}).Apply(container)
+	_ = trtllmmutation.WorkerLaunch(command, args).Apply(nil, RoleWorker, container)
 }
 
 func (b *TRTLLMBackend) workerCommand() ([]string, []string) {

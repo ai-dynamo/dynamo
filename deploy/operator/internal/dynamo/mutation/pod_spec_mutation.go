@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package render
+package mutation
 
 import (
 	"fmt"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/workload"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -30,7 +31,7 @@ type PodSpecMutations []PodSpecMutationRule
 // Apply selects and applies mutations in declaration order.
 func (mutations PodSpecMutations) Apply(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	role Role,
+	role workload.Role,
 	podSpec *corev1.PodSpec,
 ) error {
 	for _, rule := range mutations {

@@ -8,7 +8,8 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/render"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
+	vllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/vllm"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,17 +19,17 @@ import (
 const (
 	VLLMPort                  = "6379"
 	dataParallelRPCPort       = "13445"
-	tensorParallelSizeFlag    = "--tensor-parallel-size"
-	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
-	dataParallelSizeFlag      = "--data-parallel-size"
-	dataParallelSizeLocalFlag = "--data-parallel-size-local"
-	distributedExecutorFlag   = "--distributed-executor-backend"
-	enableElasticEPFlag       = "--enable-elastic-ep"
-	dataParallelBackendFlag   = "--data-parallel-backend"
+	tensorParallelSizeFlag    = vllmmutation.TensorParallelSizeFlag
+	pipelineParallelSizeFlag  = vllmmutation.PipelineParallelSizeFlag
+	dataParallelSizeFlag      = vllmmutation.DataParallelSizeFlag
+	dataParallelSizeLocalFlag = vllmmutation.DataParallelSizeLocalFlag
+	distributedExecutorFlag   = vllmmutation.DistributedExecutorFlag
+	enableElasticEPFlag       = vllmmutation.EnableElasticEPFlag
+	dataParallelBackendFlag   = vllmmutation.DataParallelBackendFlag
 	// dataParallelBackendShortFlag is vLLM's documented short alias for
 	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
-	dataParallelBackendShortFlag = "-dpb"
-	dataParallelBackendRay       = "ray"
+	dataParallelBackendShortFlag = vllmmutation.DataParallelBackendShortFlag
+	dataParallelBackendRay       = vllmmutation.DataParallelBackendRay
 )
 
 type VLLMBackend struct {
@@ -36,126 +37,73 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
-	mutations := render.EngineMutations{
-		{
-			Applies: interPodFailover,
-			Mutation: render.AppendEnvMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Env:           corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
-			},
-		},
+	mutations, err := b.containerMutations(
+		container,
+		numberOfNodes,
+		role,
+		component,
+		serviceName,
+		multinodeDeployer,
+		containerGPUCount,
+	)
+	if err != nil {
+		return err
 	}
-	if !containerHasArg(container, "--load-format", "gms") {
-		mutations = append(mutations, render.EngineMutationRule{
-			Applies: interPodGMS,
-			Mutation: render.AddFlagsMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Flags:         "--load-format gms",
-				Framework:     "vllm",
-			},
-		})
-	}
+	return mutations.Apply(component, role, container)
+}
 
-	isMultinode := numberOfNodes > 1
+func (b *VLLMBackend) containerMutations(
+	container *corev1.Container,
+	numberOfNodes int32,
+	role Role,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	containerGPUCount ContainerGPUCount,
+) (mutation.EngineMutations, error) {
+	commonMutations := vllmmutation.Common()
+	cacheMutations := vllmCompilationCacheMutations(component)
 	annotations := GetPodTemplateAnnotations(component)
 
-	if isMultinode {
+	if numberOfNodes > 1 {
 		containerGPUs, err := containerGPUCount()
 		if err != nil {
-			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+			return nil, fmt.Errorf("failed to resolve container GPUs: %w", err)
 		}
 
-		mutations = append(mutations, vllmMultinodeMutations(
-			container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations,
-		)...)
+		return mutation.Concat(
+			commonMutations,
+			vllmMultinodeMutations(
+				container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations,
+			),
+			vllmMPSideChannelMutations(annotations),
+			vllmmutation.MultinodePodWiring(),
+			cacheMutations,
+		), nil
+	}
 
-		if shouldUseMpBackend(annotations) {
-			mutations = append(mutations, render.EngineMutationRule{
-				Mutation: render.AppendEnvMutation{
-					ContainerName: commonconsts.MainContainerName,
-					Env: corev1.EnvVar{
-						Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
-						ValueFrom: &corev1.EnvVarSource{
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "status.podIP",
-							},
-						},
-					},
-				},
-			})
-		}
-
-		mutations = append(mutations, render.EngineMutationRule{
-			Applies: workerRole,
-			Mutation: render.RemoveProbesMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Liveness:      true,
-				Readiness:     true,
-				Startup:       true,
-			},
-		})
-	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
+	if role == RoleMain && IsElasticEPRayLaunch(container) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
 		if command, args, applied := elasticEPRayCommand(container, role, serviceName, multinodeDeployer); applied {
-			mutations = append(mutations, render.EngineMutationRule{
-				Mutation: render.SetCommandMutation{
-					ContainerName: commonconsts.MainContainerName,
-					Command:       command,
-					Args:          args,
-				},
-			})
-			// Bind both addresses only when a Ray head was actually injected.
-			//
-			// Both resolve from status.podIP, which is the point: the Ray head
-			// registers under that address and vLLM searches for that address, so
-			// the two cannot disagree. POD_IP is what the launch command
-			// interpolates into --node-ip-address; VLLM_DP_MASTER_IP is what the
-			// engine reads.
-			//
-			// The engine needs telling because at --data-parallel-size 1 vLLM
-			// discards the DP master IP it derives from the Ray node and falls back
-			// to VLLM_DP_MASTER_IP, which defaults to 127.0.0.1 — so it looks for a
-			// node that does not exist and aborts with "The DP master node (ip:
-			// 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP nor
-			// --data-parallel-address survives that overwrite; this env var is the
-			// only value the fallback reads.
-			podIPRef := func() *corev1.EnvVarSource {
-				return &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "status.podIP",
-					},
-				}
-			}
-			mutations = append(mutations,
-				render.EngineMutationRule{Mutation: render.AppendEnvMutation{
-					ContainerName: commonconsts.MainContainerName,
-					Env:           corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
-				}},
-				render.EngineMutationRule{Mutation: render.AppendEnvMutation{
-					ContainerName: commonconsts.MainContainerName,
-					Env:           corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
-				}},
-			)
+			return mutation.Concat(
+				commonMutations,
+				vllmmutation.SingleNodeElasticEP(command, args),
+				cacheMutations,
+			), nil
 		}
 	}
+	return mutation.Concat(commonMutations, cacheMutations), nil
+}
 
-	// Set compilation cache environment variables for VLLM
+func vllmCompilationCacheMutations(component *v1beta1.DynamoComponentDeploymentSharedSpec) mutation.EngineMutations {
 	cacheDir := ""
 	if component.CompilationCache != nil {
 		cacheDir = component.CompilationCache.MountPath
 	}
 
 	if cacheDir != "" {
-		mutations = append(mutations, render.EngineMutationRule{
-			Mutation: render.AppendEnvMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Env:           corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: cacheDir},
-			},
-		})
-
-		// Log confirmation that compilation cache is configured for VLLM
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("Compilation cache configured and enabled for VLLM backend",
 			"backend", "vllm",
@@ -165,8 +113,14 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			"env-vars-set", true,
 			"env-vars", "VLLM_CACHE_ROOT")
 	}
+	return vllmmutation.CompilationCache(cacheDir)
+}
 
-	return mutations.Apply(component, role, container)
+func vllmMPSideChannelMutations(annotations map[string]string) mutation.EngineMutations {
+	if !shouldUseMpBackend(annotations) {
+		return nil
+	}
+	return vllmmutation.MPSideChannel()
 }
 
 const (
@@ -324,10 +278,7 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		},
 	}
 
-	return (render.PodSpecMutations{
-		{Mutation: render.AppendVolumeMutation{Volume: volume}},
-		{Mutation: render.AppendInitContainerMutation{Container: initContainer}},
-	}).Apply(component, role, podSpec)
+	return vllmmutation.WaitForLeader(volume, initContainer).Apply(component, role, podSpec)
 }
 
 func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
@@ -345,29 +296,27 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 
 // vllmMultinodeMutations selects the launch mutation for the configured
 // parallelism strategy and executor backend.
-func vllmMultinodeMutations(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) render.EngineMutations {
+func vllmMultinodeMutations(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) mutation.EngineMutations {
 	expandedArgs := getExpandedArgs(container)
 	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
-		flags, needsShell := mpDistributedLaunchFlags(role, serviceName, multinodeDeployer, numberOfNodes)
-		return render.EngineMutations{{
-			Mutation: render.AddFlagsMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Flags:         flags,
-				NeedsShell:    needsShell,
-				Framework:     "vllm",
-			},
-		}}
+		var workerRank string
+		var workerRankNeedsShell bool
+		if role == RoleWorker {
+			workerRank, workerRankNeedsShell = multinodeDeployer.GetNodeRank()
+		}
+		return vllmmutation.MP(vllmmutation.MPValues{
+			NumberOfNodes:        numberOfNodes,
+			LeaderAddress:        multinodeDeployer.GetLeaderHostname(serviceName),
+			WorkerRank:           workerRank,
+			WorkerRankNeedsShell: workerRankNeedsShell,
+		})
 	} else if needsDistributed {
-		command, args := rayDistributedCommand(container, role, serviceName, multinodeDeployer)
-		return render.EngineMutations{{
-			Mutation: render.SetCommandMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Command:       command,
-				Args:          args,
-			},
-		}}
+		return vllmmutation.Ray(vllmmutation.RayValues{
+			Port:          VLLMPort,
+			LeaderAddress: multinodeDeployer.GetLeaderHostname(serviceName),
+		})
 	} else if hasFlag(expandedArgs, enableElasticEPFlag) {
 		// Elastic EP requires a single Ray cluster spanning all nodes.
 		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
@@ -383,23 +332,11 @@ func vllmMultinodeMutations(container *corev1.Container, role Role, serviceName 
 		if !applied {
 			return nil
 		}
-		return render.EngineMutations{{
-			Mutation: render.SetCommandMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Command:       command,
-				Args:          args,
-			},
-		}}
+		return vllmmutation.LaunchCommand(command, args)
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
-		flags, needsShell := dataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
-		return render.EngineMutations{{
-			Mutation: render.AddFlagsMutation{
-				ContainerName: commonconsts.MainContainerName,
-				Flags:         flags,
-				NeedsShell:    needsShell,
-				Framework:     "vllm",
-			},
-		}}
+		return vllmmutation.DataParallel(dataParallelLaunchValues(
+			container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes,
+		))
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -443,58 +380,6 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 
 	// Step 2: Check operator origin version gate
 	return compatibility.VLLMMultiprocessing.Enabled(annotations)
-}
-
-// mpDistributedLaunchFlags returns the vLLM multiprocessing flags for multi-node TP/PP deployments.
-//
-// Leader: runs the original vLLM command with --distributed-executor-backend mp,
-// --nnodes, --node-rank 0, --master-addr, --master-port
-//
-// Worker: runs the same vLLM command with --headless, --node-rank <rank>, and the same
-// coordination flags. An init container (injected via UpdatePodSpec) handles waiting for
-// the leader's master port before the worker's main container starts.
-func mpDistributedLaunchFlags(role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) (string, bool) {
-	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mpFlags := fmt.Sprintf("%s mp --nnodes %d --master-addr %s --master-port %s",
-		distributedExecutorFlag,
-		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
-
-	needsShell := false
-
-	switch role {
-	case RoleLeader:
-		mpFlags += " --node-rank 0"
-	case RoleWorker:
-		nodeRank, needsShellForRank := multinodeDeployer.GetNodeRank()
-		needsShell = needsShellForRank
-		mpFlags += fmt.Sprintf(" --node-rank %s --headless", nodeRank)
-	}
-
-	return mpFlags, needsShell
-}
-
-func rayDistributedCommand(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) ([]string, []string) {
-	args := append([]string(nil), container.Args...)
-	switch role {
-	case RoleLeader:
-		quotedCmd := make([]string, len(container.Command))
-		for i, tok := range container.Command {
-			quotedCmd[i] = shellQuoteForBashC(tok)
-		}
-		fullCommand := strings.Join(quotedCmd, " ")
-		quotedArgs := make([]string, len(container.Args))
-		for i, arg := range container.Args {
-			quotedArgs[i] = shellQuoteForBashC(arg)
-		}
-		originalArgs := strings.Join(quotedArgs, " ")
-		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)
-		args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
-	case RoleWorker:
-		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
-		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-		args = []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)}
-	}
-	return []string{"/bin/sh", "-c"}, args
 }
 
 // elasticEPRayCommand returns the cross-node Ray launch command for elastic EP.
@@ -665,7 +550,7 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-func dataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32) (string, bool) {
+func dataParallelLaunchValues(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32) vllmmutation.DataParallelValues {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
@@ -679,46 +564,20 @@ func dataParallelLaunchFlags(container *corev1.Container, role Role, serviceName
 		totalDPSize = dataParallelSizeLocal * int64(numberOfNodes)
 	}
 
-	var flags []string
-	needsShell := false
-
-	switch role {
-	case RoleLeader:
-		// Leader runs API server + coordinator + local engines
-		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
-		flags = []string{"--data-parallel-hybrid-lb"}
-		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
-			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
-		}
-		flags = append(flags,
-			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
-			"--data-parallel-start-rank", "0",
-			"--data-parallel-address", leaderHostname,
-			"--data-parallel-rpc-port", dataParallelRPCPort,
-		)
-
-	case RoleWorker:
-		// Worker runs API server + coordinator + local engines on its node
-		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
+	workerStartRank := ""
+	if role == RoleWorker {
 		nodeRank, _ := multinodeDeployer.GetNodeRank()
-		startRank := fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, nodeRank)
-		needsShell = true // Need shell for arithmetic expansion
-
-		flags = []string{"--data-parallel-hybrid-lb"}
-		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
-			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
-		}
-		flags = append(flags,
-			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
-			"--data-parallel-start-rank", startRank,
-			"--data-parallel-address", leaderHostname,
-			"--data-parallel-rpc-port", dataParallelRPCPort,
-		)
+		workerStartRank = fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, nodeRank)
 	}
-
-	return strings.Join(flags, " "), needsShell
+	return vllmmutation.DataParallelValues{
+		TotalSize:            totalDPSize,
+		OmitTotalSize:        hasFlag(expandedArgs, dataParallelSizeFlag),
+		LocalSize:            dataParallelSizeLocal,
+		LeaderAddress:        leaderHostname,
+		WorkerStartRank:      workerStartRank,
+		WorkerRankNeedsShell: true,
+		RPCPort:              dataParallelRPCPort,
+	}
 }
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
