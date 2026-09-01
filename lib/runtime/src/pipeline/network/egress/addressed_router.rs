@@ -662,7 +662,9 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
-        let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
+        let request_plane_response = self
+            .dispatch_buffer(address, buffer, context.id(), engine_ctx.clone())
+            .await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // A worker rejection surfaces on the request-plane ACK, not the response
@@ -802,6 +804,7 @@ impl AddressedPushRouter {
         address: String,
         buffer: bytes::Bytes,
         request_id: &str,
+        engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     ) -> Result<bytes::Bytes, Error> {
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
@@ -815,7 +818,7 @@ impl AddressedPushRouter {
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
         let ack = self
             .req_client
-            .send_request(address, buffer, headers)
+            .send_request_with_context(address, buffer, headers, engine_ctx)
             .await?;
         drop(_nvtx_send);
         Ok(ack)

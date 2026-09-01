@@ -11,6 +11,7 @@
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::engine::AsyncEngineContext;
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
@@ -153,6 +154,8 @@ struct PendingRequest {
     frame: TcpRequestFrame,
     /// Oneshot channel to send response back to caller
     response_tx: oneshot::Sender<Result<Bytes>>,
+    /// Set when the request context is cancelled before the writer drains it.
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Buffered TCP writer for header coalescing and chunked payload writes.
@@ -715,6 +718,12 @@ impl TcpConnection {
                 response_batch.clear();
                 let mut count = 0usize;
                 while let Some(req) = submit_queue.pop() {
+                    if req.cancelled.load(Ordering::Acquire) {
+                        let _ = req
+                            .response_tx
+                            .send(Err(anyhow::anyhow!("Request cancelled before dispatch")));
+                        continue;
+                    }
                     count += 1;
                     write_buf.push_frame(req.frame);
                     response_batch.push(req.response_tx);
@@ -886,6 +895,25 @@ impl TcpConnection {
 
     /// Send a request via lock-free SegQueue push (~20-40ns)
     async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
+        self.send_request_inner(payload, headers, None).await
+    }
+
+    async fn send_request_with_context(
+        &self,
+        payload: Bytes,
+        headers: &Headers,
+        context: Arc<dyn AsyncEngineContext>,
+    ) -> Result<Bytes> {
+        self.send_request_inner(payload, headers, Some(context))
+            .await
+    }
+
+    async fn send_request_inner(
+        &self,
+        payload: Bytes,
+        headers: &Headers,
+        context: Option<Arc<dyn AsyncEngineContext>>,
+    ) -> Result<Bytes> {
         use crate::pipeline::network::codec::TcpRequestMessage;
 
         if !self.healthy.load(Ordering::Relaxed) {
@@ -915,11 +943,25 @@ impl TcpConnection {
         // encode() runs AFTER acquire so callers blocked on the semaphore do not
         // hold a pre-allocated encoded frame, bounding peak memory to
         // channel_buffer * frame_size per connection.
-        let _permit = self
-            .admission
-            .acquire()
-            .await
-            .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+        let _permit = if let Some(ctx) = context.as_ref() {
+            tokio::select! {
+                biased;
+                _ = ctx.killed() => {
+                    anyhow::bail!("Request cancelled before TCP admission");
+                }
+                _ = ctx.stopped() => {
+                    anyhow::bail!("Request stopped before TCP admission");
+                }
+                permit = self.admission.acquire() => {
+                    permit.map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?
+                }
+            }
+        } else {
+            self.admission
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?
+        };
 
         // Header framing happens after admission is granted so callers blocked
         // on the semaphore do not hold queued frame state. The payload remains
@@ -928,6 +970,7 @@ impl TcpConnection {
         let frame = request_msg.into_frame()?;
 
         let (response_tx, response_rx) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
 
         // Re-check health: the connection may have gone unhealthy while we
         // were waiting for a permit.  Fail fast so the caller can retry on a
@@ -950,8 +993,11 @@ impl TcpConnection {
         let _inflight_guard = InflightGuard(self.inflight.clone());
 
         // Lock-free submit: ~20-40ns
-        self.submit_queue
-            .push(PendingRequest { frame, response_tx });
+        self.submit_queue.push(PendingRequest {
+            frame,
+            response_tx,
+            cancelled: cancelled.clone(),
+        });
 
         #[cfg(test)]
         if let Some(barrier) = &self.post_enqueue_barrier {
@@ -964,6 +1010,11 @@ impl TcpConnection {
         if self.closed.load(Ordering::Acquire) {
             Self::drain_pending(&self.submit_queue);
         } else {
+            if let Some(ctx) = context.as_ref()
+                && (ctx.is_killed() || ctx.is_stopped())
+            {
+                cancelled.store(true, Ordering::Release);
+            }
             // Wake writer if it was sleeping
             self.writer_notify.notify_one();
             // The writer may close between the first check and notify. Drain once more so
@@ -976,9 +1027,26 @@ impl TcpConnection {
         // Await response. On timeout the enclosing future is dropped here:
         // `_inflight_guard` drops → fetch_sub(Release) runs automatically.
         // `_permit` drops     → semaphore slot is released automatically.
-        let result = response_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
+        let result = if let Some(ctx) = context.as_ref() {
+            tokio::select! {
+                biased;
+                _ = ctx.killed() => {
+                    cancelled.store(true, Ordering::Release);
+                    anyhow::bail!("Request cancelled while queued for TCP dispatch");
+                }
+                _ = ctx.stopped() => {
+                    cancelled.store(true, Ordering::Release);
+                    anyhow::bail!("Request stopped while queued for TCP dispatch");
+                }
+                result = response_rx => {
+                    result.map_err(|_| anyhow::anyhow!("Reader task closed"))?
+                }
+            }
+        } else {
+            response_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("Reader task closed"))?
+        };
 
         if trace && let Some(start) = e2e_start {
             let e2e_ns = start.elapsed().as_nanos() as u64;
@@ -1616,6 +1684,51 @@ impl TcpRequestClient {
             Ok((socket_addr, None))
         }
     }
+
+    fn handle_send_result(
+        &self,
+        addr: SocketAddr,
+        result: std::result::Result<Result<Bytes>, tokio::time::error::Elapsed>,
+    ) -> Result<Bytes> {
+        match result {
+            Ok(Ok(response)) => {
+                self.stats
+                    .responses_received
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_received
+                    .fetch_add(response.len() as u64, Ordering::Relaxed);
+                TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
+                Ok(response)
+            }
+            Ok(Err(e)) => {
+                self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
+                tracing::warn!(%addr, error = %e, "TCP request failed");
+                let cause = crate::error::DynamoError::from(
+                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+                );
+                Err(anyhow::anyhow!(
+                    crate::error::DynamoError::builder()
+                        .error_type(crate::error::ErrorType::CannotConnect)
+                        .message(format!("TCP request to {addr} failed"))
+                        .cause(cause)
+                        .build()
+                ))
+            }
+            Err(_) => {
+                self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
+                tracing::warn!(%addr, "TCP request timeout");
+                Err(anyhow::anyhow!(
+                    crate::error::DynamoError::builder()
+                        .error_type(crate::error::ErrorType::CannotConnect)
+                        .message(format!("TCP request to {addr} timed out"))
+                        .build()
+                ))
+            }
+        }
+    }
 }
 
 impl Default for TcpRequestClient {
@@ -1659,45 +1772,45 @@ impl RequestPlaneClient for TcpRequestClient {
         )
         .await;
 
-        match result {
-            Ok(Ok(response)) => {
-                self.stats
-                    .responses_received
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes_received
-                    .fetch_add(response.len() as u64, Ordering::Relaxed);
-                TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
-                // conn (Arc) dropped here -- connection stays in pool
-                Ok(response)
-            }
-            Ok(Err(e)) => {
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                TCP_ERRORS_TOTAL.inc();
-                tracing::warn!("TCP request failed to {}: {}", addr, e);
-                let cause = crate::error::DynamoError::from(
-                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
-                );
-                Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
-                        .message(format!("TCP request to {addr} failed"))
-                        .cause(cause)
-                        .build()
-                ))
-            }
-            Err(_) => {
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                TCP_ERRORS_TOTAL.inc();
-                tracing::warn!("TCP request timeout to {}", addr);
-                Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
-                        .message(format!("TCP request to {addr} timed out"))
-                        .build()
-                ))
-            }
+        self.handle_send_result(addr, result)
+    }
+
+    async fn send_request_with_context(
+        &self,
+        address: String,
+        payload: Bytes,
+        mut headers: Headers,
+        context: Arc<dyn AsyncEngineContext>,
+    ) -> Result<Bytes> {
+        tracing::debug!(
+            "TCP client sending cancellable request to address: {}",
+            address
+        );
+        self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .bytes_sent
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+
+        let (addr, endpoint_name) = Self::parse_address(&address)?;
+
+        if let Some(endpoint_name) = endpoint_name {
+            headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
+
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection unavailable");
+            e
+        })?;
+
+        let result = tokio::time::timeout(
+            self.config.request_timeout,
+            conn.send_request_with_context(payload, &headers, context),
+        )
+        .await;
+
+        self.handle_send_result(addr, result)
     }
 
     fn transport_name(&self) -> &'static str {
@@ -2057,6 +2170,71 @@ mod tests {
         });
 
         (addr, conn_count)
+    }
+
+    /// Helper: spawn a mock TCP server that counts fully received requests before echoing.
+    async fn spawn_counting_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_clone = request_count.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let result = listener.accept().await;
+                if result.is_err() {
+                    break;
+                }
+                let (stream, _) = result.unwrap();
+                let request_count = request_count_clone.clone();
+                tokio::spawn(async move {
+                    let (mut read_half, mut write_half) = tokio::io::split(stream);
+                    loop {
+                        let mut len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let path_len = u16::from_be_bytes(len_buf) as usize;
+                        let mut path_buf = vec![0u8; path_len];
+                        if read_half.read_exact(&mut path_buf).await.is_err() {
+                            break;
+                        }
+
+                        let mut headers_len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                            break;
+                        }
+                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+                        let mut headers_buf = vec![0u8; headers_len];
+                        if read_half.read_exact(&mut headers_buf).await.is_err() {
+                            break;
+                        }
+
+                        let mut payload_len_buf = [0u8; 4];
+                        if read_half.read_exact(&mut payload_len_buf).await.is_err() {
+                            break;
+                        }
+                        let payload_len = u32::from_be_bytes(payload_len_buf) as usize;
+                        let mut payload = vec![0u8; payload_len];
+                        if read_half.read_exact(&mut payload).await.is_err() {
+                            break;
+                        }
+
+                        request_count.fetch_add(1, Ordering::SeqCst);
+
+                        use crate::pipeline::network::codec::TcpResponseMessage;
+                        let encoded = TcpResponseMessage::new(Bytes::from(payload))
+                            .encode()
+                            .unwrap();
+                        if write_half.write_all(&encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        (addr, request_count)
     }
 
     /// Env parsing for the request-plane client connector (independent of the
@@ -3423,6 +3601,63 @@ mod tests {
         );
         let inner = result.unwrap();
         assert!(inner.is_err(), "closed connection should return an error");
+
+        conn.writer_handle.abort();
+        conn.reader_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_context_cancel_after_enqueue_drops_before_tcp_dispatch() {
+        let (addr, request_count) = spawn_counting_echo_server().await;
+
+        let mut conn = TcpConnection::connect(addr, Duration::from_secs(5), 10)
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        conn.post_enqueue_barrier = Some(barrier.clone());
+        let conn = Arc::new(conn);
+
+        // Let the writer finish its startup spin and park on Notify so the
+        // post-enqueue barrier controls when it observes the queued request.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let request_context = Arc::new(crate::pipeline::context::Controller::default());
+        let request = {
+            let conn = conn.clone();
+            let request_context = request_context.clone();
+            tokio::spawn(async move {
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    conn.send_request_with_context(
+                        Bytes::from("cancelled_before_wire"),
+                        &headers,
+                        request_context,
+                    ),
+                )
+                .await
+            })
+        };
+
+        barrier.wait().await;
+        request_context.kill();
+        barrier.wait().await;
+
+        let result = request.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "context cancellation should fail promptly instead of waiting for request_timeout"
+        );
+        let inner = result.unwrap();
+        assert!(inner.is_err(), "cancelled request should return an error");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            0,
+            "cancelled request should not be written to the TCP backend"
+        );
 
         conn.writer_handle.abort();
         conn.reader_handle.abort();

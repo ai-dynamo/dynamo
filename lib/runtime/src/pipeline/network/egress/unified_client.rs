@@ -11,6 +11,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::engine::AsyncEngineContext;
 
 /// Type alias for request headers
 pub type Headers = HashMap<String, String>;
@@ -76,6 +79,20 @@ pub trait RequestPlaneClient: Send + Sync {
         payload: Bytes,
         headers: Headers,
     ) -> Result<Bytes>;
+
+    /// Send a request while observing the request's engine context for cancellation.
+    ///
+    /// Transports that own an internal queue can override this to drop stale queued
+    /// requests before bytes are written. The default preserves existing behavior.
+    async fn send_request_with_context(
+        &self,
+        address: String,
+        payload: Bytes,
+        headers: Headers,
+        _context: Arc<dyn AsyncEngineContext>,
+    ) -> Result<Bytes> {
+        self.send_request(address, payload, headers).await
+    }
 
     /// Get the transport name
     ///
