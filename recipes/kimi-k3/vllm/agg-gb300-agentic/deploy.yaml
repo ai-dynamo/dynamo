@@ -120,8 +120,6 @@ spec:
           - --dyn-tool-call-parser
           - kimi_k3
           - --dyn-enable-structural-tag
-          - --reasoning-parser
-          - kimi_k3
           - --dyn-reasoning-parser
           - kimi_k3
           - --kv-events-config

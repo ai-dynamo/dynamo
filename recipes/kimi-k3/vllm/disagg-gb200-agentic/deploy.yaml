@@ -139,8 +139,6 @@ spec:
           - vllm.v1.core.sched.async_scheduler.AsyncScheduler
           - --dyn-tool-call-parser
           - kimi_k3
-          - --reasoning-parser
-          - kimi_k3
           - --dyn-reasoning-parser
           - kimi_k3
           - --dyn-enable-structural-tag
@@ -305,8 +303,6 @@ spec:
           - --scheduler-cls
           - vllm.v1.core.sched.async_scheduler.AsyncScheduler
           - --dyn-tool-call-parser
-          - kimi_k3
-          - --reasoning-parser
           - kimi_k3
           - --dyn-reasoning-parser
           - kimi_k3
