@@ -39,7 +39,6 @@ use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity,
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal,
     },
