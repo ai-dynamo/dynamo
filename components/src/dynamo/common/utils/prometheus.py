@@ -223,9 +223,6 @@ def get_prometheus_typed(
     remains for ``/metrics``, where the engine's own rendering is what consumers
     already scrape.
     """
-    # Compile only when a filter was actually requested: an empty prefix tuple
-    # compiles to a pattern that matches everything, which would exclude every
-    # family rather than none.
     if inject_custom_labels:
         # Injected at collection time, exactly as the text path does, so
         # dynamo_namespace / dynamo_component / worker_id reach the typed form
@@ -240,6 +237,9 @@ def get_prometheus_typed(
         wrapped.register(LabelInjectingCollector(registry, inject_custom_labels))
         registry = wrapped
 
+    # Compile only when a filter was actually requested: an empty prefix tuple
+    # compiles to a pattern that matches everything, which would exclude every
+    # family rather than none.
     include = (
         _compile_include_pattern(tuple(metric_prefix_filters))
         if metric_prefix_filters

@@ -34,7 +34,7 @@ const SCOPE_NAME: &str = "dynamo.runtime.metrics";
 /// lifetime or consumers will read every export as a counter reset.
 pub fn to_resource_metrics(
     families: &[MetricFamily],
-    resource_attrs: Vec<KeyValue>,
+    resource_attrs: &[KeyValue],
     start_time: SystemTime,
 ) -> ResourceMetrics {
     let now = unix_nanos(SystemTime::now());
@@ -47,7 +47,7 @@ pub fn to_resource_metrics(
 
     ResourceMetrics {
         resource: Some(Resource {
-            attributes: resource_attrs,
+            attributes: resource_attrs.to_vec(),
             dropped_attributes_count: 0,
             entity_refs: Vec::new(),
         }),
@@ -223,21 +223,19 @@ impl ExportConfig {
             return Ok(None);
         }
 
+        let metrics_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL).ok();
         let protocol = crate::logging::resolve_signal_otlp_protocol(
             crate::logging::otlp_protocol_from_env(),
-            std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL)
-                .ok()
-                .as_deref(),
+            metrics_protocol.as_deref(),
             env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
         );
-        // Only gRPC is implemented. Failing loudly beats silently exporting
-        // over the wrong transport, or silently not exporting at all. Name the
-        // variable that actually supplied the value: the generic protocol is a
-        // fallback, so an operator who only set that one would otherwise see an
-        // error about a variable they never touched.
+        // Only gRPC is implemented; failing loudly beats exporting over the
+        // wrong transport. Name whichever variable actually supplied the value,
+        // so an operator who set only the generic one is not sent to the
+        // specific one.
         if protocol != crate::logging::OtlpProtocol::Grpc {
-            let source = match std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL) {
-                Ok(value) if !value.trim().is_empty() => {
+            let source = match metrics_protocol.as_deref() {
+                Some(value) if !value.trim().is_empty() => {
                     env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
                 }
                 _ => env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
@@ -293,9 +291,11 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
     // reset on every export.
     let start_time = SystemTime::now();
 
-    // One interval is the natural deadline: a call still outstanding when the
-    // next collection is due has already missed its window.
-    let rpc_deadline = config.interval;
+    // A call still outstanding when the next collection is due has missed its
+    // window, so the interval is the natural deadline -- but cap it, or a long
+    // interval buys an equally long hang against an unresponsive collector.
+    const MAX_RPC_DEADLINE: Duration = Duration::from_secs(30);
+    let rpc_deadline = config.interval.min(MAX_RPC_DEADLINE);
     let mut ticker = tokio::time::interval(config.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut client: Option<MetricsServiceClient<tonic::transport::Channel>> = None;
@@ -331,16 +331,28 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
             }
         }
 
-        let families = match registry.metric_families_combined() {
-            Ok(families) => families,
-            Err(error) => {
+        // Typed callbacks cross into Python and take the GIL, which can block
+        // for as long as the engine holds it. That must not park an async
+        // worker thread.
+        let collector = registry.clone();
+        let collected = tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = tokio::task::spawn_blocking(move || collector.metric_families_combined()) => result,
+        };
+        let families = match collected {
+            Ok(Ok(families)) => families,
+            Ok(Err(error)) => {
                 tracing::warn!(%error, "OTLP metrics collection failed");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "OTLP metrics collection task failed");
                 continue;
             }
         };
 
         let request = ExportMetricsServiceRequest {
-            resource_metrics: vec![to_resource_metrics(&families, attrs.clone(), start_time)],
+            resource_metrics: vec![to_resource_metrics(&families, &attrs, start_time)],
         };
         if let Some(connected) = client.as_mut() {
             let exported = tokio::select! {
@@ -365,7 +377,7 @@ mod tests {
     fn export(typed_json: &str) -> Vec<Metric> {
         let typed: Vec<TypedFamily> = serde_json::from_str(typed_json).expect("typed");
         let families = build_families(typed);
-        let rm = to_resource_metrics(&families, Vec::new(), UNIX_EPOCH);
+        let rm = to_resource_metrics(&families, &[], UNIX_EPOCH);
         rm.scope_metrics.into_iter().next().expect("scope").metrics
     }
 
@@ -463,6 +475,47 @@ mod tests {
 
     /// Summaries only survive because we bypass the SDK, whose data model has
     /// no `Summary` variant.
+    /// Every family from a real vLLM 0.18.0 registry survives the mapping with
+    /// at least one datapoint. Constructed registries only contain shapes
+    /// someone thought to write down; this is the capture.
+    #[test]
+    fn real_vllm_registry_maps_without_dropping_a_family() {
+        let typed: Vec<TypedFamily> = serde_json::from_str(include_str!(
+            "../../tests/data/vllm-same-registry-typed.json"
+        ))
+        .expect("fixture");
+        let families = build_families(typed);
+        let metrics = to_resource_metrics(&families, &[], UNIX_EPOCH)
+            .scope_metrics
+            .into_iter()
+            .next()
+            .expect("scope")
+            .metrics;
+
+        assert_eq!(
+            metrics.len(),
+            families.len(),
+            "a family was dropped by the OTLP mapping"
+        );
+        assert!(
+            families.iter().any(|f| f.name().starts_with("vllm:")),
+            "fixture should carry engine families"
+        );
+
+        let empty: Vec<&str> = metrics
+            .iter()
+            .filter(|m| match &m.data {
+                Some(metric::Data::Sum(s)) => s.data_points.is_empty(),
+                Some(metric::Data::Gauge(g)) => g.data_points.is_empty(),
+                Some(metric::Data::Histogram(h)) => h.data_points.is_empty(),
+                Some(metric::Data::Summary(s)) => s.data_points.is_empty(),
+                _ => true,
+            })
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
+    }
+
     #[test]
     fn summary_quantiles_survive() {
         let metrics = export(

@@ -128,10 +128,6 @@ jsonschema = {version = "0.17"}
 tempfile = { workspace = true }
 
 [[bench]]
-name = "metrics_collection"
-harness = false
-
-[[bench]]
 name = "compute_pool_overhead"
 harness = false
 

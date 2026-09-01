@@ -17,11 +17,14 @@ use prometheus::proto::{
     Bucket, Counter, Gauge, Histogram, LabelPair, Metric, MetricFamily, MetricType, Quantile,
     Summary,
 };
-use serde::Deserialize;
 use std::collections::BTreeMap;
+
+#[cfg(test)]
+use serde::Deserialize;
 
 /// Accept a float as either a JSON number or a string, parsing strings with
 /// `str::parse`, which is correctly rounded.
+#[cfg(test)]
 fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     use serde::Deserialize as _;
     #[derive(Deserialize)]
@@ -36,27 +39,24 @@ fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct TypedSample {
     pub name: String,
     pub labels: BTreeMap<String, String>,
     /// Fixtures carry this as a string: JSON float parsing can land a ULP off
-    /// the correctly-rounded value, and a test fixture must not introduce error
-    /// the real path -- a native f64 across PyO3 -- never has.
-    #[serde(deserialize_with = "de_f64")]
+    /// the correctly-rounded value, and a fixture must not introduce error the
+    /// real path -- a native f64 across PyO3 -- never has.
+    #[cfg_attr(test, serde(deserialize_with = "de_f64"))]
     pub value: f64,
-    /// Present in the exposition format and in `prometheus_client`'s model.
-    /// Nothing populates it today, but the boundary should not narrow the
-    /// contract on its own.
-    #[serde(default)]
-    pub timestamp: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct TypedFamily {
     pub name: String,
     pub help: String,
-    #[serde(rename = "type")]
+    #[cfg_attr(test, serde(rename = "type"))]
     pub kind: String,
     pub samples: Vec<TypedSample>,
 }
@@ -69,8 +69,13 @@ pub struct TypedFamily {
 /// today.
 pub fn build_families(typed: Vec<TypedFamily>) -> Vec<MetricFamily> {
     let mut out = Vec::new();
-    for family in typed {
-        out.extend(promote_created(&family));
+    for mut family in typed {
+        let (created, rest) = family
+            .samples
+            .drain(..)
+            .partition(|s| s.name.ends_with("_created"));
+        family.samples = rest;
+        out.extend(promote_created(&family.help, created));
         if let Some(built) = build_one(family) {
             out.push(built);
         }
@@ -82,28 +87,18 @@ pub fn build_families(typed: Vec<TypedFamily>) -> Vec<MetricFamily> {
 /// `_created` carries the construction timestamp, not a measurement, and the
 /// typed model nests it inside its parent while the text model gives it its own
 /// family. Emit one gauge family per `_created` sample so both agree.
-fn promote_created(family: &TypedFamily) -> Vec<MetricFamily> {
-    let mut by_name: BTreeMap<&str, MetricFamily> = BTreeMap::new();
-    for sample in family
-        .samples
-        .iter()
-        .filter(|s| s.name.ends_with("_created"))
-    {
-        let entry = by_name.entry(sample.name.as_str()).or_insert_with(|| {
+fn promote_created(help: &str, samples: Vec<TypedSample>) -> Vec<MetricFamily> {
+    let mut by_name: BTreeMap<String, MetricFamily> = BTreeMap::new();
+    for sample in samples {
+        let entry = by_name.entry(sample.name.clone()).or_insert_with(|| {
             let mut f = MetricFamily::new();
             f.set_name(sample.name.clone());
-            f.set_help(family.help.clone());
+            f.set_help(help.to_string());
             f.set_field_type(MetricType::GAUGE);
             f
         });
         let mut metric = Metric::new();
-        metric.set_label(label_pairs(
-            sample
-                .labels
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        ));
+        metric.set_label(label_pairs(sample.labels.into_iter().collect()));
         let mut gauge = Gauge::new();
         gauge.set_value(sample.value);
         metric.set_gauge(gauge);
@@ -118,17 +113,22 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
         "gauge" => MetricType::GAUGE,
         "histogram" => MetricType::HISTOGRAM,
         "summary" => MetricType::SUMMARY,
-        _ => MetricType::GAUGE,
+        // "unknown" is the exposition format's untyped, which is a gauge.
+        // Anything else is a type this build does not know: treat it as a
+        // gauge so the metric still ships, but say so.
+        "unknown" => MetricType::GAUGE,
+        other => {
+            tracing::debug!(
+                metric_name = %family.name,
+                kind = %other,
+                "unrecognised metric type; treating as gauge"
+            );
+            MetricType::GAUGE
+        }
     };
 
-    // `_created` carries no measurement and is opt-out upstream via
-    // PROMETHEUS_DISABLE_CREATED_SERIES. generate_latest promotes it to its own
-    // gauge family; dropping it keeps one representation of a metric.
-    let samples: Vec<TypedSample> = family
-        .samples
-        .into_iter()
-        .filter(|s| !s.name.ends_with("_created"))
-        .collect();
+    // `_created` samples were already split out into their own gauge families.
+    let samples = family.samples;
     if samples.is_empty() {
         return None;
     }
