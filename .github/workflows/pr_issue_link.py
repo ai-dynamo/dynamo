@@ -99,7 +99,17 @@ def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     )
     if status == 200:
         issue = (body.get("data") or {}).get("issue")
-        return bool(issue), True
+        if issue:
+            return True, True
+        errors = body.get("errors") or []
+        if errors and not all(
+            (e.get("extensions") or {}).get("code") == "INPUT_ERROR" for e in errors
+        ):
+            # A 200 carrying resolver or service errors is an API failure,
+            # not a definitive not-found; fail open.
+            return False, False
+        # Unknown identifiers come back as 200 with INPUT_ERROR: definitive.
+        return False, True
     if status in (400,) and body.get("errors"):
         # Linear returns errors for unknown identifiers.
         return False, True
