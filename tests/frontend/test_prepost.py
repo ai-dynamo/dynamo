@@ -2114,6 +2114,7 @@ def _long_string_argument_outputs():
         for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
     ]
 
+
 def test_streaming_tool_call_arguments_are_not_withheld(
     tokenizer, request_for_sampling, sampling_params
 ):
