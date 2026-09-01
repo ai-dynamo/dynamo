@@ -2121,6 +2121,7 @@ async def _collect(stream):
     ],
 )
 async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, payload):
+    """Reject n greater than one before either disaggregated handler starts work."""
     handler = handler_type.__new__(handler_type)
     handler.serving_mode = DisaggregationMode.DECODE
     handler._first_token_source = None
@@ -2151,6 +2152,7 @@ async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, pa
     "mode,n", [(DisaggregationMode.AGGREGATED, 2), (DisaggregationMode.DECODE, 1)]
 )
 async def test_supported_sampling_reaches_engine(mode, n):
+    """Allow aggregated parallel sampling and disaggregated single sampling."""
     handler = _new_decode_handler()
     handler.serving_mode = mode
     handler._enable_frontend_decoding = False

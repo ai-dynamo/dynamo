@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from dynamo.llm import HttpError
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -26,6 +27,7 @@ from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     EmbeddingsProcessor,
     MultimodalPrefillWorkerHandler,
+    MultimodalWorkerHandler,
     _build_mm_items,
 )
 
@@ -651,3 +653,64 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
 
     assert result == b"vp9-bytes"
+
+
+@pytest.mark.asyncio
+async def test_multimodal_decode_rejects_parallel_sampling_before_prefill_handoff():
+    """Reject multimodal n greater than one before contacting prefill."""
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    prefill_called = False
+
+    class _PrefillClient:
+        async def generate(self, *args, **kwargs):
+            """Fail if decode reaches the prefill handoff."""
+            nonlocal prefill_called
+            prefill_called = True
+            raise AssertionError("prefill handoff ran before validation")
+
+    handler.prefill_client = _PrefillClient()
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(n=2),
+        )
+    )
+
+    with pytest.raises(
+        HttpError, match="disaggregated serving supports only n=1"
+    ) as error:
+        await anext(handler._generate_disaggregated(request, lambda: None))
+
+    assert error.value.code == 400
+    assert not prefill_called
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
+    """Reject multimodal n greater than one before allocating a bootstrap room."""
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    bootstrap_allocated = False
+    request = SimpleNamespace(sampling_params={"n": 2})
+    handler._validate_and_parse_disagg_request = lambda _: request
+
+    def generate_bootstrap_room():
+        """Fail if prefill allocates a bootstrap room."""
+        nonlocal bootstrap_allocated
+        bootstrap_allocated = True
+        raise AssertionError("bootstrap room allocated before validation")
+
+    handler._generate_bootstrap_room = generate_bootstrap_room
+
+    stream = handler.generate(request, _FakeContext("request-id"))
+    output = json.loads(await anext(stream))
+
+    assert output["finish_reason"] == "error"
+    assert "disaggregated serving supports only n=1" in output["error"]
+    assert not bootstrap_allocated
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
