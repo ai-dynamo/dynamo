@@ -38,7 +38,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::{AffinityCoordinator, AffinityTarget},
+    session_affinity::AffinityTarget,
 };
 
 mod activation;
@@ -184,11 +184,10 @@ where
     binding: ArcSwapOption<PrefillBinding<Sel>>,
     target: Mutex<Option<EndpointId>>,
     target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
-    /// Reference to the decode-side `KvRouter` so conditional disagg can peek
-    /// the cache-hot decode worker. `None` for non-KV routing and disabled routers.
-    decode_router: Option<Arc<super::KvRouter<Sel>>>,
+    /// Decode routing owns conditional-disagg planning and dispatch. This is
+    /// installed after the frontend constructs its one decode `RoutingHost`.
+    decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
     worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
-    decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -282,10 +281,9 @@ where
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (mut req, context) = request.into_parts();
+        let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
-        let policy_class = context.metadata().get("policy-class").cloned();
         let engine_ctx = context.context();
 
         // Conditional-disagg bypass is a router-owned decision. Drop any
@@ -304,52 +302,52 @@ where
             return next.generate(context.map(|_| req)).await;
         }
 
+        // Query-only requests are owned by the decode RoutingHost. In particular,
+        // do not turn an advisory worker lookup into conditional local execution.
+        if req.get_annotation_value("query_instance_id").is_some() {
+            return next.generate(context.map(|_| req)).await;
+        }
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
-        let decode_affinity_target =
-            self.decode_session_affinity_target(session_affinity.as_deref())?;
-
         if self.conditional_disagg_policy.is_enabled() {
+            let conditional_request = context.map(|_| req);
             match self
-                .select_decode_worker_for_conditional_disagg(
-                    &req,
-                    &request_id,
-                    policy_class.clone(),
-                    session_affinity.as_deref(),
-                    decode_affinity_target,
-                )
+                .plan_conditional_disagg_decode(&conditional_request, &request_id)
                 .await
             {
                 Ok(Some(decision)) => {
+                    let signals = decision.plan.signals();
                     tracing::info!(
                         request_id = %request_id,
-                        worker_id = decision.worker.worker_id,
-                        dp_rank = decision.worker.dp_rank,
+                        worker_id = signals.worker.worker_id,
+                        dp_rank = signals.worker.dp_rank,
                         net_new_tokens = decision.net_new_tokens,
                         overlap_tokens = decision.overlap_tokens,
                         "Conditional disagg routing to decode worker"
                     );
 
-                    if req.tracker.is_none() {
-                        req.tracker = Some(Arc::new(RequestTracker::new()));
+                    let mut conditional_request = conditional_request;
+                    if conditional_request.tracker.is_none() {
+                        conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
                     }
-                    if let Some(ref tracker) = req.tracker {
+                    if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
 
-                    let routing = req.routing_mut();
-                    routing.decode_worker_id = Some(decision.worker.worker_id);
-                    routing.dp_rank = Some(decision.worker.dp_rank);
-
-                    req.annotations
+                    conditional_request
+                        .annotations
                         .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
-                    // TODO: This advisory selection does not reserve decode capacity. If the
-                    // exact pinned admission below races and fails, the no-clone fix is a
-                    // scheduler reservation handoff rather than retrying with a mutated request.
-                    let response_stream = next.generate(context.map(|_| req)).await?;
+                    let decode_host = self
+                        .decode_routing_host
+                        .get()
+                        .expect("conditional plan requires a decode RoutingHost");
+                    let response_stream = decode_host
+                        .dispatch_kv_plan(conditional_request, decision.plan)
+                        .await?;
                     let ctx = response_stream.context();
                     let annotation = Annotated::<LLMEngineOutput>::from_annotation(
                         BYPASS_REMOTE_PREFILL_ANNOTATION,
@@ -358,13 +356,19 @@ where
                     let merged = stream::once(async move { annotation }).chain(response_stream);
                     return Ok(ResponseStream::new(Box::pin(merged), ctx));
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    (req, context) = conditional_request.into_parts();
+                }
+                Err(error) if crate::kv_router::routing_host::is_cancelled(&error) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(
                         request_id = %request_id,
                         error = %error,
                         "Conditional disagg decision failed; falling back to remote prefill"
                     );
+                    (req, context) = conditional_request.into_parts();
                 }
             }
         }
@@ -564,27 +568,24 @@ where
         self.conditional_disagg_policy.is_enabled()
     }
 
-    pub(crate) fn set_decode_session_affinity(&self, affinity: Option<AffinityCoordinator>) {
-        let Some(affinity) = affinity else {
-            return;
-        };
-        if self.decode_session_affinity.get().is_some() {
-            return;
-        }
-        let _ = self.decode_session_affinity.set(affinity);
-    }
-
-    fn decode_session_affinity_target(
+    pub(crate) fn set_decode_routing_host(
         &self,
-        session_affinity: Option<&SessionAffinityId>,
-    ) -> Result<Option<AffinityTarget>> {
-        let Some(session_affinity) = session_affinity else {
-            return Ok(None);
-        };
-        let Some(affinity) = self.decode_session_affinity.get() else {
-            return Ok(None);
-        };
-        affinity.query_target(session_affinity, None)
+        routing_host: Arc<RoutingHost<Sel>>,
+    ) -> Result<()> {
+        match self.decode_routing_host.set(routing_host) {
+            Ok(()) => Ok(()),
+            Err(routing_host)
+                if self
+                    .decode_routing_host
+                    .get()
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &routing_host)) =>
+            {
+                Ok(())
+            }
+            Err(_) => anyhow::bail!(
+                "PrefillRouter already has a different decode RoutingHost; rebuild requires a new PrefillRouter"
+            ),
+        }
     }
 
     fn prepare_prefill_dispatch(
@@ -699,15 +700,114 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::RouterConfigOverride;
-    use std::collections::{HashMap, HashSet};
+    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use futures::StreamExt;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::oneshot;
 
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
+        timing::RoutingData,
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[derive(Default)]
+    struct QueryOnlyDecodeHost {
+        requests: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for QueryOnlyDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            assert!(request.get_annotation_value("query_instance_id").is_some());
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            let output = Annotated::from_data(LLMEngineOutput {
+                routing_data: Some(RoutingData {
+                    token_ids: Some(request.token_ids.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move { output })),
+                request.context(),
+            ))
+        }
+    }
+
+    fn active_conditional_router() -> Arc<PrefillRouter> {
+        let (_activation_tx, activation_rx) = oneshot::channel();
+        let router = PrefillRouter::new(
+            activation_rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            16,
+            Some(KvRouterConfig {
+                conditional_disagg_enabled: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+            "model".to_string(),
+            "namespace".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
+        );
+        assert!(router.conditional_disagg_enabled());
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router
+    }
+
+    fn query_only_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(vec!["query_instance_id:".to_string()])
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_query_only_forwards_to_decode_host() {
+        let router = active_conditional_router();
+        let decode_host = Arc::new(QueryOnlyDecodeHost::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            decode_host.clone();
+
+        let mut response = router
+            .generate(SingleIn::new(query_only_request()), next)
+            .await
+            .expect("query-only request should bypass conditional planning");
+        let output = response
+            .next()
+            .await
+            .expect("decode host should return routing data")
+            .data
+            .expect("query-only response should contain data");
+
+        assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            output.routing_data.and_then(|routing| routing.token_ids),
+            Some(vec![1, 2, 3])
+        );
+    }
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
@@ -873,7 +973,6 @@ mod tests {
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
             16,
-            None,
             None,
             None,
             None,

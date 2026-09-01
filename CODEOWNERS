@@ -508,6 +508,7 @@
 /lib/llm/src/block_manager.rs                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/benchmarks/multimodal/                                                @ai-dynamo/dynamo-multimodal-codeowners
 /tests/serve/test_vllm_xpu.py                                                @ai-dynamo/dynamo-xpu-codeowners
+/.github/codeowners/areas.yaml                                               @ai-dynamo/dynamo-process-codeowners
 /.github/workflows/pr-xpu.yaml                                               @ai-dynamo/dynamo-xpu-codeowners
 /.github/workflows/xpu-ci.yaml                                               @ai-dynamo/dynamo-xpu-codeowners
 /deploy/operator/internal/gms/                                               @ai-dynamo/dynamo-gms-codeowners
@@ -572,6 +573,7 @@
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-multimodal-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                @ai-dynamo/dynamo-frontend-codeowners
+/.github/codeowners/external_contributors.yaml                               @ai-dynamo/dynamo-process-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot*                           @ai-dynamo/dynamo-gms-codeowners
