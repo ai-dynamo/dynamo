@@ -1,8 +1,8 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
-# Now supports vLLM-style individual arguments for MockEngineArgs
+# Internal worker launcher. The public `python -m dynamo.mocker` CLI is removed while online
+# simulation is unavailable.
 
 import argparse
 import asyncio
@@ -265,7 +265,3 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
 def main():
     uvloop.run(worker())
-
-
-if __name__ == "__main__":
-    main()

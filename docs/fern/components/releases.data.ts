@@ -1387,22 +1387,21 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
   {
-    version: "1.4.0.dev20260803",
-    date: "Aug 3, 2026",
+    version: "1.5.0.dev20260831",
+    date: "Aug 31, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260802",
-    date: "Aug 2, 2026",
+    version: "1.5.0.dev20260830",
+    date: "Aug 30, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260730",
-    date: "Jul 30, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime"],
-    note: "kvbm was not published for this nightly.",
+    version: "1.5.0.dev20260829",
+    date: "Aug 29, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
 ];
 
 export const NIGHTLIES_NOTE =
-  "ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers use rolling `*-runtime-nightly:latest` tags on NGC.";
+  "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag.";

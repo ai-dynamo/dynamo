@@ -18,12 +18,12 @@ Use DynoSim when you want to answer questions such as:
 
 | Component | Entry Point | Role |
 |---|---|---|
-| DynoSim run | `python -m dynamo.replay` | Runs one workload against one simulated Dynamo configuration and emits metrics plus a report |
-| DynoSim sweep | `dynamo.profiler.utils.replay_optimize` | Sweeps many simulation trials across TP shape, worker split, router knobs, SLA constraints, and GPU budget |
-| Live simulation with Mocker | `python -m dynamo.mocker` | Runs simulated workers inside a live Dynamo deployment path, including worker registration and KV event publishing |
+| DynoSim prediction | `aisimulate predict --stack dynamo` | Runs one workload against one simulated Dynamo configuration and emits metrics plus a report |
+| DynoSim recommendation | `aisimulate recommend --stack dynamo` | Searches simulation trials across parallelism, worker split, router knobs, service-level objective (SLO) constraints, and GPU budget |
+| Direct online simulation CLI | Unavailable | Will return through the unified AISimulate CLI in a future release |
 | Mocker core | `lib/mocker` | Models engine scheduling, KV allocation, prefix caching, preemption, and timing |
 | AIC | AI Configurator SDK | Supplies calibrated timing and candidate-shape data for supported model/backend/GPU tuples |
-| Planner simulation | `--planner-config` on DynoSim runs | Runs Planner decisions in the simulation loop to study scaling behavior and SLA compliance |
+| Planner simulation | `planner` in the AISimulate YAML | Runs Planner decisions in the simulation loop to study scaling behavior and SLO compliance |
 
 ## How the tools differ
 
@@ -47,12 +47,12 @@ flowchart LR
     W["Workload trace or synthetic workload"] --> R["Single DynoSim run"]
     R --> S["DynoSim sweep"]
     S --> C["Candidate configs"]
-    C --> M["Live Mocker deployment"]
     C --> G["Real-GPU validation"]
-    M --> G
 ```
 
-Start with a single DynoSim run to verify the workload shape and engine arguments. Use DynoSim sweeps when you want to search the design space. Use live Mocker deployments when you need to exercise the real Dynamo frontend, router, worker registration, KV events, and planner paths without running model inference. Validate the shortlist on real GPUs before production rollout.
+Start with a single DynoSim run to verify the workload shape and engine arguments. Use DynoSim
+sweeps to search the design space. Online Mocker deployments are temporarily unavailable. Validate
+the shortlist on real GPUs before production rollout.
 
 ## Where AIC Fits
 
@@ -64,8 +64,8 @@ AIC provides performance models and candidate-shape information. DynoSim uses th
 |---|---|
 | Run one trace or synthetic workload through one config | [Run a DynoSim Simulation](dynosim-replay.mdx) |
 | Sweep topology and router choices under SLA/GPU constraints | [Sweep DynoSim Configurations](dynosim-sweeps.mdx) |
-| Exercise a Kubernetes frontend/router setup without GPUs | [Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) |
-| Exercise a local frontend/router setup without GPUs | [Simulate a Local Deployment](mocker-live-simulation.mdx) |
+| Check the status of Kubernetes online simulation | [Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) |
+| Check the status of local online simulation | [Simulate a Local Deployment](mocker-live-simulation.mdx) |
 | Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](../../../kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx) |
 | Generate a deployable Kubernetes config from model/SLA intent | [Auto Deployment](../../../kubernetes/auto-deployment/overview.mdx) |
 
