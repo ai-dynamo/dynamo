@@ -272,6 +272,9 @@ runs:
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
           VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
           cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
+        controlPlane:
+          hostPathMapper:
+            enabled: true
         sync:
           fromHost:
             nodes:
