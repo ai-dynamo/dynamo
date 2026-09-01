@@ -34,7 +34,6 @@
             - key: nvidia.com/dynamo-component-type
               operator: In
               values:
-                - worker
                 - prefill
                 - decode
 - op: test
@@ -58,6 +57,5 @@
             - key: nvidia.com/dynamo-component-type
               operator: In
               values:
-                - worker
                 - prefill
                 - decode

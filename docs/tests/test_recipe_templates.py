@@ -669,6 +669,29 @@ def test_aggregate_placement_selector_targets_only_workers() -> None:
     assert values == ["worker"]
 
 
+def test_disaggregate_placement_selector_targets_prefill_and_decode_workers() -> None:
+    patch_path = TEMPLATE_ROOT / "kustomize/components/placement/disagg/patch-dgd.yaml"
+    patch = yaml.safe_load(patch_path.read_text())
+    affinity_operations = [
+        operation
+        for operation in patch
+        if operation.get("path", "").endswith("/affinity/podAffinity")
+    ]
+
+    assert [operation["path"] for operation in affinity_operations] == [
+        "/spec/components/1/podTemplate/spec/affinity/podAffinity",
+        "/spec/components/2/podTemplate/spec/affinity/podAffinity",
+    ]
+    for operation in affinity_operations:
+        required_affinity = operation["value"][
+            "requiredDuringSchedulingIgnoredDuringExecution"
+        ]
+        values = required_affinity[0]["labelSelector"]["matchExpressions"][0][
+            "values"
+        ]
+        assert values == ["prefill", "decode"]
+
+
 def test_framework_transfer_override_boundaries_are_documented() -> None:
     sglang_text, sglang_dgd = _load("sglang/disagg/deploy-v1beta1.template.yaml")
     sglang_header = sglang_text.split("apiVersion:", 1)[0]
