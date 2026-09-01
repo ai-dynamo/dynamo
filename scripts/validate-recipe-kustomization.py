@@ -1058,15 +1058,12 @@ def _validate_guards(layer: _PatchLayer) -> None:
                         raise ValidationError(
                             "patch-guard",
                             "%s/- requires an add of one complete container mapping "
-                            "with a non-empty string name"
-                            % collection,
+                            "with a non-empty string name" % collection,
                             layer=layer.label,
                             op_index=index,
                             path=path,
                         )
-                elif not re.fullmatch(
-                    r"0|[1-9][0-9]*", collection_suffix[0]
-                ):
+                elif not re.fullmatch(r"0|[1-9][0-9]*", collection_suffix[0]):
                     raise ValidationError(
                         "patch-guard",
                         "container mutation requires a concrete container index",

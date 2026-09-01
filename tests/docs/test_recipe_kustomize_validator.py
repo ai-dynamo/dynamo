@@ -274,9 +274,7 @@ def _identity_guards(
     return _component_guards(index, name, component_type) + [
         {
             "op": "test",
-            "path": (
-                f"/spec/components/{index}/podTemplate/spec/containers/0/name"
-            ),
+            "path": (f"/spec/components/{index}/podTemplate/spec/containers/0/name"),
             "value": "main",
         },
     ]
@@ -475,9 +473,7 @@ def test_validator_rejects_dual_startup_probe_ownership(tmp_path: Path) -> None:
     _assert_error(_validate(case), "base-field-ownership")
 
 
-@pytest.mark.parametrize(
-    ("relative_base", "hook_patch"), DISAGG_CASES
-)
+@pytest.mark.parametrize(("relative_base", "hook_patch"), DISAGG_CASES)
 def test_validator_accepts_disaggregated_templates_and_hook_patches(
     tmp_path: Path,
     relative_base: str,
@@ -592,9 +588,7 @@ def test_validator_rejects_unguarded_init_container_mutation(
     operations = _component_guards(1, "Worker", "worker") + [
         {
             "op": "add",
-            "path": (
-                "/spec/components/1/podTemplate/spec/initContainers/0/command"
-            ),
+            "path": ("/spec/components/1/podTemplate/spec/initContainers/0/command"),
             "value": ["sh", "-c", "prepare"],
         }
     ]
@@ -615,8 +609,7 @@ def test_validator_rejects_unguarded_ephemeral_container_mutation(
         {
             "op": "add",
             "path": (
-                "/spec/components/1/podTemplate/spec/"
-                "ephemeralContainers/0/command"
+                "/spec/components/1/podTemplate/spec/" "ephemeralContainers/0/command"
             ),
             "value": ["sh"],
         }
@@ -632,16 +625,12 @@ def test_validator_rejects_unguarded_ephemeral_container_mutation(
 
 
 def test_validator_accepts_guarded_init_container_mutation(tmp_path: Path) -> None:
-    init_name_path = (
-        "/spec/components/1/podTemplate/spec/initContainers/0/name"
-    )
+    init_name_path = "/spec/components/1/podTemplate/spec/initContainers/0/name"
     operations = _component_guards(1, "Worker", "worker") + [
         {"op": "test", "path": init_name_path, "value": "model-prepare"},
         {
             "op": "add",
-            "path": (
-                "/spec/components/1/podTemplate/spec/initContainers/0/command"
-            ),
+            "path": ("/spec/components/1/podTemplate/spec/initContainers/0/command"),
             "value": ["sh", "-c", "prepare"],
         },
     ]
@@ -664,9 +653,7 @@ def test_validator_accepts_whole_ephemeral_container_append(
     operations = _component_guards(1, "Worker", "worker") + [
         {
             "op": "add",
-            "path": (
-                "/spec/components/1/podTemplate/spec/ephemeralContainers/-"
-            ),
+            "path": ("/spec/components/1/podTemplate/spec/ephemeralContainers/-"),
             "value": {
                 "name": "debugger",
                 "image": "example.invalid/debugger:latest",

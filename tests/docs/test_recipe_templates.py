@@ -383,9 +383,7 @@ def test_beta_frontends_do_not_mount_the_model_cache(relative_path: str) -> None
 
 
 def test_beta_workers_with_read_only_hf_home_use_writable_modules_cache() -> None:
-    for relative_path in (
-        path for path in TEMPLATE_CASES if "v1beta1" in path
-    ):
+    for relative_path in (path for path in TEMPLATE_CASES if "v1beta1" in path):
         _, dgd = _load(relative_path)
         for name, role in _roles(dgd):
             if name == "Frontend":
@@ -655,9 +653,7 @@ def test_inkling_hostipc_removal_is_documented_as_cluster_policy() -> None:
 
 
 def test_aggregate_placement_selector_targets_only_workers() -> None:
-    patch_path = (
-        TEMPLATE_ROOT / "kustomize/components/placement/agg/patch-dgd.yaml"
-    )
+    patch_path = TEMPLATE_ROOT / "kustomize/components/placement/agg/patch-dgd.yaml"
     patch = yaml.safe_load(patch_path.read_text())
     affinity_operation = next(
         operation
