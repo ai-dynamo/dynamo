@@ -39,7 +39,7 @@ pub(super) struct WorkerSelection {
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
-    pub(super) decision_trace: Option<dynamo_kv_router::protocols::RoutingDecisionTrace>,
+    pub(super) decision_trace: Option<Box<dynamo_kv_router::protocols::RoutingDecisionTrace>>,
 }
 
 pub(super) enum SelectionOutcome {

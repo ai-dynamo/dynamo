@@ -420,7 +420,7 @@ where
 
             if let Some(ref tracker) = request.tracker {
                 if let Some(trace) = selection.decision_trace.take() {
-                    tracker.record_routing_decision_trace(request_trace_routing_decision(trace));
+                    tracker.record_routing_decision_trace(request_trace_routing_decision(*trace));
                 }
                 let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
