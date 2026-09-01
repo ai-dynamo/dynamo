@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
@@ -47,6 +49,28 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = asyncio.Event()
+
+    async def set_shutdown_when_cancelled(*_args):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            handler.shutdown_event.set()
+            raise
+
+    handler._handle_cancellation = set_shutdown_when_cancelled
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("sglang-request-id")
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async with handler._cancellation_monitor(request_id_future, context):
+            await asyncio.sleep(0)
 
 
 def _read_zstd_payload(path):
@@ -251,6 +275,7 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
 
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(served_model_name="test-model"),
@@ -264,6 +289,67 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    handler.shutdown_event.set()
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(stream(), context):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
+    processor_name,
+):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+
+    class ShutdownUploader:
+        async def upload_choice(self, *_args):
+            handler.shutdown_event.set()
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(
+            stream(), context, metadata_uploader=ShutdownUploader()
+        ):
+            pass
 
 
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():

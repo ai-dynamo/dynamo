@@ -54,12 +54,12 @@ use builtin::BuiltinWorkerSelector;
 use cancellation::cancel_on_stop;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
-use request_guard::{LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
-fn is_cancelled(error: &Error) -> bool {
+pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
 
@@ -200,6 +200,60 @@ where
     /// Compatibility construction paths that predate routing load ownership leave this unset.
     #[allow(dead_code)]
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
+}
+
+/// An admitted KV route awaiting dispatch.
+pub(crate) struct RoutePlan<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    signals: RoutePlanSignals,
+    selection: WorkerSelection,
+    cleanup: KvRequestCleanup<Sel>,
+    affinity: Option<AffinityAcquire>,
+}
+
+/// A KV route selected without scheduler admission.
+pub(crate) struct RoutePreview {
+    request_id: String,
+    phase: RequestPhase,
+    signals: RoutePlanSignals,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoutePlanSignals {
+    pub(crate) worker: WorkerWithDpRank,
+    pub(crate) overlap_blocks: u32,
+    pub(crate) cached_tokens: usize,
+    pub(crate) potential_decode_blocks: u64,
+    pub(crate) total_kv_blocks: Option<u64>,
+}
+
+impl RoutePreview {
+    pub(crate) fn signals(&self) -> RoutePlanSignals {
+        self.signals
+    }
+}
+
+impl RoutePlanSignals {
+    pub(crate) fn decode_load_exceeds(self, threshold: f64) -> Option<bool> {
+        let total_kv_blocks = self.total_kv_blocks?;
+        Some(self.potential_decode_blocks as f64 > threshold * total_kv_blocks as f64)
+    }
+}
+
+impl<Sel> RoutePlan<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    pub(crate) fn signals(&self) -> RoutePlanSignals {
+        self.signals
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn abort(mut self) {
+        self.cleanup.finish().await;
+    }
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -413,21 +467,6 @@ where
             RoutingPolicy::Direct => None,
             RoutingPolicy::Kv(_) => None,
         }
-    }
-
-    pub(crate) fn query_affinity_target(
-        &self,
-        request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-    ) -> Result<Option<AffinityTarget>, Error> {
-        let Some(affinity) = self.affinity.as_ref() else {
-            return Ok(None);
-        };
-        let Some(session_id) = affinity_id(request)? else {
-            return Ok(None);
-        };
-        let explicit = explicit_target(request, phase)?;
-        affinity.query_target(&session_id, explicit)
     }
 
     fn affinity_target_requires_rebind(
