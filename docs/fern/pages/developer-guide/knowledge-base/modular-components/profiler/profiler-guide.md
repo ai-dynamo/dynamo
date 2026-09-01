@@ -9,7 +9,7 @@ subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model,
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity passed directly to the `aiconfigurator-core` wheel and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](https://github.com/ai-dynamo/aisimulate) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -128,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the Planner is enabled, the profiler emits the `aic_perf_model` identity used by the Planner's direct `aiconfigurator-core` integration whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
+When the Planner is enabled, the profiler emits the `aic_perf_model` identity used by the Planner's AIConfigurator compatibility integration in the `aisimulate` wheel whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -370,14 +370,14 @@ spec:
 ```
 
 > [!NOTE]
-> `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
+> `aicBackendVersion` specifies the TensorRT-LLM version that AIConfigurator simulates. See the [AISimulate support documentation](https://github.com/ai-dynamo/aisimulate#support-and-accuracy) for available versions.
 
 **Currently supports:**
 - **Backends**: vLLM, SGLang, TensorRT-LLM
 - **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
-See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features) for the full list.
+See the [AISimulate support documentation](https://github.com/ai-dynamo/aisimulate#support-and-accuracy) for the full list.
 
 ### Automatic GPU Discovery
 
