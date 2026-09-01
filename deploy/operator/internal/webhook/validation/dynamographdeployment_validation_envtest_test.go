@@ -239,9 +239,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "changing only a DGD component type to EPP validates the complete runtime contract",
+			// type is immutable once set, so the only transition into EPP starts
+			// from an unset type; it must still validate the complete contract.
+			name: "setting a previously unset DGD component type to EPP validates the complete runtime contract",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = ""
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
@@ -460,8 +463,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "v1beta1 introducing case-insensitive component names is rejected by CEL on update",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
-				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
+				dgd.Spec.Components[0].ComponentName = dgdAdmissionUpperWorkerName
 			})),
 			wantCELErr: "spec.components: Invalid value: component names must be unique case-insensitively",
 		},
@@ -658,6 +660,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+		},
+		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(nil),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: type is immutable after it is set",
 		},
 		{
 			name: "v1beta1 removed minAvailable update is restored by defaulting",

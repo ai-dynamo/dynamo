@@ -365,6 +365,22 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec: Invalid value: minAvailable is immutable after creation",
 		},
 		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDCDForAdmission(nil),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec: Invalid value: type is immutable after it is set",
+		},
+		{
 			name: "v1alpha1 inter-pod GMS client containers are rejected by CEL",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
@@ -1040,14 +1056,18 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
+		// EPP is never exempt from the runtime-version requirement: the eppConfig
+		// contract is decided entirely by the resolved version, so an unresolvable
+		// one is reported rather than admitted with no contract checked.
 		{
-			name: "v1beta1 EPP with an unresolvable image version leaves the runtime contract undecided",
+			name: "v1beta1 EPP with an unresolvable image version requires runtimeVersionOverride",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:latest"
 			}),
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		// eppConfig is deprecated but still served, so its shape rules keep
 		// their coverage. The default 1.1.0 fixture image is a pre-1.5.0
@@ -1313,8 +1333,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 changing only component type to EPP validates the complete runtime contract",
+			// type is immutable once set, so the only transition into EPP starts
+			// from an unset type; it must still validate the complete contract.
+			name: "v1beta1 setting a previously unset component type to EPP validates the complete runtime contract",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = ""
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
