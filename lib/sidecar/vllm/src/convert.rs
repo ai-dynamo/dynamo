@@ -13,6 +13,9 @@ use crate::proto as pb;
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
 const MM_HASHES_KEY: &str = "mm_hashes";
+const IMAGE_URL_KEY: &str = "image_url";
+const VIDEO_URL_KEY: &str = "video_url";
+const AUDIO_URL_KEY: &str = "audio_url";
 // Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
@@ -22,6 +25,7 @@ pub(crate) fn build_generate_request(
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
+    validate_multimodal_cache_uuids(&request)?;
 
     let has_media = request
         .multi_modal_data
@@ -30,19 +34,26 @@ pub(crate) fn build_generate_request(
     // Decode receives prompt KV from prefill, but vLLM still needs the original
     // media metadata to initialize model-specific multimodal positions (for
     // example Qwen-VL mRoPE). A full KV hit prevents duplicate prompt compute.
-    let forwarded_mm_uuids = if has_media {
-        forwarded_mm_uuids(&request)?
+    let has_images = request
+        .multi_modal_data
+        .as_ref()
+        .and_then(|media| media.get(IMAGE_URL_KEY))
+        .is_some_and(|items| !items.is_empty());
+    // Each engine must prepare multimodal inputs independently so model-specific
+    // position metadata matches the transferred KV state.
+    let forwarded_image_uuids = if has_images {
+        forwarded_image_uuids(&request)?
     } else {
         None
     };
-    let media = build_media(&request, forwarded_mm_uuids.as_deref())?;
+    let media = build_media(&request, forwarded_image_uuids.as_deref())?;
     let mut prefill_result = request.prefill_result;
     let token_ids = request.token_ids;
     if mode.is_decode() && has_media {
-        // Remove sidecar-private prefill metadata before the KV
-        // handoff is serialized to vLLM. Decode rebuilds the same expanded
-        // prompt and multimodal positions from the original prompt, media, and
-        // encoder-cache handoff while NIXL supplies the prompt KV.
+        // Remove sidecar-private prefill metadata before the KV handoff is
+        // serialized to vLLM. Decode rebuilds the expanded prompt and
+        // multimodal positions from the original prompt and media while NIXL
+        // supplies the prompt KV.
         strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
     let prompt_logprobs = request.output_options.prompt_logprobs;
@@ -198,26 +209,46 @@ fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>)
     }
 }
 
-fn media_source(source: &str) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
     if source.starts_with("data:") {
         Ok(pb::media_item::Source::DataUri(source.to_string()))
     } else if source.starts_with("http://") || source.starts_with("https://") {
         Ok(pb::media_item::Source::Url(source.to_string()))
     } else {
-        Err(client::invalid_argument(
-            "vLLM gRPC image input must use an http://, https://, or data: URI",
-        ))
+        Err(client::invalid_argument(format!(
+            "vLLM gRPC {modality} input must use an http://, https://, or data: URI"
+        )))
     }
 }
 
-fn forwarded_mm_uuids(request: &PreprocessedRequest) -> Result<Option<Vec<String>>, DynamoError> {
+fn validate_multimodal_cache_uuids(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+    let Some(uuids_by_modality) = request.multi_modal_uuids.as_ref() else {
+        return Ok(());
+    };
+    for (modality, uuids) in uuids_by_modality {
+        if modality != IMAGE_URL_KEY
+            && uuids
+                .iter()
+                .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
+        {
+            return Err(client::invalid_argument(format!(
+                "multimodal cache UUIDs are supported only for {IMAGE_URL_KEY}; got non-empty multi_modal_uuids.{modality}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn forwarded_image_uuids(
+    request: &PreprocessedRequest,
+) -> Result<Option<Vec<String>>, DynamoError> {
     let has_user_uuid = request
         .multi_modal_uuids
         .as_ref()
-        .is_some_and(|by_modality| {
-            by_modality
-                .values()
-                .flatten()
+        .and_then(|by_modality| by_modality.get(IMAGE_URL_KEY))
+        .is_some_and(|uuids| {
+            uuids
+                .iter()
                 .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
         });
     if has_user_uuid {
@@ -295,11 +326,16 @@ fn build_media(
         if items.is_empty() {
             continue;
         }
-        if key != "image_url" {
-            return Err(client::invalid_argument(format!(
-                "vLLM gRPC currently supports image_url media only; got `{key}`"
-            )));
-        }
+        let modality = match key.as_str() {
+            IMAGE_URL_KEY => pb::Modality::Image,
+            VIDEO_URL_KEY => pb::Modality::Video,
+            AUDIO_URL_KEY => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "vLLM gRPC does not support media modality `{key}`"
+                )));
+            }
+        };
         let uuids = request
             .multi_modal_uuids
             .as_ref()
@@ -313,7 +349,8 @@ fn build_media(
                 items.len()
             )));
         }
-        if let Some(uuids) = forwarded_uuids
+        if modality == pb::Modality::Image
+            && let Some(uuids) = forwarded_uuids
             && uuids.len() != items.len()
         {
             return Err(client::invalid_argument(format!(
@@ -325,8 +362,8 @@ fn build_media(
 
         for (index, item) in items.iter().enumerate() {
             let source = match item {
-                MultimodalData::Url(url) => media_source(url.as_str())?,
-                MultimodalData::RawUrl(source) => media_source(source)?,
+                MultimodalData::Url(url) => media_source(key, url.as_str())?,
+                MultimodalData::RawUrl(source) => media_source(key, source)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(
                         "vLLM sidecar cannot dereference pre-decoded RDMA media; configure URL passthrough",
@@ -338,16 +375,20 @@ fn build_media(
                     ));
                 }
             };
-            let uuid = uuids
-                .and_then(|uuids| uuids.get(index))
-                .and_then(Clone::clone)
-                .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
-                .unwrap_or_default();
+            let uuid = if modality == pb::Modality::Image {
+                uuids
+                    .and_then(|uuids| uuids.get(index))
+                    .and_then(Clone::clone)
+                    .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             if !uuid.is_empty() {
                 validate_media_uuid(&uuid)?;
             }
             media.push(pb::MediaItem {
-                modality: pb::Modality::Image as i32,
+                modality: modality as i32,
                 source: Some(source),
                 mime_type: String::new(),
                 uuid,
@@ -588,6 +629,17 @@ fn validate_request(
     if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
             "encode requests require multimodal media",
+        ));
+    }
+    if mode.is_encode()
+        && request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .iter()
+                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
+        })
+    {
+        return Err(client::invalid_argument(
+            "encode requests support image media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {
