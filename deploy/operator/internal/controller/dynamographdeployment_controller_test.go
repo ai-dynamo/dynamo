@@ -639,9 +639,9 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_mapAutoSnapshotJobToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{}
-	ckpt := &v1alpha1.DynamoCheckpoint{
+	job := &snapshotv1alpha1.SnapshotJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "retained",
 			Namespace: "default",
@@ -655,7 +655,7 @@ func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRet
 		},
 	}
 
-	got := reconciler.mapAutoCheckpointToDGDRequests(context.Background(), ckpt)
+	got := reconciler.mapAutoSnapshotJobToDGDRequests(context.Background(), job)
 	require.Len(t, got, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
 }

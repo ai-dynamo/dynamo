@@ -1010,6 +1010,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
 			Enabled:                 true,
 			Exists:                  true,
+			SourceKind:              SourceKindPodSnapshot,
 			CheckpointName:          "worker-snapshot",
 			RestoreTargetContainers: []string{"engine-0", "engine-1"},
 			NativeSnapshot:          &ResolvedPodSnapshot{},

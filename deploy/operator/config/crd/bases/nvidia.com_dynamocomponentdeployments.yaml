@@ -10930,7 +10930,7 @@ spec:
                         ExtraClientContainers lists additional user-declared containers that should
                         be wired as GMS clients in pods rendered from the enclosing spec.
                         DGD/DCD services apply this to service pods. Auto-created checkpoints
-                        apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                        apply checkpoint job clients before creating the SnapshotJob; manual
                         DynamoCheckpoint users must provide an already-prepared pod template.
                         Every name must match a user-declared container in the enclosing pod spec.
                       items:
@@ -11982,9 +11982,9 @@ spec:
                       description: |-
                         checkpoint configures container-image snapshotting and restore for
                         this component. Set `checkpoint.enabled: true` to opt in. Without
-                        checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
-                        CR and later restores pods in the same DGD generation from that
-                        checkpoint. With checkpointRef, the DGD restores from the named
+                        checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and
+                        later restores pods in the same DGD generation from its PodSnapshot.
+                        With checkpointRef, the DGD restores from the named
                         PodSnapshot in the same namespace. The user-facing shape of this field is
                         still settling, which is why it lives under `experimental` in v1beta1
                         instead of at the top level.

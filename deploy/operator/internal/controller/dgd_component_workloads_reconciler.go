@@ -95,9 +95,9 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingBackendFramework(ctx, dcd); err != nil {
-			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
+		if err := r.preserveExistingDCDState(ctx, dcd, checkpointInfos[key]); err != nil {
+			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
+			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		_, syncedDCD, err := commoncontroller.SyncResource(
 			ctx,
@@ -245,9 +245,14 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 	return checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo)
 }
 
-func (r *componentWorkloadsReconciler) preserveExistingBackendFramework(
+// preserveExistingDCDState carries forward server state that must not be
+// overwritten by a generated DCD. In particular, an automatic native capture
+// with WaitForCheckpoint gates a new DCD but must not scale down a workload
+// that was already running when the capture began.
+func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	ctx context.Context,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
 	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
 	err := r.syncer.Get(
@@ -268,5 +273,17 @@ func (r *componentWorkloadsReconciler) preserveExistingBackendFramework(
 	}
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	if checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.AutomaticCapture &&
+		checkpointInfo.UsesPodSnapshot() &&
+		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!checkpointInfo.Ready {
+		if existing.Spec.Replicas == nil {
+			desired.Spec.Replicas = nil
+		} else {
+			desired.Spec.Replicas = ptr.To(*existing.Spec.Replicas)
+		}
+	}
 	return nil
 }
