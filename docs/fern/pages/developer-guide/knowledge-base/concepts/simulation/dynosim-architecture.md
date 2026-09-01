@@ -130,7 +130,8 @@ Prometheus. On each Planner traffic tick, the adapter reports:
 
 | Replay metric | Planner meaning |
 |---|---|
-| `num_req` | Completed requests in the observation window |
+| `num_req` | Requests arriving at the replay runtime in the observation window |
+| `shape_count` | Completed, non-rejected requests weighting `avg_isl` and `avg_osl` |
 | `avg_isl` / `avg_osl` | Mean raw input and output lengths |
 | `avg_kv_hit_rate` | Mean router prefix-cache hit rate at admission |
 | `avg_accept_length` | Mean visible output tokens per decode request-forward |
@@ -138,6 +139,35 @@ Prometheus. On each Planner traffic tick, the adapter reports:
 KV hit rate and speculative accept length use last-value semantics in the Planner. Missing accept
 length samples preserve the previous valid value. Without valid speculative-decoding metadata, the
 effective accept length is `1.0`.
+
+Replay telemetry is separate from the Planner callback. Set `capture_telemetry=True` to persist
+samples under the top-level `ReplayReport.telemetry` field, provide `telemetry_callback` to consume
+samples without retaining them, or set `telemetry_jsonl_path` to stream one sample per line. These
+sinks share one native sampler. Telemetry is disabled by default, so the Planner callback payload
+and default serialized report remain unchanged.
+
+`telemetry_sample_interval_ms` controls the cadence in simulated time and must be positive and
+finite. It is independent of the Planner tick cadence and does not need to be a multiple of it.
+Each run emits a gauge-only `baseline`, zero or more `periodic` samples, and a `final` sample when a
+non-empty partial interval or observations at the final timestamp remain. Every sample identifies
+`interval_start_ms` and `sampled_at_ms` explicitly.
+
+Each `ReplayTelemetrySnapshot` carries live per-rank scheduler gauges in
+`prefill_scheduler_metrics` and `decode_scheduler_metrics`: block occupancy, active and physical
+cache utilization, and running and waiting request counts. Fleet-level
+`prefill_interval_metrics` and `decode_interval_metrics` preserve cache-hit token numerators,
+denominators, and preemption deltas across all ranks, including workers retired during the window.
+A zero cache-token denominator means scheduler reuse is unavailable, not a measured 0%.
+
+The nested traffic window names `arriving_requests` and `completed_requests` separately. The latter
+is the completed, non-rejected count that the Planner bridge continues to expose as `shape_count`
+for weighting shape averages. `avg_router_kv_hit_rate` measures prefix overlap at router admission;
+it is distinct from the scheduler reuse ratio derived from
+`cache_hit_tokens / cache_total_tokens`. Router-pending prefill/decode counts are requests awaiting worker
+placement and are separate from each live scheduler row's `waiting_requests`, which counts requests
+already assigned to that worker/rank. Active, starting, and draining worker IDs provide the
+point-in-time topology. Exact scaling decisions and lifecycle transitions remain separate event
+evidence rather than being approximated from periodic samples.
 
 Speculative decoding changes the Planner's effective decode latency and capacity calculations. It
 does not rewrite raw output length, which remains the input for KV residency, context-length, and

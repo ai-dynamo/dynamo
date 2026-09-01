@@ -131,6 +131,86 @@ def test_planner_callback_error_preserves_python_exception_type(callback_method)
         )
 
 
+def test_scaling_callback_contract_remains_planner_only():
+    class _CapturingPolicy:
+        def __init__(self):
+            self.snapshots = []
+
+        def initial_tick_ms(self):
+            return 0.0
+
+        def on_tick(self, snapshot):
+            self.snapshots.append(snapshot)
+            return {
+                "target_prefill": None,
+                "target_decode": None,
+                "next_tick_ms": None,
+            }
+
+    policy = _CapturingPolicy()
+    telemetry_samples = []
+    result = run_mocker_synthetic_trace_replay(
+        64,
+        16,
+        4,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            num_gpu_blocks=32,
+            speedup_ratio=1000.0,
+        ),
+        num_workers=2,
+        replay_concurrency=2,
+        scaling_policy=policy,
+        capture_telemetry=True,
+        telemetry_callback=telemetry_samples.append,
+        telemetry_sample_interval_ms=1.0,
+    )
+
+    assert len(policy.snapshots) == 1
+    snapshot = policy.snapshots[0]
+    assert set(snapshot) == {
+        "tick_ordinal",
+        "now_ms",
+        "prefill_fpm_snapshots",
+        "decode_fpm_snapshots",
+        "active_prefill_count",
+        "active_decode_count",
+        "active_prefill_ids",
+        "active_decode_ids",
+        "starting_prefill_count",
+        "starting_decode_count",
+        "starting_prefill_ids",
+        "starting_decode_ids",
+        "draining_prefill_count",
+        "draining_decode_count",
+        "draining_prefill_ids",
+        "draining_decode_ids",
+        "non_draining_prefill_count",
+        "non_draining_decode_count",
+        "total_prefill_count",
+        "total_decode_count",
+        "traffic",
+    }
+    assert set(snapshot["traffic"]) == {
+        "duration_s",
+        "num_req",
+        "avg_isl",
+        "avg_osl",
+        "avg_ttft_ms",
+        "avg_itl_ms",
+        "shape_count",
+        "ttft_count",
+        "itl_count",
+        "avg_accept_length",
+        "avg_kv_hit_rate",
+        "hit_rate_count",
+        "accept_length_forward_count",
+    }
+    assert result.telemetry["samples"] == telemetry_samples
+    assert telemetry_samples[0]["kind"] == "baseline"
+    assert "tick_ordinal" not in telemetry_samples[0]
+
+
 class _DisabledScalingPolicy:
     def initial_tick_ms(self):
         return float("inf")

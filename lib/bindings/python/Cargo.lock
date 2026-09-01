@@ -2011,6 +2011,7 @@ dependencies = [
  "pythonize",
  "rmp",
  "rmpv",
+ "same-file",
  "serde",
  "serde-transcode",
  "serde_json",

@@ -23,7 +23,12 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
-from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
+from dynamo.replay import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+    simulation,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -151,6 +156,8 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert seen["benchmark_granularity"] == 8
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
+    assert seen["capture_telemetry"] is False
+    assert seen["telemetry_sample_interval_ms"] == 1_000.0
     assert seen["sla_ttft_ms"] == 100.0
     assert seen["sla_itl_ms"] == 20.0
     assert seen["sla_e2e_ms"] is None
@@ -189,6 +196,48 @@ def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
     assert report.metadata["native_report"]["per_request"] == [
         {"request_id": "request-1", "ttft_ms": 4.0}
     ]
+
+
+def test_runner_captures_telemetry_output_when_requested(monkeypatch) -> None:
+    seen = {}
+    telemetry = ReplayTelemetryDetails(
+        sample_interval_ms=2_500.0,
+        samples=[{"sample_ordinal": 0, "kind": "baseline"}],
+    )
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return ReplayReport(
+            summary={"completed_requests": 1},
+            per_request=None,
+            coverage={},
+            planner=None,
+            telemetry=telemetry,
+        )
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    report = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(0)
+        .run(
+            spec,
+            output_requirements=ReplayOutputRequirements(
+                capture_telemetry=True,
+                telemetry_sample_interval_ms=2_500.0,
+            ),
+        )
+    )
+
+    assert seen["capture_telemetry"] is True
+    assert seen["telemetry_sample_interval_ms"] == 2_500.0
+    assert report.metadata["native_report"]["telemetry"] == telemetry.to_dict()
 
 
 def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:

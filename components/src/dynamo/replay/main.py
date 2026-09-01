@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import math
 import os
 import sys
 from collections.abc import Sequence
@@ -602,6 +603,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
     )
+    parser.add_argument(
+        "--capture-telemetry",
+        action="store_true",
+        help="persist periodic replay telemetry in the JSON report (offline only)",
+    )
+    parser.add_argument(
+        "--telemetry-sample-interval-seconds",
+        type=float,
+        default=1.0,
+        help="simulated-time telemetry cadence in seconds (default: 1.0)",
+    )
+    parser.add_argument(
+        "--telemetry-jsonl",
+        type=Path,
+        help="stream one replay telemetry sample per JSONL row (offline only)",
+    )
     return parser
 
 
@@ -661,6 +678,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--planner-config only supports --trace-format=mooncake or dynamo"
             )
+    telemetry_enabled = args.capture_telemetry or args.telemetry_jsonl is not None
+    if telemetry_enabled:
+        if base_config.replay_mode != "offline":
+            parser.error("replay telemetry only supports --replay-mode=offline")
+        if (
+            not math.isfinite(args.telemetry_sample_interval_seconds)
+            or args.telemetry_sample_interval_seconds <= 0.0
+        ):
+            parser.error(
+                "--telemetry-sample-interval-seconds must be positive and finite"
+            )
 
     capture_per_request = (
         base_config.replay_mode == "offline" and per_request_jsonl is not None
@@ -685,6 +713,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "planner_config": args.planner_config,
         "benchmark_granularity": args.benchmark_granularity,
         "capture_per_request": capture_per_request,
+        "capture_telemetry": args.capture_telemetry,
+        "telemetry_sample_interval_ms": (
+            args.telemetry_sample_interval_seconds * 1_000.0
+        ),
+        "telemetry_jsonl_path": args.telemetry_jsonl,
     }
 
     if using_trace_file:

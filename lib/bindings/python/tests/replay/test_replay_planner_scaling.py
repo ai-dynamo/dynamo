@@ -137,12 +137,29 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
         ),
         num_workers=1,
         planner_config=_planner_config("agg", tmp_path),
+        capture_telemetry=True,
+        telemetry_sample_interval_ms=12_345.0,
     )
 
     assert report.per_request is None
     assert report.coverage["capture_per_request"] is False
     assert report.planner.total_ticks == len(report.planner.ticks)
     assert report.planner.total_ticks > 0
+    assert report.telemetry is not None
+    assert report.telemetry.sample_interval_ms == 12_345.0
+    assert report.telemetry.samples[0]["kind"] == "baseline"
+    assert (
+        sum(
+            sample["traffic"]["arriving_requests"]
+            for sample in report.telemetry.samples
+        )
+        == 33
+    )
+    for tick in report.planner.ticks:
+        assert "prefill_scheduler_metrics" not in tick
+        assert "decode_scheduler_metrics" not in tick
+        assert "router_pending_prefill_requests" not in tick
+        assert "router_pending_decode_requests" not in tick
     events = [
         (event.component, event.from_count, event.to_count)
         for event in report.planner.scaling_events

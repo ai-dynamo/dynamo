@@ -6,7 +6,11 @@ from enum import Enum
 
 import pytest
 
-from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from dynamo.replay.report import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -69,3 +73,42 @@ def test_replay_report_to_dict_preserves_summary_only_shape() -> None:
     assert payload["planner"]["total_ticks"] == 4
     assert payload["planner"]["ticks"] == []
     assert payload["planner"]["lifecycle_operations"] == []
+    assert "telemetry" not in payload
+
+
+def test_replay_report_to_dict_materializes_enabled_telemetry() -> None:
+    report = ReplayReport(
+        summary={"completed_requests": 1},
+        per_request=None,
+        coverage={},
+        planner=None,
+        telemetry=ReplayTelemetryDetails(
+            sample_interval_ms=5_000.0,
+            samples=[
+                {
+                    "sample_ordinal": 0,
+                    "kind": "baseline",
+                    "sampled_at_ms": 0.0,
+                    "traffic": {
+                        "arriving_requests": 0,
+                        "completed_requests": 0,
+                    },
+                }
+            ],
+        ),
+    )
+
+    assert report.to_dict()["telemetry"] == {
+        "sample_interval_ms": 5_000.0,
+        "samples": [
+            {
+                "sample_ordinal": 0,
+                "kind": "baseline",
+                "sampled_at_ms": 0.0,
+                "traffic": {
+                    "arriving_requests": 0,
+                    "completed_requests": 0,
+                },
+            }
+        ],
+    }

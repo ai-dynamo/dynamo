@@ -8,11 +8,16 @@ entry points for single-run replay and for Router, Planner, and online adapters.
 """
 
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from dynamo.replay.report import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+)
 
 __all__ = [
     "PlannerReplayDetails",
     "ReplayReport",
+    "ReplayTelemetryDetails",
     "run_synthetic_trace_replay",
     "run_trace_replay",
 ]
