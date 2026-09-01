@@ -54,7 +54,7 @@ inputs:
     required: false
     default: ''
   epp_image:
-    description: 'EPP image reference (frontend only) — must equal what the build passed as EPP_IMAGE so the epp stage resolves the freshly-built ECR image instead of the rendered default upstream staging tag (which gets garbage-collected). Empty for non-frontend targets, which have no epp stage.'
+    description: 'EPP image reference (frontend only) — must equal what the build passed as EPP_IMAGE so the epp stage resolves the freshly-built ECR image rather than the released tag rendered from container/context.yaml. The compliance stages read /epp''s SBOM and license texts out of this stage, so a mismatch would attribute a different build of the binary than the one shipped. Empty for non-frontend targets, which have no epp stage.'
     required: false
     default: ''
   sccache_bucket:

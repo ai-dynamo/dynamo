@@ -351,6 +351,13 @@ frontend:
   - 'tests/frontend/router_aic_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  # The frontend image is rendered from these two: render.py generates its
+  # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
+  # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.
+  # Both live in `core:`, which frontend-build is not gated on, so without
+  # these a PR bumping only epp_image would build and test no frontend image.
+  - 'container/context.yaml'
+  - 'container/render.py'
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.
   - '!lib/sidecar/**'
