@@ -273,9 +273,13 @@ impl HealthCheckManager {
                             false
                         };
 
+                        let response_drain_token = token.clone();
                         tokio::spawn(async move {
                             // We need to consume the rest of the stream to avoid warnings on the frontend.
-                            response_stream.for_each(|_| async {}).await;
+                            tokio::select! {
+                                _ = response_drain_token.cancelled() => {}
+                                _ = response_stream.for_each(|_| async {}) => {}
+                            }
                         });
 
                         // Update health status based on response
