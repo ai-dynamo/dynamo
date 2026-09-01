@@ -372,21 +372,19 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 
 	current := r.currentWorkerHashes(dgd)
 	metadataChanged := false
-	needsCompatibilityMirror := current.v2 != "" && annotationV2 != current.v2 &&
-		!isRollingUpdateInProgress(&dgd.Status)
-	if needsCompatibilityMirror {
+	if current.v2 != "" && annotationV2 != current.v2 {
 		if dgd.Annotations == nil {
 			dgd.Annotations = make(map[string]string)
 		}
 		dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = current.v2
 		metadataChanged = true
-	}
-	if current.v1 == "" && needsCompatibilityMirror {
-		restored, err := r.restoreLegacyWorkerHashIfNeeded(ctx, dgd, current.v2)
-		if err != nil {
-			return false, err
+		if current.v1 == "" {
+			restored, err := r.restoreLegacyWorkerHashIfNeeded(ctx, dgd, current.v2)
+			if err != nil {
+				return false, err
+			}
+			metadataChanged = metadataChanged || restored
 		}
-		metadataChanged = metadataChanged || restored
 	}
 	if metadataChanged {
 		if err := r.Update(ctx, dgd); err != nil {

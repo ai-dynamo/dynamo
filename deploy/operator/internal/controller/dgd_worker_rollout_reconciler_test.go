@@ -555,7 +555,7 @@ func TestWorkerHashStatusRestoresStrippedLegacySuffix(t *testing.T) {
 	assert.Equal(t, legacySuffix, r.activeWorkerHashForDCDGeneration(dgd, desired))
 }
 
-func TestWorkerHashStatusDoesNotRepairMirrorDuringRollout(t *testing.T) {
+func TestWorkerHashStatusRepairsMirrorDuringRollout(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
@@ -572,7 +572,7 @@ func TestWorkerHashStatusDoesNotRepairMirrorDuringRollout(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	require.NoError(t, currentWorkerHashStatusError(r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status)))
 
-	assert.Equal(t, targetHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	assert.Equal(t, oldHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 	assert.Equal(t, oldHash, dgd.Status.CurrentWorkerHash)
 }
 
