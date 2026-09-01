@@ -398,9 +398,12 @@ class VllmEnginePauseController:
                     "Failed to resume generation after native vLLM sleep failure"
                 )
             raise
-        self._is_paused = True
+        # Prepare before recording the pause: a failed prepare must not leave
+        # the controller claiming paused, or the next resume would issue a
+        # checkpoint_restore with no matching prepare.
         if self._prepare_for_process_checkpoint:
             await self._engine_client.checkpoint_prepare()
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
