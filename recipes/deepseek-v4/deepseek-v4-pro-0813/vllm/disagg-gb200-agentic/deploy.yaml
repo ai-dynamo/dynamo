@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # DeepSeek-V4-Pro-0813 (MXFP4 experts + FP8 KV) — disaggregated GB200, 1P1D. Each worker is
-# TP8 + expert parallelism, 1M context; the decode worker adds DSpark speculative
-# decoding. Total 16 GPUs = 4 nodes.
+# TP8 + expert parallelism, 1M context; both workers run DSpark speculative
+# decoding -- prefill carries it only to match the decode worker's vLLM 0.28.0
+# NIXL compatibility hash. Total 16 GPUs = 4 nodes.
 #
 # GB200 is 4 GPUs per node, so each TP8 worker spans two nodes:
 # `multinode.nodeCount: 2`. Both workers share one ComputeDomain.
@@ -16,20 +17,20 @@
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: dsv4-0813-disagg-gb200-agentic-compute-domain
+  name: dsv4-pro-0813-disagg-gb200-agentic-compute-domain
 spec:
   # 0 = on-demand allocation; nodes are assigned when pods request them via resourceClaims.
   numNodes: 0
   channel:
     resourceClaimTemplate:
-      name: dsv4-0813-disagg-gb200-agentic-compute-domain-channel
+      name: dsv4-pro-0813-disagg-gb200-agentic-compute-domain-channel
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: dsv4-0813-disagg-gb200-agentic-config
+  name: dsv4-pro-0813-disagg-gb200-agentic-config
   labels:
-    app.kubernetes.io/name: dsv4-0813-disagg-gb200-agentic
+    app.kubernetes.io/name: dsv4-pro-0813-disagg-gb200-agentic
 data:
   # Production: real rejection sampling, distribution-preserving.
   speculative-config: |
@@ -41,7 +42,7 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: dsv4-0813-disagg-gb200-agentic
+  name: dsv4-pro-0813-disagg-gb200-agentic
 spec:
   backendFramework: vllm
   components:
@@ -52,7 +53,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
               imagePullPolicy: Always
               workingDir: /workspace
               env:
@@ -125,7 +126,7 @@ spec:
               effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: dsv4-0813-disagg-gb200-agentic-compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-0813-disagg-gb200-agentic-compute-domain-channel
           volumes:
             - name: model-cache
               persistentVolumeClaim:
@@ -136,7 +137,7 @@ spec:
                 sizeLimit: 200Gi
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
               imagePullPolicy: Always
               workingDir: /workspace/examples/backends/vllm
               volumeMounts:
@@ -189,6 +190,14 @@ spec:
                   value: "1"
                 - name: VLLM_ENGINE_READY_TIMEOUT_S
                   value: "21600"
+                # Must match decode: the vLLM 0.28.0 NIXL compatibility hash
+                # covers the speculative config. If you swap decode to
+                # `speculative-config-synthetic`, swap this one too.
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: dsv4-pro-0813-disagg-gb200-agentic-config
+                      key: speculative-config
               startupProbe:
                 httpGet:
                   path: /health
@@ -220,6 +229,7 @@ spec:
                     --attention-config '{"use_fp4_indexer_cache":true}' \
                     --moe-backend deep_gemm_mega_moe \
                     --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
+                    --speculative-config "${SPECULATIVE_CONFIG}" \
                     --disaggregation-mode prefill \
                     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}' \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}' \
@@ -299,7 +309,7 @@ spec:
               effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: dsv4-0813-disagg-gb200-agentic-compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-0813-disagg-gb200-agentic-compute-domain-channel
           volumes:
             - name: model-cache
               persistentVolumeClaim:
@@ -310,7 +320,7 @@ spec:
                 sizeLimit: 200Gi
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
               imagePullPolicy: Always
               workingDir: /workspace/examples/backends/vllm
               volumeMounts:
@@ -366,8 +376,10 @@ spec:
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: dsv4-0813-disagg-gb200-agentic-config
-                      # Swap to `speculative-config-synthetic` for benchmarking only.
+                      name: dsv4-pro-0813-disagg-gb200-agentic-config
+                      # Swap to `speculative-config-synthetic` for benchmarking only,
+                      # and change prefill and decode together -- a mismatch breaks
+                      # the NIXL compatibility hash.
                       key: speculative-config
               startupProbe:
                 httpGet:

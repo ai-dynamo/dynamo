@@ -23,10 +23,17 @@ Dynamo + vLLM deployment profiles.
 | **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV | MXFP4 experts + FP8 KV |
 | **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                | TP8/EP8 prefill / TP8/EP8 decode |
 | **Routing**              | KV-aware                | KV-aware                         | KV-aware               | KV-aware |
-| **Speculative decoding** | None                    | None                             | DSpark k=5             | DSpark k=5 (decode only) |
+| **Speculative decoding** | None                    | None                             | DSpark k=5             | DSpark k=5 (prefill and decode) |
 | **Context length**       | 1,048,576               | 1,048,576                        | 1,048,576              | 1,048,576 |
 | **KV cache offloading**  | None                    | None                             | None                   | None |
 | **KV transfer**          | N/A                     | NIXL                             | N/A                    | NIXL |
+
+The H200 and GB200 variants use different images because they require different vLLM
+versions ¹.
+
+¹ H200 runs vLLM 0.26.0; GB200 requires vLLM 0.28.0. GB200 cannot use 0.26.0 because
+DSpark does not run on Blackwell there (DeepGEMM requires `next_n == 1`), and 0.27.x
+has an upstream accuracy regression on this checkpoint.
 
 ## Supported features
 
@@ -147,8 +154,8 @@ Joint gate: user output >= 50 tok/s **and** TTFT p50 < 5 s.
 
 | Workload | Recipe | SKU | Concurrency | System tok/s/GPU | User output tok/s (P50) | TTFT P50 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 64.88 | 55.9 | 383 ms |
-| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 12 | 50.31 | 50.0 | 2,370 ms |
+| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 69.45 | 51.85 | 403 ms |
+| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 10 | 50.58 | 53.42 | 1,237 ms |
 | Agentic 64K | `agg-h200-agentic` | 8x H200 | 4 | 21.4 | 51.8 | 322 ms |
 | Agentic 64K | `disagg-h200-agentic` | 16x H200 | 4 | 13.1 | 57.2 | 441 ms |
 

@@ -18,7 +18,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
   topology: aggregated
   techniques:
   - expert-parallel
@@ -36,7 +36,7 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c8 = 64.88 system tok/s/GPU @ user 55.9 tok/s, TTFT p50 383 ms.
+    summary: c8 = 69.45 system tok/s/GPU @ user 51.85 tok/s, TTFT p50 403 ms.
 - id: disagg-gb200-agentic
   recommended: false
   hardware:
@@ -44,7 +44,7 @@ targets:
     count: 16
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -63,7 +63,7 @@ targets:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c12 = 50.31 system tok/s/GPU @ user 50.0 tok/s, TTFT p50 2.37 s.
+    summary: c10 = 50.58 system tok/s/GPU @ user 53.42 tok/s, TTFT p50 1,237 ms.
 - id: agg-h200-agentic
   recommended: false
   hardware:

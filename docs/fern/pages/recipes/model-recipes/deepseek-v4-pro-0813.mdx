@@ -140,7 +140,7 @@ kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-gb200-agentic -n ${NAME
 
 ```bash
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dgd/dsv4-0813-disagg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-disagg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
 ```
 
 </div>
@@ -178,7 +178,7 @@ kubectl port-forward svc/dsv4-pro-0813-agg-gb200-agentic-frontend 8000:8000 -n $
 <div data-sku="gb200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/dsv4-0813-disagg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/dsv4-pro-0813-disagg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -207,7 +207,7 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 
 | Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
 | --- | --- | --- | --- |
-| 8 | 64.88 | 55.9 | 383 ms |
+| 8 | 69.45 | 51.85 | 403 ms |
 
 </div>
 
@@ -215,7 +215,7 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 
 | Concurrency | System tok/s/GPU | User output tok/s | TTFT p50 |
 | --- | --- | --- | --- |
-| 12 | 50.31 | 50.0 | 2.37 s |
+| 10 | 50.58 | 53.42 | 1,237 ms |
 
 </div>
 

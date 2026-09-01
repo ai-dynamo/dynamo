@@ -17,7 +17,7 @@ metadata:
   name: dsv4-pro-0813-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 7200
+  activeDeadlineSeconds: 28800
   completions: 1
   parallelism: 1
   template:
