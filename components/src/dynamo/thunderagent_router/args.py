@@ -70,6 +70,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             raise ValueError("--scheduler-interval-seconds must be > 0")
         if self.resume_timeout_seconds <= 0:
             raise ValueError("--resume-timeout-seconds must be > 0")
+        if self.publish_sglang_generate and not self.model_name:
+            raise ValueError("--publish-sglang-generate requires --model-name")
 
 
 class ThunderAgentArgGroup(ArgGroup):

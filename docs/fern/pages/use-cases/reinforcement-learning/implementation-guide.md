@@ -15,7 +15,7 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 |---|---|---|
 | Serve SGLang token-in/token-out rollouts with native request and response shapes | Frontend `POST /generate` or `PUT /generate` | Experimental |
 | Serve rollout generation through an OpenAI-compatible endpoint | Frontend `/v1/completions` and `/v1/chat/completions` | Available |
-| Return exact prompt and completion token IDs, prompt log probabilities, and selected backend metadata | `nvext.token_data` and `nvext.extra_fields` | Available |
+| Supply pre-tokenized input and select prompt or completion metadata for the response | Request input: `nvext.token_data`; response selectors: `nvext.extra_fields` | Available |
 | Discover live rollout workers and their direct administration URLs | `/v1/rl/workers` on the frontend RL listener | vLLM only |
 | Pause generation, update weights, and resume a selected worker | Direct `/engine/` routes on the worker system server | vLLM supported; SGLang uses backend-specific routes |
 | Upload large SGLang rollout metadata out-of-band | `nvext.metadata_upload.url` | SGLang only |
@@ -61,10 +61,10 @@ Use `/generate` for SGLang reinforcement learning clients that send token IDs an
 Start the Dynamo frontend:
 
 ```bash
-python -m dynamo.frontend
+DYN_SGLANG_ENABLE_GENERATE=1 python -m dynamo.frontend
 ```
 
-Workers that support native SGLang generation advertise `/generate` automatically. To use a different path, set `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` on the frontend.
+`DYN_SGLANG_ENABLE_GENERATE=1` mounts the native SGLang route. Workers that support native SGLang generation advertise the matching capability automatically. To use a different path, set `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` on the frontend.
 
 </Step>
 <Step title="Start a SGLang worker">
@@ -194,7 +194,7 @@ The OpenAI-compatible completion routes provide a cross-backend token-in/token-o
 | Feature | Request | Response | Notes |
 |---|---|---|---|
 | Token input | Set `prompt` to an integer array on `/v1/completions`, or set `nvext.token_data` on a chat or completion request. | Standard completion response | `nvext.token_data` bypasses frontend tokenization. |
-| Prompt token IDs | Add `"prompt_token_ids"` to `nvext.extra_fields`. | `nvext.prompt_token_ids` on the final response | Returns the exact token IDs produced by the frontend preprocessor. Requires one prompt. |
+| Prompt token IDs | Add `"prompt_token_ids"` to `nvext.extra_fields`. | `nvext.prompt_token_ids` on the final response | Returns the effective single-prompt token sequence used after preprocessing, including token arrays or `nvext.token_data` supplied through the request. |
 | Completion token IDs | Add `"completion_token_ids"` to `nvext.extra_fields`. | `nvext.completion_token_ids` | Requires one prompt and one generated choice. Streaming responses contain ordered token deltas; non-streaming responses contain the concatenated IDs. A tool parser can buffer and rewrite output, so token IDs on parsed streams are not aligned with each rewritten `delta.content`. |
 | Completion log probabilities | Set `logprobs` on `/v1/completions`, or set `logprobs: true` and `top_logprobs` on `/v1/chat/completions`. | Standard `choices[].logprobs` | The selected engine must support the requested log probability mode. |
 | Prompt log probabilities | Set top-level `prompt_logprobs` and add `"prompt_logprobs"` to `nvext.extra_fields`. | `nvext.prompt_logprobs` on the final response | The first prompt position is `null` because it has no preceding-token probability. |

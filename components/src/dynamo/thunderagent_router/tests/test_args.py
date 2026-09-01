@@ -17,7 +17,12 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 def test_sglang_generate_capability_is_opt_in() -> None:
-    base = ["--endpoint", "dynamo.sglang.generate"]
+    base = [
+        "--endpoint",
+        "dynamo.sglang.generate",
+        "--model-name",
+        "Qwen/Qwen3-0.6B",
+    ]
     assert parse_args(base).publish_sglang_generate is False
     assert (
         parse_args([*base, "--publish-sglang-generate"]).publish_sglang_generate is True
@@ -31,9 +36,29 @@ def test_sglang_generate_capability_is_opt_in() -> None:
 def test_sglang_generate_capability_reads_environment(monkeypatch) -> None:
     monkeypatch.setenv("DYN_THUNDERAGENT_PUBLISH_SGLANG_GENERATE", "true")
     assert (
-        parse_args(["--endpoint", "dynamo.sglang.generate"]).publish_sglang_generate
+        parse_args(
+            [
+                "--endpoint",
+                "dynamo.sglang.generate",
+                "--model-name",
+                "Qwen/Qwen3-0.6B",
+            ]
+        ).publish_sglang_generate
         is True
     )
+
+
+def test_sglang_generate_capability_requires_model_name() -> None:
+    with pytest.raises(
+        ValueError, match="--publish-sglang-generate requires --model-name"
+    ):
+        parse_args(
+            [
+                "--endpoint",
+                "dynamo.sglang.generate",
+                "--publish-sglang-generate",
+            ]
+        )
 
 
 def test_publish_sglang_generate_capability_uses_backend_contract(monkeypatch) -> None:

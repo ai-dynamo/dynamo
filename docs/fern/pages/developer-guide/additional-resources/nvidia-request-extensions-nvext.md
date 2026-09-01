@@ -248,7 +248,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
-| `prompt_token_ids` | `extra_fields: ["prompt_token_ids"]` | Exact prompt token IDs produced by the frontend preprocessor. Emitted on the final response and requires a single prompt. |
+| `prompt_token_ids` | `extra_fields: ["prompt_token_ids"]` | Effective single-prompt token sequence used after preprocessing, including pre-tokenized input supplied through the request. Emitted on the final response. |
 | `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs. Requires a single prompt and one generated choice. |
 | `prompt_logprobs` | `extra_fields: ["prompt_logprobs"]` | Prompt log probabilities requested with the top-level `prompt_logprobs` field. Emitted on the final response. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
