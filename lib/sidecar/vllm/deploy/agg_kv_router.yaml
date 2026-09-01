@@ -9,9 +9,9 @@
 #   - vllm-engine: the stock vLLM image running vllm-rs. It holds one GPU and
 #     publishes KV-cache events over ZMQ for exact KV-aware routing.
 #
-# The gRPC listener is unauthenticated and plaintext, so vllm-rs binds it to pod
-# loopback. The ZMQ publisher binds all pod interfaces so the frontend can
-# subscribe to the pod IP advertised by vLLM's Control service.
+# The unauthenticated gRPC listener stays on pod loopback. The ZMQ publisher
+# binds the pod IP injected by the downward API so the frontend can subscribe
+# to the endpoint advertised by vLLM's Control service.
 #
 # There is no published sidecar image yet: build the image from
 # lib/sidecar/Dockerfile and set <your-registry> below (see README).
@@ -63,6 +63,11 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+          env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -73,7 +78,6 @@ spec:
               # Increase this value for larger models.
               ephemeral-storage: 2Gi
           # Arguments after `--` are forwarded to the managed vLLM engine.
-          # The sidecar converts tcp://*:20080 into a frontend-reachable pod IP.
           command:
           - /bin/sh
           - -c
@@ -81,7 +85,7 @@ spec:
             exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 --
             --block-size 64
-            --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+            --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://${POD_IP}:20080\",\"enable_kv_cache_events\":true}"
         containers:
         # No published image yet; build lib/sidecar/Dockerfile and set the
         # registry below. Must be named "main" for operator injection.

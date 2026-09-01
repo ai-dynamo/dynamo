@@ -75,6 +75,10 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:
               fieldRef:
@@ -103,7 +107,6 @@ spec:
           volumeMounts:
           - name: dshm
             mountPath: /dev/shm
-          # The sidecar resolves the wildcard KV-event host to this pod's IP.
           command: ["/bin/sh", "-c"]
           args:
           - |
@@ -112,7 +115,7 @@ spec:
               --host 127.0.0.1 --grpc-port 50051 -- \
               --block-size 64 \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+              --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://${POD_IP}:20080\",\"enable_kv_cache_events\":true}"
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0

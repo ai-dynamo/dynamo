@@ -218,8 +218,8 @@ curl -s localhost:8000/v1/chat/completions \
 ### KV routing
 
 The KV-routing manifests run multiple workers and configure each relevant vLLM
-engine to publish ZMQ KV-cache events. The sidecars advertise those event
-sources to the frontend for exact KV-aware routing.
+engine to publish ZMQ KV-cache events on its pod IP. The sidecars advertise
+those event sources to the frontend for exact KV-aware routing.
 
 ```bash
 # Aggregated: two workers, two GPUs.
