@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::error::SanitizedError;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -112,7 +113,13 @@ async fn track_inflight_inference(
         return super::openai::ErrorMessage::_service_unavailable().into_response();
     }
 
-    let permit = state.acquire_inflight();
+    let Some(permit) = state.try_acquire_inflight() else {
+        return super::openai::ErrorMessage::sanitized_with_details(
+            SanitizedError::Overloaded,
+            "frontend inference inflight limit reached",
+        )
+        .into_response();
+    };
     // Close the race where shutdown starts after the readiness check but
     // before this request is counted as inflight.
     if !state.is_ready() {
@@ -154,6 +161,7 @@ struct StateConfig {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    max_inflight_inference: Option<u64>,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -199,6 +207,39 @@ fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Dur
 
 fn sse_keep_alive_from_env() -> Option<Duration> {
     parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
+}
+
+fn parse_max_inflight_inference(value: Result<String, std::env::VarError>) -> Option<u64> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_MAX_INFLIGHT_REQUESTS,
+                %error,
+                "ignoring invalid frontend inference inflight limit"
+            );
+            return None;
+        }
+    };
+
+    match value.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(limit) => Some(limit),
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_MAX_INFLIGHT_REQUESTS,
+                value,
+                %error,
+                "ignoring invalid frontend inference inflight limit"
+            );
+            None
+        }
+    }
+}
+
+fn max_inflight_inference_from_env() -> Option<u64> {
+    parse_max_inflight_inference(std::env::var(env_llm::DYN_HTTP_MAX_INFLIGHT_REQUESTS))
 }
 
 const DEFERRED_RESPONSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -260,19 +301,25 @@ pub struct ServiceObserver {
     stage: AtomicU8,
     inflight_inference: AtomicU64,
     inflight_zero: Notify,
+    max_inflight_inference: Option<u64>,
 }
 
 impl Default for ServiceObserver {
     fn default() -> Self {
-        Self {
-            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
-            inflight_inference: AtomicU64::new(0),
-            inflight_zero: Notify::new(),
-        }
+        Self::new(None)
     }
 }
 
 impl ServiceObserver {
+    fn new(max_inflight_inference: Option<u64>) -> Self {
+        Self {
+            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
+            inflight_inference: AtomicU64::new(0),
+            inflight_zero: Notify::new(),
+            max_inflight_inference,
+        }
+    }
+
     /// Return the current frontend lifecycle stage.
     pub fn stage(&self) -> ServiceStage {
         ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
@@ -311,11 +358,29 @@ impl ServiceObserver {
             .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
     }
 
-    /// Track one admitted inference response body.
+    /// Try to track one admitted inference response body.
     ///
-    /// The returned permit must live for the full HTTP response body lifetime,
+    /// Returns `None` when the optional frontend admission cap is reached. The
+    /// returned permit must live for the full HTTP response body lifetime,
     /// including streaming responses. Dropping the permit decrements the
     /// inflight count and wakes shutdown waiters when the count reaches zero.
+    pub fn try_acquire_inflight(self: &Arc<Self>) -> Option<InflightPermit> {
+        match self.max_inflight_inference {
+            Some(max) => self
+                .inflight_inference
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    (current < max).then_some(current + 1)
+                })
+                .ok()?,
+            None => self.inflight_inference.fetch_add(1, Ordering::Relaxed),
+        };
+        Some(InflightPermit {
+            observer: self.clone(),
+        })
+    }
+
+    /// Track one admitted inference response body for callers that already
+    /// passed admission or intentionally bypass the optional admission cap.
     pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
         self.inflight_inference.fetch_add(1, Ordering::Relaxed);
         InflightPermit {
@@ -467,7 +532,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
-            service_observer: Arc::new(ServiceObserver::default()),
+            service_observer: Arc::new(ServiceObserver::new(config.max_inflight_inference)),
             nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -525,6 +590,10 @@ impl State {
 
     pub fn start_stopping(&self) {
         self.service_observer.start_stopping();
+    }
+
+    pub fn try_acquire_inflight(&self) -> Option<InflightPermit> {
+        self.service_observer.try_acquire_inflight()
     }
 
     pub fn acquire_inflight(&self) -> InflightPermit {
@@ -738,6 +807,12 @@ pub struct HttpServiceConfig {
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
     #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
     sse_keep_alive: Option<Duration>,
+
+    /// Optional cap on concurrently admitted inference responses. System routes
+    /// bypass this cap so health, liveness, metrics, and models remain probeable
+    /// under inference overload. Defaults to `DYN_HTTP_MAX_INFLIGHT_REQUESTS`.
+    #[builder(setter(strip_option), default = "max_inflight_inference_from_env()")]
+    max_inflight_inference: Option<u64>,
 }
 
 fn default_rl_port() -> u16 {
@@ -1151,6 +1226,7 @@ impl HttpServiceConfigBuilder {
                 frontend_api_config,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
+                max_inflight_inference: config.max_inflight_inference,
             },
         ));
         state
@@ -1681,6 +1757,63 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_service_observer_rejects_above_inflight_limit() {
+        let observer = Arc::new(ServiceObserver::new(Some(1)));
+        let permit = observer
+            .try_acquire_inflight()
+            .expect("first request should fit under the cap");
+
+        assert_eq!(observer.inflight_count(), 1);
+        assert!(
+            observer.try_acquire_inflight().is_none(),
+            "second request should be rejected while the only permit is held"
+        );
+
+        drop(permit);
+        assert_eq!(observer.inflight_count(), 0);
+        assert!(observer.try_acquire_inflight().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_inflight_limit_sheds_inference_but_not_system_routes() {
+        let (port, state, handle) =
+            spawn_service(|builder| builder.max_inflight_inference(1)).await;
+        let _held = state
+            .try_acquire_inflight()
+            .expect("manual permit should fill the configured cap");
+
+        let client = reqwest::Client::new();
+        let live = client
+            .get(format!("http://localhost:{port}/live"))
+            .send()
+            .await
+            .expect("live request failed");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+        let health = client
+            .get(format!("http://localhost:{port}/health"))
+            .send()
+            .await
+            .expect("health request failed");
+        assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+        let inference = client
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "model", "input": "hi"}))
+            .send()
+            .await
+            .expect("inference request failed");
+        assert_eq!(
+            inference.status().as_u16(),
+            super::super::error::overload_status_code().as_u16()
+        );
+        let body: serde_json::Value = inference.json().await.expect("body must be JSON");
+        assert_eq!(body["message"], "Service temporarily overloaded");
+
+        handle.abort();
     }
 
     #[tokio::test]

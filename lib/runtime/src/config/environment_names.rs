@@ -330,6 +330,12 @@ pub mod llm {
     /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
+    /// Optional frontend inference admission cap. When set to a positive
+    /// integer, system routes stay available but inference routes reject new
+    /// requests with the configured overload status once this many inference
+    /// response bodies are in flight. Unset, zero, or invalid disables the cap.
+    pub const DYN_HTTP_MAX_INFLIGHT_REQUESTS: &str = "DYN_HTTP_MAX_INFLIGHT_REQUESTS";
+
     /// Emit an SSE comment at this interval while a streaming response has no
     /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
     /// disabled.
