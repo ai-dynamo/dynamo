@@ -267,6 +267,7 @@ spec:
 
     patched = base_module.patch_dgd_manifest(
         rendered,
+        _candidate(),
         _options(),
         dgd_name="sweeper-dgd",
     )
@@ -277,6 +278,46 @@ spec:
         "DynamoGraphDeployment",
     ]
     assert documents[1]["metadata"]["name"] == "sweeper-dgd"
+
+
+def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
+    calls = []
+
+    def fake_chunked_prefill(dgd):
+        calls.append("chunked-prefill")
+        return dgd
+
+    def fake_materialize(dgd, *, purpose, runtime_backend, model_name_or_path):
+        calls.append((purpose, runtime_backend, model_name_or_path))
+        return dgd
+
+    monkeypatch.setattr(
+        base_module, "enable_trtllm_chunked_prefill", fake_chunked_prefill
+    )
+    monkeypatch.setattr(base_module, "materialize_dgd", fake_materialize)
+
+    base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components: []
+""",
+        _candidate(backend="trtllm", model_name="Qwen/Qwen3-32B"),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    assert calls == [
+        "chunked-prefill",
+        (
+            base_module.DGDMaterializationPurpose.FINAL_OUTPUT,
+            "trtllm",
+            "Qwen/Qwen3-32B",
+        ),
+    ]
 
 
 def test_runtime_version_override_is_only_written_when_explicit() -> None:
@@ -292,6 +333,7 @@ spec:
 
     patched = base_module.patch_dgd_manifest(
         rendered,
+        _candidate(),
         _options(runtime_version_override="1.4.2"),
         dgd_name="sweeper-dgd",
     )
