@@ -579,6 +579,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
+        embedding_worker=False,
+        embedding_worker_processes=1,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -1835,6 +1837,7 @@ class TestEmbeddingWorkerFlag:
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
         config = parse_args()
         assert config.embedding_worker is False
+        assert config.embedding_worker_processes == 1
 
     def test_flag_sets_true(self, mock_vllm_cli):
         """--embedding-worker on its own with default agg mode parses cleanly."""
@@ -1847,6 +1850,53 @@ class TestEmbeddingWorkerFlag:
         )
         config = parse_args()
         assert config.embedding_worker is True
+
+    def test_embedding_worker_processes_parse(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "8",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker_processes == 8
+
+    def test_embedding_worker_processes_require_embedding_worker(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--embedding-worker-processes", "4")
+        with pytest.raises(ValueError, match="requires --embedding-worker"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_data_parallel(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--data-parallel-size",
+            "2",
+        )
+        with pytest.raises(ValueError, match="data-parallel-size=1"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_lora(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--enable-lora",
+        )
+        with pytest.raises(ValueError, match="--enable-lora"):
+            parse_args()
 
     def test_rejects_prefill_disagg(self, mock_vllm_cli):
         """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
@@ -1976,3 +2026,78 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
     assert chunks
     assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_notifies_for_empty_decoded_token():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class Context:
+        def __init__(self):
+            self.notifications = 0
+
+        def trace_headers(self):
+            return {}
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            async def gen():
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="",
+                            token_ids=[101],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+                assert context.notifications == 1
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="a",
+                            token_ids=[101, 102],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    request = {"model": "test-model", "prompt": "ignored after tokenization"}
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    assert context.notifications == 1

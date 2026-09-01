@@ -72,6 +72,10 @@ PATH_RE = re.compile(r"^\s*path:\s*(\S+)\s*$", re.M)
 # Not Fern pages, even though they sit under docs/: agent instructions and authoring READMEs
 # carry an HTML-comment SPDX block and a body H1, and none of them appear in the nav. SPDX and
 # link rules still apply to them; only the frontmatter rules are skipped.
+#
+# CLAUDE.md is the exception: scripts/validate_agent_instructions.py requires it to contain
+# exactly "@AGENTS.md\n", so it cannot carry an SPDX header at all. Demanding one here put two
+# repository gates in direct contradiction -- whichever you satisfied, the other failed.
 NON_PAGE_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
 
 # Generated at publish time by docs/fern/scripts/gen_python_api.py and its Rust
@@ -130,6 +134,10 @@ def frontmatter(text: str):
 
 
 def check_spdx(rel: str, text: str, out: list) -> None:
+    # See NON_PAGE_FILES: a CLAUDE.md that satisfied this rule would fail
+    # scripts/validate_agent_instructions.py, which pins its exact bytes.
+    if os.path.basename(rel) == "CLAUDE.md":
+        return
     ext = os.path.splitext(rel)[1].lower()
     if ext in (".md", ".mdx"):
         fm, body = frontmatter(text)

@@ -399,7 +399,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             if component == "prefill"
             else self._capabilities.decode
         )
-        gpu = caps.num_gpu if caps else None
+        gpu = caps.resolved_gpu_cost_per_replica if caps is not None else None
         if gpu is None:
             return desired
         min_endpoint = self._min_endpoint_for(component)
@@ -408,12 +408,18 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
         """Apply the GPU budget band (ceiling and optional floor) to
         ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
-        for the actual math; this method only resolves the per-engine GPU
-        counts from capabilities."""
+        for the actual math; this method only resolves the per-replica GPU
+        costs from capabilities."""
         p_gpu = (
-            self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
+            self._capabilities.prefill.resolved_gpu_cost_per_replica
+            if self._capabilities.prefill is not None
+            else None
         )
-        d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
+        d_gpu = (
+            self._capabilities.decode.resolved_gpu_cost_per_replica
+            if self._capabilities.decode is not None
+            else None
+        )
         if p_gpu is None or d_gpu is None:
             return num_p, num_d
 
@@ -438,12 +444,12 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             )
         return new_p, new_d
 
-    def _budget_clamp(self, desired: int, engine_gpu: int, min_endpoint: int) -> int:
+    def _budget_clamp(self, desired: int, gpu_cost: int, min_endpoint: int) -> int:
         """Apply the GPU budget band to a single component's desired replica
         count (agg, prefill-only, or decode-only mode)."""
         new_replicas = proportional_clamp_single(
             desired,
-            engine_gpu,
+            gpu_cost,
             self._config.min_gpu_budget,
             self._config.max_gpu_budget,
             min_endpoint,
@@ -452,8 +458,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             logger.warning(
                 f"GPU budget band [min={self._config.min_gpu_budget}, "
                 f"max={self._config.max_gpu_budget}] clamped "
-                f"{desired} replicas (= {desired * engine_gpu} GPUs) -> "
-                f"{new_replicas} replicas (= {new_replicas * engine_gpu} GPUs)"
+                f"{desired} replicas (= {desired * gpu_cost} GPUs) -> "
+                f"{new_replicas} replicas (= {new_replicas * gpu_cost} GPUs)"
             )
         return new_replicas
 

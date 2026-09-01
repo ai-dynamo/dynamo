@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 175 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 176 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">75 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">68 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -2175,6 +2175,16 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="gpusPerEngine" type="integer">
+GPUsPerEngine is the number of GPUs assigned to one inference engine in a service replica, across all of its nodes. Independent auxiliary GPU allocations are excluded. A present zero means the engine itself has no GPUs; consult GPUsPerReplica for auxiliary allocations.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+GPUsPerReplica is the unique GPU allocation added when this service scales by one replica, across all nodes, application and initialization phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod scheduling footprint; shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 Replicas is the total number of non-terminated replicas. Required for all component kinds.
 **Validation:** Minimum: 0
@@ -2527,6 +2537,16 @@ componentNames is the list of underlying Kubernetes resource names for this Dyna
 <ParamField path="runtimeNamespace" type="string">
 runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpusPerEngine" type="integer">
+gpusPerEngine is the number of GPUs assigned to one inference engine in a component replica, across all of its nodes. Independent auxiliary GPU allocations are excluded. A present zero means the engine itself has no GPUs; consult gpusPerReplica for auxiliary allocations.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, application and initialization phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod scheduling footprint; shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -3467,6 +3487,12 @@ See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="kvRouter" type="KVRouterSpec">
+KVRouter configures KV-cache-aware routing for the generated deployment. When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend. Settings in spec.overrides.dgd take precedence: an override can replace DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the environment variable when both are present.
+See [KVRouterSpec](#kvrouterspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="mocker" type="MockerSpec">
 Mocker configures the simulated (mocker) backend for testing without GPUs.
 See [MockerSpec](#mockerspec).
@@ -3623,6 +3649,19 @@ Interconnect describes the primary GPU-to-GPU interconnect *within a node*. Sema
 
 <ParamField path="rdma" type="boolean">
 RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement. Semantics / usage:   - This is capability metadata used for profiling, planning, and deployment decisions.   - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,     GPUDirect settings). It only expresses availability/intent.   - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating     RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery     is unavailable, it may remain unset. Impact of wrong / missing values:   - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or     deployments to assume RDMA is available; depending on the runtime transport selection and     fallback behavior, this can lead to connection/setup failures or performance regressions.   - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and     fall back to non-RDMA transports, usually remaining functional but potentially slower.   - If unset and undiscovered, consumers should treat RDMA availability as unknown and use     conservative defaults / fallback transports.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="kvrouterspec" title="KVRouterSpec">
+KVRouterSpec configures KV-cache-aware routing.
+
+
+**Kind:** `type`
+**Appears in:** [FeaturesSpec](#featuresspec)
+
+<ParamField path="enabled" type="boolean">
+Enabled indicates whether to enable KV-cache-aware routing in the generated DGD. KV routing optimizes request scheduling based on KV cache locality.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4491,6 +4530,46 @@ ModelExpressURL is the URL of the Model Express server to inject into all pods
 
 <ParamField path="prometheusEndpoint" type="string">
 PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
+</ParamField>
+
+<ParamField path="natsTLSCAPath" type="string">
+NATSTLSCAPath is the CA certificate path for verifying the NATS server
+</ParamField>
+
+<ParamField path="natsTLSClientCertPath" type="string">
+NATSTLSClientCertPath is the client certificate path for NATS mTLS
+</ParamField>
+
+<ParamField path="natsTLSClientKeyPath" type="string">
+NATSTLSClientKeyPath is the client private key path for NATS mTLS
+</ParamField>
+
+<ParamField path="tcpTLSCertPath" type="string">
+TCPTLSCertPath is the server certificate path for TCP TLS
+</ParamField>
+
+<ParamField path="tcpTLSKeyPath" type="string">
+TCPTLSKeyPath is the server private key path for TCP TLS
+</ParamField>
+
+<ParamField path="tcpTLSCAPath" type="string">
+TCPTLSCAPath is the CA certificate path for verifying TCP peers
+</ParamField>
+
+<ParamField path="tcpTLSClientCertPath" type="string">
+TCPTLSClientCertPath is the client certificate path for TCP mTLS
+</ParamField>
+
+<ParamField path="tcpTLSClientKeyPath" type="string">
+TCPTLSClientKeyPath is the client private key path for TCP mTLS
+</ParamField>
+
+<ParamField path="tcpTLSClientCAPath" type="string">
+TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS)
+</ParamField>
+
+<ParamField path="tcpTLSServerName" type="string">
+TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when verifying the server certificate. Useful when dialing by IP (pod address) to a server whose certificate has a DNS SAN.
 </ParamField>
 </Accordion>
 

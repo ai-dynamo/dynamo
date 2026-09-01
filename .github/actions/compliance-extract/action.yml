@@ -20,8 +20,12 @@ inputs:
   target:
     description: 'Target docker stage (runtime, frontend, planner)'
     required: true
+  dockerfile:
+    description: 'Existing Dockerfile with compliance_artifact support. Empty renders the standard framework Dockerfile.'
+    required: false
+    default: ''
   platform:
-    description: 'Single platform string, e.g. linux/amd64'
+    description: 'Platform string, e.g. linux/amd64, or a comma-separated list for multi-platform builds'
     required: true
   cuda_version:
     description: 'CUDA version string (e.g. 12.9, 13.0); empty for non-CUDA targets'
@@ -95,7 +99,7 @@ runs:
   using: 'composite'
   steps:
     - name: Render Dockerfile
-      id: render
+      if: ${{ inputs.dockerfile == '' }}
       shell: bash
       run: |
         RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
@@ -109,13 +113,9 @@ runs:
         if [ "${{ inputs.make_efa }}" == "true" ]; then
           RENDER_ARGS+=" --make-efa"
         fi
-        # render.py prints an "INFO: Generated Dockerfile written to ..." line
-        # to stdout, so we can't capture its output as the path. With
-        # --output-short-filename the file is always written to
-        # container/rendered.Dockerfile (see render.py:render()), so just
-        # hardcode that path here.
+        # --output-short-filename writes container/rendered.Dockerfile, which
+        # the extraction steps use when no explicit Dockerfile was supplied.
         python3 container/render.py ${RENDER_ARGS} --output-short-filename
-        echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
 
     # Unified compliance tree — flat NOTICES-<Eco>.txt + osrb-deps.csv +
     # osrb.cdx.json. FROM scratch stage; export bounded by these files' size
@@ -124,6 +124,7 @@ runs:
     - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ inputs.dockerfile || 'container/rendered.Dockerfile' }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
@@ -184,7 +185,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 
@@ -350,6 +351,7 @@ runs:
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ inputs.dockerfile || 'container/rendered.Dockerfile' }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
@@ -395,7 +397,7 @@ runs:
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/sources \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 

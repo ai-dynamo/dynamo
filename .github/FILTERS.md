@@ -15,17 +15,19 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
-| `sidecar` | Nothing directly; sidecar source and proto files also match `rust` |
+| `sidecar` | Unified multi-architecture sidecar image build, publish, and compliance checks for changes under `lib/sidecar/**` (docs excluded), its shared workflow, and shared compliance inputs |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
-| `docs` | Docs Lint, Fern Configuration Check, Docs Website Composition Check, Fern Broken Links Check |
+| `docs` | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow |
 | `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
 | `examples` | Recipe Kustomize generation and unit checks |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `ignore` and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks. `docs` does gate jobs: the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`. `examples` gates Recipe Check.
+> **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published. `docs` gates the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`. `examples` gates Recipe Check.
+
+> **TODO:** The sidecar image also consumes root Cargo files, shared libraries, and composite actions. Expanding the filter to cover every remaining build input is deferred until the additional PR CI fan-out is evaluated and agreed.
 
 ## Fixing "Uncovered Files" Errors
 
