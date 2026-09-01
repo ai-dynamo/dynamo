@@ -92,7 +92,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
     delta:
-      "Patch release and the first Dynamo Enterprise release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for NVIDIA Enterprise Support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
+      "Patch release and the first Dynamo Enterprise Support release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for NVIDIA Enterprise Support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
   },
   {
     version: "v1.4.1",

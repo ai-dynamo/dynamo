@@ -1129,7 +1129,7 @@ navigation:
       # marks the curated publication channel and the commercial support
       # boundary. Commercial support requires an NVIDIA AI Enterprise
       # subscription; the artifacts are free to download and run.
-      - section: Enterprise
+      - section: Enterprise Support
         icon: badge-check
         slug: enterprise
         collapsed: true
