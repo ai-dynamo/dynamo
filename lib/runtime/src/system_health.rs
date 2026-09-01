@@ -100,10 +100,16 @@ impl SystemHealth {
         self.health_check_enabled
     }
 
-    /// Signal endpoint transport registration. Sets Ready when canary is disabled;
-    /// no-op when canary is enabled (canary will set Ready after verification).
+    /// Signal endpoint transport registration. Endpoints with a canary target stay
+    /// NotReady until verification succeeds. Payload-less endpoints cannot run a
+    /// canary, so transport registration is their readiness signal.
     pub fn set_endpoint_registered(&self, endpoint: &str) {
-        if !self.health_check_enabled {
+        let has_health_check_target = self
+            .health_check_targets
+            .read()
+            .unwrap()
+            .contains_key(endpoint);
+        if !self.health_check_enabled || !has_health_check_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
         }
     }
@@ -151,6 +157,13 @@ impl SystemHealth {
                             .get(endpoint_subject)
                             .is_some_and(|status| *status == HealthStatus::Ready)
                     })
+            } else if self.health_check_enabled && !endpoint_health.is_empty() {
+                // A payload-less endpoint cannot register a canary target. When
+                // canaries are enabled, its transport registration is therefore
+                // the strongest available readiness signal.
+                endpoint_health
+                    .values()
+                    .all(|status| *status == HealthStatus::Ready)
             } else {
                 // No health check targets registered, use simple system health
                 self.system_health == HealthStatus::Ready
@@ -386,6 +399,21 @@ mod tests {
             health.get_health_status().0,
             "with no targets, system_health alone decides"
         );
+    }
+
+    /// Payload-less workers cannot run a canary. With canaries enabled, endpoint
+    /// registration is therefore sufficient to make the worker healthy.
+    #[test]
+    fn payloadless_endpoint_is_ready_with_canary_on() {
+        let health = system_health(true);
+        health.set_endpoint_registered(ENDPOINT);
+
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            healthy,
+            "a registered payload-less endpoint must report healthy"
+        );
+        assert_eq!(endpoints.get(ENDPOINT).map(String::as_str), Some("ready"));
     }
 
     /// With the canary on, endpoint registration deliberately does NOT mark the

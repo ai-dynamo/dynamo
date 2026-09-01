@@ -207,6 +207,10 @@ class FeaturesSpec(BaseModel):
         default=None,
         description="Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
+    kvRouter: Optional[KVRouterSpec] = Field(
+        default=None,
+        description="KVRouter configures KV-cache-aware routing for the generated deployment. When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend. Settings in spec.overrides.dgd take precedence: an override can replace DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the environment variable when both are present.",
+    )
     mocker: Optional[MockerSpec] = Field(
         default=None,
         description="Mocker configures the simulated (mocker) backend for testing without GPUs.",
