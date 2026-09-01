@@ -1252,6 +1252,30 @@ class HandlerBase(BaseGenerativeHandler):
                 cache_salt=cache_salt,
             )
 
+            # Log the Dynamo-to-engine request-ID mapping exactly once per
+            # request, immediately after submission. This is the only place the
+            # Dynamo request UUID, the TRT-LLM executor client ID, and (in
+            # disaggregated mode) the cross-phase disagg_request_id coexist, and
+            # none of them is persisted together anywhere else. The line makes
+            # every engine-side per-request record (e.g. a perf-metrics JSONL
+            # keyed by the executor client ID, or requestStats keyed by the
+            # disagg ID) joinable to Dynamo traces, spans, and logs offline.
+            # Notes for consumers: the client ID is a per-worker-process
+            # counter, so join it only within this worker's own log; logging
+            # before the response iteration starts means cancelled requests
+            # still leave their mapping behind.
+            # context.id() is the canonical request UUID (the payload's id field
+            # is not guaranteed on every path), and this handler already treats
+            # it as authoritative elsewhere.
+            logging.info(
+                "Engine ID map: request_id=%s trtllm_client_id=%s disagg_request_id=%s",
+                context.id(),
+                getattr(generation_result, "request_id", None),
+                disaggregated_params.disagg_request_id
+                if disaggregated_params
+                else None,
+            )
+
             # In disagg decode mode with remote prefill, wrap abort() to defer
             # until the first token is received (KV transfer complete).
             abort_guard = (

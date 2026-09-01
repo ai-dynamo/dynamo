@@ -101,5 +101,5 @@ spec:
 ## See Also
 
 - [Azure Lustre CSI Driver](azure-lustre-csi-driver.mdx) — Full setup guide for Azure Managed Lustre
-- [Model Caching](../../model-deployment/model-loading/model-caching.mdx) — Full walkthrough for setting up model caching with Dynamo, including download Jobs and mount configuration
+- [Model Storage Overview](overview.md) — Storage choices for model weights, compilation artifacts, and shared caches
 - [AKS CSI Storage Drivers](https://learn.microsoft.com/azure/aks/csi-storage-drivers) — Microsoft documentation for all built-in CSI drivers
