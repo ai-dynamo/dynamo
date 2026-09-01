@@ -46,7 +46,6 @@ def test_filtering_is_family_level_in_the_typed_contract():
     assert families == ["vllm:request_success"]
     assert "vllm:request_success_total" in samples
 
-    # The prefix both share: agreement.
     assert len(get_prometheus_typed(registry, metric_prefix_filters=["vllm:"])) == 1
 
     # A suffixed sample name is not the family name, so it selects nothing.

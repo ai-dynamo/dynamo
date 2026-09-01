@@ -515,6 +515,24 @@ mod tests {
         assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
     }
 
+    /// `prometheus_client` reports an Info family under its bare name but
+    /// renders it as `<name>_info`. Exporting the bare name would give the
+    /// series a different identity than `/metrics` shows, and could collide
+    /// with a real gauge of that name when families are merged.
+    #[test]
+    fn info_family_keeps_its_rendered_name() {
+        let metrics = export(
+            r#"[{"name":"example_build","help":"Build info","type":"info","samples":[
+                 {"name":"example_build_info","labels":{"version":"1.2.3"},"value":"1"}]}]"#,
+        );
+
+        assert_eq!(metrics[0].name, "example_build_info");
+        let Some(metric::Data::Gauge(g)) = &metrics[0].data else {
+            panic!("expected gauge, got {:?}", metrics[0].data);
+        };
+        assert_eq!(g.data_points[0].attributes[0].key, "version");
+    }
+
     /// Summaries only survive because we bypass the SDK, whose data model has
     /// no `Summary` variant.
     #[test]

@@ -108,22 +108,28 @@ fn promote_created(help: &str, samples: Vec<TypedSample>) -> Vec<MetricFamily> {
 }
 
 fn build_one(family: TypedFamily) -> Option<MetricFamily> {
-    let metric_type = match family.kind.as_str() {
-        "counter" => MetricType::COUNTER,
-        "gauge" => MetricType::GAUGE,
-        "histogram" => MetricType::HISTOGRAM,
-        "summary" => MetricType::SUMMARY,
+    // Some families are reported under a bare name but rendered with a suffix:
+    // counters as `foo_total`, info as `foo_info`. Carry that suffix so the
+    // exported identity matches the one `/metrics` shows.
+    let (metric_type, rendered_suffix) = match family.kind.as_str() {
+        "counter" => (MetricType::COUNTER, Some("_total")),
+        "gauge" => (MetricType::GAUGE, None),
+        "histogram" => (MetricType::HISTOGRAM, None),
+        "summary" => (MetricType::SUMMARY, None),
+        // Info has no proto counterpart; it renders as a gauge whose value is
+        // always 1 and whose labels carry the payload.
+        "info" => (MetricType::GAUGE, Some("_info")),
         // "unknown" is the exposition format's untyped, which is a gauge.
         // Anything else is a type this build does not know: treat it as a
         // gauge so the metric still ships, but say so.
-        "unknown" => MetricType::GAUGE,
+        "unknown" => (MetricType::GAUGE, None),
         other => {
             tracing::debug!(
                 metric_name = %family.name,
                 kind = %other,
                 "unrecognised metric type; treating as gauge"
             );
-            MetricType::GAUGE
+            (MetricType::GAUGE, None)
         }
     };
 
@@ -133,15 +139,9 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
         return None;
     }
 
-    // A counter's family is reported as `foo` but rendered as `foo_total`.
-    // Keep the rendered name so the metric surface is unchanged.
-    let name = match metric_type {
-        MetricType::COUNTER => samples
-            .iter()
-            .find(|s| s.name.ends_with("_total"))
-            .map_or_else(|| family.name.clone(), |s| s.name.clone()),
-        _ => family.name.clone(),
-    };
+    let name = rendered_suffix
+        .and_then(|suffix| samples.iter().find(|s| s.name.ends_with(suffix)))
+        .map_or_else(|| family.name.clone(), |s| s.name.clone());
 
     let mut out = MetricFamily::new();
     out.set_name(name);
