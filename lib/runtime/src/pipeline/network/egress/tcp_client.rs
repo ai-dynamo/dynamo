@@ -46,6 +46,7 @@ use tokio_util::codec::FramedRead;
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const MAX_MESSAGE_SIZE_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+const INVALID_REQUEST_USER_MESSAGE: &str = "Request cannot be encoded for this deployment. Reduce the endpoint path, metadata, or payload size and retry.";
 
 /// Default connection pool size per host.
 /// Ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400 concurrent
@@ -1021,6 +1022,16 @@ fn validate_request_frame_size(frame_len: usize, max_message_size: usize) -> Res
     Ok(())
 }
 
+fn invalid_request_error(cause: std::io::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(INVALID_REQUEST_USER_MESSAGE)
+            .cause(cause)
+            .build()
+    )
+}
+
 fn prepare_request_frame(
     payload: Bytes,
     headers: &Headers,
@@ -1030,10 +1041,15 @@ fn prepare_request_frame(
 
     let endpoint_path = headers
         .get("x-endpoint-path")
-        .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
+        .ok_or_else(|| {
+            invalid_request_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing x-endpoint-path header for TCP request",
+            ))
+        })?
         .to_string();
     let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-    let frame = request_msg.into_frame()?;
+    let frame = request_msg.into_frame().map_err(invalid_request_error)?;
     validate_request_frame_size(frame.encoded_len(), max_message_size)?;
     Ok(frame)
 }
@@ -1996,6 +2012,48 @@ mod tests {
             &[ErrorType::CannotConnect],
             &[]
         ));
+        assert!(client.pool.hosts.is_empty());
+        assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_unencodable_request_is_rejected_before_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let endpoint = "x".repeat(u16::MAX as usize + 1);
+
+        let err = client
+            .send_request(
+                format!("127.0.0.1:1/{endpoint}"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), INVALID_REQUEST_USER_MESSAGE);
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("Endpoint path too long"))
+        );
         assert!(client.pool.hosts.is_empty());
         assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
         assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
