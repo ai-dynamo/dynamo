@@ -17,12 +17,12 @@ use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
-use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
+use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use opentelemetry::trace::{SpanContext, SpanId, Status, TraceFlags, TraceId, TraceState};
 use tokio::sync::watch;
