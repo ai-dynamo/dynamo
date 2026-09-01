@@ -9,8 +9,18 @@ mod host;
 mod identity;
 mod load;
 mod pool_registry;
+#[cfg(feature = "kv-dc-relay-proto")]
+pub mod protocol;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_codec;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_hub;
 mod resolution;
 mod topology;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport_config;
 
 pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
@@ -33,3 +43,5 @@ pub use load::PoolLoadSnapshot;
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+pub use transport_config::KvDcRelayTransportConfig;

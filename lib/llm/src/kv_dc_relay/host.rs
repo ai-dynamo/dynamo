@@ -45,13 +45,21 @@ use super::discovery::{
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::pool_registry::PoolPublicationConfig;
 use super::pool_registry::PoolServingFacts;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::publication_hub::PublicationHubConfig;
 use super::resolution::stable_dc_id;
 use super::topology::{TopologyPublisher, TopologySnapshot};
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::transport::{KvDcRelayTransport, WanPublicationSource};
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::transport_config::KvDcRelayTransportConfig;
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
 };
@@ -117,6 +125,8 @@ impl Default for KvDcRelayProducerConfig {
 pub struct KvDcRelayConfig {
     pub discovery: KvDcRelayDiscoveryConfig,
     pub producer: KvDcRelayProducerConfig,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub transport: Option<KvDcRelayTransportConfig>,
 }
 
 impl Default for KvDcRelayConfig {
@@ -127,6 +137,8 @@ impl Default for KvDcRelayConfig {
                 ..Default::default()
             },
             producer: KvDcRelayProducerConfig::default(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            transport: None,
         }
     }
 }
@@ -270,6 +282,14 @@ pub struct KvDcRelayHealth {
     pub endpoint_count: usize,
     pub active_endpoint_count: usize,
     pub fenced_endpoint_count: usize,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub wan_enabled: bool,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub wan_serving: bool,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub wan_bound_address: Option<String>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub wan_last_error: Option<String>,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -581,7 +601,7 @@ fn is_stronger_source_fault(candidate: CkfFailureAction, current: CkfFailureActi
 pub struct KvDcRelay {
     #[cfg(feature = "ckf-diagnostics")]
     dc_id: Arc<str>,
-    #[cfg(feature = "ckf-diagnostics")]
+    #[cfg(any(feature = "ckf-diagnostics", feature = "kv-dc-relay-wan"))]
     relay_identity: DcRelayIdentity,
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
@@ -591,6 +611,8 @@ pub struct KvDcRelay {
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
     topology: Arc<TopologyPublisher>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    transport: Option<KvDcRelayTransport>,
 }
 
 impl KvDcRelay {
@@ -621,6 +643,12 @@ impl KvDcRelay {
             config.producer.recovery_attempt_timeout_ms != 0,
             "KV DC Relay recovery_attempt_timeout_ms must be positive"
         );
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let transport_config = config.transport.clone();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        if let Some(transport) = transport_config.as_ref() {
+            transport.validate()?;
+        }
         let publication = ActorPublicationConfig {
             threshold: config.producer.publication_threshold,
             delay: Duration::from_millis(config.producer.publication_delay_ms),
@@ -643,11 +671,55 @@ impl KvDcRelay {
             publication_threshold: publication.threshold,
             publication_delay: publication.delay,
         };
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let pools = Arc::new(match transport_config.as_ref() {
+            Some(transport) => PoolRegistry::new_with_publication_config(
+                relay_identity,
+                actor_config,
+                PoolPublicationConfig {
+                    hub: PublicationHubConfig {
+                        queue_capacity: transport.publication_queue_capacity,
+                        queue_bytes: transport.publication_queue_bytes,
+                        max_subscribers: transport.max_subscribers_per_pool,
+                        max_delta_images: super::protocol::wire::images::max_delta_images(),
+                        encoding_permits: Arc::new(Semaphore::new(
+                            transport.publication_encoding_concurrency,
+                        )),
+                        #[cfg(test)]
+                        initialization_gate: None,
+                    },
+                    max_initialized_pool_hubs: transport.max_initialized_pool_hubs,
+                },
+            ),
+            None => PoolRegistry::new(relay_identity, actor_config),
+        });
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
         let pools = Arc::new(PoolRegistry::new(relay_identity, actor_config));
         let topology = {
             let mut initial_view = membership_rx.borrow().clone();
             reject_duplicate_live_pools(&mut initial_view, ckf_dc_id);
             Arc::new(TopologyPublisher::new(initial_view, &pools.catalog()))
+        };
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let transport = if let Some(transport_config) = transport_config {
+            let source = WanPublicationSource::new(
+                pools.clone(),
+                topology.clone(),
+                relay_identity,
+                cancel.clone(),
+            );
+            match KvDcRelayTransport::start(source, transport_config).await {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    cancel.cancel();
+                    topology.clear();
+                    membership.shutdown().await;
+                    pools.shutdown().await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
         };
         let terminal = Arc::new(HostTerminalState::default());
         let host = tokio::spawn(run_host_supervisor(
@@ -674,7 +746,7 @@ impl KvDcRelay {
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id,
-            #[cfg(feature = "ckf-diagnostics")]
+            #[cfg(any(feature = "ckf-diagnostics", feature = "kv-dc-relay-wan"))]
             relay_identity,
             cancel,
             membership: Mutex::new(Some(membership)),
@@ -684,6 +756,8 @@ impl KvDcRelay {
             statuses,
             pools,
             topology,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            transport,
         })
     }
 
@@ -693,6 +767,11 @@ impl KvDcRelay {
 
     pub fn watch_pool_catalog(&self) -> watch::Receiver<DcPoolCatalog> {
         self.pools.watch_catalog()
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub const fn relay_identity(&self) -> DcRelayIdentity {
+        self.relay_identity
     }
 
     /// Current derived serving topology: per-namespace model readiness with nested
@@ -804,16 +883,45 @@ impl KvDcRelay {
                 _ => {}
             }
         }
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let transport_health = self
+            .transport
+            .as_ref()
+            .map(KvDcRelayTransport::health)
+            .unwrap_or_default();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let transport_healthy = !transport_health.enabled
+            || (transport_health.serving && transport_health.last_error.is_none());
         let host_last_error = self.terminal.last_error();
         KvDcRelayHealth {
             healthy: !self.cancel.is_cancelled()
                 && host_last_error.is_none()
-                && fenced_endpoint_count == 0,
+                && fenced_endpoint_count == 0
+                && {
+                    #[cfg(feature = "kv-dc-relay-wan")]
+                    {
+                        transport_healthy
+                    }
+                    #[cfg(not(feature = "kv-dc-relay-wan"))]
+                    {
+                        true
+                    }
+                },
             shutting_down: self.cancel.is_cancelled(),
             host_last_error,
             endpoint_count: statuses.len(),
             active_endpoint_count,
             fenced_endpoint_count,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            wan_enabled: transport_health.enabled,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            wan_serving: transport_health.serving,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            wan_bound_address: transport_health
+                .bound_address
+                .map(|address| address.to_string()),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            wan_last_error: transport_health.last_error,
         }
     }
 
@@ -823,6 +931,10 @@ impl KvDcRelay {
 
     pub async fn shutdown(&self) -> Result<(), KvDcRelayError> {
         self.cancel.cancel();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        if let Some(transport) = &self.transport {
+            transport.shutdown().await;
+        }
         let supervisor = self.supervisor.lock().take();
         if let Some(supervisor) = supervisor
             && let Err(error) = supervisor.await
@@ -2896,7 +3008,7 @@ mod tests {
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
+            #[cfg(any(feature = "ckf-diagnostics", feature = "kv-dc-relay-wan"))]
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel,
             membership: Mutex::new(None),
@@ -2906,6 +3018,8 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            transport: None,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -2986,7 +3100,7 @@ mod tests {
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
+            #[cfg(any(feature = "ckf-diagnostics", feature = "kv-dc-relay-wan"))]
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel: cancel.clone(),
             membership: Mutex::new(None),
@@ -2996,6 +3110,8 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology: topology.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            transport: None,
         };
 
         cancel.cancel();
@@ -3097,7 +3213,7 @@ mod tests {
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
+            #[cfg(any(feature = "ckf-diagnostics", feature = "kv-dc-relay-wan"))]
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel: CancellationToken::new(),
             membership: Mutex::new(None),
@@ -3107,6 +3223,8 @@ mod tests {
             statuses,
             pools: Arc::new(registry()),
             topology: test_topology(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            transport: None,
         };
 
         let health = relay.health().await;
