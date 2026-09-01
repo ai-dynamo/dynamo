@@ -1208,15 +1208,20 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
         }
     }
     if config.prefill_continue_force && !config.prefill_continue_enabled {
-        return Err("prefill_continue_force requires prefill_continue_enabled=true".to_string());
+        return Err(
+            "prefill_continue_force requires prefill_continue_enabled=true \
+             (--router-prefill-continue)"
+                .to_string(),
+        );
     }
     if config.prefill_continue_enabled
         && config.prefill_continue_decode_busy_threshold.is_none()
         && !config.prefill_continue_force
     {
         return Err(
-            "prefill_continue_enabled needs prefill_continue_decode_busy_threshold (or \
-             prefill_continue_force for bring-up); it would never trigger"
+            "prefill_continue_enabled needs prefill_continue_decode_busy_threshold \
+             (--router-prefill-continue-config {\"decode_busy_threshold\": 0.9}), or \
+             \"force\": true for bring-up; otherwise it would never trigger"
                 .to_string(),
         );
     }
@@ -1228,7 +1233,8 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
     }
     if config.prefill_continue_enabled && config.prefill_continue_max_concurrent.is_none() {
         return Err(
-            "prefill_continue_enabled needs prefill_continue_max_concurrent; the prefill-load \
+            "prefill_continue_enabled needs prefill_continue_max_concurrent \
+             (--router-prefill-continue-config {\"max_concurrent\": 2}); the prefill-load \
              interlock is cleared at a request's first token, so it cannot see continuations \
              that are already running, and this cap is the only bound that can"
                 .to_string(),
@@ -1250,7 +1256,8 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             (None, None) => {
                 return Err(
                     "prefill_continue_enabled needs prefill_continue_prefill_busy_threshold \
-                     (or router_queue_threshold); without it the prefill-load interlock \
+                     (--router-prefill-continue-config {\"prefill_busy_threshold\": 0.8}) \
+                     or router_queue_threshold; without it the prefill-load interlock \
                      cannot run, and the feature would spend prefill capacity unchecked"
                         .to_string(),
                 );

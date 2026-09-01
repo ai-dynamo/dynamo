@@ -109,6 +109,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             self.router_mode = "kv"
         self.apply_load_aware_preset()
         self.apply_conditional_disagg_config()
+        self.apply_prefill_continue_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -206,6 +207,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError("--router-conditional-disagg requires --router-mode=kv")
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")
+        # Without KV routing the frontend discards its whole KV config, so the
+        # feature would be silently dropped rather than refused. It also has no
+        # load signals to trigger on there: both the decode-busy check and the
+        # prefill interlock read a KV route preview.
+        if self.prefill_continue_enabled and self.router_mode != "kv":
+            raise ValueError("--router-prefill-continue requires --router-mode=kv")
         self.validate_rejection_thresholds()
         self.log_rejection_thresholds()
 

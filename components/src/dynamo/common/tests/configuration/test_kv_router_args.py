@@ -450,6 +450,128 @@ def test_conditional_disagg_config_cli_lowers_to_router_kwargs() -> None:
     assert kwargs["conditional_disagg_decode_busy_threshold"] == 0.9
 
 
+def test_prefill_continue_config_cli_lowers_to_router_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-prefill-continue",
+                "--router-prefill-continue-config",
+                '{"decode_busy_threshold":0.9,"output_reserve_tokens":4096,'
+                '"prefill_busy_threshold":0.4,"max_budget_tokens":2048,'
+                '"max_concurrent":2}',
+            ]
+        )
+    )
+    config.validate()
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["prefill_continue_enabled"] is True
+    assert kwargs["prefill_continue_decode_busy_threshold"] == 0.9
+    assert kwargs["prefill_continue_output_reserve_tokens"] == 4096
+    assert kwargs["prefill_continue_prefill_busy_threshold"] == 0.4
+    assert kwargs["prefill_continue_max_budget_tokens"] == 2048
+    assert kwargs["prefill_continue_max_concurrent"] == 2
+    assert kwargs["prefill_continue_force"] is False
+
+
+def test_prefill_continue_defaults_are_off() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--router-mode", "kv"]))
+    config.validate()
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["prefill_continue_enabled"] is False
+    assert kwargs["prefill_continue_max_concurrent"] is None
+    assert kwargs["prefill_continue_force"] is False
+
+
+def test_prefill_continue_config_requires_the_feature_flag() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-prefill-continue-config",
+                '{"max_concurrent":2}',
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires --router-prefill-continue"):
+        config.kv_router_kwargs()
+
+
+@pytest.mark.parametrize(
+    "config_json, message",
+    [
+        ("not json", "must be a JSON object"),
+        ("[1,2]", "must be a JSON object"),
+        ('{"nope":1}', "unknown field"),
+        ('{"max_concurrent":1.5}', "max_concurrent must be an integer"),
+        ('{"max_concurrent":-1}', "max_concurrent must not be negative"),
+        ('{"decode_busy_threshold":"0.9"}', "decode_busy_threshold must be a number"),
+        (
+            '{"decode_busy_threshold":-0.5}',
+            "decode_busy_threshold must not be negative",
+        ),
+        ('{"force":"yes"}', "force must be a boolean"),
+    ],
+)
+def test_prefill_continue_config_rejects_invalid_json(
+    config_json: str, message: str
+) -> None:
+    """Call the type function directly, so the failing rule is named.
+
+    Going through the parser would only prove that argparse exited, which a
+    typo in the flag name also does.
+    """
+    with pytest.raises(argparse.ArgumentTypeError, match=message):
+        kv_router_args._prefill_continue_config_arg(config_json)
+
+
+def test_prefill_continue_requires_router_mode_kv() -> None:
+    """Without KV routing the frontend discards its whole KV config.
+
+    So an unguarded flag would not fail, it would silently start a plain
+    handoff frontend that reads as the treatment arm.
+    """
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-prefill-continue"])
+    )
+
+    with pytest.raises(ValueError, match="requires --router-mode=kv"):
+        config.validate()
+
+
+def test_prefill_continue_config_without_the_flag_fails_frontend_validation() -> None:
+    """The guard must fire during validate(), not only when kwargs are built.
+
+    In a non-KV mode the kwargs are never built at all.
+    """
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-prefill-continue-config", '{"max_concurrent":2}'])
+    )
+
+    with pytest.raises(ValueError, match="requires --router-prefill-continue"):
+        config.validate()
+
+
 def test_conditional_disagg_requires_router_kv_events() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)

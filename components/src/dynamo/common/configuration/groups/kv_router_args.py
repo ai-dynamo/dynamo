@@ -65,6 +65,13 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_disagg_eff_isl_ratio_threshold",
     "conditional_disagg_prefill_busy_threshold",
     "conditional_disagg_decode_busy_threshold",
+    "prefill_continue_enabled",
+    "prefill_continue_decode_busy_threshold",
+    "prefill_continue_output_reserve_tokens",
+    "prefill_continue_prefill_busy_threshold",
+    "prefill_continue_max_budget_tokens",
+    "prefill_continue_max_concurrent",
+    "prefill_continue_force",
     "router_predicted_ttl_secs",
 )
 
@@ -84,6 +91,16 @@ _CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
     "prefill_busy_threshold": "conditional_disagg_prefill_busy_threshold",
     "decode_busy_threshold": "conditional_disagg_decode_busy_threshold",
 }
+
+_PREFILL_CONTINUE_CONFIG_FIELDS: dict[str, str] = {
+    "decode_busy_threshold": "prefill_continue_decode_busy_threshold",
+    "output_reserve_tokens": "prefill_continue_output_reserve_tokens",
+    "prefill_busy_threshold": "prefill_continue_prefill_busy_threshold",
+    "max_budget_tokens": "prefill_continue_max_budget_tokens",
+    "max_concurrent": "prefill_continue_max_concurrent",
+    "force": "prefill_continue_force",
+}
+
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
@@ -135,22 +152,26 @@ def _default_prefill_load_scale() -> float:
     return 1.0
 
 
-def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
+def _parse_json_object_config(
+    flag: str, value: str, fields: dict[str, str]
+) -> dict[str, Any]:
+    """Decode ``value`` as a JSON object whose keys are all known ``fields``."""
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            "--router-conditional-disagg-config must be a JSON object"
-        ) from exc
+        raise ValueError(f"{flag} must be a JSON object") from exc
     if not isinstance(parsed, dict):
-        raise ValueError("--router-conditional-disagg-config must be a JSON object")
-
-    unknown = sorted(set(parsed) - set(_CONDITIONAL_DISAGG_CONFIG_FIELDS))
+        raise ValueError(f"{flag} must be a JSON object")
+    unknown = sorted(set(parsed) - set(fields))
     if unknown:
-        raise ValueError(
-            "--router-conditional-disagg-config has unknown field(s): "
-            + ", ".join(unknown)
-        )
+        raise ValueError(f"{flag} has unknown field(s): " + ", ".join(unknown))
+    return parsed
+
+
+def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
+    parsed = _parse_json_object_config(
+        "--router-conditional-disagg-config", value, _CONDITIONAL_DISAGG_CONFIG_FIELDS
+    )
     if "policy" in parsed and not isinstance(parsed["policy"], str):
         raise ValueError("--router-conditional-disagg-config policy must be a string")
     if "eff_isl_threshold" in parsed and (
@@ -180,9 +201,44 @@ def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
     return parsed
 
 
+def _parse_prefill_continue_config(value: str) -> dict[str, Any]:
+    flag = "--router-prefill-continue-config"
+    parsed = _parse_json_object_config(flag, value, _PREFILL_CONTINUE_CONFIG_FIELDS)
+
+    for field in ("decode_busy_threshold", "prefill_busy_threshold"):
+        if parsed.get(field) is None:
+            continue
+        if not isinstance(parsed[field], (int, float)) or isinstance(
+            parsed[field], bool
+        ):
+            raise ValueError(f"{flag} {field} must be a number")
+        if parsed[field] < 0:
+            raise ValueError(f"{flag} {field} must not be negative")
+    for field in ("output_reserve_tokens", "max_budget_tokens", "max_concurrent"):
+        if parsed.get(field) is None:
+            continue
+        if not isinstance(parsed[field], int) or isinstance(parsed[field], bool):
+            raise ValueError(f"{flag} {field} must be an integer")
+        if parsed[field] < 0:
+            raise ValueError(f"{flag} {field} must not be negative")
+    if "force" in parsed and not isinstance(parsed["force"], bool):
+        raise ValueError(f"{flag} force must be a boolean")
+    return parsed
+
+
 def _conditional_disagg_config_arg(value: str) -> dict[str, Any]:
+    # argparse discards a ValueError's message and substitutes its own; only
+    # ArgumentTypeError survives to the user. This wrapper is load-bearing.
     try:
         return _parse_conditional_disagg_config(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _prefill_continue_config_arg(value: str) -> dict[str, Any]:
+    # See the note above: argparse would otherwise swallow the reason.
+    try:
+        return _parse_prefill_continue_config(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
@@ -227,6 +283,14 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_eff_isl_ratio_threshold: float = 0.7
     conditional_disagg_prefill_busy_threshold: Optional[float] = None
     conditional_disagg_decode_busy_threshold: Optional[float] = None
+    prefill_continue_enabled: bool = False
+    prefill_continue_config: Optional[dict[str, Any]] = None
+    prefill_continue_decode_busy_threshold: Optional[float] = None
+    prefill_continue_output_reserve_tokens: int = 0
+    prefill_continue_prefill_busy_threshold: Optional[float] = None
+    prefill_continue_max_budget_tokens: Optional[int] = None
+    prefill_continue_max_concurrent: Optional[int] = None
+    prefill_continue_force: bool = False
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -273,10 +337,24 @@ class KvRouterConfigBase(ConfigBase):
                 "prefill_busy_threshold nor --router-queue-threshold is set"
             )
 
+    def apply_prefill_continue_config(self) -> None:
+        if (
+            self.prefill_continue_config is not None
+            and not self.prefill_continue_enabled
+        ):
+            raise ValueError(
+                "--router-prefill-continue-config requires --router-prefill-continue"
+            )
+        if self.prefill_continue_config is None:
+            return
+        for key, value in self.prefill_continue_config.items():
+            setattr(self, _PREFILL_CONTINUE_CONFIG_FIELDS[key], value)
+
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
         self.apply_conditional_disagg_config()
+        self.apply_prefill_continue_config()
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
@@ -593,6 +671,37 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=_conditional_disagg_config_arg,
             dest="conditional_disagg_config",
+            metavar="JSON",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-prefill-continue",
+            env_var="DYN_ROUTER_PREFILL_CONTINUE",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: let a prefill worker generate the whole "
+                "response instead of handing off, when the decode pool has no room "
+                "for it. Both the prefill and decode sets must be KV-routed, because "
+                "the load signals that trigger it exist only there. Requires "
+                "max_concurrent in --router-prefill-continue-config."
+            ),
+            dest="prefill_continue_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--router-prefill-continue-config",
+            env_var="DYN_ROUTER_PREFILL_CONTINUE_CONFIG",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: JSON object for prefill-continues-decode "
+                "settings. Supported fields: decode_busy_threshold, "
+                "output_reserve_tokens, prefill_busy_threshold, max_budget_tokens, "
+                "max_concurrent, force. max_concurrent is required whenever the "
+                "feature is enabled: it is the only bound that can see a "
+                "continuation that is already running."
+            ),
+            arg_type=_prefill_continue_config_arg,
+            dest="prefill_continue_config",
             metavar="JSON",
         )
         add_argument(
