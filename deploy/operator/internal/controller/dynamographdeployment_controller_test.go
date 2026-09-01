@@ -1032,6 +1032,8 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			want := tt.wantReconcileResult
 			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
 			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
+				componentStatus.GPUsPerEngine = ptr.To(int64(0))
+				componentStatus.GPUsPerReplica = ptr.To(int64(0))
 				want.ComponentStatus[componentName] = componentStatus
 			}
 			for i := range dgd.Spec.Components {
