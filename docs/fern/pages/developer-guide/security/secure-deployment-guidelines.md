@@ -120,8 +120,7 @@ Components exchange coordination events — including the KV-cache events used f
 KV-aware routing — over the event plane. Dynamo supports two event transports,
 selected by `DYN_EVENT_PLANE`:
 
-- **NATS** (preferred where the event plane must be authenticated). Enable NATS
-  authentication — `NATS_AUTH_USERNAME`/`NATS_AUTH_PASSWORD`, or
+- **NATS** supports authentication — `NATS_AUTH_USERNAME`/`NATS_AUTH_PASSWORD`, or
   `NATS_AUTH_TOKEN`, `NATS_AUTH_NKEY`, or `NATS_AUTH_CREDENTIALS_FILE` — and TLS
   (`NATS_TLS_CA_CERT_PATH`). Whether the NATS server *requires* these is enforced
   by the NATS server configuration (for example `tls { ca_file: …; verify: true }`),
@@ -140,8 +139,7 @@ selected by `DYN_EVENT_PLANE`:
 
 **Why it matters:** the event plane carries **sensitive request-derived data** —
 KV events can reconstruct prompt content — so keep it on the trusted network and
-restrict publishers and subscribers. Prefer NATS with authentication and TLS
-wherever the event plane crosses a trust boundary. See the
+restrict publishers and subscribers. See the
 [Event Plane](../knowledge-base/concepts/communication-planes/event-plane.md)
 reference.
 
