@@ -774,6 +774,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{DynamoError, ErrorType};
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
@@ -900,6 +901,61 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
         )
+    }
+
+    async fn run_response_frames(content: Vec<TestResponse>) -> Arc<WorkHandlerMetrics> {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(content.len() + 2);
+        let publisher = StreamSender { tx, prologue: None };
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        metrics
+    }
+
+    #[tokio::test]
+    async fn test_engine_stream_errors_count_once_per_request() {
+        let metrics = run_response_frames(vec![
+            Annotated::from_data(serde_json::json!({"token": 0})),
+            Annotated::from_error("engine returned 503"),
+            Annotated::from_error("engine stream ended unexpectedly"),
+        ])
+        .await;
+
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            1,
+            "multiple engine error frames are one failed request"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_frame_does_not_count_as_engine_stream_error() {
+        let cancellation = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client disconnected")
+            .build();
+        let metrics = run_response_frames(vec![Annotated::from_err(cancellation)]).await;
+
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            0,
+            "cancellation frames must not count as engine failures"
+        );
     }
 
     /// Losing the `complete_final` send to a client that has already
