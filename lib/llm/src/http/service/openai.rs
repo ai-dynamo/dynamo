@@ -39,7 +39,9 @@ use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_activity,
+        monitor_for_disconnects_with_activity_and_error_signal,
+        monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -2034,10 +2036,12 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request =
-        context_from_headers_with_input_trigger(request, request_id.clone(), &headers, |request| {
-            Some(classify_chat_request(request))
-        })?;
+    let mut request = context_from_headers_with_input_trigger(
+        request,
+        request_id.clone(),
+        &headers,
+        |request| Some(classify_chat_request(request)),
+    )?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -3114,12 +3118,14 @@ async fn chat_completions(
             }
         };
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
-        let stream = monitor_for_disconnects_with_activity(
+        let monitor_error_signal = StreamErrorSignal::default();
+        let stream = monitor_for_disconnects_with_activity_and_error_signal(
             stream,
             ctx.clone(),
             inflight_guard,
             stream_handle,
             activity_rx,
+            monitor_error_signal.clone(),
         );
         let terminal = terminal.clone();
         let stream = async_stream::stream! {
@@ -3128,7 +3134,12 @@ async fn chat_completions(
             while let Some(item) = inner.next().await {
                 yield item;
             }
-            if ctx.is_killed() {
+            if let Some(error_type) = monitor_error_signal.error_type() {
+                terminal.finish(match error_type {
+                    ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
+                    _ => TerminalOutcome::Failed,
+                });
+            } else if ctx.is_killed() {
                 terminal.finish(TerminalOutcome::Cancelled);
             } else {
                 terminal.finish(TerminalOutcome::Success);

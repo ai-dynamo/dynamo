@@ -4,12 +4,12 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
-use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;

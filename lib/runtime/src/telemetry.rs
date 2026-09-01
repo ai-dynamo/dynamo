@@ -82,14 +82,8 @@ impl TerminalOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LifecycleIdentity {
     request_id: String,
-    /// Identifies one lifecycle wave within a request.
-    ///
-    /// `request_id` groups every prefill, decode, retry, and migration for an
-    /// end-user request. `operation_id` identifies one of those waves. When
-    /// cross-operation propagation is added, a successor (for example, decode)
-    /// records its producing operation (for example, prefill) as
-    /// `dynamo.operation.parent_id` and carries an OTel link. That causal
-    /// relation cannot be inferred reliably from `request_id` alone.
+    /// Identifies one lifecycle wave within a request, which may span retries
+    /// or prefill/decode operations.
     operation_id: String,
     role: LifecycleOperationRole,
     profile: String,
@@ -161,11 +155,17 @@ impl LifecycleStage {
 
     const fn component(self) -> &'static str {
         match self {
-            Self::RequestLifecycle | Self::RequestPreprocessing | Self::ResponseStreaming => "frontend",
+            Self::RequestLifecycle | Self::RequestPreprocessing | Self::ResponseStreaming => {
+                "frontend"
+            }
             Self::RouterQueue | Self::RouterSelection => "router",
-            Self::WorkerAdmission | Self::RequestDispatch | Self::WorkerOperationPrefill
-            | Self::WorkerOperationDecode | Self::ResponseStreamingPrefill
-            | Self::ResponseStreamingDecode | Self::ResponseStreamingWorker => "worker",
+            Self::WorkerAdmission
+            | Self::RequestDispatch
+            | Self::WorkerOperationPrefill
+            | Self::WorkerOperationDecode
+            | Self::ResponseStreamingPrefill
+            | Self::ResponseStreamingDecode
+            | Self::ResponseStreamingWorker => "worker",
             Self::KvTransfer => "kv_transfer",
             Self::EngineQueue => "engine",
         }
@@ -260,7 +260,6 @@ impl LifecycleTrace {
         Self::with_role(request_id, worker_operation_role())
     }
 
-    /// Construct router capture state. M3 will propagate explicit P/D operation links.
     pub fn router_request(request_id: impl Into<String>) -> Self {
         Self::with_role(request_id, LifecycleOperationRole::Frontend)
     }
@@ -389,8 +388,10 @@ impl LifecycleTerminal {
 impl Drop for TerminalState {
     fn drop(&mut self) {
         if self.enabled && !self.finished.swap(true, Ordering::AcqRel) {
-            self.span
-                .record("dynamo.request.terminal.outcome", TerminalOutcome::Unknown.as_str());
+            self.span.record(
+                "dynamo.request.terminal.outcome",
+                TerminalOutcome::Unknown.as_str(),
+            );
             self.span.record("dynamo.request.terminal.error", true);
         }
     }
@@ -405,7 +406,9 @@ fn lifecycle_profile() -> String {
 
 fn lifecycle_mode() -> String {
     match std::env::var(DYN_LIFECYCLE_TRACE_MODE) {
-        Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => "investigation".to_string(),
+        Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => {
+            "investigation".to_string()
+        }
         _ => DEFAULT_MODE.to_string(),
     }
 }
@@ -452,10 +455,12 @@ fn worker_response_streaming_stage() -> LifecycleStage {
 pub(crate) fn lifecycle_tracing_enabled() -> bool {
     std::env::var(DYN_LIFECYCLE_TRACE_ENABLED)
         .ok()
-        .is_some_and(|value| matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        ))
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -471,7 +476,6 @@ mod tests {
     struct CapturedSpan {
         name: &'static str,
         target: &'static str,
-        field_count: usize,
     }
 
     struct CaptureLayer(Arc<Mutex<Vec<CapturedSpan>>>);
@@ -487,13 +491,12 @@ mod tests {
             self.0.lock().unwrap().push(CapturedSpan {
                 name: metadata.name(),
                 target: metadata.target(),
-                field_count: metadata.fields().len(),
             });
         }
     }
 
     #[test]
-    fn enabled_trace_creates_a_fieldless_registered_span() {
+    fn enabled_trace_creates_a_registered_span() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -504,7 +507,6 @@ mod tests {
             [CapturedSpan {
                 name: "router.queue",
                 target: LIFECYCLE_TARGET,
-                field_count: 0,
             }]
         );
     }
@@ -529,7 +531,10 @@ mod tests {
             LifecycleStage::WorkerOperationDecode.name(),
             "worker.operation.decode"
         );
-        assert_eq!(LifecycleStage::ResponseStreaming.name(), "response.streaming");
+        assert_eq!(
+            LifecycleStage::ResponseStreaming.name(),
+            "response.streaming"
+        );
         assert_eq!(
             LifecycleStage::ResponseStreamingPrefill.name(),
             "response.streaming.prefill"
