@@ -566,6 +566,7 @@ pub struct RouterQueueMetricHandles {
     pub request_limit_rejections: IntCounter,
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
+    pub do_not_queue_rejections: IntCounter,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -630,6 +631,7 @@ impl RouterQueueMetrics {
             request_limit_rejections: rejection("request_limit"),
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
+            do_not_queue_rejections: rejection("do_not_queue"),
         }
     }
 }
@@ -1442,12 +1444,14 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         handles.pending_requests.set(5);
         handles.pending_isl_tokens.set(1024);
         handles.pending_cached_tokens.set(512);
+        handles.do_not_queue_rejections.inc();
 
         let output = gather_pef(&registry);
         let expected = "\
 # HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
 # TYPE dynamo_frontend_router_queue_backpressure_total counter
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"do_not_queue\",worker_type=\"decode\"} 1
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"raw_isl_token_limit\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"request_limit\",worker_type=\"decode\"} 0
 # HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue

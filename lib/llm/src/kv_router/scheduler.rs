@@ -351,6 +351,14 @@ where
                 }
             }
         }
+        if let Err(KvSchedulerError::DoNotQueue { policy_class, .. }) = response
+            && let Some(metrics) = self
+                .queue_metric_indices
+                .get(policy_class)
+                .and_then(|index| self.queue_metrics.get(*index))
+        {
+            metrics.do_not_queue_rejections.inc();
+        }
         self.update_queue_metrics();
     }
 

@@ -69,6 +69,7 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
+        KvSchedulerError::DoNotQueue { .. } => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
@@ -108,6 +109,28 @@ impl IntoResponse for SelectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduling::{QueueLimitKind, QueueRejection};
+
+    #[test]
+    fn preserves_queue_rejection_status_and_returns_backpressure_for_do_not_queue() {
+        let rejection = KvSchedulerError::QueueRejected(QueueRejection {
+            policy_class: "default".to_string(),
+            limit_kind: QueueLimitKind::Requests,
+            current: 1,
+            limit: 1,
+        });
+        assert_eq!(SelectionError::from(rejection).status_code(), 503);
+        assert_eq!(
+            SelectionError::from(KvSchedulerError::DoNotQueue {
+                policy_class: "default".to_string(),
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            })
+            .status_code(),
+            429
+        );
+    }
 
     #[test]
     fn filtered_workers_are_unavailable_not_overloaded() {

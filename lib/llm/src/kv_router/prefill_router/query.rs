@@ -29,6 +29,7 @@ where
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<PrefillQueryOutcome> {
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
@@ -49,21 +50,23 @@ where
             });
         };
         let outcome = kv_router
-            .find_best_match_details(
+            .find_best_match_details_with_options(
                 None,
                 token_ids,
                 block_mm_infos,
                 None,
                 false,
                 false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                None,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
+                crate::kv_router::RoutingOptions {
+                    lora_name,
+                    cache_namespace,
+                    priority_jump,
+                    strict_priority,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    do_not_queue,
+                    ..Default::default()
+                },
             )
             .await?;
         match outcome {
@@ -217,6 +220,7 @@ mod tests {
                 0,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap()

@@ -72,6 +72,16 @@ pub enum KvSchedulerError {
     #[error(transparent)]
     QueueRejected(#[from] QueueRejection),
 
+    #[error(
+        "request opted out of router queueing for policy class {policy_class} (pending_count={pending_count}, pending_isl_tokens={pending_isl_tokens}, pending_cached_tokens={pending_cached_tokens})"
+    )]
+    DoNotQueue {
+        policy_class: String,
+        pending_count: usize,
+        pending_isl_tokens: usize,
+        pending_cached_tokens: usize,
+    },
+
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
 
@@ -347,6 +357,7 @@ pub struct ScheduleRequest {
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    pub do_not_queue: bool,
 }
 
 /// Actor-owned admission request.
@@ -372,6 +383,7 @@ pub struct SchedulingRequest {
     pub strict_priority: u32,
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
+    pub do_not_queue: bool,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
@@ -544,6 +556,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: HashMap::default(),

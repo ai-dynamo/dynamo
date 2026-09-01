@@ -293,6 +293,25 @@ fn find_queue_rejection_in_chain<'a>(
     None
 }
 
+fn find_do_not_queue_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::KvSchedulerError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(scheduler_error) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::KvSchedulerError>()
+            && matches!(
+                scheduler_error,
+                dynamo_kv_router::scheduling::KvSchedulerError::DoNotQueue { .. }
+            )
+        {
+            return Some(scheduler_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -512,6 +531,20 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        if let Some(error) = find_do_not_queue_in_chain(err.as_ref()) {
+            let code = StatusCode::TOO_MANY_REQUESTS;
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: error.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: None,
+                    metric_error_type: None,
+                }),
+            );
+        }
+
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
             let code = overload_status_code();
             return (
@@ -5997,6 +6030,20 @@ mod tests {
                 "limit": 1024,
             }))
         );
+    }
+
+    #[test]
+    fn do_not_queue_maps_to_http_429() {
+        let error = dynamo_kv_router::scheduling::KvSchedulerError::DoNotQueue {
+            policy_class: "latency".to_string(),
+            pending_count: 2,
+            pending_isl_tokens: 128,
+            pending_cached_tokens: 64,
+        };
+        let response = ErrorMessage::from_anyhow(anyhow::Error::new(error), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.code, StatusCode::TOO_MANY_REQUESTS.as_u16());
     }
 
     #[test]

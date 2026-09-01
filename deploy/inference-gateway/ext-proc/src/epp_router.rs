@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -95,19 +95,18 @@ impl EppRouter {
         self.reflector_ready.load(Ordering::Acquire)
     }
 
-    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// Tokenize a chat body and lift its routing metadata. Priority uses
+    /// header-over-body precedence via [`resolve_request_priority`].
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
-        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
-        // full body anyway, so we skip allocating the large `messages`/tools
-        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
-        // is not a valid chat request is caught by the renderer below.
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, bool), TokenizeError> {
+        // Parse only routing fields from `nvext` — the worker re-parses the full
+        // body anyway, so we skip allocating the large `messages`/tools fields.
+        // Malformed JSON still fails here (→ 400); a well-formed body that is
+        // not a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
         let resolved = resolve_request_priority(
@@ -121,7 +120,15 @@ impl EppRouter {
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            hints
+                .nvext
+                .and_then(|nvext| nvext.do_not_queue)
+                .unwrap_or(false),
+        ))
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -154,9 +161,9 @@ fn endpoint_in_subset(
             .is_ok_and(|address| candidate_ips.contains(&address.ip()))
 }
 
-/// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
-/// is needed for priority resolution, so the large `messages`/tools fields are
-/// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
+/// Minimal deserialize target for the routing hot path. The large
+/// `messages`/tools fields are never allocated. Unknown fields are ignored (no
+/// `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
     #[serde(default)]
@@ -167,6 +174,16 @@ struct RoutingHints {
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    #[serde(default)]
+    do_not_queue: Option<bool>,
+}
+
+fn selection_error_is_backpressure(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<SelectionError>()
+            .is_some_and(|selection_error| selection_error.status_code() == 429)
+    })
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -262,7 +279,7 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, priority_jump, strict_priority, do_not_queue) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
@@ -290,11 +307,15 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            do_not_queue,
         };
 
         // On either error return below the guard (still armed) frees the booking.
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
+            Err(e) if selection_error_is_backpressure(&e) => {
+                return Err(PickError::Backpressure(e.to_string()));
+            }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
 
@@ -446,6 +467,26 @@ impl TokenizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_hints_lift_do_not_queue() {
+        let enabled: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":true}}"#).unwrap();
+        assert_eq!(
+            enabled.nvext.and_then(|nvext| nvext.do_not_queue),
+            Some(true)
+        );
+
+        let omitted: RoutingHints = serde_json::from_str(r#"{"nvext":{}}"#).unwrap();
+        assert_eq!(omitted.nvext.and_then(|nvext| nvext.do_not_queue), None);
+
+        let explicit_null: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":null}}"#).unwrap();
+        assert_eq!(
+            explicit_null.nvext.and_then(|nvext| nvext.do_not_queue),
+            None
+        );
+    }
 
     #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {

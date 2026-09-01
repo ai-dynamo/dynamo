@@ -83,6 +83,7 @@ struct SelectionOperation {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    do_not_queue: bool,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
@@ -649,6 +650,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                do_not_queue: req.do_not_queue,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -684,6 +686,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                do_not_queue: req.do_not_queue,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -708,6 +711,7 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_id,
+            do_not_queue,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -779,6 +783,7 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits: None,
+            do_not_queue,
         };
         let response = tokio::select! {
             biased;
@@ -1310,6 +1315,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            do_not_queue: false,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1327,6 +1333,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            do_not_queue: false,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1597,6 +1604,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn do_not_queue_rejects_busy_selections_without_enqueueing() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("occupy"))
+            .await
+            .expect("initial reservation");
+
+        let mut select = select_request();
+        select.do_not_queue = true;
+        let error = core
+            .select(select)
+            .await
+            .expect_err("do_not_queue selection should fail while busy");
+        assert!(matches!(
+            error,
+            SelectionError::Scheduler(KvSchedulerError::DoNotQueue { .. })
+        ));
+
+        let mut reserve = reserve_request("do-not-queue");
+        reserve.do_not_queue = true;
+        let error = core
+            .select_and_reserve(reserve)
+            .await
+            .expect_err("do_not_queue reservation should fail while busy");
+        assert!(matches!(
+            error,
+            SelectionError::Scheduler(KvSchedulerError::DoNotQueue { .. })
+        ));
+        assert_eq!(
+            core.loads(Some("model"), Some("default"))[0].pending_count,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_operations_find_reservation_in_later_entry() {
         let mut config = test_config(false);
         config.router_track_prefill_tokens = true;
@@ -1729,6 +1779,7 @@ mod tests {
                     priority_jump: None,
                     strict_priority: None,
                     session_id: None,
+                    do_not_queue: false,
                     pinned_worker: None,
                     allowed_worker_ids: None,
                     routing_constraints: RoutingConstraints::default(),

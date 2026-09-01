@@ -409,6 +409,8 @@ pub struct SelectRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub do_not_queue: bool,
+    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -436,6 +438,8 @@ pub struct SelectAndReserveRequest {
     pub strict_priority: Option<u32>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub do_not_queue: bool,
     #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]

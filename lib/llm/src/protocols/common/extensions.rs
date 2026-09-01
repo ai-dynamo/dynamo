@@ -210,6 +210,11 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub cache_salt: Option<String>,
 
+    /// Reject the request with backpressure when router admission would queue it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub do_not_queue: Option<bool>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
@@ -280,6 +285,7 @@ impl NvExt {
             token_data,
             max_thinking_tokens,
             cache_salt: _,
+            do_not_queue,
             extra_fields,
             metadata_upload,
             prefill_worker_id,
@@ -298,6 +304,7 @@ impl NvExt {
             || backend_instance_id.is_some()
             || token_data.is_some()
             || max_thinking_tokens.is_some()
+            || do_not_queue.is_some()
             || extra_fields.is_some()
             || metadata_upload.is_some()
             || prefill_worker_id.is_some()
@@ -936,6 +943,17 @@ mod tests {
 
         assert!(err.to_string().contains("invalid nvext"));
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn parse_nvext_carries_do_not_queue() {
+        let nv_ext = parse_nvext(Some(serde_json::json!({"do_not_queue": true})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(nv_ext.do_not_queue, Some(true));
+
+        let nv_ext = parse_nvext(Some(serde_json::json!({}))).unwrap().unwrap();
+        assert_eq!(nv_ext.do_not_queue, None);
     }
 
     #[test]

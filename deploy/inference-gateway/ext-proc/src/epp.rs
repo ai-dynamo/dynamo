@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter, RoutingOptions};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{
@@ -31,6 +31,19 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+struct TokenizeOutput {
+    tokens: Vec<u32>,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    do_not_queue: bool,
+}
+
+struct DecodeRouteOptions {
+    is_disaggregated: bool,
+    routing_options: RoutingOptions,
+}
 
 fn validate_kube_discovery_mode() -> Result<()> {
     match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
@@ -66,6 +79,20 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
         track_prefill_tokens: Some(false),
         ..Default::default()
     })
+}
+
+fn is_do_not_queue_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if matches!(
+            error.downcast_ref::<dynamo_kv_router::scheduling::KvSchedulerError>(),
+            Some(dynamo_kv_router::scheduling::KvSchedulerError::DoNotQueue { .. })
+        ) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 fn cache_namespace_with_header_override(
@@ -224,10 +251,10 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
+    /// Returns token IDs and the queue-routing metadata lifted from the request.
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    fn tokenize(&self, request_json: &str) -> Result<TokenizeOutput> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -236,18 +263,20 @@ impl Router {
 
         let priority_jump = extract_priority_jump(&request);
         let strict_priority = extract_strict_priority(&request);
+        let do_not_queue = extract_do_not_queue(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let encoding = match self.preprocessor.apply_template(&request)? {
             Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
             None => self.preprocessor.tokenize("")?,
         };
-        Ok((
-            encoding.token_ids().to_vec(),
+        Ok(TokenizeOutput {
+            tokens: encoding.token_ids().to_vec(),
             cache_namespace,
             priority_jump,
             strict_priority,
-        ))
+            do_not_queue,
+        })
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -328,6 +357,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        do_not_queue: bool,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
@@ -346,9 +376,10 @@ impl Router {
                 strict_priority,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
+                do_not_queue,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
+            .context("Prefill query failed")?;
 
         match outcome {
             // Advisory only: the gateway owns dispatch and lifecycle state.
@@ -367,38 +398,32 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary tier.
-    pub async fn route_decode(
+    async fn route_decode(
         &self,
         tokens: &[u32],
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        allowed_worker_ids: Option<HashSet<u64>>,
+        options: DecodeRouteOptions,
     ) -> Result<(WorkerWithDpRank, u32)> {
-        if let Some(ref ids) = allowed_worker_ids {
+        let DecodeRouteOptions {
+            is_disaggregated,
+            routing_options,
+        } = options;
+        if let Some(ids) = routing_options.allowed_worker_ids.as_ref() {
             self.decode_router.register_workers(ids);
         }
 
         let config_override = decode_router_config_override(is_disaggregated);
 
         self.decode_router
-            .find_best_match(
+            .find_best_match_with_options(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
-                None,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                None,
-                allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_options,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
+            .context("Decode query failed")
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -525,6 +550,16 @@ fn extract_strict_priority(
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
+}
+
+fn extract_do_not_queue(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> bool {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.do_not_queue)
+        .unwrap_or(false)
 }
 
 struct DiscoveredModelBootstrap {
@@ -944,7 +979,13 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
+        let TokenizeOutput {
+            tokens,
+            cache_namespace: body_cache_namespace,
+            priority_jump,
+            strict_priority,
+            do_not_queue,
+        } = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
@@ -961,11 +1002,15 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids.clone(),
+                do_not_queue,
             )
             .await;
 
         let is_disaggregated = match &prefill_result {
             Ok(_) => true,
+            Err(error) if is_do_not_queue_error(error.as_ref()) => {
+                return Err(PickError::Backpressure(error.to_string()));
+            }
             Err(e) => {
                 tracing::debug!(
                     error = %e,
@@ -982,14 +1027,26 @@ impl EndpointPicker for Router {
         let (decode_worker, _overlap) = self
             .route_decode(
                 &tokens,
-                is_disaggregated,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                allowed_worker_ids,
+                DecodeRouteOptions {
+                    is_disaggregated,
+                    routing_options: RoutingOptions {
+                        cache_namespace: cache_namespace.clone(),
+                        priority_jump,
+                        strict_priority,
+                        allowed_worker_ids,
+                        do_not_queue,
+                        ..Default::default()
+                    },
+                },
             )
             .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .map_err(|e| {
+                if is_do_not_queue_error(e.as_ref()) {
+                    PickError::Backpressure(e.to_string())
+                } else {
+                    PickError::RoutingFailed(e.to_string())
+                }
+            })?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1230,5 +1287,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_strict_priority(&without_nvext), 0);
+    }
+
+    #[test]
+    fn do_not_queue_lifted_from_nvext() {
+        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"do_not_queue": true}
+                }"#,
+            )
+            .unwrap();
+        assert!(extract_do_not_queue(&request));
     }
 }
