@@ -46,7 +46,11 @@ from .health_check import (
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+    InstrumentedScheduler,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
@@ -66,6 +70,79 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+
+# Method name that set the worker id for FPM. Used in snapshot restore where the child process
+# was forked before runtime. This method syncs the newly generated worker_id from the main proc
+# to the child proc.
+FPM_SET_WORKER_ID_METHOD_NAME = "set_fpm_worker_id"
+
+# call_utility_async() awaits its future with no deadline of its own (vLLM 0.26.0
+# core_client.py), so an EngineCore rank that stops answering would hang the
+# restore before endpoint registration, with no diagnostic. This bounds a local
+# ZMQ round-trip to an already-restored child: generous, but far short of any
+# startup probe.
+_FPM_SET_WORKER_ID_TIMEOUT_SECS = 30.0
+
+
+def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
+    """Whether the snapshot's EngineCore children run an InstrumentedScheduler.
+
+    Snapshot mode is independent of FPM and benchmark mode, so a restored engine
+    may carry vLLM's default scheduler or a foreign one. Those children reject
+    the ``set_fpm_worker_id`` utility — there is no FPM publisher to retarget —
+    and since a rejection is now fatal, the call has to be skipped for them.
+    """
+    try:
+        scheduler_cls = vllm_config.scheduler_config.get_scheduler_cls()
+    except Exception:
+        # get_scheduler_cls() imports the class named by --scheduler-cls; an
+        # unimportable name is not ours, and it will fail loudly elsewhere.
+        logger.warning(
+            "Could not resolve the snapshot's scheduler class; skipping the FPM "
+            "worker_id sync",
+            exc_info=True,
+        )
+        return False
+    return isinstance(scheduler_cls, type) and issubclass(
+        scheduler_cls, InstrumentedScheduler
+    )
+
+
+async def _sync_fpm_worker_id(
+    engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
+) -> None:
+    """Retarget a restored EngineCore child's FPM identity to ``new_worker_id``.
+
+    Raises on failure. A child left publishing an empty worker id is dropped by
+    the FPM subscriber, so the planner sees fewer FPM workers than registered
+    workers and abandons every scaling decision. Failing the restore is better
+    than advertising a replica the planner cannot see.
+    """
+    if not _snapshot_uses_instrumented_scheduler(vllm_config):
+        logger.debug(
+            "Snapshot does not use InstrumentedScheduler; skipping FPM worker_id sync"
+        )
+        return
+
+    try:
+        await asyncio.wait_for(
+            engine_client.engine_core.call_utility_async(
+                FPM_SET_WORKER_ID_METHOD_NAME, new_worker_id
+            ),
+            timeout=_FPM_SET_WORKER_ID_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"Timed out after {_FPM_SET_WORKER_ID_TIMEOUT_SECS}s setting FPM "
+            f"worker_id {new_worker_id} on the restored engine; an EngineCore rank "
+            f"is not answering utility RPCs"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to set FPM worker_id {new_worker_id} on the restored engine; "
+            f"this replica would publish an empty worker id and stay invisible to "
+            f"the planner"
+        ) from exc
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -725,6 +802,10 @@ class WorkerFactory:
                 component_gauges,
             ) = snapshot_engine
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
+
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
                 component_gauges=component_gauges,
@@ -1197,6 +1278,16 @@ class WorkerFactory:
                 component_gauges,
             ) = snapshot_engine
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Hand the restored engine to the lifecycle before the sync, which is
+            # fatal on failure: the lifecycle cannot shut down an engine it was
+            # never given, and its children would outlive the failed restore.
+            lifecycle.engine_client = engine_client
+            lifecycle.vllm_config = vllm_config
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
+
             # Factory is created after unpack so component_gauges is available
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
@@ -1278,8 +1369,9 @@ class WorkerFactory:
             handler.kv_publishers = kv_publishers
 
         # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode the engine was created before the runtime, so
-        # ForwardPassMetrics.worker_id will be empty (relay still works).
+        # In checkpoint mode the engine was created before the runtime, so the
+        # child baked ForwardPassMetrics.worker_id as ""; _sync_fpm_worker_id()
+        # has since pushed the real id, or failed the restore trying.
         fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
@@ -1509,11 +1601,11 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = snapshot_engine
-            # TODO: The scheduler in the child process still has worker_id=""
-            # because the engine was forked before the runtime existed.
-            # Propagating the new ID to the child requires shared memory or
-            # a restart of the EngineCore process.
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
+
         else:
             (
                 engine_client,
@@ -1569,8 +1661,9 @@ class WorkerFactory:
             handler.kv_publishers = kv_publishers
 
         # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode the engine was created before the runtime, so
-        # ForwardPassMetrics.worker_id will be empty (relay still works).
+        # In checkpoint mode the engine was created before the runtime, so the
+        # child baked ForwardPassMetrics.worker_id as ""; _sync_fpm_worker_id()
+        # has since pushed the real id, or failed the restore trying.
         fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
