@@ -65,8 +65,10 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
                 )
             elif self.connector[0] not in VALID_TRTLLM_CONNECTORS:
                 logging.warning(
-                    f"TRT-LLM does not support connector '{self.connector[0]}'. "
-                    f"Supported connectors: {VALID_TRTLLM_CONNECTORS}. Falling back to 'none'."
+                    "TRT-LLM does not support connector '%s'. "
+                    "Supported connectors: %s. Falling back to 'none'.",
+                    self.connector[0],
+                    VALID_TRTLLM_CONNECTORS,
                 )
                 self.connector = ["none"]
 
