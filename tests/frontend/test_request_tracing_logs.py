@@ -6,6 +6,13 @@
 Verifies that JSONL logs contain consistent structured fields for all request
 lifecycle events: "request received", "http response sent", "request completed".
 
+The routine per-request lifecycle events ("request received", and "request
+completed" on the success path) are emitted at DEBUG so they do not dominate a
+default-level production log; the fixtures below therefore run with
+`DYN_LOG=debug` to observe them. Abnormal completions stay at ERROR and the
+Axum access log ("http response sent") stays at INFO, both of which remain
+visible at the default level — see `test_agg_lifecycle_absent_at_info_level`.
+
 Tests cover: unary success, streaming success, 404 error, 400 invalid UUID,
 cancellation, frontend-worker trace_id correlation, aggregated deployment,
 and disaggregated (prefill+decode) deployment.
@@ -13,6 +20,7 @@ and disaggregated (prefill+decode) deployment.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -122,12 +130,13 @@ def assert_lifecycle_logs(req_logs, expected_status="success"):
     completed = [e for e in req_logs if e.get("message") == "request completed"]
     http_sent = [e for e in req_logs if e.get("message") == "http response sent"]
     msgs = [e.get("message") for e in req_logs]
+    lifecycle_hint = " (DEBUG-level event: does the fixture env set DYN_LOG=debug?)"
     assert (
         len(received) == 1
-    ), f"Expected 1 'request received', got {len(received)}: {msgs}"
+    ), f"Expected 1 'request received', got {len(received)}: {msgs}{lifecycle_hint}"
     assert (
         len(completed) == 1
-    ), f"Expected 1 'request completed', got {len(completed)}: {msgs}"
+    ), f"Expected 1 'request completed', got {len(completed)}: {msgs}{lifecycle_hint}"
     assert (
         len(http_sent) == 1
     ), f"Expected 1 'http response sent', got {len(http_sent)}: {msgs}"
@@ -165,7 +174,9 @@ def assert_error_completion(req_logs):
     return completed
 
 
-JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
+# Lifecycle assertions require DEBUG; the INFO fixture checks filtering.
+JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "debug"}
+JSONL_ENV_INFO = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
 
 
 # ---------------------------------------------------------------------------
@@ -173,27 +184,23 @@ JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="function")
-def tracing_services(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_tokenizers,
-):
-    """Aggregated frontend + mocker with JSONL logging."""
-    ports = dynamo_dynamic_ports
+@contextlib.contextmanager
+def _agg_services(request, ports, env, speedup_ratio=None):
+    """Start an aggregated frontend and mocker."""
+    worker_kwargs = {} if speedup_ratio is None else {"speedup_ratio": speedup_ratio}
     with DynamoFrontendProcess(
         request,
         frontend_port=ports.frontend_port,
         terminate_all_matching_process_names=False,
-        extra_env=JSONL_ENV,
+        extra_env=env,
     ) as frontend:
         with MockerWorkerProcess(
             request,
             model=TEST_MODEL,
             frontend_port=ports.frontend_port,
             system_port=ports.system_ports[0],
-            extra_env=JSONL_ENV,
+            extra_env=env,
+            **worker_kwargs,
         ) as worker:
             wait_for_http_completions_ready(
                 frontend_port=ports.frontend_port, model=TEST_MODEL
@@ -203,6 +210,30 @@ def tracing_services(
                 "frontend": frontend,
                 "worker": worker,
             }
+
+
+@pytest.fixture(scope="function")
+def tracing_services(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Aggregated frontend + mocker with JSONL logging at DYN_LOG=debug."""
+    with _agg_services(request, dynamo_dynamic_ports, JSONL_ENV) as services:
+        yield services
+
+
+@pytest.fixture(scope="function")
+def tracing_services_info_level(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Aggregated frontend + mocker at the default DYN_LOG=info level."""
+    with _agg_services(request, dynamo_dynamic_ports, JSONL_ENV_INFO) as services:
+        yield services
 
 
 @pytest.fixture(scope="function")
@@ -213,29 +244,10 @@ def tracing_services_slow(
     predownload_tokenizers,
 ):
     """Aggregated frontend + slow mocker for cancellation/crash testing."""
-    ports = dynamo_dynamic_ports
-    with DynamoFrontendProcess(
-        request,
-        frontend_port=ports.frontend_port,
-        terminate_all_matching_process_names=False,
-        extra_env=JSONL_ENV,
-    ) as frontend:
-        with MockerWorkerProcess(
-            request,
-            model=TEST_MODEL,
-            frontend_port=ports.frontend_port,
-            system_port=ports.system_ports[0],
-            speedup_ratio=0.1,
-            extra_env=JSONL_ENV,
-        ) as worker:
-            wait_for_http_completions_ready(
-                frontend_port=ports.frontend_port, model=TEST_MODEL
-            )
-            yield {
-                "frontend_port": ports.frontend_port,
-                "frontend": frontend,
-                "worker": worker,
-            }
+    with _agg_services(
+        request, dynamo_dynamic_ports, JSONL_ENV, speedup_ratio=0.1
+    ) as services:
+        yield services
 
 
 @pytest.fixture(scope="function")
@@ -303,12 +315,15 @@ def test_agg_unary_success(tracing_services) -> None:
     req_logs = get_request_logs(tracing_services["frontend"], rid)
     received, completed, http_sent = assert_lifecycle_logs(req_logs)
 
-    assert received[0]["level"] == "INFO"
+    assert received[0]["level"] == "DEBUG"
+    assert completed[0]["level"] == "DEBUG"
     assert received[0].get("x_request_id") == rid
-    assert "request_id" in received[0]
+    assert received[0].get("request_id"), "request_id must survive the DEBUG demotion"
+    assert completed[0].get("request_id"), "request_id must survive the DEBUG demotion"
     assert "model" in received[0]
     assert "endpoint" in received[0]
     assert "elapsed_ms" in completed[0]
+    assert http_sent[0]["level"] == "INFO"
     assert http_sent[0].get("status") == "200"
 
     # Token counts on inference span
@@ -324,10 +339,15 @@ def test_agg_unary_success(tracing_services) -> None:
     wk_completed = [e for e in wk_logs if e.get("message") == "request completed"]
     assert len(wk_received) == 1, "Worker should log 1 'request received'"
     assert len(wk_completed) == 1, "Worker should log 1 'request completed'"
+    assert wk_received[0]["level"] == "DEBUG"
+    assert wk_completed[0]["level"] == "DEBUG"
     assert wk_received[0].get("x_request_id") == rid, "Worker should have x_request_id"
     assert (
         wk_received[0].get("request_id") == server_rid
     ), "Worker request_id should match frontend"
+    assert wk_completed[0].get(
+        "request_id"
+    ), "Worker request_id must survive the DEBUG demotion"
 
 
 def test_agg_streaming_success(tracing_services) -> None:
@@ -373,6 +393,36 @@ def test_agg_404_error(tracing_services) -> None:
     assert "error_detail" in completed[0]
     assert http_sent[0]["level"] == "ERROR"
     assert http_sent[0].get("status") == "404"
+
+
+def test_agg_lifecycle_absent_at_info_level(tracing_services_info_level) -> None:
+    """Routine lifecycle events are filtered at DYN_LOG=info."""
+    port = tracing_services_info_level["frontend_port"]
+    rid = str(uuid.uuid4())
+
+    resp = _send_chat_completions(port, request_id=rid)
+    assert resp.status_code == 200
+    time.sleep(1)
+
+    for name in ("frontend", "worker"):
+        req_logs = get_request_logs(tracing_services_info_level[name], rid)
+        lifecycle = [
+            e
+            for e in req_logs
+            if e.get("message") in ("request received", "request completed")
+        ]
+        assert not lifecycle, (
+            f"{name} emitted routine lifecycle events at DYN_LOG=info: "
+            f"{[(e.get('message'), e.get('level')) for e in lifecycle]}"
+        )
+
+    fe_logs = get_request_logs(tracing_services_info_level["frontend"], rid)
+    http_sent = [e for e in fe_logs if e.get("message") == "http response sent"]
+    assert len(http_sent) == 1, (
+        "Expected the INFO-level access log to still be present, got: "
+        f"{[e.get('message') for e in fe_logs]}"
+    )
+    assert http_sent[0].get("status") == "200"
 
 
 def test_agg_invalid_uuid_warn(tracing_services) -> None:
