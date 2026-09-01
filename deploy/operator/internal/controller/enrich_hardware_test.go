@@ -382,13 +382,14 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 	}, time.Minute)
 
 	r := &DynamoGraphDeploymentRequestReconciler{
-		Client:            fakeClient,
-		APIReader:         fakeClient,
-		Recorder:          &events.FakeRecorder{},
-		Config:            &configv1alpha1.OperatorConfiguration{},
+		Client:    fakeClient,
+		APIReader: fakeClient,
+		Recorder:  &events.FakeRecorder{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: dgdr.Namespace},
+		},
 		GPUDiscovery:      gpupkg.NewGPUDiscovery(nil),
 		GPUDiscoveryCache: cache,
-		RBACManager:       &MockRBACManager{},
 	}
 
 	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest
@@ -450,10 +451,11 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
 	r := &DynamoGraphDeploymentRequestReconciler{
-		Client:      fakeClient,
-		Recorder:    &events.FakeRecorder{},
-		Config:      &configv1alpha1.OperatorConfiguration{},
-		RBACManager: &MockRBACManager{},
+		Client:   fakeClient,
+		Recorder: &events.FakeRecorder{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: dgdr.Namespace},
+		},
 	}
 
 	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest

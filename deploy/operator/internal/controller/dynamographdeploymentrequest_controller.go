@@ -58,6 +58,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 )
 
 const (
@@ -391,13 +392,6 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
 	OperatorImagePullPolicy corev1.PullPolicy
-	// RBACMgr handles RBAC setup for profiling jobs
-	RBACManager RBACManager
-}
-
-// RBACManager interface for managing RBAC resources
-type RBACManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
 }
 
 // GetRecorder implements commonController.Reconciler interface
@@ -1430,8 +1424,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
 	if r.Config.Namespace.Restricted == "" {
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		if err := rbac.EnsureServiceAccountWithRBAC(
 			ctx,
+			r.Client,
 			dgdr.Namespace,
 			ServiceAccountProfilingJob,
 			r.Config.RBAC.DGDRProfilingClusterRoleName,

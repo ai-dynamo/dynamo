@@ -49,7 +49,6 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 			r.RestConfig,
 			r.DockerSecretRetriever,
 			r.SSHKeyManager,
-			r.RBACManager,
 		),
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
