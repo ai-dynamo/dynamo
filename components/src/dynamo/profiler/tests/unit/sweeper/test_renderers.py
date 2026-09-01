@@ -283,35 +283,38 @@ spec:
 def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
     calls = []
 
-    def fake_chunked_prefill(dgd):
-        calls.append("chunked-prefill")
-        return dgd
-
     def fake_materialize(dgd, *, purpose, runtime_backend, model_name_or_path):
         calls.append((purpose, runtime_backend, model_name_or_path))
         return dgd
 
-    monkeypatch.setattr(
-        base_module, "enable_trtllm_chunked_prefill", fake_chunked_prefill
-    )
     monkeypatch.setattr(base_module, "materialize_dgd", fake_materialize)
 
-    base_module.patch_dgd_manifest(
+    patched = base_module.patch_dgd_manifest(
         """
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: generated
 spec:
-  components: []
+  components:
+  - name: TRTLLMWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: []
 """,
         _candidate(backend="trtllm", model_name="Qwen/Qwen3-32B"),
         _options(),
         dgd_name="sweeper-dgd",
     )
 
+    dgd = yaml.safe_load(patched)
+    args = dgd["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["args"]
+    index = args.index("--trtllm.enable_chunked_prefill")
+    assert args[index + 1] == "true"
     assert calls == [
-        "chunked-prefill",
         (
             base_module.DGDMaterializationPurpose.FINAL_OUTPUT,
             "trtllm",

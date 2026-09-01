@@ -59,6 +59,8 @@ spec:
           - '512'
           - --trtllm.enable_attention_dp
           - 'false'
+          - --trtllm.enable_chunked_prefill
+          - 'true'
           resources:
             limits:
               nvidia.com/gpu: '2'

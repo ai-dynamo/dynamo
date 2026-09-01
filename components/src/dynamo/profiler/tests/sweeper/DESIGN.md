@@ -250,9 +250,8 @@ or suite rendering fails.
 
 The suite name is the suite filename without `.yaml`, so every checked-in golden has one owning
 testsuite. Individual `--hardware` runs default to the ignored `generated/manual/` tree. All final
-DGDs are complete manifests that can be inspected, diffed, or applied individually. A golden CI
-check regenerates the same suite in a temporary directory and compares the final `dgd-*.yaml` files
-with the suite's goldens. Updating a golden is an explicit contributor action.
+DGDs are complete manifests that can be inspected, diffed, or applied individually. Updating a
+golden is an explicit contributor action.
 
 The same directory may contain ignored diagnostics after a local update run:
 

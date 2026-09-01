@@ -34,9 +34,8 @@ python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
 ```
 
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
-`generated/<suite-name>/` tree. CI uses that form before comparing the final `dgd-*.yaml` files
-with the suite's goldens. Individual `--hardware` runs write under the ignored `generated/manual/`
-tree unless `--output-dir` is set.
+`generated/<suite-name>/` tree. Individual `--hardware` runs write under the ignored
+`generated/manual/` tree unless `--output-dir` is set.
 
 Each Sweeper case performs one search. The selected Candidate is passed to both the AIC and direct
 renderers, so renderer differences cannot be caused by separate searches.
