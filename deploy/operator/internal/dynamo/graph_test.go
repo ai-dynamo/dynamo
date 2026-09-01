@@ -3965,6 +3965,31 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 											},
+											{
+												Name: "wait-leader-script",
+												VolumeSource: corev1.VolumeSource{
+													ConfigMap: &corev1.ConfigMapVolumeSource{
+														LocalObjectReference: corev1.LocalObjectReference{
+															Name: "test-dynamo-graph-deployment-wait-leader-script",
+														},
+													},
+												},
+											},
+										},
+										InitContainers: []corev1.Container{
+											{
+												Name:  "wait-for-leader",
+												Image: "worker-image",
+												Command: []string{"sh", "-c",
+													`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}" LEADER_PORT="6379" && exec python3 /scripts/wait-for-leader.py`},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      "wait-leader-script",
+														MountPath: "/scripts",
+														ReadOnly:  true,
+													},
+												},
+											},
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{

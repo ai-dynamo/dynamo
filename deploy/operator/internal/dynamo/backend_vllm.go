@@ -255,8 +255,16 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 }
 
 func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
+	// Return early if the podSpec is not using multi-node MP or Ray
+	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) && !b.shouldInjectVLLMRayWaitLeaderInit(podSpec, numberOfNodes, role) {
 		return
+	}
+	initName := "wait-for-leader-mp"
+	leaderPort := commonconsts.VLLMMpMasterPort
+	// If the podSpec is detected as multi-node Ray, set different leader port and init container name
+	if b.shouldInjectVLLMRayWaitLeaderInit(podSpec, numberOfNodes, role) {
+		leaderPort = VLLMPort
+		initName = "wait-for-leader"
 	}
 
 	mainContainer := &podSpec.Containers[0]
@@ -282,11 +290,11 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// definition order.
 	shellHostname := k8sToShellVarSyntax(leaderHostname)
 	initContainer := corev1.Container{
-		Name:  "wait-for-leader-mp",
+		Name:  initName,
 		Image: mainImage,
 		Command: []string{"sh", "-c", fmt.Sprintf(
 			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
-			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
+			shellHostname, leaderPort, waitLeaderMountPath, waitLeaderScriptKey)},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      waitLeaderVolumeName,
@@ -305,6 +313,15 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 	}
 
 	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+}
+
+// Detect a multi-node Ray worker
+func (b *VLLMBackend) shouldInjectVLLMRayWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
+	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
+		return false
+	}
+
+	return containerCommandLineHasArg(&podSpec.Containers[0], "ray", "start")
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
