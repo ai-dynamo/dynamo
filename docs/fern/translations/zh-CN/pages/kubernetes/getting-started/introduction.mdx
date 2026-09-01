@@ -56,7 +56,7 @@ Dynamo 生态系统包含以下额外的模块化组件，并会随着时间继�
 | **扩缩容 / 云** | Planner | 在给定 SLA 约束（TTFT 和 TPOT）下，实时自动调优 prefill 和 decode 的性能 |
 | | [Grove](https://github.com/ai-dynamo/grove) | 支持 Kubernetes 多节点分离式服务所需的 gang scheduling 和拓扑感知 |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | 通过缓存模型权重并经由 NIXL 将其传输到其他 GPU，快速加载模型权重。未来也将用于容错 |
-| **性能** | [AISimulate](https://github.com/ai-dynamo/aisimulate) | 基于模型、ISL/OSL、硬件等信息离线预测聚合式与分离式服务的性能，并搜索部署配置。 |
+| **性能** | [AISimulate](https://pypi.org/project/aisimulate/) | 基于模型、ISL/OSL、硬件等信息离线预测聚合式与分离式服务的性能，并搜索部署配置。 |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | 用 Python 编写、重新架构的 GenAI-Perf，具有最大可扩展性；支持分布式基准测试 |
 | | AITune | 给定模型或 pipeline，搜索最适合部署的后端（例如 TensorRT、Torch.compile 等）（即将推出） |
 | | Flex Tensor | 从主机内存向 GPU 流式传输权重，以便在内存容量有限的 GPU 上运行超大语言模型（即将推出） |
@@ -107,7 +107,7 @@ Dynamo 通过组合三项核心技术实现先进的 LLM 性能：分离式服�
 
 手动为分离式服务寻找最佳并行度可能需要数天的穷举配置扫描，而这一挑战在大规模环境中只会更加严峻。
 
-Dynamo 的 [AISimulate](https://github.com/ai-dynamo/aisimulate/) 可以离线预测聚合式与分离式服务的行为，并根据流量、延迟目标和 GPU 预算搜索候选部署配置。DGDR 使用同一性能建模能力生成 DynamoGraphDeployment（DGD）。
+Dynamo 的 [AISimulate](https://pypi.org/project/aisimulate/) 可以离线预测聚合式与分离式服务的行为，并根据流量、延迟目标和 GPU 预算搜索候选部署配置。DGDR 使用同一性能建模能力生成 DynamoGraphDeployment（DGD）。
 
 ### 使用 Planner 根据 SLA 自动调整部署
 

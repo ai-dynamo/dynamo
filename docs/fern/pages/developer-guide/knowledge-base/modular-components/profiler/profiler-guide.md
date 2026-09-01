@@ -9,7 +9,7 @@ subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model,
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](https://github.com/ai-dynamo/aisimulate) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -370,14 +370,14 @@ spec:
 ```
 
 > [!NOTE]
-> `aicBackendVersion` specifies the TensorRT-LLM version that AIConfigurator simulates. See the [AISimulate support documentation](https://github.com/ai-dynamo/aisimulate#support-and-accuracy) for available versions.
+> `aicBackendVersion` specifies the TensorRT-LLM version that AIConfigurator simulates. See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/) for available versions.
 
 **Currently supports:**
 - **Backends**: vLLM, SGLang, TensorRT-LLM
 - **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
-See the [AISimulate support documentation](https://github.com/ai-dynamo/aisimulate#support-and-accuracy) for the full list.
+See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/) for the full list.
 
 ### Automatic GPU Discovery
 

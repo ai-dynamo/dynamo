@@ -95,7 +95,7 @@ limitations under the License.
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | 通过 NIXL/NVLink 在 GPU 之间流式传输模型权重 | 新副本冷启动快 7x |
 | [**Planner**](docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) | 由 SLA 驱动的自动扩缩容器，可分析工作负载并调整资源池规模 | 以最低总体拥有成本（TCO）满足延迟目标 |
 | [**Grove**](https://github.com/ai-dynamo/grove) | 面向拓扑感知 gang scheduling 的 K8s operator（NVL72） | 在机架、主机和 NUMA 节点之间优化放置工作负载 |
-| [**AISimulate**](https://github.com/ai-dynamo/aisimulate) | 离线预测服务行为并搜索部署配置 | 无需启动 GPU 集群即可找到高质量的服务配置 |
+| [**AISimulate**](https://pypi.org/project/aisimulate/) | 离线预测服务行为并搜索部署配置 | 无需启动 GPU 集群即可找到高质量的服务配置 |
 | [**容错**](docs/fern/pages/kubernetes/fault-tolerance/request-migration.md) | 金丝雀健康检查 + 运行中请求迁移 | worker 可以失败，但用户请求不应失败 |
 
 ### 1.0 新功能
