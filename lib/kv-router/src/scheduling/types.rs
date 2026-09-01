@@ -111,8 +111,11 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
-    /// Greatest router-visible cached-token count among eligible workers.
+    /// Greatest cached-token count allowed by static request constraints,
+    /// before dynamic availability and overload filters.
     pub max_cached_tokens: usize,
+    /// Greatest cached-token count after final availability and overload filters.
+    pub best_eligible_cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,

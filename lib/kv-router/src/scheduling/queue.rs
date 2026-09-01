@@ -62,45 +62,77 @@ struct SelectedWorkerForRequest {
     selection: WorkerSelectionResult,
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
+    max_cached_tokens: usize,
+    best_eligible_cached_tokens: usize,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
 }
 
-fn non_max_overlap_selection<C: WorkerConfigLike>(
+fn routing_choice_snapshot<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
-    selected_worker: WorkerWithDpRank,
-    selected_overlap_blocks: f64,
-) -> Option<NonMaxOverlapSelection> {
-    if eligibility.pinned_worker().is_some() {
-        return None;
-    }
-
+    selection: &WorkerSelectionResult,
+) -> (usize, usize, Option<NonMaxOverlapSelection>) {
+    let selected_worker = selection.worker;
+    let selected_tokens = request.effective_cached_tokens_for(selected_worker);
+    debug_assert_eq!(selected_tokens, selection.cached_tokens);
+    let selected_overlap_blocks = selection.effective_overlap_blocks;
+    let base_eligibility = request.eligibility();
+    let mut best_router_tokens = 0;
+    let mut best_eligible_tokens = 0;
     let mut highest_overlap = None;
-    for (&worker, &overlap_blocks) in &request.overlap.effective_overlap_blocks {
-        if overlap_blocks <= selected_overlap_blocks
-            || eligibility.validate_worker_rank(workers, worker).is_err()
-        {
-            continue;
-        }
-        let is_better = highest_overlap.is_none_or(
-            |(current_worker, current_overlap): (WorkerWithDpRank, f64)| {
-                overlap_blocks > current_overlap
-                    || (overlap_blocks == current_overlap && worker < current_worker)
-            },
-        );
-        if is_better {
-            highest_overlap = Some((worker, overlap_blocks));
+
+    for (&worker_id, config) in workers {
+        let dp_start = config.data_parallel_start_rank();
+        let dp_end = dp_start.saturating_add(config.data_parallel_size());
+        for dp_rank in dp_start..dp_end {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let cached_tokens = request.effective_cached_tokens_for(worker);
+            let overlap_blocks = request.effective_overlap_blocks_for(worker);
+            let base_allows = base_eligibility.pinned_worker().map_or_else(
+                || base_eligibility.allows_worker(worker_id, config),
+                |pinned| pinned == worker,
+            );
+            if base_allows {
+                best_router_tokens = best_router_tokens.max(cached_tokens);
+            }
+            let final_allows = eligibility.pinned_worker().map_or_else(
+                || eligibility.allows_worker(worker_id, config),
+                |pinned| {
+                    pinned == worker && eligibility.validate_worker_rank(workers, worker).is_ok()
+                },
+            );
+            if !final_allows {
+                continue;
+            }
+            best_eligible_tokens = best_eligible_tokens.max(cached_tokens);
+            if highest_overlap.is_none_or(
+                |(current_worker, current_overlap): (WorkerWithDpRank, f64)| {
+                    overlap_blocks > current_overlap
+                        || (overlap_blocks == current_overlap && worker < current_worker)
+                },
+            ) {
+                highest_overlap = Some((worker, overlap_blocks));
+            }
         }
     }
 
-    let (highest_overlap_worker, highest_overlap_blocks) = highest_overlap?;
-    (highest_overlap_blocks > selected_overlap_blocks).then_some(NonMaxOverlapSelection {
-        selected_worker,
-        highest_overlap_worker,
-        highest_overlap_blocks,
-        selected_overlap_blocks,
-    })
+    let highest_overlap = highest_overlap.unwrap_or((selected_worker, selected_overlap_blocks));
+    debug_assert!(best_router_tokens >= best_eligible_tokens);
+    debug_assert!(best_eligible_tokens >= selected_tokens);
+    let non_max_overlap_selection = (eligibility.pinned_worker().is_none()
+        && highest_overlap.1 > selected_overlap_blocks)
+        .then_some(NonMaxOverlapSelection {
+            selected_worker,
+            highest_overlap_worker: highest_overlap.0,
+            highest_overlap_blocks: highest_overlap.1,
+            selected_overlap_blocks,
+        });
+    (
+        best_router_tokens,
+        best_eligible_tokens,
+        non_max_overlap_selection,
+    )
 }
 
 fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDpRank) -> u32 {
@@ -1033,16 +1065,14 @@ impl<
                     self.block_size,
                 ))
                 .map(|selection| {
-                    let non_max_overlap_selection = if request.mode.is_tracked()
-                        && self.non_max_overlap_selection_observer.get().is_some()
-                    {
-                        non_max_overlap_selection(
-                            &workers,
-                            request,
-                            eligibility,
-                            selection.worker,
-                            selection.effective_overlap_blocks,
-                        )
+                    let (max_cached_tokens, best_eligible_cached_tokens, non_max) =
+                        routing_choice_snapshot(&workers, request, eligibility, &selection);
+                    let non_max_overlap_selection = if request.mode.is_tracked() {
+                        self.non_max_overlap_selection_observer
+                            .get()
+                            .is_some()
+                            .then_some(non_max)
+                            .flatten()
                     } else {
                         None
                     };
@@ -1065,6 +1095,8 @@ impl<
                         selection,
                         selected_worker_tiers,
                         selected_worker_load,
+                        max_cached_tokens,
+                        best_eligible_cached_tokens,
                         non_max_overlap_selection,
                     }
                 })
@@ -1086,7 +1118,8 @@ impl<
                 best_worker: selected.selection.worker,
                 effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                 cached_tokens: selected.selection.cached_tokens,
-                max_cached_tokens: selected.selection.max_cached_tokens,
+                max_cached_tokens: selected.max_cached_tokens,
+                best_eligible_cached_tokens: selected.best_eligible_cached_tokens,
                 selected_worker_tiers: selected.selected_worker_tiers,
                 target_cached_prefix_blocks,
                 router_hint_candidates: request.router_hint_candidates.take(),
@@ -1113,7 +1146,8 @@ impl<
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
-            max_cached_tokens: selected.selection.max_cached_tokens,
+            max_cached_tokens: selected.max_cached_tokens,
+            best_eligible_cached_tokens: selected.best_eligible_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
             router_hint_candidates: request.router_hint_candidates.take(),
@@ -1454,7 +1488,6 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
-                max_cached_tokens: SchedulingContext::new(request, workers).best_cached_tokens(),
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })
@@ -1915,6 +1948,13 @@ mod tests {
 
     #[test]
     fn non_max_overlap_selection_ignores_ties_pins_and_ineligible_workers() {
+        let selection = |worker, effective_overlap_blocks| WorkerSelectionResult {
+            worker,
+            required_blocks: 4,
+            effective_overlap_blocks,
+            cached_tokens: 0,
+            potential_decode_blocks: 4,
+        };
         let workers = HashMap::from([
             (0, SimpleWorkerConfig::default()),
             (1, SimpleWorkerConfig::default()),
@@ -1927,8 +1967,14 @@ mod tests {
             .effective_overlap_blocks
             .extend([(worker0, 8.0), (worker1, 8.0)]);
         assert!(
-            non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 8.0)
-                .is_none()
+            routing_choice_snapshot(
+                &workers,
+                &request,
+                request.eligibility(),
+                &selection(worker1, 8.0),
+            )
+            .2
+            .is_none()
         );
 
         request
@@ -1937,16 +1983,135 @@ mod tests {
             .insert(worker1, 2.0);
         request.pinned_worker = Some(worker1);
         assert!(
-            non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
-                .is_none()
+            routing_choice_snapshot(
+                &workers,
+                &request,
+                request.eligibility(),
+                &selection(worker1, 2.0),
+            )
+            .2
+            .is_none()
         );
 
         request.pinned_worker = None;
         request.allowed_worker_ids = Some(HashSet::from([worker1.worker_id]));
         assert!(
-            non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
-                .is_none()
+            routing_choice_snapshot(
+                &workers,
+                &request,
+                request.eligibility(),
+                &selection(worker1, 2.0),
+            )
+            .2
+            .is_none()
         );
+    }
+
+    fn routing_choice_test_selection(
+        worker: WorkerWithDpRank,
+        cached_tokens: usize,
+    ) -> WorkerSelectionResult {
+        WorkerSelectionResult {
+            worker,
+            required_blocks: 4,
+            effective_overlap_blocks: cached_tokens as f64 / 16.0,
+            cached_tokens,
+            potential_decode_blocks: 4,
+        }
+    }
+
+    #[test]
+    fn routing_choice_attributes_overload_to_final_eligibility() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = make_request("routing-choice-overload", 100);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 80), (worker1, 48)]);
+        let overloaded = HashSet::from([worker0.worker_id]);
+        let eligibility = request.eligibility_with_overloaded(Some(&overloaded));
+
+        let (a, e, _) = routing_choice_snapshot(
+            &workers,
+            &request,
+            eligibility,
+            &routing_choice_test_selection(worker1, 48),
+        );
+
+        assert_eq!((a, e), (80, 48));
+    }
+
+    #[test]
+    fn routing_choice_attributes_unavailability_to_final_eligibility() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = make_request("routing-choice-availability", 100);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 80), (worker1, 48)]);
+        let available = HashSet::from([worker1.worker_id]);
+        let eligibility = request
+            .eligibility()
+            .with_available_workers(Some(&available));
+
+        let (a, e, _) = routing_choice_snapshot(
+            &workers,
+            &request,
+            eligibility,
+            &routing_choice_test_selection(worker1, 48),
+        );
+
+        assert_eq!((a, e), (80, 48));
+    }
+
+    #[test]
+    fn tied_best_worker_and_zero_overlap_candidate_are_counted_exactly() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+            (2, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let worker2 = WorkerWithDpRank::new(2, 0);
+        let (mut request, _rx) = make_request("routing-choice-tie", 100);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 80), (worker1, 80)]);
+        let available = HashSet::from([worker1.worker_id]);
+        let tied_eligibility = request
+            .eligibility()
+            .with_available_workers(Some(&available));
+        let (a, e, _) = routing_choice_snapshot(
+            &workers,
+            &request,
+            tied_eligibility,
+            &routing_choice_test_selection(worker1, 80),
+        );
+        assert_eq!((a, e), (80, 80));
+
+        let zero_only = HashSet::from([worker2.worker_id]);
+        let zero_eligibility = request
+            .eligibility()
+            .with_available_workers(Some(&zero_only));
+        let (a, e, _) = routing_choice_snapshot(
+            &workers,
+            &request,
+            zero_eligibility,
+            &routing_choice_test_selection(worker2, 0),
+        );
+        assert_eq!((a, e), (80, 0));
     }
 
     #[tokio::test]
@@ -1973,11 +2138,18 @@ mod tests {
             .overlap
             .effective_overlap_blocks
             .extend([(worker0, 1.0), (worker1, 4.0)]);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 16), (worker1, 64)]);
+        request.track_prefill_tokens = false;
 
         queue.enqueue(request).await;
         let response = response_rx.await.unwrap().unwrap();
 
         assert_eq!(response.best_worker, worker0);
+        assert_eq!(response.max_cached_tokens, 64);
+        assert_eq!(response.best_eligible_cached_tokens, 64);
         let event = tokio::time::timeout(Duration::from_secs(1), observer_rx.recv())
             .await
             .expect("observer did not run")
