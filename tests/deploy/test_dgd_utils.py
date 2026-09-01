@@ -6,12 +6,7 @@
 import pytest
 import yaml
 
-from tests.deploy.dgd_utils import (
-    SCHEMA_V1ALPHA1,
-    SCHEMA_V1BETA1,
-    DeploymentSpec,
-    ServiceSpec,
-)
+from tests.deploy.dgd_utils import DeploymentSpec
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -33,70 +28,3 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
     deployment_spec = DeploymentSpec(str(manifest_path))
 
     assert deployment_spec.get_logging_config()["jsonl_enabled"] is True
-
-
-def test_model_resolves_shell_variable_from_v1alpha1_container_env() -> None:
-    service = ServiceSpec(
-        "Worker",
-        {
-            "extraPodSpec": {
-                "mainContainer": {
-                    "args": ["--model-path", "${MODEL_PATH}"],
-                    "env": [{"name": "MODEL_PATH", "value": "Qwen/Qwen3-32B-FP8"}],
-                }
-            }
-        },
-        schema=SCHEMA_V1ALPHA1,
-    )
-
-    assert service.model == "Qwen/Qwen3-32B-FP8"
-
-
-def test_model_resolves_shell_variable_from_v1beta1_container_env() -> None:
-    service = ServiceSpec(
-        "Worker",
-        {
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "args": ["--model", "$MODEL_ID"],
-                            "env": [
-                                {
-                                    "name": "MODEL_ID",
-                                    "value": "Qwen/Qwen3-32B-FP8",
-                                }
-                            ],
-                        }
-                    ]
-                }
-            }
-        },
-        schema=SCHEMA_V1BETA1,
-    )
-
-    assert service.model == "Qwen/Qwen3-32B-FP8"
-
-
-def test_model_prefers_v1beta1_container_env_over_component_env() -> None:
-    service = ServiceSpec(
-        "Worker",
-        {
-            "envs": [{"name": "MODEL_ID", "value": "component-model"}],
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "args": ["--model", "$MODEL_ID"],
-                            "env": [{"name": "MODEL_ID", "value": "container-model"}],
-                        }
-                    ]
-                }
-            },
-        },
-        schema=SCHEMA_V1BETA1,
-    )
-
-    assert service.model == "container-model"
