@@ -87,6 +87,7 @@
 
 # === backend-trtllm  (@ai-dynamo/dynamo-backend-trtllm-codeowners) ===
 /lib/sidecar/trtllm/                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners
+/container/patches/trtllm/                                                   @ai-dynamo/dynamo-backend-trtllm-codeowners
 /examples/backends/trtllm/                                                   @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/                                               @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/tests/                                         @ai-dynamo/dynamo-backend-trtllm-codeowners
