@@ -466,7 +466,7 @@ impl Runtime {
         // caller's thread, so an async-context drop cannot call `shutdown_background`.
         let primary = self.primary.clone();
         let secondary = self.secondary.clone();
-        let wait_bound = graceful_shutdown_timeout() + TEARDOWN_WAIT_MARGIN;
+        let wait_bound = graceful_shutdown_timeout().saturating_add(TEARDOWN_WAIT_MARGIN);
 
         let spawned = std::thread::Builder::new()
             .name("dyn-rt-teardown".to_string())
