@@ -55,8 +55,13 @@ DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 DECODE_CANCEL_ABORT_LOG_TIMEOUT_S = 5
 DECODE_CANCEL_KILL_LOG_TIMEOUT_S = 5
-DECODE_CANCEL_METRICS_REQUEST_TIMEOUT_S = 5
 DECODE_CANCEL_DECODE_METRICS_RETRY_TIMEOUT_S = 15
+# The next two are budget line items, not bounds this module enforces.
+# METRICS_REQUEST mirrors the requests.get(timeout=5) inside the metrics
+# helpers in utils.py, and this test makes three scrapes: frontend, decode,
+# and prefill. TEARDOWN covers the three ManagedProcess exits, which run
+# inside the test body and are therefore charged to this timeout.
+DECODE_CANCEL_METRICS_REQUEST_TIMEOUT_S = 5
 DECODE_CANCEL_TEARDOWN_ALLOWANCE_S = 30
 DECODE_CANCEL_TEST_TIMEOUT_S = (
     DECODE_CANCEL_FRONTEND_STARTUP_ALLOWANCE_S
