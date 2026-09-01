@@ -39,9 +39,6 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
-_PHASE_POLL_INTERVAL_SECONDS = 5
-_TRANSIENT_API_RETRY_LIMIT = 3
-
 PHASE_ORDER = {
     "Pending": 0,
     "Profiling": 1,
@@ -380,32 +377,35 @@ class ManagedDGDR:
     async def _wait_for_phase(
         self, name: str, target: str, at_least: bool, timeout: int | None
     ) -> dict[str, Any]:
+        poll_interval_seconds = 5
+        vcluster_connection_retry_limit = 3
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
-        transient_api_failures = 0
+        vcluster_connection_failures = 0
         while time.monotonic() < deadline:
             # Give the vCluster watchdog a bounded window to restore its tunnel.
             try:
                 result = await self.get(name)
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as error:
-                transient_api_failures += 1
-                if transient_api_failures > _TRANSIENT_API_RETRY_LIMIT:
+            except aiohttp.ClientConnectorError as error:
+                vcluster_connection_failures += 1
+                if vcluster_connection_failures > vcluster_connection_retry_limit:
                     raise
                 logger.warning(
-                    "Transient Kubernetes API error while waiting for DGDR %s/%s; "
-                    "retrying in %ss (%s/%s): %s",
+                    "vCluster API connection failed while waiting for DGDR %s/%s; "
+                    "the port-forward watchdog may restore the tunnel, retrying in "
+                    "%ss (%s/%s): %s",
                     self.config.namespace,
                     name,
-                    _PHASE_POLL_INTERVAL_SECONDS,
-                    transient_api_failures,
-                    _TRANSIENT_API_RETRY_LIMIT,
+                    poll_interval_seconds,
+                    vcluster_connection_failures,
+                    vcluster_connection_retry_limit,
                     error,
                 )
-                await asyncio.sleep(_PHASE_POLL_INTERVAL_SECONDS)
+                await asyncio.sleep(poll_interval_seconds)
                 continue
 
-            transient_api_failures = 0
+            vcluster_connection_failures = 0
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)
@@ -425,7 +425,7 @@ class ManagedDGDR:
                 )
             ):
                 return result
-            await asyncio.sleep(_PHASE_POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(poll_interval_seconds)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"
