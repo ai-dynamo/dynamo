@@ -6,6 +6,8 @@ propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
 from unittest.mock import AsyncMock, MagicMock
 
+import json
+
 import pytest
 import torch
 
@@ -440,3 +442,69 @@ async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
 
     assert "expanded_prompt_len" not in processed
     ip.get_num_tokens_per_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_epd_non_object_kwargs_raises_client_error() -> None:
+    """The disaggregated path must raise the same 400 as the aggregated one.
+
+    Yielding an error payload instead reads as a normal encoder response, so the
+    caller surfaces a client mistake as an internal failure.
+    """
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        async for _ in EncodeHelper.process_encode_request(
+            request={
+                "token_ids": [1, 2, 3],
+                "image_urls": ["http://example.invalid/a.png"],
+                "mm_processor_kwargs": "invalid",
+            },
+            tokenizer=MagicMock(),
+            model_dir="unused",
+            model_type="multimodal",
+            engine=MagicMock(),
+        ):
+            pass
+
+    assert excinfo.value.status == 400
+
+
+async def _cache_keys_for(request, url):
+    """Run the real cache path and return the key it looked up."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    seen = []
+    cache = MagicMock()
+    cache.get.side_effect = lambda h: seen.append(h) or None
+    cache.set = MagicMock()
+
+    async def _encode(_req):
+        raise AssertionError("encode should not run in this test")
+
+    with pytest.raises(Exception):
+        await ef._fetch_embeddings_with_cache([url], request, cache, _encode)
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_does_not_collide_with_plain_url() -> None:
+    """`url + salt` collided when a URL ended with another request's overrides."""
+    overrides = {"max_soft_tokens": 70}
+    salt = json.dumps(overrides, sort_keys=True, default=str)
+    url = "http://example.invalid/a.png"
+
+    salted = await _cache_keys_for({"mm_processor_kwargs": overrides}, url)
+    lookalike = await _cache_keys_for({}, url + salt)
+
+    assert salted != lookalike
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_unchanged_without_overrides() -> None:
+    """No overrides must hash exactly the URL, so existing entries stay valid."""
+    from dynamo.trtllm.multimodal.hasher import MultimodalHasher
+
+    url = "http://example.invalid/a.png"
+    key = await _cache_keys_for({}, url)
+    assert key == MultimodalHasher.hash_bytes(url.encode())

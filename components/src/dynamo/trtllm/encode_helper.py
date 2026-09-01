@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.http import HttpStatusError
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
@@ -451,10 +452,14 @@ class EncodeHelper:
             token_ids = request.get("token_ids")
             epd_mm_kwargs = resolve_mm_processor_kwargs(request)
             if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
-                yield {
-                    "error": "Malformed mm_processor_kwargs field: expected an object"
-                }
-                return
+                # Raise rather than yield an error payload: a yielded dict reads as a
+                # normal encoder response, so the caller reports missing embeddings as
+                # an internal failure. Matches the aggregated path's 400.
+                raise HttpStatusError(
+                    400,
+                    "Malformed mm_processor_kwargs field: expected an object",
+                    str(epd_mm_kwargs),
+                )
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,  # type: ignore
                 image_urls,

@@ -159,14 +159,21 @@ async def _fetch_embeddings_with_cache(
     mm_kwargs = (
         resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
     )
-    if not isinstance(mm_kwargs, dict):
+    if not isinstance(mm_kwargs, dict) or not mm_kwargs:
         mm_kwargs = None
-    kwargs_salt = (
-        json.dumps(mm_kwargs, sort_keys=True, default=str) if mm_kwargs else ""
-    )
+
+    def _cache_key(url: str) -> str:
+        # JSON-encode the pair rather than concatenating: `url + salt` is ambiguous,
+        # so a URL ending in another request's serialized overrides would collide
+        # with it and be served the wrong embeddings.
+        if mm_kwargs is None:
+            return MultimodalHasher.hash_bytes(url.encode())
+        return MultimodalHasher.hash_bytes(
+            json.dumps([url, mm_kwargs], sort_keys=True, default=str).encode()
+        )
 
     for i, url in enumerate(image_urls):
-        url_hash = MultimodalHasher.hash_bytes((url + kwargs_salt).encode())
+        url_hash = _cache_key(url)
         cached = cache.get(url_hash)
         if cached is not None:
             embeddings_with_index.append((i, cached.tensor))
