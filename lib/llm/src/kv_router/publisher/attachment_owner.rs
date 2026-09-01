@@ -51,6 +51,7 @@ pub struct KvStateAttachmentDescriptor {
     pub raw_zmq_endpoint: String,
     pub raw_topic: String,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
     pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
@@ -144,6 +145,7 @@ fn materialize_intents(
                 raw_zmq_endpoint: descriptor.raw_zmq_endpoint,
                 raw_topic: descriptor.raw_topic,
                 image_token_id: descriptor.image_token_id,
+                video_token_id: descriptor.video_token_id,
                 router_hint_source: descriptor.router_hint_source,
             },
         );
@@ -511,7 +513,8 @@ mod tests {
                     ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
                     raw_zmq_endpoint: format!("tcp://producer.example:{}", 20_000 + rank),
                     raw_topic: String::new(),
-                    image_token_id: None,
+                    image_token_id: Some(99),
+                    video_token_id: Some(100),
                     router_hint_source: None,
                 }
             })
@@ -535,6 +538,8 @@ mod tests {
         assert_eq!(selected.worker, WorkerWithDpRank::new(17, 7));
         assert_eq!(selected.raw_zmq_endpoint, "tcp://producer.example:20007");
         assert_eq!(selected.raw_topic, "");
+        assert_eq!(selected.image_token_id, Some(99));
+        assert_eq!(selected.video_token_id, Some(100));
     }
 
     #[tokio::test]

@@ -1661,7 +1661,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test(flavor = "current_thread")]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
@@ -1751,6 +1751,8 @@ mod tests {
             .await
             .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
+        // Freeze time only after async setup so background timers cannot expire the fixture.
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")
             .await

@@ -749,13 +749,16 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: GLM-5.3-Flash
+            path: pages/recipes/model-recipes/glm-5-3-flash.mdx
+            slug: glm-5-3-flash
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
           - page: Qwen3.8-2.4T-A95B
             path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
             slug: qwen-3-8-2-4t-a95b-fp8
-          - page: GLM-5.2
+          - page: GLM-5.3/5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2
           - page: Inkling NVFP4
