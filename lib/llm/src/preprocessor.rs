@@ -1222,6 +1222,19 @@ fn exact_mm_routing_preconditions_met(
     !has_user_uuid && !has_processor_override && resolved_image_count == total_image_count
 }
 
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+fn should_hash_decoded_video(
+    exact_mm_routing_eligible: bool,
+    has_user_uuid: bool,
+    has_processor_override: bool,
+    has_video_routing_processor: bool,
+) -> bool {
+    exact_mm_routing_eligible
+        && !has_user_uuid
+        && !has_processor_override
+        && has_video_routing_processor
+}
+
 #[cfg(feature = "mm-routing")]
 fn exact_mm_routing_supports_modality(modality: &str, frontend_decoding: bool) -> bool {
     modality == "image_url" || (modality == "video_url" && frontend_decoding)
@@ -3274,6 +3287,18 @@ impl OpenAIPreprocessor {
             }
         }
 
+        #[cfg(feature = "mm-routing")]
+        let has_processor_override = has_mm_processor_override(request.mm_processor_kwargs());
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let hash_decoded_video = should_hash_decoded_video(
+            exact_mm_routing_eligible,
+            has_user_uuid,
+            has_processor_override,
+            self.video_routing_processor.is_some(),
+        );
+        #[cfg(not(all(feature = "mm-routing", feature = "media-ffmpeg")))]
+        let hash_decoded_video = false;
+
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
@@ -3286,9 +3311,10 @@ impl OpenAIPreprocessor {
                 .transpose()
                 .map_err(|e| invalid_argument_error(format!("invalid media_io_kwargs: {e}")))?;
             let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
-                loader.fetch_and_decode_media_part(
+                loader.fetch_and_decode_media_part_with_video_hash(
                     task.content_part.as_ref(),
                     media_io_kwargs.as_ref(),
+                    hash_decoded_video,
                 )
             }))
             .await;
@@ -3350,10 +3376,8 @@ impl OpenAIPreprocessor {
                                 self.video_routing_processor.as_ref().ok_or_else(|| {
                                     anyhow::anyhow!("model has no exact video routing processor")
                                 })?;
-                            let has_processor_overrides =
-                                has_mm_processor_override(request.mm_processor_kwargs());
                             anyhow::ensure!(
-                                !has_processor_overrides,
+                                !has_processor_override,
                                 "request mm_processor_kwargs can change the video token layout"
                             );
                             let (frame_count, width, height) =
@@ -3470,9 +3494,6 @@ impl OpenAIPreprocessor {
                 }
             }
         }
-
-        #[cfg(feature = "mm-routing")]
-        let has_processor_override = has_mm_processor_override(request.mm_processor_kwargs());
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
@@ -8312,6 +8333,16 @@ mod tests {
         assert!(!exact_mm_routing_preconditions_met(false, 0, 1, false));
     }
 
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn decoded_video_hash_requires_exact_routing_eligibility() {
+        assert!(should_hash_decoded_video(true, false, false, true));
+        assert!(!should_hash_decoded_video(false, false, false, true));
+        assert!(!should_hash_decoded_video(true, true, false, true));
+        assert!(!should_hash_decoded_video(true, false, true, true));
+        assert!(!should_hash_decoded_video(true, false, false, false));
+    }
+
     #[test]
     fn replace_reserved_media_slot_preserves_alignment_and_returns_errors() {
         let mut map = HashMap::from([(
@@ -11321,6 +11352,57 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_replacements_preserve_image_video_image_order() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let replacement = |mm_hash, target_token| TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![target_token],
+            worker_tokens: vec![target_token, target_token],
+            routing_tokens: vec![
+                pad_value_for_mm_hash(mm_hash),
+                pad_value_for_mm_hash(mm_hash),
+            ],
+        };
+        let replacements = [
+            replacement(41, image_token_id),
+            replacement(42, video_token_id),
+            replacement(43, image_token_id),
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[1, image_token_id, 2, video_token_id, 3, image_token_id, 4],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 10);
+        assert_eq!(
+            &tokens[..prompt_len],
+            &[
+                1,
+                pad_value_for_mm_hash(41),
+                pad_value_for_mm_hash(41),
+                2,
+                pad_value_for_mm_hash(42),
+                pad_value_for_mm_hash(42),
+                3,
+                pad_value_for_mm_hash(43),
+                pad_value_for_mm_hash(43),
+                4,
+            ]
+        );
+        assert!(infos[0].is_none());
     }
 
     #[cfg(feature = "mm-routing")]

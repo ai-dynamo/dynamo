@@ -210,7 +210,11 @@ fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64
     hasher.digest()
 }
 
-fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStorage) -> Option<u64> {
+fn content_hash_for_storage(
+    tensor_info: &MediaTensorInfo,
+    storage: &SystemStorage,
+    _hash_video: bool,
+) -> Option<u64> {
     use dynamo_memory::{MemoryDescriptor, actions::Slice};
 
     if storage.size() == 0 {
@@ -227,13 +231,17 @@ fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStora
             bytes,
         )),
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-        Some(DecodedMediaMetadata::Video(_)) => match hash_video_content(tensor_info, bytes) {
-            Ok(hash) => Some(hash),
-            Err(error) => {
-                tracing::debug!(%error, "Skipping exact routing hash for decoded video");
-                None
+        Some(DecodedMediaMetadata::Video(_)) if _hash_video => {
+            match hash_video_content(tensor_info, bytes) {
+                Ok(hash) => Some(hash),
+                Err(error) => {
+                    tracing::debug!(%error, "Skipping exact routing hash for decoded video");
+                    None
+                }
             }
-        },
+        }
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        Some(DecodedMediaMetadata::Video(_)) => None,
         #[cfg(all(not(feature = "mm-routing"), feature = "media-ffmpeg"))]
         Some(DecodedMediaMetadata::Video(_)) => None,
         None => None,
@@ -242,9 +250,10 @@ fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStora
 
 impl DecodedMediaData {
     /// Precompute the canonical media hash while still running on the decode
-    /// thread. Video hashing is enabled only for exact MM routing builds.
-    pub(crate) fn compute_content_hash(&mut self) {
-        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data);
+    /// thread. Images are always hashed; videos are hashed only when the
+    /// request is eligible for exact MM routing.
+    pub(crate) fn compute_content_hash(&mut self, hash_video: bool) {
+        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data, hash_video);
     }
 
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
@@ -386,9 +395,21 @@ mod video_tests {
         }
 
         assert_eq!(
-            content_hash_for_storage(&info, &storage),
+            content_hash_for_storage(&info, &storage, true),
             Some(hash_video_content(&info, &bytes).unwrap())
         );
+    }
+
+    #[test]
+    fn video_hash_is_skipped_when_exact_routing_is_ineligible() {
+        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let info = video_info(vec![0.0, 5.0]);
+        let mut storage = SystemStorage::new(bytes.len()).unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), storage.as_mut_ptr(), bytes.len());
+        }
+
+        assert_eq!(content_hash_for_storage(&info, &storage, false), None);
     }
 
     #[test]

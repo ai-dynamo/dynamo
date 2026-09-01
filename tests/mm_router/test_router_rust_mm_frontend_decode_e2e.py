@@ -245,29 +245,6 @@ def _build_video_payload(video_uri: str) -> dict[str, Any]:
     }
 
 
-def _build_mixed_payload(
-    first_image_uri: str, video_uri: str, second_image_uri: str
-) -> dict[str, Any]:
-    return {
-        "model": VLLM_MM_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Compare the images with the video between them.",
-                    },
-                    {"type": "image_url", "image_url": {"url": first_image_uri}},
-                    {"type": "video_url", "video_url": {"url": video_uri}},
-                    {"type": "image_url", "image_url": {"url": second_image_uri}},
-                ],
-            }
-        ],
-        "max_tokens": 4,
-    }
-
-
 def _send(
     frontend_port: int,
     router_proc: ManagedProcess,
@@ -345,14 +322,12 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
     """Serve PNGs over HTTP. Two distinct paths (`/image_A.png` and
     `/image_A_alias.png`) return *byte-identical* content; the
     content-hash assertion below relies on this. Distinct paths defeat
-    URL-string hashing — only content hashing collides them. `/image_B.png`
-    has distinct content for mixed-media ordering coverage."""
+    URL-string hashing — only content hashing collides them."""
     (port,) = allocate_ports(count=1, start_port=18600)
     primary_bytes = _make_png_bytes((180, 30, 90))
     image_map: dict[str, bytes] = {
         "/image_A.png": primary_bytes,
         "/image_A_alias.png": primary_bytes,  # byte-identical, different URL
-        "/image_B.png": _make_png_bytes((20, 140, 210)),
     }
     server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -361,7 +336,6 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
         yield {
             "primary": f"http://127.0.0.1:{port}/image_A.png",
             "alias": f"http://127.0.0.1:{port}/image_A_alias.png",
-            "secondary": f"http://127.0.0.1:{port}/image_B.png",
         }
     finally:
         server.shutdown()
@@ -524,48 +498,3 @@ def test_frontend_decoded_video_routes_by_sampled_content(
         f"got A warm={overlap_a2}/{total_a2}, B cold={overlap_b1}/{total_b1}"
     )
     assert "video routing metadata resolved" in router_proc.read_logs()
-
-
-@pytest.mark.post_merge
-@pytest.mark.timeout(1800)
-def test_frontend_decoded_mixed_media_preserves_i_v_i_order(
-    start_frontend_decode_services,
-    predownload_models,
-    http_image_server_with_alias,
-    http_video_server_with_alias,
-):
-    frontend_port, router_proc = start_frontend_decode_services
-    image_1 = http_image_server_with_alias["primary"]
-    image_2 = http_image_server_with_alias["secondary"]
-    video = http_video_server_with_alias["primary"]
-
-    payload = _build_mixed_payload(image_1, video, image_2)
-    overlap_1, total_1, _ = _send(
-        frontend_port, router_proc, payload, "fed_mixed_i1_v_i2"
-    )
-    overlap_2, total_2, data_2 = _send(
-        frontend_port, router_proc, payload, "fed_mixed_i1_v_i2_repeat"
-    )
-    swapped_overlap, swapped_total, _ = _send(
-        frontend_port,
-        router_proc,
-        _build_mixed_payload(image_2, video, image_1),
-        "fed_mixed_i2_v_i1",
-    )
-
-    assert total_1 > 1 and total_2 > 1 and swapped_total > 1
-    assert overlap_2 > overlap_1 and overlap_2 >= total_2 - 1, (
-        "an exact I-V-I repeat should reuse every complete mixed-media block, got "
-        f"{overlap_1}/{total_1} then {overlap_2}/{total_2}"
-    )
-    assert swapped_overlap < overlap_2, (
-        "swapping two distinct images around the same video must change the "
-        f"routing prefix, got repeat={overlap_2}/{total_2}, "
-        f"swapped={swapped_overlap}/{swapped_total}"
-    )
-
-    cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
-        "cached_tokens"
-    )
-    prompt_tokens_2 = data_2.get("usage", {}).get("prompt_tokens", 0)
-    assert cached_2 is not None and cached_2 > prompt_tokens_2 // 2
