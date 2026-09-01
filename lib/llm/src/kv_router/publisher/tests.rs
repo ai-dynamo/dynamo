@@ -233,6 +233,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -247,6 +248,7 @@ mod test_event_processing {
             None,
             Some("tenant-a"),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
             None,
             None,
@@ -286,6 +288,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -313,7 +316,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
 
         let out = convert_event(
@@ -322,6 +325,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -347,7 +351,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -363,7 +367,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -374,6 +378,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -382,6 +387,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -420,7 +426,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -436,7 +442,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
 
         let out1 = convert_event(
@@ -446,6 +452,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -454,6 +461,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -538,7 +546,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: None,
+            ownership: None,
         };
         let out = convert_event(
             raw_evt,
@@ -546,6 +554,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -556,13 +565,14 @@ mod test_event_processing {
     #[test]
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
-        let raw_evt = RawKvEvent::AllBlocksCleared { source_kind: None };
+        let raw_evt = RawKvEvent::AllBlocksCleared { ownership: None };
         let out = convert_event(
             raw_evt,
             1,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -574,9 +584,15 @@ mod test_event_processing {
     fn test_parse_mm_hash_from_extra_key() {
         assert_eq!(
             parse_mm_hash_from_extra_key(
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+                "0123456789abcdef000000000000000000000000000000000000000000000000"
             ),
             Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            None
         );
         assert_eq!(parse_mm_hash_from_extra_key("123"), None);
         assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
@@ -585,7 +601,7 @@ mod test_event_processing {
     #[test]
     fn test_extra_keys_to_block_mm_infos() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
             Some(vec![ExtraKeyItem::Hash(mm_hash.clone())]),
             None,
@@ -611,7 +627,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -643,7 +659,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_tuple_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -692,7 +708,7 @@ mod test_event_processing {
             medium: Some("GPU".to_string()),
             lora_name: None,
             extra_keys: Some(vec![Some(vec![
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
+                "0123456789abcdef000000000000000000000000000000000000000000000000".to_string(),
             ])]),
         })
         .unwrap();
@@ -726,7 +742,7 @@ mod test_event_processing {
         }
 
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let payload = rmps::to_vec(&MapBlockStoredEvent {
             event_type: "BlockStored",
             block_hashes: vec![10],
@@ -1279,6 +1295,7 @@ mod tests_startup_helpers {
                 4,
                 next_event_id,
                 None,
+                None,
             )
         });
 
@@ -1409,6 +1426,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1507,6 +1525,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1589,7 +1608,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1610,7 +1629,7 @@ mod tests_startup_helpers {
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
                 locality: None,
-                source_kind: None,
+                ownership: None,
             }],
             data_parallel_rank: Some(0),
         };
@@ -1922,6 +1941,91 @@ mod test_event_dedup_filter {
         let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 3);
+    }
+
+    #[test]
+    fn cache_owner_policy_controls_refcounting() {
+        let mut filter = EventDedupFilter::new();
+        let data = store_data(&[1, 2, 3]);
+
+        filter.track_store_in_domain(
+            0,
+            StorageTier::HostPinned,
+            ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
+            &data,
+        );
+        filter.track_store_in_domain(
+            0,
+            StorageTier::HostPinned,
+            ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
+            &data,
+        );
+
+        let result = filter
+            .filter_remove_in_domain(
+                0,
+                StorageTier::HostPinned,
+                ResidencyDomain::CacheOwner,
+                EventDedupPolicy::SetLike,
+                remove_data(&[1, 2, 3]),
+            )
+            .expect("CacheOwner removes bypass Worker refcounting");
+        assert_eq!(
+            result.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(1),
+                ExternalSequenceBlockHash(2),
+                ExternalSequenceBlockHash(3),
+            ]
+        );
+        assert!(
+            filter
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::SetLike,
+                    remove_data(&[]),
+                )
+                .is_none()
+        );
+
+        let mut refcounted = EventDedupFilter::new();
+        for _ in 0..2 {
+            refcounted.track_store_in_domain(
+                0,
+                StorageTier::HostPinned,
+                ResidencyDomain::CacheOwner,
+                EventDedupPolicy::RefCounted,
+                &data,
+            );
+        }
+        assert!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .expect("refcounted CacheOwner removes pass only at zero")
+                .block_hashes,
+            result.block_hashes
+        );
     }
 
     #[test]

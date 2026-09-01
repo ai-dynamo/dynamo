@@ -14,7 +14,7 @@ use crate::kv_router::metrics::kv_publisher_metrics;
 
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
-use super::dedup::EventDedupFilter;
+use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
@@ -99,7 +99,11 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                         KvCacheEventData::Cleared => {
                             batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                             let event = placement_event.event;
-                            dedup.clear_rank_domain(event.dp_rank, residency_domain);
+                            dedup.clear_rank_domain(
+                                event.dp_rank,
+                                residency_domain,
+                                EventDedupPolicy::RefCounted,
+                            );
                             let applied = emit(
                                 &local_indexer,
                                 worker_id,

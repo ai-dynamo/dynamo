@@ -13,11 +13,12 @@ sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
-The supported prebuilt environment is the `dynamo-planner` image. The image builds AI Simulate and
-Dynamo from the same source revision and installs both wheels. The AI Simulate wheel remains inside
-the image and is not published as a release artifact.
+The supported prebuilt environment is the `dynamo-planner` image. The image stages and installs the
+published `aisimulate==0.1.0.dev1` wheel alongside the Dynamo wheels. Dynamo's Rust workspace
+resolves `aisimulate-core==0.1.0-dev.1` from crates.io.
 
-For source development, build the matching Dynamo bindings and install both source distributions:
+For Dynamo source development, install the published AI Simulate wheel and build the matching
+Dynamo bindings:
 
 ```bash
 python -m pip install pip "maturin[patchelf]"
@@ -25,7 +26,7 @@ cd lib/bindings/python
 maturin develop --uv --release --features aic-forward-pass
 cd ../../..
 python -m pip install --no-deps -e .
-python -m pip install -e ./aisimulate
+python -m pip install "aisimulate==0.1.0.dev1"
 python -m pip install -r container/deps/requirements.planner.txt
 ```
 
@@ -34,12 +35,7 @@ full AI Simulate and Replay refactor has a supported distribution path.
 
 ## Run a Dynamo Sweep
 
-```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py \
-  --config aisimulate/examples/sweeper/configs/smart_sweep.yaml
-```
-
-Or compose the runtime directly:
+Compose the runtime directly:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
@@ -73,10 +69,30 @@ adapters:
       overlap_score_credit: [0.0, 0.5, 1.0]
   dynamo.planner:
     search_space:
-      scaling_policy: [disabled, load_180_5]
-      fpm_sampling: [default]
-      load_sensitivity: [default]
+      scaling_policy:
+        preset: [disabled, load_180_5]
+      fpm_sampling:
+        preset: [default]
+      load_sensitivity:
+        preset: [default]
 ```
+
+> [!WARNING]
+> The legacy flat Planner preset lists remain accepted for backward compatibility but emit a
+> `FutureWarning`. They will be removed after the 1.5 release. Nest each list under its sub-item's
+> `preset` field.
+
+Each Planner preset sub-item owns a complete knob set:
+
+| Sub-item | Knobs covered by every preset |
+|---|---|
+| `scaling_policy` | Throughput/load enablement and both adjustment intervals |
+| `fpm_sampling` | Maximum FPM samples and sample-bucket size |
+| `load_sensitivity` | Scale-down sensitivity and minimum observations |
+| `load_predictor` | Predictor family, log transform, Prophet window, and all Kalman parameters |
+
+Named presets and custom mappings are validated against the complete sub-item. The provider fills
+family defaults for conditionally inactive predictor knobs before validation.
 
 The Planner provider derives load-predictor parameters from all configured scaling intervals during
 `generate_search_space`. Enabled candidates materialize a concrete `PlannerConfig` runtime hook.

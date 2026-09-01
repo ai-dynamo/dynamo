@@ -105,6 +105,35 @@ def test_materialize_dgd_copies_blueprint_without_transforms() -> None:
     assert materialized["spec"] is not blueprint["spec"]
 
 
+def test_materialize_remote_model_preserves_explicit_frontend_cli(
+    monkeypatch,
+) -> None:
+    from dynamo.profiler.utils.dgd_template import load_dgd_template
+
+    blueprint = load_dgd_template("vllm", "agg")
+    monkeypatch.setattr(dgd_materialization, "model_has_auto_map", lambda _model: False)
+
+    materialized = materialize_dgd(
+        blueprint,
+        purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+        runtime_backend="vllm",
+        model_name_or_path="Qwen/Qwen3-0.6B",
+    )
+
+    frontend = next(
+        component
+        for component in materialized["spec"]["components"]
+        if component["name"] == "Frontend"
+    )
+    main = next(
+        container
+        for container in frontend["podTemplate"]["spec"]["containers"]
+        if container["name"] == "main"
+    )
+    assert main["command"] == ["python3"]
+    assert main["args"] == ["-m", "dynamo.frontend"]
+
+
 def test_materialize_dgd_only_changes_last_document(monkeypatch) -> None:
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "data": {"key": "value"}}
     dgd = {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"}

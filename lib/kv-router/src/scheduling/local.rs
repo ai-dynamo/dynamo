@@ -15,12 +15,15 @@ use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
-use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::queue::{
+    ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
+};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
+    AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
+    KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
+    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -76,6 +79,7 @@ where
             isl_tokens,
             lora_name,
             expected_output_tokens,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -95,6 +99,7 @@ where
             isl_tokens,
             lora_name,
             expected_output_tokens,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -312,7 +317,20 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_request_admitted(request)
+            .await
+            .map(AdmittedSchedulingResponse::into_response)
+    }
+
+    /// Schedule a request and return the router-internal admitted-attempt identity.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -320,16 +338,30 @@ where
 
         let mut lifecycle_lease = self
             .queue
-            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
+            .enqueue_admitted_with_block_hashes_and_lease(
+                request,
+                block_hashes,
+                lifecycle_lease,
+                tracked.then_some(attempt_tx),
+            )
             .await;
 
         let response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
+        let attempt = if tracked {
+            AdmissionAttempt::Tracked(
+                attempt_rx
+                    .await
+                    .map_err(|_| KvSchedulerError::SubscriberShutdown)?,
+            )
+        } else {
+            AdmissionAttempt::Untracked
+        };
         if let Some(lease) = lifecycle_lease.as_mut() {
             lease.disarm();
         }
-        response
+        Ok(AdmittedSchedulingResponse { response, attempt })
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -484,6 +516,7 @@ where
             policy_class,
             session_context: None,
             expected_output_tokens,
+            affinity_target: None,
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
@@ -499,6 +532,15 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request and return the router-internal attempt identity.
+    #[doc(hidden)]
+    pub async fn add_request_admitted(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<AttemptId, SequenceError> {
+        self.slots.add_request_admitted(req, Instant::now())
+    }
+
     /// Book a request only when its worker is already registered, so a request
     /// racing worker removal cannot lazily recreate the removed worker/rank.
     pub async fn add_request_if_registered(
@@ -511,11 +553,18 @@ where
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots
+        let outcome = self
+            .slots
             .mark_prefill_completed(&request_id, Instant::now())?;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        self.slots.publish_prefill_completed(&request_id);
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
         }
         Ok(())
     }
@@ -523,10 +572,15 @@ where
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots.free(&request_id, Instant::now())?;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
+        let outcome = self.slots.free(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
         }
         Ok(())
     }
@@ -541,10 +595,28 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        self.slots
+        let outcome = self
+            .slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        self.queue.update_worker(worker).await;
+        if outcome.is_applied() {
+            self.queue.update_worker(worker).await;
+        }
         Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
+        self.queue.booking_cleanup()
+    }
+
+    #[doc(hidden)]
+    pub async fn mark_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue
+            .mark_prefill_completed_if_booking(booking.clone())
+            .await
     }
 
     pub fn pending_count(&self) -> usize {
@@ -578,6 +650,28 @@ where
     ) -> Result<(), SequenceError> {
         self.slots
             .add_output_block(&request_id.to_string(), decay_fraction)
+    }
+
+    #[doc(hidden)]
+    pub async fn add_output_block_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue
+            .add_output_block_if_booking(booking.clone(), decay_fraction)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn enqueue_output_block_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue
+            .enqueue_output_block_if_booking(booking.clone(), decay_fraction)
+            .await
     }
 
     pub fn get_potential_loads(
@@ -826,6 +920,28 @@ mod tests {
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
     ) {
+        make_scheduler_with_replica_sync(
+            workers,
+            threshold_frac,
+            monitor_worker_configs,
+            prefill_load_estimator,
+            false,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_scheduler_with_replica_sync(
+        workers: HashMap<WorkerId, SimpleWorkerConfig>,
+        threshold_frac: Option<f64>,
+        monitor_worker_configs: bool,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        replica_sync: bool,
+    ) -> (
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+        CancellationToken,
+    ) {
         let dp_range = workers
             .iter()
             .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
@@ -834,7 +950,7 @@ mod tests {
             NoopSequencePublisher,
             64,
             dp_range,
-            false,
+            replica_sync,
             0,
             "test",
         ));
@@ -890,6 +1006,7 @@ mod tests {
             isl_tokens: 64,
             lora_name: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -1162,7 +1279,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler
@@ -1246,7 +1363,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
         let mut queue_updates = scheduler.subscribe_queue_updates();
 
@@ -1331,7 +1448,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler
