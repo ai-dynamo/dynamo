@@ -3019,6 +3019,8 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			var objects []client.Object
 			objects = append(objects, dgd)
+			t.Log("Attach the DGD owner to existing DCD fixtures")
+			// Attach the DGD controller owner before inserting existing DCDs.
 			for _, dcd := range tt.existingDCDs {
 				ownedDCD := dcd.DeepCopyObject().(client.Object)
 				ownedDCD.SetOwnerReferences([]metav1.OwnerReference{

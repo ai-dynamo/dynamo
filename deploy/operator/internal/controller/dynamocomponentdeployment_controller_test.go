@@ -2340,6 +2340,8 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Prepare objects for fake client
 			var objects []client.Object
 			objects = append(objects, dcd)
+			t.Log("Attach the DCD owner to existing LeaderWorkerSet fixtures")
+			// Attach the DCD controller owner before inserting existing LeaderWorkerSets.
 			for _, lws := range tt.existingLeaderWorkerSets {
 				ownedLWS := lws.DeepCopy()
 				ownedLWS.OwnerReferences = []metav1.OwnerReference{
@@ -2666,6 +2668,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			})
 
 			// Prepare objects for fake client
+			t.Log("Attach the DCD owner to the existing Deployment fixture")
+			// Attach the DCD controller owner before inserting the existing Deployment.
 			var objects []client.Object
 			objects = append(objects, dcd)
 			if tt.existingDeployment != nil {
@@ -2765,6 +2769,8 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 			},
 		},
 	}
+	t.Log("Attach the DCD owner to the failed-restore Deployment fixture")
+	// Attach the DCD controller owner before reconciling the failed-restore fixture.
 	deployment.OwnerReferences = []metav1.OwnerReference{
 		*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
 	}

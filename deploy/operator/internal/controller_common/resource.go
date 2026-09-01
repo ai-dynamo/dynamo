@@ -125,6 +125,9 @@ func checkControllerOwnership(existing, parentResource client.Object, scheme *ru
 	return nil
 }
 
+// SyncResource synchronizes a generated resource with the API server. parentResource may be nil;
+// when it is nil, SyncResource neither sets nor validates controller ownership.
+//
 //nolint:nakedret
 func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T], opts ...SyncOption) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
@@ -207,8 +210,10 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 
 // SyncObservedResource synchronizes a desired resource against the exact
 // object previously observed by its caller. Unlike SyncResource, it does not
-// read from the API server. Create and update conflicts must be retried from a
-// fresh observation so render-time decisions remain tied to the written object.
+// read from the API server. parentResource may be nil; when it is nil,
+// SyncObservedResource neither sets nor validates controller ownership. Create
+// and update conflicts must be retried from a fresh observation so render-time
+// decisions remain tied to the written object.
 func SyncObservedResource[T client.Object](
 	ctx context.Context,
 	r Reconciler,
