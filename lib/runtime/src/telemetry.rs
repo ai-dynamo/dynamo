@@ -112,8 +112,7 @@ impl LifecycleIdentity {
 ///
 /// `WorkerOperationPrefill` and `WorkerOperationDecode` are coarse Dynamo
 /// runtime boundaries around the worker operation; they are not direct engine
-/// execution measurements. Keep `engine.*` and `kv.transfer` for future spans
-/// driven by authoritative engine or NIXL lifecycle signals.
+/// execution measurements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleStage {
     RequestLifecycle,
@@ -320,9 +319,7 @@ impl LifecycleTrace {
     }
 
     /// Start the worker response-streaming boundary with its configured
-    /// disaggregation role encoded in the timing span name. This is deliberately
-    /// fieldless during the timing-only rollout; the role will become the common
-    /// `dynamo.operation.role` attribute when typed lifecycle fields are added.
+    /// disaggregation role encoded in the timing span name.
     #[must_use]
     pub fn start_worker_response_streaming(&self) -> Span {
         self.start(worker_response_streaming_stage())
@@ -331,8 +328,7 @@ impl LifecycleTrace {
     /// Start the worker operation boundary for a disaggregated role.
     ///
     /// This bounds the Dynamo runtime's worker-side operation. It intentionally
-    /// includes any backend-internal queueing or decode-side KV wait. Reserve
-    /// `engine.*` names for future direct engine signals.
+    /// includes any backend-internal queueing or decode-side KV wait.
     #[must_use]
     pub fn start_worker_operation(&self) -> Span {
         match worker_disaggregation_mode().as_deref() {
