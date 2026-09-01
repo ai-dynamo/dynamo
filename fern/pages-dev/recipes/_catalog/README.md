@@ -19,7 +19,8 @@ render the picker but **filter nothing** — adding a new value requires a
 
 ## Steps to add a page
 
-1. **Write the MDX** at `docs/fern/pages/recipes/<slug>.mdx` (or `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`),
+1. **Write the MDX** at `docs/fern/pages/recipes/model-recipes/<slug>.mdx` (or
+   `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`),
    following the [page blueprint](#page-blueprint) below.
 2. **Add a catalog entry** — create one per-entry file at
    `docs/fern/pages/recipes/_catalog/recipes/<id>.yaml` (or
