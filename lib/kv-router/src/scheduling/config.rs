@@ -1209,6 +1209,29 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if config.prefill_continue_enabled {
+        match (
+            config.prefill_continue_prefill_busy_threshold,
+            config.router_queue_threshold,
+        ) {
+            (Some(threshold), _) => tracing::info!(
+                busy_threshold = threshold,
+                "prefill_continue interlock using its own threshold"
+            ),
+            (None, Some(threshold)) => tracing::info!(
+                inherited_threshold = threshold,
+                "prefill_continue interlock inheriting router_queue_threshold"
+            ),
+            (None, None) => {
+                return Err(
+                    "prefill_continue_enabled needs prefill_continue_prefill_busy_threshold \
+                     (or router_queue_threshold); without it the prefill-load interlock \
+                     cannot run, and the feature would spend prefill capacity unchecked"
+                        .to_string(),
+                );
+            }
+        }
+    }
     if config.conditional_disagg_enabled
         && let Some(threshold) = config.conditional_disagg_decode_busy_threshold
     {
@@ -1815,6 +1838,7 @@ mod tests {
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
             prefill_continue_force: true,
+            prefill_continue_prefill_busy_threshold: Some(0.4),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -1823,6 +1847,31 @@ mod tests {
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
             prefill_continue_decode_busy_threshold: Some(0.9),
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn prefill_continue_requires_an_interlock_threshold() {
+        // The interlock is the safety gate: the feature spends prefill capacity,
+        // so enabling it without a way to tell a busy prefill worker apart is
+        // rejected rather than silently skipped.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("interlock"), "{error}");
+
+        // The router-wide queue threshold satisfies it, as it does for the
+        // sibling feature.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            router_queue_threshold: Some(4.0),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
