@@ -855,10 +855,12 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     fn from(delta: DeltaChoice) -> Self {
         // A terminal reason that already explains why generation ended
         // outranks the tool-call rewrite. Only `Stop` and a missing reason are
-        // rewritten, which is the same rule the streaming path applies in
-        // `unified_parser::ChoiceState::normalize_finish_reason`; the two paths used to
-        // disagree, so a call truncated at the token limit reached a non-streaming
-        // caller labelled `tool_calls` with no sign it had been cut off.
+        // rewritten. The streaming path applies the same rule in two parts:
+        // `unified_parser::ChoiceState::normalize_finish_reason` rewrites `Stop`, and
+        // `unified_parser::ChoiceState::unterminated_finish_reason` supplies `ToolCalls`
+        // when no reason arrives at all. The two paths used to disagree, so a call
+        // truncated at the token limit reached a non-streaming caller labelled
+        // `tool_calls` with no sign it had been cut off.
         //
         // Preserving `Length` is also what makes the Responses conversion reachable:
         // `responses::chat_completion_to_response` keys `status: "incomplete"` and
