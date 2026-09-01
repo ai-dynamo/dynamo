@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -30,7 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,6 +39,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -93,7 +95,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 	}
 
 	err = r.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, oldResource)
-	oldResourceIsNotFound := errors.IsNotFound(err)
+	oldResourceIsNotFound := apierrors.IsNotFound(err)
 	if err != nil && !oldResourceIsNotFound {
 		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Get", "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
 		logs.Error(err, "Failed to get resource.")
@@ -133,6 +135,8 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 // object previously observed by its caller. Unlike SyncResource, it does not
 // read from the API server. Create and update conflicts must be retried from a
 // fresh observation so render-time decisions remain tied to the written object.
+// The parent controls new or unowned resources; an existing foreign controller
+// is preserved while desired content continues to synchronize.
 func SyncObservedResource[T client.Object](
 	ctx context.Context,
 	r Reconciler,
@@ -187,12 +191,42 @@ func SyncObservedResource[T client.Object](
 		recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 		return false, desired, fmt.Errorf("failed to check if spec has changed: %w", err)
 	}
-	if !changeResult.NeedsUpdate {
-		logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
+
+	synced, ok := observed.DeepCopyObject().(T)
+	if !ok {
+		var zero T
+		return false, zero, fmt.Errorf("deep copy observed %s as %T", resourceType, observed)
+	}
+	controllerReferenceChanged := false
+	if parentResource != nil {
+		observedOwnerReferences := observed.GetOwnerReferences()
+
+		if err := ctrl.SetControllerReference(parentResource, synced, r.Scheme()); err != nil {
+			var alreadyOwnedError *controllerutil.AlreadyOwnedError
+			if errors.As(err, &alreadyOwnedError) {
+				logs.V(1).Info(
+					"Preserving controller reference owned by another resource",
+					"controllerKind", alreadyOwnedError.Owner.Kind,
+					"controllerName", alreadyOwnedError.Owner.Name,
+					"controllerUID", alreadyOwnedError.Owner.UID,
+				)
+			} else {
+				logs.Error(err, "Failed to set controller reference.")
+				recordResourceEvent(r, observed, corev1.EventTypeWarning, "SetControllerReference", "Update", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+				var zero T
+				return false, zero, err
+			}
+		}
+
+		controllerReferenceChanged = !equality.Semantic.DeepEqual(observedOwnerReferences, synced.GetOwnerReferences())
+	}
+
+	if !changeResult.NeedsUpdate && !controllerReferenceChanged {
+		logs.Info(fmt.Sprintf("%s spec and controller reference are unchanged. Skipping update.", resourceType))
 		recordResourceEvent(r, observed, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Skipping update %s %s", resourceType, resourceNamespace)
 		return false, observed, nil
 	}
-	if changeResult.NewHash == nil {
+	if changeResult.NeedsUpdate && changeResult.NewHash == nil {
 		var zero T
 		return false, zero, fmt.Errorf("%s update has no desired spec hash", resourceType)
 	}
@@ -203,11 +237,6 @@ func SyncObservedResource[T client.Object](
 			"lastAppliedGeneration", getAnnotation(observed, NvidiaAnnotationGenerationKey))
 	}
 
-	synced, ok := observed.DeepCopyObject().(T)
-	if !ok {
-		var zero T
-		return false, zero, fmt.Errorf("deep copy observed %s as %T", resourceType, observed)
-	}
 	if changeResult.SpecNeedsUpdate {
 		diff, diffErr := generateSpecDiff(observed, desired)
 		if diffErr != nil {
@@ -222,11 +251,13 @@ func SyncObservedResource[T client.Object](
 			var zero T
 			return false, zero, err
 		}
-	} else {
+	} else if changeResult.NeedsUpdate {
 		logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
 	}
 
-	updateAnnotations(synced, *changeResult.NewHash, changeResult.NewGeneration)
+	if changeResult.NeedsUpdate {
+		updateAnnotations(synced, *changeResult.NewHash, changeResult.NewGeneration)
+	}
 	if err := r.Update(ctx, synced); err != nil {
 		logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
 		recordResourceEvent(r, observed, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Update", "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
