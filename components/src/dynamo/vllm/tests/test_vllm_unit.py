@@ -16,6 +16,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import transformers
 
 import dynamo.llm as dynamo_llm
 from dynamo.vllm import envs
@@ -484,6 +485,228 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
         vllm_main.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(expected_excludes_reasoning),
     )
+
+
+@pytest.mark.parametrize(
+    ("overrides_video_replacement", "expected"),
+    [
+        (True, "bare_video_token"),
+        (False, "vision_wrapped_video_token"),
+    ],
+)
+def test_vllm_publishes_actual_qwen_video_placeholder_target(
+    monkeypatch, overrides_video_replacement, expected
+):
+    class ProcessorMixin:
+        def replace_video_token(self):
+            pass
+
+    if overrides_video_replacement:
+
+        class Qwen3VLProcessor(ProcessorMixin):
+            def replace_video_token(self):
+                pass
+
+    else:
+
+        class Qwen3VLProcessor(ProcessorMixin):
+            pass
+
+    monkeypatch.setattr(transformers, "ProcessorMixin", ProcessorMixin)
+    monkeypatch.setattr(transformers, "Qwen3VLProcessor", Qwen3VLProcessor)
+
+    vllm_main = _load_vllm_main()
+    monkeypatch.setattr(
+        vllm_main,
+        "_resolve_qwen_video_resize_mode",
+        lambda: vllm_main.QWEN_VIDEO_RESIZE_LEGACY_CEIL,
+    )
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="qwen3_5",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+            ),
+            multimodal_config=SimpleNamespace(
+                mm_processor_kwargs=None,
+                get_video_pruning_spec=lambda: None,
+            ),
+        )
+    )
+
+    vllm_main.publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        json.dumps(
+            {
+                "placeholder_target": expected,
+                "resize_mode": vllm_main.QWEN_VIDEO_RESIZE_LEGACY_CEIL,
+            }
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "hf_config",
+    [
+        SimpleNamespace(model_type="llama"),
+        SimpleNamespace(model_type="qwen3_5", architectures=["Qwen3_5ForCausalLM"]),
+    ],
+)
+def test_vllm_skips_video_placeholder_target_for_non_video_models(hf_config):
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    vllm_main.publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_vllm_skips_video_placeholder_target_for_engine_processor_overrides():
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="qwen3_vl",
+                architectures=["Qwen3VLForConditionalGeneration"],
+            ),
+            multimodal_config=SimpleNamespace(
+                mm_processor_kwargs={"max_pixels": 4096},
+                get_video_pruning_spec=lambda: None,
+            ),
+        )
+    )
+
+    vllm_main.publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_vllm_skips_video_placeholder_target_for_video_pruning():
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="qwen3_vl",
+                architectures=["Qwen3VLForConditionalGeneration"],
+            ),
+            multimodal_config=SimpleNamespace(
+                mm_processor_kwargs=None,
+                get_video_pruning_spec=lambda: ("evs", 0.5),
+            ),
+        )
+    )
+
+    vllm_main.publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("resize_result", "expected"),
+    [
+        ((1216, 4096), "legacy_ceil"),
+        ((1120, 3776), "round_ties_even"),
+        ((999, 999), None),
+    ],
+)
+def test_resolve_qwen_video_resize_mode(monkeypatch, resize_result, expected):
+    vllm_main = _load_vllm_main()
+    resize = Mock(return_value=resize_result)
+    monkeypatch.setattr(vllm_main, "qwen3_smart_resize", resize)
+
+    assert vllm_main._resolve_qwen_video_resize_mode() == expected
+    resize.assert_called_once_with(
+        num_frames=5,
+        height=1120,
+        width=3760,
+        temporal_factor=2,
+        factor=32,
+        min_pixels=4096,
+        max_pixels=25165824,
+    )
+
+
+def test_resolve_qwen_video_resize_mode_without_qwen_processor(monkeypatch):
+    vllm_main = _load_vllm_main()
+    monkeypatch.setattr(vllm_main, "qwen3_smart_resize", None)
+
+    assert vllm_main._resolve_qwen_video_resize_mode() is None
+
+
+def test_vllm_skips_video_contract_without_qwen_processor(monkeypatch):
+    vllm_main = _load_vllm_main()
+    monkeypatch.setattr(transformers, "Qwen3VLProcessor", None)
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="qwen3_vl",
+                architectures=["Qwen3VLForConditionalGeneration"],
+            ),
+            multimodal_config=SimpleNamespace(
+                mm_processor_kwargs=None,
+                get_video_pruning_spec=lambda: None,
+            ),
+        )
+    )
+
+    vllm_main.publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
+        (SimpleNamespace(video_token_index=202), 202),
+        (SimpleNamespace(), None),
+    ],
+)
+def test_resolve_video_token_id(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert _load_vllm_main()._resolve_video_token_id(vllm_config) == expected
+
+
+def test_kv_event_publisher_receives_video_token_id(monkeypatch):
+    vllm_main = _load_vllm_main()
+    publisher = Mock()
+    monkeypatch.setattr(vllm_main, "KvEventPublisher", publisher)
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(vllm_main, "get_configured_kv_event_block_size", lambda _: 16)
+    monkeypatch.setattr(vllm_main, "_resolve_image_token_id", lambda *_: 100)
+    monkeypatch.setattr(vllm_main, "_resolve_video_token_id", lambda _: 200)
+    monkeypatch.setattr(
+        vllm_main.ZmqEventPublisher,
+        "offset_endpoint_port",
+        lambda endpoint, data_parallel_rank: endpoint,
+    )
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(
+            enable_prefix_caching=True,
+            kv_events_config=SimpleNamespace(
+                enable_kv_cache_events=True,
+                endpoint="tcp://*:5557",
+            ),
+        ),
+        enable_local_indexer=True,
+        kv_state_endpoint=None,
+    )
+
+    publishers = vllm_main.setup_kv_event_publisher(
+        config, SimpleNamespace(), SimpleNamespace()
+    )
+
+    assert publishers is not None and len(publishers) == 1
+    assert publisher.call_args.kwargs["image_token_id"] == 100
+    assert publisher.call_args.kwargs["video_token_id"] == 200
 
 
 @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
