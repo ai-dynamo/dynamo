@@ -6,17 +6,11 @@
 # environments must produce byte-identical output, that output must match the
 # committed bytes, and it must be LF-only.
 #
-# Lived in docs-link-check.yml until it was moved here. It has nothing to do
-# with link checking, and as a script it also runs locally, which the inline
-# workflow step never could.
-#
 # Usage: docs/fern/scripts/check_llms_tables_determinism.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
-
-python3 docs/fern/scripts/gen_llms_tables.py --check
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -39,9 +33,8 @@ outputs=(
 # write on the unchanged fast-path, leaving cmp comparing the originals with
 # themselves and proving nothing about how the generator writes.
 #
-# The CRLF step goes through python3 rather than `sed -i`: GNU sed takes no
-# argument after -i and BSD sed requires one, so the inline `sed -i 's/$/\r/'`
-# this script came from fails on macOS. This script is meant to run locally.
+# CRLF goes through python3, not `sed -i`: GNU sed takes no argument after -i
+# and BSD sed requires one, so a `sed -i` form cannot run on both CI and macOS.
 for tree in first second; do
   rm -f "$tmp_dir/$tree/docs/fern/assets/releases.json" \
         "$tmp_dir/$tree/docs/fern/assets/releases-atom.xml"
