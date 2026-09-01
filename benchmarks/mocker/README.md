@@ -60,7 +60,7 @@ runs isolate steady-state replay. Equivalence of replay metrics is asserted firs
 (rel ≤ 1e-6); a divergence makes the speedup meaningless and fails the run.
 
 ```bash
-uv pip install '.[mocker]'           # plus a build with --features aic-forward-pass
+uv pip install .                     # plus a build with --features aic-forward-pass
 python benchmarks/mocker/bench_aic_rust_callback.py --warmup 1 --repeat 5
 ```
 

@@ -16,6 +16,20 @@ from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 
 
+def _planner_replay_adapter():
+    """Load Planner replay lazily to break the replay.api/mocker import cycle.
+
+    ``dynamo.replay.planner`` imports ``dynamo.mocker``, whose package
+    initializer imports ``dynamo.replay.api`` for compatibility wrappers.
+    Importing Planner at module scope therefore fails in spawned workers while
+    this module is still partially initialized.
+    """
+
+    from dynamo.replay.planner import planner_replay_adapter
+
+    return planner_replay_adapter
+
+
 class _CommonReplayOptions(TypedDict, total=False):
     extra_engine_args: Any
     prefill_engine_args: Any
@@ -33,6 +47,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     sla_itl_ms: float | None
     sla_e2e_ms: float | None
     planner_config: Any
+    performance_model_metadata: dict[str, Any] | None
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
@@ -64,7 +79,7 @@ def _normalize_trace_files(trace_files):
 
 
 def _planner_config_arg(planner_config):
-    """Normalize a planner config to the JSON-string form ``_prepare_planner_replay``
+    """Normalize a planner config to the JSON form ``prepare_planner_replay``
     expects: a dict is json-encoded; a str (path or inline JSON) passes through."""
     if isinstance(planner_config, dict):
         return json.dumps(planner_config)
@@ -140,6 +155,7 @@ def run_trace_replay(
     sla_itl_ms=None,
     sla_e2e_ms=None,
     planner_config=None,
+    performance_model_metadata=None,
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
@@ -189,12 +205,15 @@ def run_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        if trace_format not in ("mooncake", "dynamo"):
+        if trace_format not in (
+            "mooncake",
+            "applied_compute_agentic",
+            "dynamo",
+        ):
             raise ValueError(
-                "planner_config replay only supports trace_format='mooncake' or 'dynamo'"
+                "planner_config replay only supports trace_format='mooncake', "
+                "'applied_compute_agentic', or 'dynamo'"
             )
-        if max_sim_time_ms is not None:
-            raise ValueError("max_sim_time_ms is not supported with planner_config")
         if trace_format != "dynamo" and len(trace_files) != 1:
             raise ValueError(
                 f"planner_config replay with trace_format={trace_format!r} "
@@ -205,13 +224,12 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
-        from dynamo.replay.main import _planner_replay_adapter
-
-        adapter_scope = _planner_replay_adapter(
+        adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
+            performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
         )
@@ -300,6 +318,7 @@ def run_synthetic_trace_replay(
     sla_itl_ms=None,
     sla_e2e_ms=None,
     planner_config=None,
+    performance_model_metadata=None,
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
@@ -339,13 +358,12 @@ def run_synthetic_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        from dynamo.replay.main import _planner_replay_adapter
-
-        adapter_scope = _planner_replay_adapter(
+        adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
+            performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
         )

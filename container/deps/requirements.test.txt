@@ -18,8 +18,16 @@ coverage[toml]==7.13.1
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 filelock==3.25.1
-# For faster model downloads
-hf-xet==1.4.3
+# For faster model downloads. Must stay a floor, not an exact pin: huggingface_hub
+# raises its hf-xet requirement over time (>=1.4.3 at hub 1.18, >=1.5.1 at 1.19,
+# >=1.5.2 at 1.28), so pinning hf-xet exactly silently caps huggingface_hub at
+# whatever hub release still accepts it.
+hf-xet>=1.5.2
+# vLLM-Omni ships diffusers, which imports huggingface_hub.get_cached_repo_tree
+# (added in 1.23.0). This floor is satisfied by the runtime image's own hub
+# version; it is declared so that a future cap fails resolution loudly here
+# instead of silently downgrading the hub underneath diffusers.
+huggingface-hub>=1.23.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
 # For Kubernetes operations in deploy tests

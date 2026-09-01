@@ -2,123 +2,144 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim Sweep Reference
-subtitle: Input models, search behavior, and result fields for replay_optimize
+subtitle: Configuration domains, optimizer controls, and output for aisimulate recommend
 ---
 
-`dynamo.profiler.utils.replay_optimize` searches simulated deployment candidates by repeatedly
-calling the DynoSim run harness. This page describes the Python API. For a guided workflow, see
+`aisimulate recommend --stack dynamo` searches AISimulate engine configuration plus Dynamo Router
+and Planner domains. Each selected result is a concrete prediction YAML. For a guided workflow, see
 [Sweep DynoSim Configurations](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
 
-## Input models
+## Command
 
-The API takes a `ReplayOptimizeSpec` with the following models and fields.
+```bash
+aisimulate recommend --stack dynamo --config recommendation.yaml
+```
 
-### EngineSpec
+| Option | Default | Purpose |
+|---|---|---|
+| `-c`, `--config` | Required | Recommendation YAML |
+| `--stack` | `engine` | Set to `dynamo` to load the Dynamo runner and adapters |
+| `--set PATH=YAML_VALUE` | None | Override a configuration path after loading YAML; repeatable |
+| `--output-dir` | `./aisimulate-output` | Recommendation output directory |
+| `--overwrite` | `false` | Replace known AISimulate output files while preserving unrelated files |
+| `--format` | `table` | Standard-output format: `table` or `json` |
 
-| Field | Purpose |
+## Configuration Sections
+
+Recommendation accepts the prediction sections plus search controls:
+
+| Section | Required | Purpose |
+|---|---|---|
+| `traffic` | No | Workload source, load pattern, and stopping condition |
+| `engine` | Yes | Backend, topology, parallelism, scheduler, KV cache, and timing domains |
+| `router` | No | Dynamo routing domains |
+| `planner` | No | Dynamo Planner domains and presets |
+| `evaluation` | No | Service-level objective (SLO) thresholds |
+| `optimization` | Yes | Objective, hardware resolution, and candidate GPU constraints |
+| `optimizer` | No | Algorithm, trial budget, worker fan-out, timeout, and seed |
+
+Unknown fields are rejected. Conditional validation runs after each candidate is materialized.
+
+## Domain Syntax
+
+### Choices
+
+Use `choices` for categorical or explicitly enumerated values:
+
+```yaml
+engine:
+  backend: {choices: [vllm, sglang]}
+router:
+  policy: {choices: [round_robin, kv_router]}
+```
+
+### Numeric Ranges
+
+Use `range` for numeric domains:
+
+```yaml
+traffic:
+  load:
+    type: constant_rate
+    requests_per_second: {range: {min: 4, max: 32, step: 4, scale: linear}}
+```
+
+`scale` is `linear` by default. Use `log` only for positive bounds. A stepped integer range includes
+its upper bound when the step lands on it.
+
+### Presets
+
+A preset covers every knob in its smallest configuration group.
+
+- Omit `preset` or set it to `default` to use the built-in complete mappings.
+- Supply a list of names or complete mappings to search those mappings as categorical choices.
+- Set `preset: false` or `preset: {}` to search the group's independent knob domains.
+- Do not combine an active preset with an independent domain covered by that preset.
+
+Parallelism presets are special. The default invokes AISimulate's feasible parallel-configuration
+enumeration and projection. A custom list treats each complete parallelism mapping as one flat
+choice. With `preset: false`, each parallelism knob becomes an independent dimension before
+feasibility filtering.
+
+## Optimization
+
+`optimization.target` accepts:
+
+| Target | Ordering |
 |---|---|
-| `model` | Model identifier used by timing and candidate-shape providers |
-| `backend` | Backend used for the simulated engine |
-| `baseEngineArgs` | Shared JSON-like engine arguments for aggregated simulations |
-| `prefillEngineArgs` | Prefill-stage arguments for disaggregated simulations |
-| `decodeEngineArgs` | Decode-stage arguments for disaggregated simulations |
+| `throughput` | Highest output throughput |
+| `throughput_per_gpu` | Highest output throughput per simulated GPU |
+| `throughput_per_user` | Highest per-user output throughput |
+| `goodput` | Highest SLO-compliant request throughput |
+| `goodput_per_gpu` | Highest goodput per simulated GPU |
+| `ttft` | Lowest Time to First Token (TTFT) |
+| `e2e_latency` | Lowest end-to-end latency |
+| `pareto` | Complete nondominated objective front |
 
-### HardwareSpec
+`goodput` and `goodput_per_gpu` require `evaluation.sla` with either `e2e_ms` or both `ttft_ms` and
+`itl_ms`.
 
-| Field | Purpose |
-|---|---|
-| `system` | GPU system identifier used by the performance model |
-| `totalGpus` | Maximum simulated GPU budget for a candidate |
+`optimization.constraints.min_candidate_gpus` and `max_candidate_gpus` bound the simulated GPU
+footprint. When `engine.hardware: auto`, set one concrete `optimization.hardware` value.
 
-The GPU budget is a search constraint. It is not a requirement for the host that executes the
-simulation.
+## Optimizer Controls
 
-### WorkloadSpec
+| Field | Default | Purpose |
+|---|---:|---|
+| `optimizer.algorithm` | `bayesian` | `bayesian` or `random` search |
+| `optimizer.max_trials` | `320` | Hard total suggestion budget across active topology branches |
+| `optimizer.parallelism` | `16` | Concurrent candidate workers |
+| `optimizer.candidate_timeout_seconds` | `600` | Wall-clock timeout per candidate |
+| `optimizer.seed` | `42` | Stable base seed for branch samplers |
 
-`WorkloadSpec` accepts either a synthetic workload or a trace.
+Failed, infeasible, unsupported, and cached suggestions consume the trial budget. Every active
+topology branch must receive at least one trial.
 
-Common synthetic fields include:
+## Output
 
-- `isl`
-- `osl`
-- `requestCount`
-- `concurrency`
-- `sharedPrefixRatio`
-- `numPrefixGroups`
+Recommendation writes:
 
-Trace workloads use `traceFile` and can set `arrivalSpeedupRatio`. Synthetic-only fields are ignored
-when `traceFile` is present. Mooncake-style traces use 512 tokens per `hash_id`; the underlying
-`run_trace_replay(...)` API defaults `trace_block_size` to `512`. `WorkloadSpec` does not currently
-expose a separate `traceBlockSize` field.
+```text
+aisimulate-output/
+└── recommendations/
+    ├── 0001.yaml
+    ├── 0002.yaml
+    └── ...
+```
 
-### SLASpec
+Each numbered YAML contains one concrete prediction configuration with no `optimization`,
+`optimizer`, preset, domain, or `auto` value. Run any result directly:
 
-`SLASpec` can constrain:
+```bash
+aisimulate predict \
+  --stack dynamo \
+  --config aisimulate-output/recommendations/0001.yaml
+```
 
-- TTFT
-- ITL
-- end-to-end latency
-- p95 variants of the supported latency bounds
+Scalar objectives write all feasible candidates in deterministic best-to-worst order. Pareto writes
+the complete nondominated front; its deterministic file order is not a scalar ranking.
 
-Input fields use DynamoGraphDeploymentRequest-style lowerCamelCase names. The result DataFrames use
-the DynoSim runner metric names described in [Result columns](#result-columns).
-
-### RouterSpec
-
-| Field | Purpose |
-|---|---|
-| `mode` | Routing strategy to search; use `both` to compare round-robin and KV routing |
-| `overlapCredits` | Candidate KV-overlap score credits in the range `0.0` to `1.0` |
-| `prefillLoadScales` | Candidate weights for prompt-side load |
-| `baseConfig` | Base KV-router configuration applied to each candidate |
-
-### Search fields
-
-| Field | Purpose |
-|---|---|
-| `objective` | Ranking target, such as throughput, mean TTFT, or mean end-to-end latency |
-| `maxParallelEvals` | Maximum candidate evaluations executed concurrently |
-
-## Search behavior
-
-The optimizer searches tensor-parallel shapes, worker counts, and router settings under the GPU
-budget. Each state is evaluated by the DynoSim run harness. States that violate any SLA or budget
-constraint are retained as infeasible results but cannot become `best_feasible`.
-
-For disaggregated deployments, the search can vary prefill and decode tensor parallelism and worker
-counts independently. Aggregated searches use one tensor-parallel size and worker count.
-
-The search is heuristic. It prioritizes states near the GPU-budget edge rather than exhaustively
-evaluating every possible configuration.
-
-## Result object
-
-`DenseReplayOptimizationResult` contains:
-
-| Field | Description |
-|---|---|
-| `best_feasible` | Highest-ranked visited state that satisfies all SLA and budget constraints |
-| `best_infeasible` | Highest-ranked visited state that violates at least one constraint |
-| `evaluated_df` | DataFrame containing every evaluated state |
-| `feasible_df` | DataFrame containing only feasible states |
-
-## Result columns
-
-Common DataFrame columns include:
-
-| Category | Columns |
-|---|---|
-| Topology | `prefill_tp`, `decode_tp`, `prefill_workers`, `decode_workers` |
-| Routing | `router_mode`, `overlap_score_credit`, `prefill_load_scale` |
-| Budget | `total_gpus_used` |
-| Throughput | `output_throughput_tok_s` |
-| Cache behavior | `prefix_cache_reused_ratio` |
-| Latency | `mean_ttft_ms`, `mean_tpot_ms`, `mean_e2e_latency_ms` |
-
-`total_gpus_used` is the simulated footprint of the candidate. It is not the number of physical GPUs
-allocated to the process running the sweep.
-
-## Related pages
+## Related Pages
 
 - [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx)
 - [DynoSim Replay CLI Reference](dynosim-replay-cli-reference.mdx)
