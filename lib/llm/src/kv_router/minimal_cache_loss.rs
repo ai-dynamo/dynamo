@@ -80,6 +80,7 @@ impl CacheHistory {
         )))
     }
 
+    #[cfg(test)]
     pub fn new(capacity_blocks: usize, block_tokens: u32) -> Self {
         Self::new_with_budget(
             capacity_blocks,
