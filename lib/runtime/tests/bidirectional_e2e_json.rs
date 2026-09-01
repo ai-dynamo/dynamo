@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
-    RequestPlanePayloadCodec,
+    RequestPlanePayloadCodec, ResponseFrameKind,
     egress::push_router::{PushRouter, RouterMode},
 };
 use dynamo_runtime::{
@@ -132,7 +132,7 @@ impl IngressResponseEncoder<NonSerdeResponse> for FailingResponseAdapter {
             .map_err(|error| PipelineError::SerializationError(error.to_string()))?;
         Ok(EncodedResponseFrame {
             bytes: bytes.into(),
-            is_error: false,
+            kind: ResponseFrameKind::Data,
             stop_stream: false,
         })
     }
