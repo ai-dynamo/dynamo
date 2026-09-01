@@ -11,12 +11,6 @@ from typing import Any, Protocol
 
 import yaml
 
-from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
-from dynamo.profiler.utils.dgd_materialization import (
-    DGDMaterializationPurpose,
-    materialize_dgd,
-)
-
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
 _RUNTIME_VERSION_PATTERN = re.compile(
     r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$"
@@ -99,6 +93,13 @@ def validate_candidate(candidate: CandidateLike) -> None:
         )
 
 
+def _materialize_dgd(*args: Any, **kwargs: Any) -> Any:
+    """Load legacy runtime modifiers only when a manifest is finalized."""
+    from dynamo.profiler.utils.dgd_materialization import materialize_dgd
+
+    return materialize_dgd(*args, **kwargs)
+
+
 def patch_dgd_manifest(
     rendered: str,
     candidate: CandidateLike,
@@ -124,13 +125,19 @@ def patch_dgd_manifest(
     # TODO(#13770 follow-up after #14040): Remove this explicit TRT-LLM patch
     # when required runtime rules run once during base rendering.
     if candidate.config.get("backend") == "trtllm":
+        from dynamo.profiler.utils.config_modifiers.trtllm import (
+            enable_trtllm_chunked_prefill,
+        )
+
         dgd = enable_trtllm_chunked_prefill(dgd)
 
     # TODO(#13770 follow-up after #14040): Remove this materialize_dgd() call
     # once required runtime rules run during base rendering and optional patches
     # move into the common assembler.
+    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
+
     try:
-        dgd = materialize_dgd(
+        dgd = _materialize_dgd(
             dgd,
             purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend=candidate.config.get("backend"),
