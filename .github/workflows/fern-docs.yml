@@ -141,14 +141,28 @@ jobs:
         # gitignored in the source tree and generated here against the exact
         # ref being published, so source PRs never carry (or review) the
         # regenerated MDX. Generation must precede the pages-dev sync below,
-        # which rsyncs whatever sits under docs/fern/pages/. The Kubernetes
-        # reference regenerates from a docs-owned source file and stays
-        # committed, so it keeps the freshness check.
+        # which rsyncs whatever sits under docs/fern/pages/.
+        #
+        # The Kubernetes reference stays committed, because reviewers read it
+        # in the PR diff, but it is REGENERATED here rather than checked. Its
+        # only input is the docs-owned api-reference-k8s.md sitting in this
+        # same checkout, so a write-mode run always produces the output the
+        # tagged source implies, and the rsync below publishes it.
+        #
+        # This used to be `--check`, which failed the step and so skipped the
+        # sync and publish steps entirely. The per-PR gate is `--since`-scoped
+        # (pre-merge.yml) so that a branch is only failed for drift it caused,
+        # which is right, but it leaves merge skew uncovered: a PR that
+        # regenerates against main@T1 merges at T3 after another PR edited the
+        # source at T2, and neither PR was at fault. Main went stale and
+        # docs.nvidia.com silently stopped updating until somebody noticed.
+        # Publishing generated output removes that failure mode; the scoped
+        # pre-merge gate still keeps the committed copy honest for review.
         run: |
           python3 -m pip install 'griffe==2.1.0'
           python3 source-checkout/docs/fern/scripts/gen_python_api.py
           python3 source-checkout/docs/fern/scripts/gen_rust_api.py
-          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check
+          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
