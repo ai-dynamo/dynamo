@@ -2097,6 +2097,7 @@ mod tests {
             lower_tier: lower_tiers.clone(),
             approx: None,
             primary_records_routing_decisions: false,
+            session_prefix_index: None,
         };
         lower_tiers
             .get_or_create(StorageTier::HostPinned)
