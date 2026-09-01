@@ -46,10 +46,20 @@ const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
+const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached the libzmq ZMQ_MAX_SOCKETS context limit or its operating-system file-descriptor limit. Check the libzmq context limit and `ulimit -n`. For deployments with many event publishers, use ZMQ broker mode with DYN_ZMQ_BROKER_URL, or DYN_ZMQ_BROKER_ENABLED when the broker is registered in discovery";
+
 use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
+
+fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
+    if matches!(error, tmq::TmqError::Zmq(zmq::Error::EMFILE)) {
+        anyhow::Error::new(error).context(ZMQ_SOCKET_LIMIT_GUIDANCE)
+    } else {
+        error.into()
+    }
+}
 
 fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
@@ -115,7 +125,9 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let socket = configure_publish_builder(publish(&ctx))
+            .bind(&actual_endpoint)
+            .map_err(map_socket_creation_error)?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -140,7 +152,9 @@ impl ZmqPubTransport {
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
+        let socket = configure_publish_builder(publish(&ctx))
+            .connect(xsub_endpoint)
+            .map_err(map_socket_creation_error)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -163,7 +177,9 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+        let socket = configure_publish_builder(publish(&ctx))
+            .connect(first_endpoint)
+            .map_err(map_socket_creation_error)?;
 
         for endpoint in endpoints {
             socket.get_socket().connect(endpoint)?;
@@ -339,11 +355,10 @@ impl ZmqSubTransport {
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context();
-        Ok(
-            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
-                .connect(endpoint)?
-                .subscribe(topic.as_bytes())?,
-        )
+        let socket = configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
+            .connect(endpoint)
+            .map_err(map_socket_creation_error)?;
+        Ok(socket.subscribe(topic.as_bytes())?)
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -436,7 +451,8 @@ impl ZmqSubTransport {
 
         let ctx = shared_zmq_context();
         let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(first_endpoint)?
+            .connect(first_endpoint)
+            .map_err(map_socket_creation_error)?
             .subscribe(topic.as_bytes())?;
 
         for endpoint in endpoints_iter {
@@ -583,6 +599,26 @@ mod tests {
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn emfile_explains_zmq_socket_capacity_options() {
+        let error = map_socket_creation_error(tmq::TmqError::Zmq(zmq::Error::EMFILE));
+        let message = format!("{error:#}");
+
+        assert!(message.contains("ZMQ_MAX_SOCKETS"));
+        assert!(message.contains("ulimit -n"));
+        assert!(message.contains("DYN_ZMQ_BROKER_URL"));
+        assert!(message.contains("DYN_ZMQ_BROKER_ENABLED"));
+    }
+
+    #[test]
+    fn other_zmq_errors_do_not_include_socket_capacity_guidance() {
+        let error = map_socket_creation_error(tmq::TmqError::Zmq(zmq::Error::EINVAL));
+        let message = format!("{error:#}");
+
+        assert!(!message.contains("ZMQ_MAX_SOCKETS"));
+        assert!(message.contains("Invalid argument"));
+    }
 
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher
