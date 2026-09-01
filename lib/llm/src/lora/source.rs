@@ -347,12 +347,15 @@ impl S3LoRASource {
         Ok(String::from(endpoint).trim_end_matches('/').to_string())
     }
 
-    /// Parses the boolean forms accepted by object_store configuration.
-    fn parse_config_bool(value: &str) -> Result<bool> {
+    /// Reads one explicitly supported boolean setting from the environment.
+    fn config_bool_from_env(name: &str) -> Result<Option<bool>> {
+        let Ok(value) = std::env::var(name) else {
+            return Ok(None);
+        };
         match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "on" | "yes" | "y" => Ok(true),
-            "0" | "false" | "off" | "no" | "n" => Ok(false),
-            _ => anyhow::bail!("AWS_VIRTUAL_HOSTED_STYLE_REQUEST must be a boolean value"),
+            "1" | "true" | "on" | "yes" | "y" => Ok(Some(true)),
+            "0" | "false" | "off" | "no" | "n" => Ok(Some(false)),
+            _ => anyhow::bail!("{name} must be a boolean value"),
         }
     }
 
@@ -364,9 +367,14 @@ impl S3LoRASource {
         endpoint: Option<&str>,
         timeout_secs: u64,
     ) -> Result<AmazonS3Builder> {
-        let mut builder = AmazonS3Builder::from_env()
+        let allow_http = Self::config_bool_from_env("AWS_ALLOW_HTTP")?.unwrap_or_default();
+        let virtual_hosted_style =
+            Self::config_bool_from_env("AWS_VIRTUAL_HOSTED_STYLE_REQUEST")?.unwrap_or_default();
+        let mut builder = AmazonS3Builder::new()
             .with_region(region)
             .with_bucket_name(bucket)
+            .with_allow_http(allow_http)
+            .with_virtual_hosted_style_request(virtual_hosted_style)
             .with_config(
                 object_store::aws::AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
                 format!("{timeout_secs}s"),
@@ -374,11 +382,6 @@ impl S3LoRASource {
             .with_credentials(credentials);
 
         if let Some(endpoint) = endpoint {
-            let virtual_hosted_style = builder
-                .get_config_value(&object_store::aws::AmazonS3ConfigKey::VirtualHostedStyleRequest)
-                .map(|value| Self::parse_config_bool(&value))
-                .transpose()?
-                .unwrap_or_default();
             let endpoint = if virtual_hosted_style {
                 Self::bucket_qualified_endpoint(endpoint, bucket)?
             } else {
@@ -394,7 +397,14 @@ impl S3LoRASource {
     async fn aws_s3_configuration(&self) -> Result<&AwsS3Configuration> {
         self.configuration
             .get_or_try_init(|| async {
+                // Preserve the legacy us-east-1 fallback without querying IMDS for a region.
+                let region_provider = aws_config::meta::region::RegionProviderChain::first_try(
+                    aws_config::environment::region::EnvironmentVariableRegionProvider::new(),
+                )
+                .or_else(aws_config::profile::region::ProfileFileRegionProvider::new())
+                .or_else(aws_types::region::Region::new("us-east-1"));
                 let aws_config = aws_config::defaults(aws_config::BehaviorVersion::v2026_01_12())
+                    .region(region_provider)
                     .load()
                     .await;
                 let credentials = aws_config
@@ -664,7 +674,7 @@ mod tests {
         provider::{ProvideCredentials, SharedCredentialsProvider, future},
     };
     use hf_hub::Cache;
-    use mockito::Matcher;
+    use mockito::{Matcher, ServerOpts};
     use object_store::{
         StaticCredentialProvider,
         aws::{AmazonS3ConfigKey, AwsCredentialProvider},
@@ -753,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest),
-            Some("1".to_string())
+            Some("true".to_string())
         );
     }
 
@@ -775,10 +785,17 @@ mod tests {
     #[serial_test::serial]
     #[tokio::test]
     async fn s3_source_downloads_from_bucket_qualified_virtual_hosted_endpoint() {
-        let mut server = mockito::Server::new_async().await;
+        let mut server = mockito::Server::new_with_opts_async(ServerOpts {
+            host: "::1",
+            ..ServerOpts::default()
+        })
+        .await;
+        let port = server.socket_address().port();
+        let endpoint = format!("http://localhost:{port}");
+        let bucket_host = format!("bucket.localhost:{port}");
         let list = server
             .mock("GET", "/")
-            .match_header("host", "bucket.s3.example")
+            .match_header("host", bucket_host.as_str())
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("list-type".into(), "2".into()),
                 Matcher::UrlEncoded("prefix".into(), "adapter/".into()),
@@ -792,7 +809,7 @@ mod tests {
             .await;
         let get = server
             .mock("GET", "/adapter/adapter_config.json")
-            .match_header("host", "bucket.s3.example")
+            .match_header("host", bucket_host.as_str())
             .with_status(200)
             .with_body("{}")
             .create_async()
@@ -812,10 +829,10 @@ mod tests {
                 ("AWS_SHARED_CREDENTIALS_FILE", None),
                 ("AWS_CONFIG_FILE", None),
                 ("AWS_PROFILE", None),
-                ("AWS_ENDPOINT_URL", Some("http://s3.example")),
+                ("AWS_ENDPOINT_URL", Some(endpoint.as_str())),
                 ("AWS_ALLOW_HTTP", Some("true")),
                 ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
-                ("AWS_PROXY_URL", Some(server.url().as_str())),
+                ("AWS_PROXY_URL", None),
                 ("AWS_PROXY_EXCLUDES", None),
                 ("AWS_EC2_METADATA_DISABLED", Some("true")),
             ],
@@ -912,7 +929,7 @@ mod tests {
 
     #[serial_test::serial]
     #[tokio::test]
-    async fn s3_source_downloads_with_shared_credentials_and_profile_endpoint() {
+    async fn s3_source_ignores_skip_signature_with_shared_credentials_and_profile_endpoint() {
         let mut server = mockito::Server::new_async().await;
         let list = server
             .mock("GET", "/bucket")
@@ -974,6 +991,7 @@ mod tests {
                 ("AWS_ENDPOINT_URL", None),
                 ("AWS_ALLOW_HTTP", Some("true")),
                 ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", None),
+                ("AWS_SKIP_SIGNATURE", Some("true")),
                 ("AWS_PROXY_URL", None),
                 ("AWS_PROXY_EXCLUDES", None),
                 ("AWS_EC2_METADATA_DISABLED", Some("true")),
@@ -993,6 +1011,62 @@ mod tests {
         );
         list.assert_async().await;
         get.assert_async().await;
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn s3_configuration_defaults_region_without_querying_imds() {
+        let mut imds = mockito::Server::new_async().await;
+        let token = imds
+            .mock("PUT", "/latest/api/token")
+            .expect(0)
+            .with_status(200)
+            .with_header("x-aws-ec2-metadata-token-ttl-seconds", "21600")
+            .with_body("token")
+            .create_async()
+            .await;
+        let region = imds
+            .mock("GET", "/latest/meta-data/placement/region")
+            .expect(0)
+            .with_status(200)
+            .with_body("us-west-2")
+            .create_async()
+            .await;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config");
+        let credentials_path = temp.path().join("credentials");
+        fs::write(&config_path, "").unwrap();
+        fs::write(&credentials_path, "").unwrap();
+        let imds_endpoint = imds.url();
+
+        let resolved_region = temp_env::async_with_vars(
+            [
+                ("AWS_ACCESS_KEY_ID", Some("test-access-key")),
+                ("AWS_SECRET_ACCESS_KEY", Some("test-secret-key")),
+                ("AWS_REGION", None),
+                ("AWS_DEFAULT_REGION", None),
+                ("AWS_CONFIG_FILE", config_path.to_str()),
+                ("AWS_SHARED_CREDENTIALS_FILE", credentials_path.to_str()),
+                ("AWS_PROFILE", None),
+                ("AWS_ENDPOINT_URL", Some("https://s3.example")),
+                ("AWS_EC2_METADATA_DISABLED", Some("false")),
+                (
+                    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+                    Some(imds_endpoint.as_str()),
+                ),
+            ],
+            async {
+                let source = S3LoRASource::from_env();
+                Ok::<_, anyhow::Error>(source.aws_s3_configuration().await?.region.clone())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved_region, "us-east-1");
+        token.assert_async().await;
+        region.assert_async().await;
     }
 
     #[serial_test::serial]
