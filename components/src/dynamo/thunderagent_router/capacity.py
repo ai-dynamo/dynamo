@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-worker retention budget derived from worker model deployment cards.
+"""Per-replica retention budget derived from worker model deployment cards.
 
 The device KV pool is always ``block_size * total_kv_blocks``. Backends may
 publish additional native offloading capacity through common runtime metadata.
@@ -17,6 +17,7 @@ from typing import Optional
 from dynamo.common.native_offloading import get_native_offloading_capacity_tokens
 from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import Client, Endpoint
+from dynamo.thunderagent_router.program_state import ReplicaKey
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class WorkerCapacityProvider:
         # Cache parsed cards keyed on the raw JSON string so a subsequent
         # snapshot() call avoids re-parsing on the request hot path.
         self._parsed: dict[str, Optional[int]] = {}
+        self._parsed_dp_ranges: dict[str, tuple[int, int]] = {}
 
     def start(self) -> None:
         if self._subscriber is not None:
@@ -48,7 +50,7 @@ class WorkerCapacityProvider:
             logger.warning("WorkerCapacityProvider shutdown error: %s", exc)
         self._subscriber = None
 
-    def snapshot(self) -> dict[int, int]:
+    def snapshot(self) -> dict[ReplicaKey, int]:
         if self._subscriber is None:
             return {}
         try:
@@ -57,7 +59,7 @@ class WorkerCapacityProvider:
             logger.debug("WorkerCapacityProvider snapshot error: %s", exc)
             return {}
 
-        out: dict[int, int] = {}
+        out: dict[ReplicaKey, int] = {}
         for worker_id_str, card_json in cards.items():
             try:
                 worker_id = int(worker_id_str)
@@ -65,7 +67,9 @@ class WorkerCapacityProvider:
                 continue
             retention_tokens = self._parse_pool_tokens(card_json)
             if retention_tokens is not None:
-                out[worker_id] = retention_tokens
+                dp_start, dp_size = self._parse_dp_range(card_json)
+                for dp_rank in range(dp_start, dp_start + dp_size):
+                    out[(worker_id, dp_rank)] = retention_tokens
         return out
 
     def live_worker_ids(self) -> set[int]:
@@ -101,4 +105,40 @@ class WorkerCapacityProvider:
                 if offloaded_tokens is not None:
                     result += offloaded_tokens
         self._parsed[card_json] = result
+        return result
+
+    def _parse_dp_range(self, card_json: str) -> tuple[int, int]:
+        """Return the global DP rank range advertised by an MDC card.
+
+        Older cards do not include DP metadata, so they represent one replica
+        at rank zero.  Invalid metadata is treated the same way; retaining a
+        single conservative replica is safer than inventing a multi-rank
+        topology from malformed input.
+        """
+        cached = self._parsed_dp_ranges.get(card_json)
+        if cached is not None:
+            return cached
+
+        result = (0, 1)
+        try:
+            card = json.loads(card_json)
+        except json.JSONDecodeError:
+            card = None
+        if isinstance(card, dict):
+            runtime_config = card.get("runtime_config")
+            if isinstance(runtime_config, dict):
+                start = runtime_config.get("data_parallel_start_rank", 0)
+                size = runtime_config.get("data_parallel_size", 1)
+                valid_start = (
+                    isinstance(start, int)
+                    and not isinstance(start, bool)
+                    and start >= 0
+                )
+                valid_size = (
+                    isinstance(size, int) and not isinstance(size, bool) and size > 0
+                )
+                if valid_start and valid_size:
+                    result = (start, size)
+
+        self._parsed_dp_ranges[card_json] = result
         return result

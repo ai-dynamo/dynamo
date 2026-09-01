@@ -49,12 +49,21 @@ def _card(
     block_size: Optional[int],
     total_blocks: Optional[int],
     host_total_tokens: Optional[int] = None,
+    dp_start: Optional[int] = None,
+    dp_size: Optional[int] = None,
 ) -> str:
     body: dict = {}
     if block_size is not None:
         body["kv_cache_block_size"] = block_size
     if total_blocks is not None:
         body["runtime_config"] = {"total_kv_blocks": total_blocks}
+    if dp_start is not None or dp_size is not None:
+        body.setdefault("runtime_config", {})["data_parallel_start_rank"] = (
+            0 if dp_start is None else dp_start
+        )
+        body.setdefault("runtime_config", {})["data_parallel_size"] = (
+            1 if dp_size is None else dp_size
+        )
     if host_total_tokens is not None:
         body.setdefault("runtime_config", {}).setdefault("runtime_data", {})[
             "native_offloading_capacity"
@@ -64,12 +73,12 @@ def _card(
 
 def test_snapshot_extracts_kv_pool_tokens():
     provider, _ = _make_provider({"1": _card(16, 1000), "2": _card(8, 2000)})
-    assert provider.snapshot() == {1: 16_000, 2: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000, (2, 0): 16_000}
 
 
 def test_snapshot_adds_native_offloading_tokens_to_retention_budget():
     provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=300)})
-    assert provider.snapshot() == {1: 16_300}
+    assert provider.snapshot() == {(1, 0): 16_300}
 
 
 def test_snapshot_ignores_invalid_native_offloading_capacity():
@@ -78,7 +87,7 @@ def test_snapshot_ignores_invalid_native_offloading_capacity():
         "native_offloading_capacity": {"total_tokens": "300"}
     }
     provider, _ = _make_provider({"1": json.dumps(card)})
-    assert provider.snapshot() == {1: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000}
 
 
 def test_snapshot_skips_malformed_cards():
@@ -92,12 +101,36 @@ def test_snapshot_skips_malformed_cards():
             "6": _card(16, "abc"),  # type: ignore[arg-type]
         }
     )
-    assert provider.snapshot() == {1: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000}
 
 
 def test_snapshot_skips_unparseable_worker_ids():
     provider, _ = _make_provider({"not-an-int": _card(16, 1000)})
     assert provider.snapshot() == {}
+
+
+def test_snapshot_expands_capacity_for_each_data_parallel_rank():
+    provider, _ = _make_provider(
+        {
+            "7": _card(16, 1000, dp_start=2, dp_size=3),
+            "8": _card(8, 2000, dp_size=2),
+        }
+    )
+    assert provider.snapshot() == {
+        (7, 2): 16_000,
+        (7, 3): 16_000,
+        (7, 4): 16_000,
+        (8, 0): 16_000,
+        (8, 1): 16_000,
+    }
+
+
+def test_snapshot_uses_single_rank_for_invalid_data_parallel_metadata():
+    card = json.loads(_card(16, 1000))
+    card["runtime_config"]["data_parallel_start_rank"] = -1
+    card["runtime_config"]["data_parallel_size"] = 4
+    provider, _ = _make_provider({"1": json.dumps(card)})
+    assert provider.snapshot() == {(1, 0): 16_000}
 
 
 def test_parsed_cards_cache_hits_on_repeat_snapshot():
@@ -110,7 +143,7 @@ def test_parsed_cards_cache_hits_on_repeat_snapshot():
     # Second snapshot returns same result without touching json.loads;
     # we sentinel-check by mutating the cached value.
     provider._parsed[cards["1"]] = 999_999
-    assert provider.snapshot() == {1: 999_999}
+    assert provider.snapshot() == {(1, 0): 999_999}
 
 
 def test_snapshot_returns_empty_when_subscriber_unset():
