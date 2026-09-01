@@ -18,22 +18,67 @@ use futures::StreamExt;
 type PayloadStream =
     Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>;
 
-/// Resolves to `Some(final_response)` when aggregation succeeds, or `None` when the
-/// client cancels mid-stream / the aggregator fails. The caller emits the single
-/// combined request payload record once either way — with the response on `Some`, or
-/// request-only (`response = None`) on `None`.
-type PayloadFuture =
-    Pin<Box<dyn std::future::Future<Output = Option<NvCreateChatCompletionResponse>> + Send>>;
+/// What the aggregation of a response stream produced, for request payload capture.
+///
+/// `response` is the aggregated record when aggregation succeeded, or the partial
+/// record recovered from the chunks that arrived before a failure. `drop_reason` is
+/// set whenever the record is not a faithful copy of what the client received, and
+/// is published verbatim as the record's `payload_drop_reason`. The two travel
+/// together so the emit site can derive `payload_complete` from the data rather
+/// than assuming it: a partial response is `Some` response *and* `Some` reason.
+pub struct PayloadOutcome {
+    pub response: Option<NvCreateChatCompletionResponse>,
+    pub drop_reason: Option<String>,
+}
+
+impl PayloadOutcome {
+    fn complete(response: NvCreateChatCompletionResponse) -> Self {
+        Self {
+            response: Some(response),
+            drop_reason: None,
+        }
+    }
+
+    fn dropped(
+        response: Option<NvCreateChatCompletionResponse>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            response,
+            drop_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// The response stream ended without ever yielding a chunk.
+const DROP_EMPTY_RESPONSE_STREAM: &str = "empty_response_stream";
+
+/// The aggregation never reported an outcome at all: the SSE consumer dropped the
+/// pass-through stream before end-of-stream, or the aggregation task was cancelled.
+const DROP_CLIENT_CANCELLED: &str = "client_cancelled";
+
+/// Build the `aggregation_failed` drop reason. The colon-delimited
+/// `identifier:detail` shape matches the marker reasons `otel_sink.rs` already
+/// publishes, so a consumer can parse one grammar across both producers.
+fn aggregation_failed_reason(error: impl std::fmt::Display) -> String {
+    format!("aggregation_failed:{error}")
+}
+
+/// Resolves to the aggregation outcome. On success it carries the final response and
+/// no drop reason; otherwise it carries a drop reason naming why the record is
+/// incomplete, plus whatever partial response was recovered. The caller emits the
+/// single combined request payload record once, either way.
+type PayloadFuture = Pin<Box<dyn std::future::Future<Output = PayloadOutcome> + Send>>;
 
 /// Forwards transformed chunks unchanged; collects them for aggregation.
 pub struct PassThroughWithAgg<S> {
     inner: S,
     chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
-    done_tx: Option<oneshot::Sender<NvCreateChatCompletionResponse>>,
+    done_tx: Option<oneshot::Sender<PayloadOutcome>>,
 }
 
 impl<S> PassThroughWithAgg<S> {
-    fn new(inner: S, tx: oneshot::Sender<NvCreateChatCompletionResponse>) -> Self {
+    fn new(inner: S, tx: oneshot::Sender<PayloadOutcome>) -> Self {
         Self {
             inner,
             chunks: Vec::new(),
@@ -64,21 +109,14 @@ where
                         tracing::debug!(
                             "request payload: empty response stream, no response to aggregate"
                         );
-                        drop(tx);
+                        let _ = tx.send(PayloadOutcome::dropped(None, DROP_EMPTY_RESPONSE_STREAM));
                         return Poll::Ready(None);
                     }
-                    let chunks_stream = futures::stream::iter(chunks);
                     let parsing_options = ParsingOptions::default();
 
                     tokio::spawn(async move {
-                        match DeltaAggregator::apply(chunks_stream, parsing_options).await {
-                            Ok(final_resp) => {
-                                let _ = tx.send(final_resp);
-                            }
-                            Err(e) => {
-                                tracing::warn!("request payload: aggregation failed: {e}");
-                            }
-                        }
+                        let _ =
+                            tx.send(aggregate_with_partial_recovery(chunks, parsing_options).await);
                     });
                 }
                 Poll::Ready(None)
@@ -88,27 +126,71 @@ where
     }
 }
 
-/// Return (pass-through stream, future -> final aggregated response for request payload capture).
+/// Aggregate the buffered chunks, keeping whatever content arrived before an
+/// error-tagged chunk.
+///
+/// `Annotated::into_data` returns `Err` for exactly the chunks `is_error()` matches,
+/// and `DeltaAggregator::apply` drives the buffer through a `try_fold` that
+/// short-circuits on the first of them and discards the accumulator. So a buffer
+/// containing an error-tagged chunk can only aggregate to `Err`, and aggregating the
+/// prefix before that chunk recovers the content the client already received. The
+/// aggregator itself is deliberately left alone: its short-circuit is load-bearing on
+/// the client-facing non-streaming path, where a typed backend error must surface as
+/// an error rather than as a truncated success.
+async fn aggregate_with_partial_recovery(
+    mut chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+    parsing_options: ParsingOptions,
+) -> PayloadOutcome {
+    let Some(error_at) = chunks.iter().position(|chunk| chunk.is_error()) else {
+        return match DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options).await {
+            Ok(final_resp) => PayloadOutcome::complete(final_resp),
+            Err(e) => {
+                tracing::warn!("request payload: aggregation failed: {e}");
+                PayloadOutcome::dropped(None, aggregation_failed_reason(e))
+            }
+        };
+    };
+
+    let error = match chunks[error_at].clone().into_data() {
+        Err(error) => error.to_string(),
+        // Unreachable: `is_error()` is the same predicate `into_data` errors on.
+        // Kept so a future divergence still yields a well-formed reason.
+        Ok(_) => "unknown error".to_string(),
+    };
+    tracing::warn!("request payload: aggregation failed: {error}");
+    let reason = aggregation_failed_reason(&error);
+
+    chunks.truncate(error_at);
+    if chunks.is_empty() {
+        return PayloadOutcome::dropped(None, reason);
+    }
+    let partial = DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options)
+        .await
+        .ok();
+    PayloadOutcome::dropped(partial, reason)
+}
+
+/// Return (pass-through stream, future -> aggregation outcome for request payload capture).
 pub fn scan_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Unpin + Send + 'static,
 {
-    let (tx, rx) = oneshot::channel::<NvCreateChatCompletionResponse>();
+    let (tx, rx) = oneshot::channel::<PayloadOutcome>();
     let passthrough = PassThroughWithAgg::new(stream, tx);
     (
         Box::pin(passthrough),
         Box::pin(async move {
             match rx.await {
-                Ok(resp) => Some(resp),
+                Ok(outcome) => outcome,
                 Err(_) => {
-                    // tx dropped without sending: either the SSE consumer dropped the
-                    // passthrough stream before end-of-stream (client cancel) or the
-                    // spawned `DeltaAggregator::apply` errored. Either way, the combined
-                    // record is emitted with `response = None`.
+                    // tx dropped without sending: the SSE consumer dropped the
+                    // passthrough stream before end-of-stream (client cancel), or the
+                    // spawned aggregation task was cancelled before it reported.
+                    // Aggregation failures report themselves and no longer land here.
                     tracing::debug!(
-                        "request payload: response aggregation produced no record (client cancel or aggregation error)"
+                        "request payload: response aggregation produced no outcome (client cancel)"
                     );
-                    None
+                    PayloadOutcome::dropped(None, DROP_CLIENT_CANCELLED)
                 }
             }
         }),
@@ -120,7 +202,7 @@ pub fn fold_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
-    let (tx, rx) = oneshot::channel::<NvCreateChatCompletionResponse>();
+    let (tx, rx) = oneshot::channel::<PayloadOutcome>();
 
     let single_chunk_stream = async move {
         let chunks: Vec<_> = stream.collect().await;
@@ -129,16 +211,17 @@ where
 
         match DeltaAggregator::apply(chunks_stream, parsing_options).await {
             Ok(final_resp) => {
-                let _ = tx.send(final_resp.clone());
+                let _ = tx.send(PayloadOutcome::complete(final_resp.clone()));
                 final_response_to_one_chunk_stream(final_resp)
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
-                // Drop tx without sending so the request payload future resolves to None.
-                // The client still receives a (best-effort) empty fallback chunk so
-                // the HTTP response shape stays valid; the combined request payload record is
-                // emitted with `response = None`.
-                drop(tx);
+                // Report the failure instead of dropping tx silently, so the record
+                // carries why it has no response. The client still receives a
+                // (best-effort) empty fallback chunk so the HTTP response shape stays
+                // valid; the combined request payload record is emitted with
+                // `response = None` and this drop reason.
+                let _ = tx.send(PayloadOutcome::dropped(None, aggregation_failed_reason(&e)));
                 let fallback = NvCreateChatCompletionResponse {
                     inner: dynamo_protocols::types::CreateChatCompletionResponse {
                         id: String::new(),
@@ -159,12 +242,12 @@ where
 
     let future = Box::pin(async move {
         match rx.await {
-            Ok(resp) => Some(resp),
+            Ok(outcome) => outcome,
             Err(_) => {
                 tracing::debug!(
-                    "request payload: fold response aggregation produced no record (client cancel or aggregation error)"
+                    "request payload: fold response aggregation produced no outcome (client cancel)"
                 );
-                None
+                PayloadOutcome::dropped(None, DROP_CLIENT_CANCELLED)
             }
         }
     });
@@ -472,7 +555,16 @@ mod tests {
         let input_stream = stream::iter(chunks.clone());
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
-        let final_resp = future.await.expect("aggregation should produce a record");
+        let outcome = future.await;
+        // Negative control for the drop-reason work: a clean stream must still
+        // aggregate to a complete record with no reason attached.
+        assert!(
+            outcome.drop_reason.is_none(),
+            "a fully successful aggregation must not carry a drop reason"
+        );
+        let final_resp = outcome
+            .response
+            .expect("aggregation should produce a record");
 
         // Verify chunk count
         assert_eq!(results.len(), 3, "Should pass through all chunks unchanged");
@@ -524,7 +616,14 @@ mod tests {
         let input_stream = stream::iter(chunks.clone());
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
-        let final_resp = future.await.expect("aggregation should produce a record");
+        let outcome = future.await;
+        assert!(
+            outcome.drop_reason.is_none(),
+            "a fully successful aggregation must not carry a drop reason"
+        );
+        let final_resp = outcome
+            .response
+            .expect("aggregation should produce a record");
 
         assert_eq!(results.len(), chunks.len());
         assert_eq!(
@@ -601,21 +700,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_stream_handling() {
-        // Empty stream is treated the same as a client-cancel mid-stream: the
-        // aggregator has nothing to apply, tx drops without sending, and the
-        // future resolves to None. The caller (preprocessor) then emits the
-        // combined request payload record with `response = None`.
+        // Empty stream: the aggregator has nothing to apply, so the outcome carries
+        // no response. It names itself rather than looking like a client cancel, so
+        // the caller (preprocessor) emits the combined request payload record with
+        // `response = None` and this specific drop reason.
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
-        let final_resp = future.await;
+        let outcome = future.await;
 
         assert_eq!(results.len(), 0, "Empty stream should produce no chunks");
         assert!(
-            final_resp.is_none(),
-            "Empty stream should resolve request payload future to None, not a fallback record"
+            outcome.response.is_none(),
+            "Empty stream should resolve request payload future to no response, not a fallback record"
+        );
+        assert_eq!(
+            outcome.drop_reason.as_deref(),
+            Some("empty_response_stream"),
+            "an empty stream must be distinguishable from a client cancel"
         );
     }
 
@@ -627,7 +731,14 @@ mod tests {
         let input_stream = stream::iter(chunks);
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
-        let final_resp = future.await.expect("aggregation should produce a record");
+        let outcome = future.await;
+        assert!(
+            outcome.drop_reason.is_none(),
+            "a fully successful aggregation must not carry a drop reason"
+        );
+        let final_resp = outcome
+            .response
+            .expect("aggregation should produce a record");
 
         // Verify passthrough
         assert_eq!(results.len(), 1);
@@ -694,16 +805,96 @@ mod tests {
         // Test that multiple concurrent payload streams don't interfere. The
         // passthrough streams are dropped immediately (the `_` destructure), which
         // models a client cancel before the first poll — each future should
-        // independently resolve to None without crosstalk.
+        // independently resolve to a cancelled outcome without crosstalk.
         let chunks1 = vec![create_mock_chunk("Stream 1".to_string(), 0)];
         let chunks2 = vec![create_mock_chunk("Stream 2".to_string(), 0)];
 
         let (_, future1) = scan_aggregate_with_future(stream::iter(chunks1));
         let (_, future2) = scan_aggregate_with_future(stream::iter(chunks2));
 
-        let (resp1, resp2) = tokio::join!(future1, future2);
+        let (outcome1, outcome2) = tokio::join!(future1, future2);
 
-        assert!(resp1.is_none());
-        assert!(resp2.is_none());
+        assert!(outcome1.response.is_none());
+        assert!(outcome2.response.is_none());
+        assert_eq!(outcome1.drop_reason.as_deref(), Some("client_cancelled"));
+        assert_eq!(outcome2.drop_reason.as_deref(), Some("client_cancelled"));
+    }
+
+    #[tokio::test]
+    async fn error_chunk_mid_stream_keeps_partial_content_and_names_the_error() {
+        // The regression this change exists for: the client saw "Hello " before the
+        // backend errored, so the audit record must keep that text and say why it is
+        // short, instead of silently claiming a complete empty record.
+        let chunks = vec![
+            create_mock_chunk("Hello ".to_string(), 0),
+            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
+                "invalid sampling parameter",
+            ),
+            create_mock_chunk("never delivered".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks.clone());
+        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let results: Vec<_> = passthrough.collect().await;
+        let outcome = future.await;
+
+        assert_eq!(
+            results.len(),
+            chunks.len(),
+            "the error chunk must still reach the client unchanged"
+        );
+
+        let reason = outcome
+            .drop_reason
+            .as_deref()
+            .expect("an errored stream must carry a drop reason");
+        assert!(
+            reason.starts_with("aggregation_failed:"),
+            "reason should use the colon-delimited grammar, got {reason}"
+        );
+        assert!(
+            reason.contains("invalid sampling parameter"),
+            "reason should name the underlying error, got {reason}"
+        );
+
+        let partial = outcome
+            .response
+            .expect("content delivered before the error must be preserved");
+        assert_eq!(
+            partial.inner.choices[0].message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello ".to_string()),
+            "only the pre-error prefix should be aggregated"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_as_first_chunk_reports_reason_without_a_response() {
+        // Nothing was delivered before the error, so there is no partial content to
+        // keep — but the record must still say why it is empty.
+        let chunks = vec![
+            Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend unavailable"),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let _results: Vec<_> = passthrough.collect().await;
+        let outcome = future.await;
+
+        assert!(
+            outcome.response.is_none(),
+            "no content arrived before the error, so there is nothing to preserve"
+        );
+        let reason = outcome
+            .drop_reason
+            .as_deref()
+            .expect("an errored stream must carry a drop reason");
+        assert!(
+            reason.starts_with("aggregation_failed:"),
+            "reason should use the colon-delimited grammar, got {reason}"
+        );
+        assert!(
+            reason.contains("backend unavailable"),
+            "reason should name the underlying error, got {reason}"
+        );
     }
 }

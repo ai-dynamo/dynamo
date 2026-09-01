@@ -6474,22 +6474,23 @@ impl
                 crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn the payload emit off the request path. `agg_fut` resolves to
-            // None on client cancel / gateway timeout / aggregation failure; we
-            // still emit the payload record with an empty response so those
-            // cases remain inspectable. The record carries the request snapshot
-            // and arrival time captured at handle creation.
+            // Spawn the payload emit off the request path. `agg_fut` resolves to an
+            // outcome that carries a drop reason on client cancel / gateway timeout /
+            // aggregation failure, plus any partial response recovered before the
+            // failure; we emit the payload record either way so those cases remain
+            // inspectable and self-describing. The record carries the request
+            // snapshot and arrival time captured at handle creation.
             tokio::spawn(async move {
-                match agg_fut.await {
-                    Some(final_resp) => payload.emit(Some(Arc::new(final_resp))),
-                    None => {
-                        tracing::debug!(
-                            request_id = %payload.request_id(),
-                            "request payload: response aggregation incomplete (client cancel / timeout); emitting request-only record"
-                        );
-                        payload.emit(None);
-                    }
+                let outcome = agg_fut.await;
+                if let Some(reason) = outcome.drop_reason.as_deref() {
+                    tracing::debug!(
+                        request_id = %payload.request_id(),
+                        drop_reason = %reason,
+                        partial_response = outcome.response.is_some(),
+                        "request payload: response aggregation incomplete; emitting record with drop reason"
+                    );
                 }
+                payload.emit(outcome.response.map(Arc::new), outcome.drop_reason);
             });
 
             stream

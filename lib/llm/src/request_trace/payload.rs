@@ -55,6 +55,11 @@ fn capture_http_headers_with_list(
     (!out.is_empty()).then_some(out)
 }
 
+/// Fallback reason for a record that has no response and no stated reason. A
+/// consumer should never see this; it means a call site dropped the response
+/// without saying why.
+const DROP_UNSPECIFIED: &str = "unspecified";
+
 pub struct RequestPayloadHandle {
     requested_streaming: bool,
     request_id: String,
@@ -75,9 +80,29 @@ impl RequestPayloadHandle {
 
     /// Publish one request trace payload record. Consumes the handle to enforce
     /// exactly one payload record per request. `response` is `None` on client
-    /// cancel / gateway timeout / aggregation failure; the record still carries
-    /// the request so those cases remain inspectable.
-    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
+    /// cancel / gateway timeout / aggregation failure, and may be a partial
+    /// record when some content was delivered before a failure; the record still
+    /// carries the request so those cases remain inspectable.
+    ///
+    /// `drop_reason` is required rather than defaulted so a new call site cannot
+    /// quietly re-introduce a record that claims completeness it does not have.
+    /// Pass `None` only for a faithful, fully aggregated response; otherwise pass
+    /// the reason, which is published verbatim as `payload_drop_reason`.
+    /// `payload_complete` is derived from the two together, never assumed.
+    pub fn emit(
+        self,
+        response: Option<Arc<NvCreateChatCompletionResponse>>,
+        drop_reason: Option<String>,
+    ) {
+        let payload_complete = response.is_some() && drop_reason.is_none();
+        // Defensive: a record with neither a response nor a reason would assert
+        // nothing about why it is empty, which is exactly the state this signature
+        // exists to prevent. Never silently mark it complete.
+        let drop_reason = match (payload_complete, drop_reason) {
+            (true, reason) => reason,
+            (false, Some(reason)) => Some(reason),
+            (false, None) => Some(DROP_UNSPECIFIED.to_string()),
+        };
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,
@@ -86,8 +111,8 @@ impl RequestPayloadHandle {
                 request: Some(self.request),
                 response,
                 http_request_headers: self.http_request_headers,
-                payload_complete: true,
-                payload_drop_reason: None,
+                payload_complete,
+                payload_drop_reason: drop_reason,
             },
             unix_time_ms(self.event_time),
         );
@@ -300,8 +325,9 @@ mod tests {
         let mut rx = crate::request_trace::subscribe();
 
         RequestPayloadHandle::for_test("payload-test-req-ok", "test-model", true)
-            .emit(Some(Arc::new(create_test_response("hello"))));
-        RequestPayloadHandle::for_test("payload-test-req-cancel", "test-model", true).emit(None);
+            .emit(Some(Arc::new(create_test_response("hello"))), None);
+        RequestPayloadHandle::for_test("payload-test-req-cancel", "test-model", true)
+            .emit(None, Some("client_cancelled".to_string()));
 
         let mut records = HashMap::new();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -340,6 +366,10 @@ mod tests {
         assert_eq!(first_payload.request_id, "payload-test-req-ok");
         assert!(first_payload.request.is_some());
         assert!(first_payload.response.is_some());
+        // Negative control: a faithful record still reports itself complete with
+        // no reason, so the flag stays meaningful in both directions.
+        assert!(first_payload.payload_complete);
+        assert!(first_payload.payload_drop_reason.is_none());
 
         assert_eq!(
             second.event_type,
@@ -349,5 +379,52 @@ mod tests {
         assert_eq!(second_payload.request_id, "payload-test-req-cancel");
         assert!(second_payload.request.is_some());
         assert!(second_payload.response.is_none());
+        assert!(
+            !second_payload.payload_complete,
+            "a record with no response must not claim to be complete"
+        );
+        assert_eq!(
+            second_payload.payload_drop_reason.as_deref(),
+            Some("client_cancelled")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emit_without_response_or_reason_still_marks_the_record_incomplete() {
+        // Defensive invariant: even if a future call site drops the response
+        // without saying why, the record must not claim completeness. It is
+        // labelled rather than left silently indistinguishable from a good one.
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
+
+        RequestPayloadHandle::for_test("payload-test-req-unspecified", "test-model", true)
+            .emit(None, None);
+
+        let record = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = rx.recv().await.expect("record receives ok");
+                if record.event_type != crate::request_trace::RequestTraceEventType::RequestPayload
+                {
+                    continue;
+                }
+                let Some(payload) = record.payload.as_ref() else {
+                    continue;
+                };
+                if payload.request_id == "payload-test-req-unspecified" {
+                    return record;
+                }
+            }
+        })
+        .await
+        .expect("expected request payload record before timeout");
+
+        let payload = record.payload.as_ref().expect("payload");
+        assert!(payload.response.is_none());
+        assert!(
+            !payload.payload_complete,
+            "a record with no response must not claim to be complete"
+        );
+        assert_eq!(payload.payload_drop_reason.as_deref(), Some("unspecified"));
     }
 }
