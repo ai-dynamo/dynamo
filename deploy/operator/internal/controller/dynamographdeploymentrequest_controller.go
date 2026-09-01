@@ -82,6 +82,7 @@ const (
 	// Annotation keys
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
+	AnnotationDGDRUID             = "nvidia.com/dgdr-uid"
 
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
@@ -1021,6 +1022,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			annotations[k] = v
 		}
 	}
+	annotations[AnnotationDGDRUID] = string(dgdr.UID)
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -1121,6 +1123,9 @@ func resolveGeneratedDGDIdentity(
 		liveDGD.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
 		liveDGD.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
 		return false, "it does not carry this request's tracking labels", nil
+	}
+	if liveDGD.Annotations[AnnotationDGDRUID] != string(dgdr.UID) {
+		return false, "it is not bound to this request's UID", nil
 	}
 
 	// Require the live spec to carry everything this request asked for.
