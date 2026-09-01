@@ -62,8 +62,11 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::{
+    http::service::metrics::generate_log_buckets,
+    kv_router::minimal_cache_loss::cache_loss_funnel_enabled,
+};
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
@@ -843,15 +846,19 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    pub cache_loss_observation_input_tokens_total: prometheus::IntCounter,
-    pub cache_loss_funnel_tokens_total: IntCounterVec,
-    pub cache_loss_observations_total: IntCounterVec,
-    pub cache_loss_history_block_records: IntGauge,
-    pub cache_loss_history_unique_hashes: IntGauge,
-    pub cache_loss_history_represented_tokens: IntGauge,
-    pub cache_loss_history_estimated_bytes: IntGauge,
-    pub cache_loss_history_capacity_bytes: IntGauge,
-    pub cache_loss_history_capacity_blocks: IntGauge,
+    cache_loss: Option<CacheLossMetrics>,
+}
+
+struct CacheLossMetrics {
+    observation_input_tokens_total: prometheus::IntCounter,
+    funnel_tokens_total: IntCounterVec,
+    observations_total: IntCounterVec,
+    history_block_records: IntGauge,
+    history_unique_hashes: IntGauge,
+    history_represented_tokens: IntGauge,
+    history_estimated_bytes: IntGauge,
+    history_capacity_bytes: IntGauge,
+    history_capacity_blocks: IntGauge,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -987,14 +994,15 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                let cache_loss_observation_input_tokens_total = metrics
+                let cache_loss = cache_loss_funnel_enabled().then(|| {
+                let observation_input_tokens_total = metrics
                     .create_intcounter(
                         &router_metric("cache_loss_observation_input_tokens_total"),
                         "Prompt tokens observed by cache-loss accounting, including incomplete outcomes",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_observation_input_tokens_total");
-                let cache_loss_funnel_tokens_total = metrics
+                let funnel_tokens_total = metrics
                     .create_intcountervec(
                         &router_metric("cache_loss_funnel_tokens_total"),
                         "Prompt tokens remaining at each cache-loss funnel stage",
@@ -1002,7 +1010,7 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_funnel_tokens_total");
-                let cache_loss_observations_total = metrics
+                let observations_total = metrics
                     .create_intcountervec(
                         &router_metric("cache_loss_observations_total"),
                         "Cache-loss funnel observations by result",
@@ -1011,53 +1019,65 @@ impl RouterRequestMetrics {
                     )
                     .expect("failed to create router_cache_loss_observations_total");
                 for stage in ["f0", "f1", "f2", "f3", "f4", "f5"] {
-                    cache_loss_funnel_tokens_total.with_label_values(&[stage]);
+                    funnel_tokens_total.with_label_values(&[stage]);
                 }
                 for result in ["complete", "incomplete"] {
-                    cache_loss_observations_total.with_label_values(&[result]);
+                    observations_total.with_label_values(&[result]);
                 }
-                let cache_loss_history_block_records = metrics
+                let history_block_records = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_block_records"),
                         "Complete canonical sequence-hash records currently retained for cache-loss history",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_block_records");
-                let cache_loss_history_unique_hashes = metrics
+                let history_unique_hashes = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_unique_hashes"),
                         "Distinct canonical sequence hashes currently retained for cache-loss history",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_unique_hashes");
-                let cache_loss_history_represented_tokens = metrics
+                let history_represented_tokens = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_represented_tokens"),
                         "Estimated full KV tokens represented by retained cache-loss history records",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_represented_tokens");
-                let cache_loss_history_estimated_bytes = metrics
+                let history_estimated_bytes = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_estimated_bytes"),
                         "Conservative estimated bytes used by retained cache-loss history records",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_estimated_bytes");
-                let cache_loss_history_capacity_bytes = metrics
+                let history_capacity_bytes = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_capacity_bytes"),
                         "Configured byte budget for cache-loss history records",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_capacity_bytes");
-                let cache_loss_history_capacity_blocks = metrics
+                let history_capacity_blocks = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_capacity_blocks"),
                         "Configured maximum complete canonical sequence-hash records retained for cache-loss history",
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_capacity_blocks");
+                CacheLossMetrics {
+                    observation_input_tokens_total,
+                    funnel_tokens_total,
+                    observations_total,
+                    history_block_records,
+                    history_unique_hashes,
+                    history_represented_tokens,
+                    history_estimated_bytes,
+                    history_capacity_bytes,
+                    history_capacity_blocks,
+                }
+                });
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -1070,15 +1090,7 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
-                    cache_loss_observation_input_tokens_total,
-                    cache_loss_funnel_tokens_total,
-                    cache_loss_observations_total,
-                    cache_loss_history_block_records,
-                    cache_loss_history_unique_hashes,
-                    cache_loss_history_represented_tokens,
-                    cache_loss_history_estimated_bytes,
-                    cache_loss_history_capacity_bytes,
-                    cache_loss_history_capacity_blocks,
+                    cache_loss,
                 })
             })
             .clone()
@@ -1096,25 +1108,40 @@ impl RouterRequestMetrics {
     }
 
     pub fn observe_cache_loss_input(&self, prompt_tokens: u64) {
-        self.cache_loss_observation_input_tokens_total
-            .inc_by(prompt_tokens);
+        let Some(metrics) = &self.cache_loss else {
+            return;
+        };
+        metrics.observation_input_tokens_total.inc_by(prompt_tokens);
     }
 
     pub fn observe_cache_loss_funnel(&self, stages: [u64; 6]) {
+        let Some(metrics) = &self.cache_loss else {
+            return;
+        };
         for (stage, tokens) in ["f0", "f1", "f2", "f3", "f4", "f5"].into_iter().zip(stages) {
-            self.cache_loss_funnel_tokens_total
+            metrics
+                .funnel_tokens_total
                 .with_label_values(&[stage])
                 .inc_by(tokens);
         }
-        self.cache_loss_observations_total
+        metrics
+            .observations_total
             .with_label_values(&["complete"])
             .inc();
     }
 
     pub fn observe_cache_loss_incomplete(&self) {
-        self.cache_loss_observations_total
+        let Some(metrics) = &self.cache_loss else {
+            return;
+        };
+        metrics
+            .observations_total
             .with_label_values(&["incomplete"])
             .inc();
+    }
+
+    pub fn cache_loss_funnel_enabled(&self) -> bool {
+        self.cache_loss.is_some()
     }
 
     pub fn set_cache_loss_history(
@@ -1126,17 +1153,26 @@ impl RouterRequestMetrics {
         capacity_bytes: usize,
         capacity_blocks: usize,
     ) {
-        self.cache_loss_history_block_records
+        let Some(metrics) = &self.cache_loss else {
+            return;
+        };
+        metrics
+            .history_block_records
             .set(retained_records.min(i64::MAX as usize) as i64);
-        self.cache_loss_history_unique_hashes
+        metrics
+            .history_unique_hashes
             .set(retained_unique_hashes.min(i64::MAX as usize) as i64);
-        self.cache_loss_history_represented_tokens
+        metrics
+            .history_represented_tokens
             .set(represented_tokens.min(i64::MAX as u64) as i64);
-        self.cache_loss_history_estimated_bytes
+        metrics
+            .history_estimated_bytes
             .set(estimated_retained_bytes.min(i64::MAX as usize) as i64);
-        self.cache_loss_history_capacity_bytes
+        metrics
+            .history_capacity_bytes
             .set(capacity_bytes.min(i64::MAX as usize) as i64);
-        self.cache_loss_history_capacity_blocks
+        metrics
+            .history_capacity_blocks
             .set(capacity_blocks.min(i64::MAX as usize) as i64);
     }
 }

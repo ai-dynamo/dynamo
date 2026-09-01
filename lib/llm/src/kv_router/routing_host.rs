@@ -331,8 +331,10 @@ where
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
-        let cache_history = CacheHistory::from_env(kv_router.block_size());
-        {
+        let cache_history = request_metrics
+            .cache_loss_funnel_enabled()
+            .then(|| CacheHistory::from_env(kv_router.block_size()));
+        if let Some(cache_history) = &cache_history {
             let history = cache_history.lock();
             let stats = history.stats();
             request_metrics.set_cache_loss_history(
@@ -349,7 +351,7 @@ where
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
-            cache_history: Some(cache_history),
+            cache_history,
             affinity,
             hosted_occupancy: None,
             lora: None,

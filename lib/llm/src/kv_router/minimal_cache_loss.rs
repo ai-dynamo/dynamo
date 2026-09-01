@@ -24,6 +24,7 @@ use dynamo_kv_router::protocols::{BlockExtraInfo, TokensWithHashes};
 pub const DEFAULT_HISTORY_BLOCK_CAPACITY: usize = 5_000_000;
 pub const HISTORY_BLOCK_CAPACITY_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BLOCKS";
 pub const HISTORY_BYTES_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BYTES";
+pub const CACHE_LOSS_FUNNEL_ENABLED_ENV: &str = "DYN_CACHE_LOSS_FUNNEL_ENABLED";
 pub const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 
 /// Conservative planning estimate: an 8-byte FIFO sequence hash plus the
@@ -31,6 +32,19 @@ pub const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 /// This is deliberately larger than `size_of::<u64>()`; it is a capacity model,
 /// not a promise about a particular Rust allocator build.
 pub const ESTIMATED_BYTES_PER_HISTORY_RECORD: usize = 32;
+
+/// The experimental funnel is opt-in so it contributes no per-request history
+/// or metric work unless an operator explicitly enables it.
+pub fn cache_loss_funnel_enabled() -> bool {
+    cache_loss_funnel_enabled_from(std::env::var(CACHE_LOSS_FUNNEL_ENABLED_ENV).ok().as_deref())
+}
+
+fn cache_loss_funnel_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
 
 /// A bounded history of cache identities that have definitely been computed.
 ///
@@ -332,5 +346,15 @@ mod tests {
         let capacity_from_default_budget =
             super::DEFAULT_HISTORY_BYTES / super::ESTIMATED_BYTES_PER_HISTORY_RECORD;
         assert!(capacity_from_default_budget >= super::DEFAULT_HISTORY_BLOCK_CAPACITY);
+    }
+
+    #[test]
+    fn funnel_is_disabled_unless_explicitly_enabled() {
+        for value in [None, Some(""), Some("0"), Some("false"), Some("off")] {
+            assert!(!super::cache_loss_funnel_enabled_from(value));
+        }
+        for value in [Some("1"), Some("true"), Some("YES"), Some(" on ")] {
+            assert!(super::cache_loss_funnel_enabled_from(value));
+        }
     }
 }
