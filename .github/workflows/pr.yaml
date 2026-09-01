@@ -1533,6 +1533,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
 
   deploy-snapshot-agent-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Snapshot Agent Setup
@@ -1585,6 +1586,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
 
   deploy-snapshot-agent-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
@@ -1637,6 +1639,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
 
   deploy-test-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Deploy Test
@@ -1691,6 +1694,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
       - name: Run DynamoCheckpoint Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
@@ -1764,6 +1768,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
       - name: Run DynamoCheckpoint Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
@@ -1837,6 +1842,7 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
       - name: Run DynamoCheckpoint Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
