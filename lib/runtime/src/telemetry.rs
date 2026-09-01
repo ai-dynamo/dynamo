@@ -285,7 +285,10 @@ impl LifecycleTrace {
     pub fn frontend_request_without_session(request_id: impl Into<String>) -> Self {
         Self {
             enabled: lifecycle_tracing_enabled(),
-            identity: LifecycleIdentity::new(Some(request_id.into()), LifecycleOperationRole::Frontend),
+            identity: LifecycleIdentity::new(
+                Some(request_id.into()),
+                LifecycleOperationRole::Frontend,
+            ),
             session: None,
         }
     }
@@ -379,7 +382,6 @@ impl LifecycleRequest {
         self.span.record("dynamo.session.source", source);
     }
 }
-
 
 /// A terminal recorder that is safe to clone across completion and cancellation paths.
 #[derive(Clone)]

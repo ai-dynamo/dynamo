@@ -2017,14 +2017,15 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let mut request: NvCreateChatCompletionRequest = match parse_json_request("chat completions", &body) {
-        Ok(request) => request,
-        Err(error) => {
-            lifecycle_request.record_session(&request_id, None);
-            terminal.finish(terminal_outcome_for_error_response(&error));
-            return Err(error);
-        }
-    };
+    let mut request: NvCreateChatCompletionRequest =
+        match parse_json_request("chat completions", &body) {
+            Ok(request) => request,
+            Err(error) => {
+                lifecycle_request.record_session(&request_id, None);
+                terminal.finish(terminal_outcome_for_error_response(&error));
+                return Err(error);
+            }
+        };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }

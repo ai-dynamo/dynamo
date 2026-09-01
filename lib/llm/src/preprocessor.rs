@@ -6907,7 +6907,6 @@ impl
             .unwrap_or_else(|| LifecycleTrace::from_request_id(context.id().to_string()));
         let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
 
-
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
