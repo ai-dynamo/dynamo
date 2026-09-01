@@ -3362,9 +3362,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        out.setdefault("engine_data", {})["cache_loss"] = (
-                            BaseWorkerHandler._cache_loss_engine_data(res)
-                        )
+                        out.setdefault("engine_data", {})[
+                            "cache_loss"
+                        ] = BaseWorkerHandler._cache_loss_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
