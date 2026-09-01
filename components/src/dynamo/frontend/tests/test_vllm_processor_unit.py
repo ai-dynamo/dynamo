@@ -3781,3 +3781,39 @@ def test_stop_trimmed_marker_suffix_does_not_leak(with_tool_parser):
     assert "message" not in content
     assert "<|sep|>" not in content
     assert final["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_marker_split_inside_channel_word_is_held(with_tool_parser):
+    """A delta can split inside the composite marker's channel word."""
+    post = _repro_postprocessor(with_tool_parser)
+
+    first = post.process_output(_repro_chunk("analysis</think><|open|>res"))
+    second = post.process_output(_repro_chunk("ponse<|sep|>Hello"))
+    final = post.process_output(_repro_chunk(" world", "stop"))
+
+    first_content = first["delta"].get("content") or ""
+    assert not first_content or first_content.isascii()  # nothing yet or held
+    assert "res" not in first_content  # partial marker prefix is withheld
+    contents = (second["delta"].get("content") or "") + (
+        final["delta"].get("content") or ""
+    )
+    assert contents == "Hello world"
+    for choice in (first, second, final):
+        c = choice["delta"].get("content") or ""
+        assert "<|open|>" not in c and "<|sep|>" not in c
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_holdback_flushes_ordinary_text(with_tool_parser):
+    """A trailing ordinary word must surface once it fails to complete."""
+    post = _repro_postprocessor(with_tool_parser)
+
+    post.process_output(_repro_chunk("analysis</think><|open|>response<|sep|>"))
+    first = post.process_output(_repro_chunk("the message"))
+    second = post.process_output(_repro_chunk(" arrived", "stop"))
+
+    contents = (first["delta"].get("content") or "") + (
+        second["delta"].get("content") or ""
+    )
+    assert contents == "the message arrived"

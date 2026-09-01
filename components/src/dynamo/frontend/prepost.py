@@ -1053,9 +1053,15 @@ class StreamingPostProcessor:
             self._marker_strip_re = _compile_marker_strip_re(
                 tuple(m for m in self._control_markers if m not in owned)
             )
-        self._parser_marker_re = _compile_parser_marker_re(
+        self._parser_marker_variants = frozenset(
             _parser_control_markers(self.tool_parser, self.reasoning_parser)
         )
+        self._parser_marker_re = _compile_parser_marker_re(
+            tuple(sorted(self._parser_marker_variants))
+        )
+        # Chars withheld while they can still complete into a marker, per
+        # choice index. See _apply_marker_holdback.
+        self._marker_pending: dict[int, str] = {}
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -1287,6 +1293,39 @@ class StreamingPostProcessor:
             return text
         return self._parser_marker_re.sub("", text)
 
+    def _apply_marker_holdback(
+        self, index: int, text: str | None, finish_reason: str | None
+    ) -> str | None:
+        """Buffer marker prefixes that may still complete in a later delta.
+
+        vLLM deltas are token-aligned in practice, but nothing guarantees it:
+        a delta can split inside a composite marker's channel word (Kimi K3's
+        `response` in `res` + `ponse<|sep|>`), in which case neither the full
+        nor the orphan pattern matches until both halves arrived. Hold only
+        the longest trailing segment that is a strict prefix of a configured
+        marker variant; everything else is emitted immediately. On the
+        finishing delta -- or once the candidate extends past the longest
+        marker -- the held text is flushed verbatim, so ordinary content is
+        never dropped.
+        """
+        if not self._parser_marker_variants:
+            return text
+        pending = self._marker_pending.pop(index, "")
+        body = (pending + (text or "")) or None
+        if body is None:
+            return None
+        body = self._strip_parser_control_markers(body)
+        if not body or finish_reason:
+            return body
+        max_len = max(len(m) for m in self._parser_marker_variants)
+        limit = min(len(body), max_len - 1)
+        for k in range(limit, 0, -1):
+            segment = body[-k:]
+            if any(v.startswith(segment) for v in self._parser_marker_variants):
+                self._marker_pending[index] = segment
+                return body[:-k] or None
+        return body
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -1423,9 +1462,15 @@ class StreamingPostProcessor:
         # the producers as well only re-scans text that is about to be scanned.
         if isinstance(delta.get("content"), str):
             # Composite markers must go first: they match across control-token
-            # boundaries, which `_strip_control_markers` would erase.
+            # boundaries, which `_strip_control_markers` would erase. Holdback
+            # also runs before the literal strip so a marker completed across
+            # deltas is still recognizable.
             stripped = self._strip_control_markers(
-                self._strip_parser_control_markers(delta["content"])
+                self._apply_marker_holdback(
+                    output.index,
+                    self._strip_parser_control_markers(delta["content"]),
+                    output.finish_reason,
+                )
             )
             if stripped:
                 delta["content"] = stripped
