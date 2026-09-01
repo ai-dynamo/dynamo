@@ -77,7 +77,6 @@ fn wrap_py_typed_callback(
                                     name,
                                     labels: labels.into_iter().collect(),
                                     value,
-                                    timestamp: None,
                                 }
                             })
                             .collect(),
