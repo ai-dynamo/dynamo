@@ -100,6 +100,7 @@ impl HealthCheckManager {
             return;
         };
 
+        let mut endpoint_tasks = self.endpoint_tasks.lock();
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
@@ -146,9 +147,7 @@ impl HealthCheckManager {
         });
 
         // Store the task handle
-        self.endpoint_tasks
-            .lock()
-            .insert(endpoint_subject.clone(), task);
+        endpoint_tasks.insert(endpoint_subject.clone(), task);
 
         info!(
             "Spawned health check task for endpoint: {}",
