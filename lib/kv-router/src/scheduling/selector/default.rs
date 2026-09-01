@@ -14,7 +14,10 @@ use super::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionInput,
     WorkerSelector, select_worker_with_policy,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    RoutingDecisionCandidate, RoutingDecisionTrace, WorkerConfigLike, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
@@ -102,7 +105,7 @@ pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DefaultScoringContext {
+pub(super) struct DefaultScoringContext {
     min_active_prefill_tokens: usize,
     has_tier_overlap_blocks: bool,
 }
@@ -254,7 +257,7 @@ impl DefaultScoringContext {
     }
 }
 
-fn default_row(
+pub(super) fn default_row(
     input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
@@ -271,7 +274,7 @@ fn default_row(
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
-    fn worker_logit(
+    pub(super) fn worker_logit(
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
@@ -389,7 +392,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     }
 
     #[inline]
-    fn worker_cost(
+    pub(super) fn worker_cost(
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
@@ -403,6 +406,88 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             None => base_score,
         }
     }
+}
+
+/// Build the per-worker explanation only after a selection, and only when the
+/// caller explicitly enabled diagnostic tracing. The normal picker remains
+/// allocation-free beyond its existing scratch buffer.
+pub(super) fn decision_trace_for_selection<C: WorkerConfigLike>(
+    kv_router_config: &KvRouterConfig,
+    worker_type: &'static str,
+    input: &MaterializedSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selected: WorkerWithDpRank,
+) -> Option<RoutingDecisionTrace> {
+    let default_context =
+        DefaultScoringContext::new(workers, request, eligibility, input.context.weights);
+    let scorer = DefaultWorkerScorer {
+        kv_router_config,
+        worker_type,
+    };
+    let weights = input.context.weights;
+    let mut candidates = Vec::new();
+    eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+        let preferred_taint_multiplier = request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints());
+        let row = default_row(input, default_context, worker, preferred_taint_multiplier);
+        let cache = row.cache;
+        let load = row.load;
+        let excess_active_prefill_blocks =
+            load.active_prefill_tokens
+                .saturating_sub(default_context.min_active_prefill_tokens) as f64
+                / input.context.block_size as f64;
+        let normalized_prefill_load =
+            excess_active_prefill_blocks / input.context.request_blocks as f64;
+        let overlap_credit_decay =
+            if input.context.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+            } else {
+                1.0
+            };
+        let device_overlap_blocks = default_context
+            .device_overlap(cache.effective_overlap_blocks, cache.device_overlap_blocks);
+        let overlap_credit_blocks =
+            weights.overlap_score_credit * overlap_credit_decay * device_overlap_blocks
+                + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
+                + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
+                + weights.shared_cache_multiplier * cache.shared_beyond_device_blocks as f64;
+        let prefill_cost_blocks =
+            weights.prefill_load_scale * (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let active_request_cost_blocks =
+            kv_router_config.decode_active_request_weight * load.active_requests as f64;
+        candidates.push(RoutingDecisionCandidate {
+            worker_id: worker.worker_id,
+            dp_rank: worker.dp_rank,
+            selected: worker == selected,
+            total_cost_blocks: scorer.worker_cost(&input.context, default_context, &row),
+            effective_overlap_blocks: cache.effective_overlap_blocks,
+            device_overlap_blocks,
+            host_overlap_blocks: cache.host_overlap_blocks,
+            disk_overlap_blocks: cache.disk_overlap_blocks,
+            shared_beyond_device_blocks: cache.shared_beyond_device_blocks,
+            raw_prefill_blocks: load.raw_prefill_blocks,
+            prefill_cost_blocks,
+            decode_cost_blocks: load.decode_cost_blocks,
+            active_request_cost_blocks,
+            overlap_credit_blocks,
+            overlap_credit_decay,
+            preferred_taint_multiplier,
+        });
+    });
+    (!candidates.is_empty()).then_some(RoutingDecisionTrace {
+        worker_type: worker_type.to_owned(),
+        block_size: input.context.block_size,
+        selected_worker_id: selected.worker_id,
+        selected_dp_rank: selected.dp_rank,
+        overlap_score_credit: weights.overlap_score_credit,
+        prefill_load_scale: weights.prefill_load_scale,
+        host_cache_hit_weight: kv_router_config.host_cache_hit_weight,
+        disk_cache_hit_weight: kv_router_config.disk_cache_hit_weight,
+        candidates,
+    })
 }
 
 impl DefaultWorkerPicker {

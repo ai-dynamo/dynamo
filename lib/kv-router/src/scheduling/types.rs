@@ -115,6 +115,8 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+    /// Populated only by opt-in default-router decision tracing.
+    pub decision_trace: Option<crate::protocols::RoutingDecisionTrace>,
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.

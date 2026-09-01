@@ -3,6 +3,44 @@
 
 use super::*;
 use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
+use crate::protocols::common::timing::{RoutingDecisionCandidate, RoutingDecisionTrace};
+
+fn request_trace_routing_decision(
+    trace: dynamo_kv_router::protocols::RoutingDecisionTrace,
+) -> RoutingDecisionTrace {
+    RoutingDecisionTrace {
+        worker_type: trace.worker_type,
+        block_size: trace.block_size,
+        selected_worker_id: trace.selected_worker_id,
+        selected_dp_rank: trace.selected_dp_rank,
+        overlap_score_credit: trace.overlap_score_credit,
+        prefill_load_scale: trace.prefill_load_scale,
+        host_cache_hit_weight: trace.host_cache_hit_weight,
+        disk_cache_hit_weight: trace.disk_cache_hit_weight,
+        candidates: trace
+            .candidates
+            .into_iter()
+            .map(|candidate| RoutingDecisionCandidate {
+                worker_id: candidate.worker_id,
+                dp_rank: candidate.dp_rank,
+                selected: candidate.selected,
+                total_cost_blocks: candidate.total_cost_blocks,
+                effective_overlap_blocks: candidate.effective_overlap_blocks,
+                device_overlap_blocks: candidate.device_overlap_blocks,
+                host_overlap_blocks: candidate.host_overlap_blocks,
+                disk_overlap_blocks: candidate.disk_overlap_blocks,
+                shared_beyond_device_blocks: candidate.shared_beyond_device_blocks,
+                raw_prefill_blocks: candidate.raw_prefill_blocks,
+                prefill_cost_blocks: candidate.prefill_cost_blocks,
+                decode_cost_blocks: candidate.decode_cost_blocks,
+                active_request_cost_blocks: candidate.active_request_cost_blocks,
+                overlap_credit_blocks: candidate.overlap_credit_blocks,
+                overlap_credit_decay: candidate.overlap_credit_decay,
+                preferred_taint_multiplier: candidate.preferred_taint_multiplier,
+            })
+            .collect(),
+    }
+}
 
 impl<Sel> RoutingHost<Sel>
 where
@@ -349,6 +387,9 @@ where
             }
 
             if let Some(ref tracker) = request.tracker {
+                if let Some(trace) = selection.decision_trace.take() {
+                    tracker.record_routing_decision_trace(request_trace_routing_decision(trace));
+                }
                 let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));

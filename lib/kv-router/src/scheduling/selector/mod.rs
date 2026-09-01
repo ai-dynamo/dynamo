@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 mod default;
 mod policy;
@@ -15,7 +16,7 @@ pub use policy::{
     WorkerSelectionPolicy,
 };
 
-use default::{pick_default_worker, selection_weights};
+use default::{decision_trace_for_selection, pick_default_worker, selection_weights};
 use policy::{
     CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
 };
@@ -24,6 +25,23 @@ use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+
+/// Disabled by default: collecting the candidate table is diagnostic-only and
+/// intentionally has zero extra work or trace volume in normal serving.
+static ROUTER_DECISION_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("DYN_ROUTER_DECISION_TRACE_ENABLED")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+});
+
+pub(crate) fn router_decision_trace_enabled() -> bool {
+    *ROUTER_DECISION_TRACE_ENABLED
+}
 
 /// Low-level selector used by routing hosts.
 ///
@@ -274,6 +292,7 @@ fn selection_result(
         cached_tokens: request.effective_cached_tokens_for(worker),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        decision_trace: None,
     }
 }
 
@@ -437,7 +456,19 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let mut result = selection_result(request, worker, block_size);
+    if router_decision_trace_enabled() && matches!(state, WorkerSelectionPolicyStateRef::Default(_))
+    {
+        result.decision_trace = decision_trace_for_selection(
+            kv_router_config,
+            worker_type,
+            &input,
+            workers,
+            request,
+            eligibility,
+            worker,
+        );
+    }
     log_selection(
         workers,
         request,
