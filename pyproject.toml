@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.1.0.dev2; python_version < '3.14'",
+    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -86,10 +86,6 @@ sglang = [
     "cupy-cuda12x>=13.0.0",
 ]
 
-mocker = [
-    # aiconfigurator_core ships inside aisimulate (core dependency above).
-]
-
 [tool.uv]
 # Some backend extras have incompatible transitive dependency requirements.
 # Each conflict below identifies the dependency that prevents co-installation.
@@ -99,19 +95,9 @@ conflicts = [
         { extra = "vllm" },
         { extra = "sglang" },
     ],
-    # TensorRT-LLM and the mocker have incompatible NumPy requirements.
-    [
-        { extra = "trtllm" },
-        { extra = "mocker" },
-    ],
     # TensorRT-LLM and vLLM have incompatible flashinfer-python requirements.
     [
         { extra = "trtllm" },
-        { extra = "vllm" },
-    ],
-    # The mocker and vLLM have incompatible NumPy requirements on macOS with Python 3.14.
-    [
-        { extra = "mocker" },
         { extra = "vllm" },
     ],
     # SGLang and TensorRT-LLM have incompatible XGrammar requirements.

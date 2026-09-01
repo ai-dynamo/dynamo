@@ -500,12 +500,11 @@ def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
 
     venv_python = create_venv(python_spec)
     try:
-        # The wheelhouse contains Dynamo-produced artifacts. Third-party optional
-        # dependencies such as aiconfigurator-core resolve from their package index.
+        # aiconfigurator_core ships inside the staged aisimulate wheel.
         pip_install(
             venv_python,
             wheelhouse,
-            [str(runtime), f"{ai_dynamo}[mocker]"],
+            [str(runtime), str(ai_dynamo)],
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)

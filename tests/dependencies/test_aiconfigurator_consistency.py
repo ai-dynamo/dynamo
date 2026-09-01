@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep every Dynamo AIC dependency on one published dev release."""
+"""Python AIC comes from the aisimulate wheel, not standalone AIC pins.
+
+The optional Rust ``aic-forward-pass`` feature still pins ``aiconfigurator-core``
+on crates.io. That crate pin is checked here so Cargo.toml and Cargo.lock stay
+on one published version.
+"""
 
 from __future__ import annotations
 
@@ -30,24 +35,17 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[2]
 AIC_PACKAGES = {"aiconfigurator", "aiconfigurator-core"}
-
-
-def _python_exact_version(requirement: str, *, package: str) -> Version:
-    parsed = Requirement(requirement)
-    assert canonicalize_name(parsed.name) == canonicalize_name(package), parsed
-    assert parsed.marker is None, "AIC release dependency must not be conditional"
-    assert (
-        parsed.url is None
-    ), f"AIC release dependency must be index-resolvable: {parsed}"
-
-    specifiers = list(parsed.specifier)
-    assert (
-        len(specifiers) == 1 and specifiers[0].operator == "=="
-    ), f"AIC release dependency must use one exact version: {parsed}"
-    assert (
-        "*" not in specifiers[0].version
-    ), f"AIC release dependency must not use a wildcard: {parsed}"
-    return Version(specifiers[0].version)
+PYTHON_AIC_SOURCES = (
+    "pyproject.toml",
+    "benchmarks/pyproject.toml",
+    "container/deps/requirements.frontend.txt",
+    "container/deps/requirements.planner.txt",
+    "container/deps/requirements.aisimulate.txt",
+)
+requires_aisimulate = pytest.mark.skipif(
+    not ((3, 11) <= sys.version_info[:2] < (3, 14)),
+    reason="aisimulate publishes wheels for Python 3.11-3.13 only",
+)
 
 
 def _cargo_exact_version(dependency: object) -> Version:
@@ -82,128 +80,79 @@ def _cargo_lock_version(path: Path) -> Version:
     return Version(str(package["version"]))
 
 
-def _project_requirements(path: Path, *, extra: str | None = None) -> dict[str, str]:
-    with path.open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    requirements = (
-        project["optional-dependencies"][extra] if extra else project["dependencies"]
-    )
-    return _aic_requirements(requirements, source=str(path))
-
-
-def _installed_requirements(package: str) -> dict[str, str]:
-    requirements = metadata.requires(package)
-    assert requirements is not None, f"{package} has no installed requirements"
-    return _aic_requirements(requirements, source=f"installed {package} distribution")
-
-
-def _requirements_file(path: Path) -> dict[str, str]:
-    requirements = [
+def _requirement_lines(path: Path) -> list[str]:
+    if path.suffix == ".toml":
+        with path.open("rb") as handle:
+            document = tomllib.load(handle)
+        project = document.get("project", {})
+        lines = list(project.get("dependencies", []))
+        for extra_reqs in project.get("optional-dependencies", {}).values():
+            lines.extend(extra_reqs)
+        for group_reqs in document.get("dependency-groups", {}).values():
+            # PEP 735 groups may hold {include-group = ...} tables alongside strings.
+            lines.extend(req for req in group_reqs if isinstance(req, str))
+        return lines
+    return [
         line.partition(" #")[0].strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    return _aic_requirements(requirements, source=str(path))
 
 
-def _aic_requirements(requirements: list[str], *, source: str) -> dict[str, str]:
+def _aic_python_pins(path: Path) -> dict[str, str]:
     matches: dict[str, str] = {}
-    for requirement in requirements:
+    for requirement in _requirement_lines(path):
         parsed = Requirement(requirement)
         package = canonicalize_name(parsed.name)
         if package not in AIC_PACKAGES:
             continue
-        assert package not in matches, f"duplicate {package} requirement in {source}"
+        assert package not in matches, f"duplicate {package} requirement in {path}"
         matches[package] = requirement
     return matches
 
 
-def test_all_aiconfigurator_dependencies_use_one_release() -> None:
+@pytest.mark.parametrize("source", PYTHON_AIC_SOURCES)
+def test_python_source_does_not_pin_standalone_aic(source: str) -> None:
+    pinned = _aic_python_pins(ROOT / source)
+    assert pinned == {}, f"standalone AIC pins must be removed from {source}: {pinned}"
+
+
+@requires_aisimulate
+def test_installed_aisimulate_does_not_depend_on_aic_wheels() -> None:
+    requirements = metadata.requires("aisimulate")
+    assert requirements is not None, "aisimulate has no installed requirements"
+    aic_requires = [
+        requirement
+        for requirement in requirements
+        if canonicalize_name(Requirement(requirement).name) in AIC_PACKAGES
+    ]
+    assert aic_requires == [], (
+        "aisimulate 0.1.0.dev2 vendors AIC; it must not Requires-Dist AIC wheels: "
+        f"{aic_requires}"
+    )
+
+
+def test_rust_aiconfigurator_core_crate_uses_one_release() -> None:
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
-
-    root_requirements = _project_requirements(ROOT / "pyproject.toml", extra="mocker")
-    if sys.version_info < (3, 13):
-        aisimulate_requirements = _installed_requirements("aisimulate")
-        assert set(aisimulate_requirements) == AIC_PACKAGES
-    else:
-        aisimulate_requirements = {}
-    benchmark_requirements = _project_requirements(ROOT / "benchmarks/pyproject.toml")
-    frontend_requirements = _requirements_file(
-        ROOT / "container/deps/requirements.frontend.txt"
+    expected = _cargo_exact_version(
+        bindings_cargo["dependencies"]["aiconfigurator-core"]
     )
-    planner_requirements = _requirements_file(
-        ROOT / "container/deps/requirements.planner.txt"
+    locked = _cargo_lock_version(ROOT / "lib/bindings/python/Cargo.lock")
+    assert locked == expected, (
+        f"Python bindings Cargo.toml ({expected}) and Cargo.lock ({locked}) "
+        "disagree on aiconfigurator-core"
     )
 
-    assert set(root_requirements) == {"aiconfigurator-core"}
-    assert set(benchmark_requirements) == {"aiconfigurator-core"}
-    assert set(frontend_requirements) == {"aiconfigurator-core"}
-    assert set(planner_requirements) == AIC_PACKAGES
 
-    versions = {
-        "Python bindings Cargo": _cargo_exact_version(
-            bindings_cargo["dependencies"]["aiconfigurator-core"]
-        ),
-        "Python bindings Cargo.lock": _cargo_lock_version(
-            ROOT / "lib/bindings/python/Cargo.lock"
-        ),
-        "ai-dynamo[mocker]": _python_exact_version(
-            root_requirements["aiconfigurator-core"],
-            package="aiconfigurator-core",
-        ),
-        "benchmarks core": _python_exact_version(
-            benchmark_requirements["aiconfigurator-core"],
-            package="aiconfigurator-core",
-        ),
-        "frontend core": _python_exact_version(
-            frontend_requirements["aiconfigurator-core"],
-            package="aiconfigurator-core",
-        ),
-        "planner upper": _python_exact_version(
-            planner_requirements["aiconfigurator"],
-            package="aiconfigurator",
-        ),
-        "planner core": _python_exact_version(
-            planner_requirements["aiconfigurator-core"],
-            package="aiconfigurator-core",
-        ),
-    }
-    if aisimulate_requirements:
-        versions.update(
-            {
-                "AI Simulate upper": _python_exact_version(
-                    aisimulate_requirements["aiconfigurator"],
-                    package="aiconfigurator",
-                ),
-                "AI Simulate core": _python_exact_version(
-                    aisimulate_requirements["aiconfigurator-core"],
-                    package="aiconfigurator-core",
-                ),
-            }
-        )
-    expected_version = versions["Python bindings Cargo"]
-    mismatches = {
-        consumer: version
-        for consumer, version in versions.items()
-        if version != expected_version
-    }
-    assert (
-        not mismatches
-    ), f"AIC release versions differ; expected {expected_version}: {mismatches}"
+@requires_aisimulate
+def test_python_aic_modules_come_from_aisimulate() -> None:
+    for dist in AIC_PACKAGES:
+        with pytest.raises(metadata.PackageNotFoundError):
+            metadata.version(dist)
 
+    import aiconfigurator
+    import aiconfigurator_core
 
-def test_installed_aiconfigurator_packages_match_declared_release() -> None:
-    expected_version = _cargo_lock_version(ROOT / "lib/bindings/python/Cargo.lock")
-    installed = {
-        "aiconfigurator": Version(metadata.version("aiconfigurator")),
-        "aiconfigurator-core": Version(metadata.version("aiconfigurator-core")),
-    }
-    mismatches = {
-        package: version
-        for package, version in installed.items()
-        if version != expected_version
-    }
-    assert (
-        not mismatches
-    ), f"installed AIC versions differ; expected {expected_version}: {mismatches}"
+    assert aiconfigurator
+    assert aiconfigurator_core

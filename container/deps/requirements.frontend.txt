@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# KV router --router-prefill-load-model=aic imports aiconfigurator_core from the
-# aisimulate wheel (see requirements.aisimulate.txt), not a standalone AIC pin.
-
 # tritonclient<=2.62.0 requires grpcio<1.68 and protobuf<6.0dev; pin here so the
 # resolver picks compatible versions when installed alongside runtime deps.
 grpcio<1.68,>=1.63.0

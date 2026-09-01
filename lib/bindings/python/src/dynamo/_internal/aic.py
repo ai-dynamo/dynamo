@@ -443,9 +443,9 @@ def estimate_num_gpu_blocks(
         memory_fraction_kind = "of_total"
         memory_fraction_value = gpu_memory_utilization
 
-    # Imported lazily because aiconfigurator-core is provided by the optional
-    # `mocker` extra. An AIC-backed call requires that extra and fails fast when
-    # it is absent.
+    # Imported lazily because aiconfigurator_core ships inside aisimulate, which
+    # publishes wheels for Python 3.11-3.13 only. An AIC-backed call fails fast
+    # when it is absent.
     # TODO: account for whether specdec is enabled (pass `nextn=...`). Currently
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
@@ -459,8 +459,9 @@ def estimate_num_gpu_blocks(
             "aiconfigurator_core."
         ):
             raise RuntimeError(
-                "aiconfigurator-core is required for AIC KV-cache estimation but is "
-                "not installed; install the 'mocker' extra"
+                "aiconfigurator_core is required for AIC KV-cache estimation but is "
+                "not installed; it ships in the aisimulate package, which requires "
+                "Python 3.11-3.13"
             ) from exc
         raise
 

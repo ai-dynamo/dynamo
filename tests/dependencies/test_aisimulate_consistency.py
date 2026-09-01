@@ -104,9 +104,15 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
 
     assert python_requirement.marker is not None
     environment = default_environment()
+    # aisimulate 0.1.0.dev2 publishes wheels for 3.11 through 3.13 only, while
+    # ai-dynamo still declares requires-python >=3.10.
+    environment["python_version"] = "3.10"
+    assert not python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.12"
     assert python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.13"
+    assert python_requirement.marker.evaluate(environment)
+    environment["python_version"] = "3.14"
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
     assert _exact_version(container_requirement) == python_version
@@ -146,8 +152,8 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
 
 
 def test_installed_aisimulate_matches_the_declared_release() -> None:
-    if sys.version_info >= (3, 13):
-        pytest.skip("AISimulate does not publish a Python 3.13 wheel")
+    if sys.version_info >= (3, 14):
+        pytest.skip("AISimulate does not publish a Python 3.14 wheel")
     pyproject, _ = _root_configs()
     expected = _exact_version(_python_requirement(pyproject))
 
