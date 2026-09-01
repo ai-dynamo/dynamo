@@ -33,7 +33,7 @@ _HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{8,}\b")
 
 
 def is_secret_key(key: str) -> bool:
-    """Return whether a field name conventionally identifies a credential."""
+    """Keep credential matching narrow enough to preserve token telemetry."""
     camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
     parts = tuple(
         part for part in re.split(r"[^A-Za-z0-9]+", camel_split.lower()) if part
@@ -47,6 +47,8 @@ def is_secret_key(key: str) -> bool:
     ):
         return True
     if parts[-1] in {"secret", "auth"}:
+        return True
+    if {"apikey", "accesskey", "privatekey"} & set(parts):
         return True
     sensitive_key_pairs = {("api", "key"), ("access", "key"), ("private", "key")}
     if any(pair in sensitive_key_pairs for pair in zip(parts, parts[1:])):
@@ -80,7 +82,7 @@ def json_string_end(text: str, opening_quote: int) -> int | None:
 
 
 def redact_json_string_values(text: str) -> str:
-    """Redact sensitive JSON string values embedded in arbitrary text."""
+    """Scan once so malformed log fragments cannot trigger regex backtracking."""
     cursor = 0
     unchanged_start = 0
     chunks: list[str] = []
@@ -133,7 +135,6 @@ def redact(text: str) -> str:
         return text
 
     def redact_plain_value(match: re.Match[str]) -> str:
-        """Redact a matched plain key/value when its key is sensitive."""
         if not is_secret_key(match.group(1)):
             return match.group(0)
         return f"{match.group(1)}{match.group(2)}<redacted>"
@@ -146,7 +147,7 @@ def redact(text: str) -> str:
 
 
 def run(cmd: list[str], timeout: int) -> dict[str, Any]:
-    """Run one command and normalize subprocess wrapper failures."""
+    """Use shell-like 127/124 codes when kubectl cannot start or times out."""
     try:
         proc = subprocess.run(
             cmd, text=True, capture_output=True, timeout=timeout, check=False
@@ -174,7 +175,7 @@ def run(cmd: list[str], timeout: int) -> dict[str, Any]:
 
 
 def write_result(outdir: Path, name: str, result: dict[str, Any]) -> None:
-    """Write one redacted command result into the bundle."""
+    """Redact both output streams before either one reaches persistent storage."""
     safe = name.replace("/", "_").replace(" ", "_")
     (outdir / f"{safe}.txt").write_text(
         "$ "
@@ -201,7 +202,7 @@ def write_pod_discovery_result(outdir: Path, name: str, result: dict[str, Any]) 
 
 
 def kubectl_json(args: list[str], timeout: int) -> tuple[Any | None, dict[str, Any]]:
-    """Run a kubectl JSON query and retain its normalized command result."""
+    """Retain command evidence even when kubectl fails or emits invalid JSON."""
     result = run(["kubectl", *args, "-o", "json"], timeout)
     if result["returncode"] != 0:
         return None, result
@@ -219,7 +220,7 @@ def kubectl_json(args: list[str], timeout: int) -> tuple[Any | None, dict[str, A
 def pod_names(
     namespace: str, selector: str | None, timeout: int
 ) -> tuple[list[str], dict[str, Any]]:
-    """Discover selected pod names and return the inventory command result."""
+    """Keep pod specifications in memory while exposing names for collection."""
     args = ["get", "pods", "-n", namespace]
     if selector:
         args.extend(["-l", selector])
@@ -239,7 +240,7 @@ def pod_names(
 def container_names(
     namespace: str, pod: str, timeout: int
 ) -> tuple[list[tuple[str, str]], dict[str, Any]]:
-    """Discover a pod's init and application container names."""
+    """Tag init and application names so their log artifacts stay distinct."""
     body, result = kubectl_json(["get", "pod", pod, "-n", namespace], timeout)
     if not body:
         return [], result

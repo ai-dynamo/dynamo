@@ -52,6 +52,16 @@ class DebugBundleTest(unittest.TestCase):
             r'{"api\u005fkey":"<redacted>","author":"ali\"ce"}',
         )
 
+    def test_redact_recognizes_compact_key_names(self) -> None:
+        """Cover compact credential names without broad substring matching."""
+        source = "APIKEY=compact-api-secret\nACCESSKEY: compact-access-secret\n"
+
+        output = bundle.redact(source)
+
+        self.assertNotIn("compact-api-secret", output)
+        self.assertNotIn("compact-access-secret", output)
+        self.assertEqual(output.count("<redacted>"), 2)
+
     def test_redact_handles_long_unterminated_json_string(self) -> None:
         """Handle adversarial unterminated JSON strings without backtracking."""
         source = '{"api_key":"' + (r"\!" * 50_000)
