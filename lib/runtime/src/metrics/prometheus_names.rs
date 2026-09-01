@@ -766,6 +766,10 @@ pub mod transport {
         pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
         pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
         pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+        pub const CANCELLED_BEFORE_ADMISSION_TOTAL: &str = "tcp_cancelled_before_admission_total";
+        pub const CANCELLED_WHILE_QUEUED_TOTAL: &str = "tcp_cancelled_while_queued_total";
+        pub const CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL: &str =
+            "tcp_cancelled_dropped_before_dispatch_total";
         pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
         /// Response-server accept failures that triggered a descriptor- or memory-exhaustion
         /// backoff sleep; counts per failed accept, not per backoff episode

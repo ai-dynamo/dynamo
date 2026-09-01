@@ -39,6 +39,30 @@ pub static TCP_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("tcp_errors_total counter")
 });
 
+pub static TCP_CANCELLED_BEFORE_ADMISSION_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::new(
+        transport_metric_name(transport::tcp::CANCELLED_BEFORE_ADMISSION_TOTAL),
+        "Total cancellable TCP requests that observed cancellation before admission",
+    )
+    .expect("tcp_cancelled_before_admission_total counter")
+});
+
+pub static TCP_CANCELLED_WHILE_QUEUED_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::new(
+        transport_metric_name(transport::tcp::CANCELLED_WHILE_QUEUED_TOTAL),
+        "Total cancellable TCP requests that observed cancellation while queued or waiting for response",
+    )
+    .expect("tcp_cancelled_while_queued_total counter")
+});
+
+pub static TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::new(
+        transport_metric_name(transport::tcp::CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL),
+        "Total queued TCP requests dropped by the writer before dispatch because their request context was cancelled",
+    )
+    .expect("tcp_cancelled_dropped_before_dispatch_total counter")
+});
+
 /// Incremented once per `listener.accept()` failure with `EMFILE`, `ENFILE`, `ENOBUFS`, or
 /// `ENOMEM` — that is, per failed accept while the process or kernel is out of file
 /// descriptors or memory, not once per backoff episode. A single episode of exhaustion
@@ -80,6 +104,11 @@ pub fn ensure_transport_metrics_registered_prometheus(
                 registry.register(Box::new(TCP_BYTES_SENT_TOTAL.clone()))?;
                 registry.register(Box::new(TCP_BYTES_RECEIVED_TOTAL.clone()))?;
                 registry.register(Box::new(TCP_ERRORS_TOTAL.clone()))?;
+                registry.register(Box::new(TCP_CANCELLED_BEFORE_ADMISSION_TOTAL.clone()))?;
+                registry.register(Box::new(TCP_CANCELLED_WHILE_QUEUED_TOTAL.clone()))?;
+                registry.register(Box::new(
+                    TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL.clone(),
+                ))?;
                 registry.register(Box::new(TCP_ACCEPT_BACKOFF_TOTAL.clone()))?;
                 registry.register(Box::new(NATS_ERRORS_TOTAL.clone()))?;
                 Ok(())

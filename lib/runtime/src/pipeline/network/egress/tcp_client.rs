@@ -13,7 +13,9 @@
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::engine::AsyncEngineContext;
 use crate::metrics::transport_metrics::{
-    TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
+    TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_CANCELLED_BEFORE_ADMISSION_TOTAL,
+    TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL, TCP_CANCELLED_WHILE_QUEUED_TOTAL,
+    TCP_ERRORS_TOTAL,
 };
 use crate::pipeline::network::codec::TcpRequestFrame;
 use crate::pipeline::network::get_tcp_max_message_size;
@@ -719,6 +721,7 @@ impl TcpConnection {
                 let mut count = 0usize;
                 while let Some(req) = submit_queue.pop() {
                     if req.cancelled.load(Ordering::Acquire) {
+                        TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL.inc();
                         let _ = req
                             .response_tx
                             .send(Err(anyhow::anyhow!("Request cancelled before dispatch")));
@@ -947,9 +950,11 @@ impl TcpConnection {
             tokio::select! {
                 biased;
                 _ = ctx.killed() => {
+                    TCP_CANCELLED_BEFORE_ADMISSION_TOTAL.inc();
                     anyhow::bail!("Request cancelled before TCP admission");
                 }
                 _ = ctx.stopped() => {
+                    TCP_CANCELLED_BEFORE_ADMISSION_TOTAL.inc();
                     anyhow::bail!("Request stopped before TCP admission");
                 }
                 permit = self.admission.acquire() => {
@@ -1014,6 +1019,7 @@ impl TcpConnection {
                 && (ctx.is_killed() || ctx.is_stopped())
             {
                 cancelled.store(true, Ordering::Release);
+                TCP_CANCELLED_WHILE_QUEUED_TOTAL.inc();
             }
             // Wake writer if it was sleeping
             self.writer_notify.notify_one();
@@ -1032,10 +1038,12 @@ impl TcpConnection {
                 biased;
                 _ = ctx.killed() => {
                     cancelled.store(true, Ordering::Release);
+                    TCP_CANCELLED_WHILE_QUEUED_TOTAL.inc();
                     anyhow::bail!("Request cancelled while queued for TCP dispatch");
                 }
                 _ = ctx.stopped() => {
                     cancelled.store(true, Ordering::Release);
+                    TCP_CANCELLED_WHILE_QUEUED_TOTAL.inc();
                     anyhow::bail!("Request stopped while queued for TCP dispatch");
                 }
                 result = response_rx => {
@@ -3609,6 +3617,8 @@ mod tests {
     #[tokio::test]
     async fn test_context_cancel_after_enqueue_drops_before_tcp_dispatch() {
         let (addr, request_count) = spawn_counting_echo_server().await;
+        let dropped_before = TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL.get();
+        let queued_before = TCP_CANCELLED_WHILE_QUEUED_TOTAL.get();
 
         let mut conn = TcpConnection::connect(addr, Duration::from_secs(5), 10)
             .await
@@ -3657,6 +3667,15 @@ mod tests {
             request_count.load(Ordering::SeqCst),
             0,
             "cancelled request should not be written to the TCP backend"
+        );
+        assert_eq!(
+            TCP_CANCELLED_DROPPED_BEFORE_DISPATCH_TOTAL.get(),
+            dropped_before + 1.0,
+            "writer should count the cancelled request it dropped before dispatch"
+        );
+        assert!(
+            TCP_CANCELLED_WHILE_QUEUED_TOTAL.get() >= queued_before + 1.0,
+            "send path should count cancellation observed after TCP admission"
         );
 
         conn.writer_handle.abort();
