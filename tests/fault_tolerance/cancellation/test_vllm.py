@@ -6,13 +6,6 @@ Test Execution Times (Last Run: 2026-08-28):
 - test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
 - test_request_cancellation_vllm_decode_cancel: ~130s (gpu_2)
 - test_request_cancellation_vllm_prefill_cancel: ~108s [nats] / ~123s [tcp] (gpu_2)
-
-test_request_cancellation_vllm_prefill_cancel covers a disconnect during remote
-prefill that left the decode leg undispatched and its staged KV blocks pinned.
-It was temporarily promoted to
-pre_merge to validate that fix on CI (run 33223555776, both parametrizations
-green) and then returned to nightly. Promoting it costs ~231s in the
-`pre_merge and vllm and gpu_2` job (~18m30s -> ~22m20s against a 60m cap).
 """
 
 import json
