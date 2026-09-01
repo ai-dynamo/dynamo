@@ -61,6 +61,10 @@ use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
+#[cfg(feature = "thunderagent-e2e")]
+use thunderagent_dynamo_policy::{
+    ThunderAgentComponents, ThunderAgentConfig, WorkerCapacityProvider, WorkerCapacitySnapshot,
+};
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -1905,6 +1909,9 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
+    #[cfg(feature = "thunderagent-e2e")]
+    let needs_policy_role = false;
+    #[cfg(not(feature = "thunderagent-e2e"))]
     let needs_policy_role = worker_selection_policy_factory.is_some();
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
@@ -1991,8 +1998,10 @@ async fn create_kv_router_from_endpoint(
             }
         }
     };
-    #[cfg(not(feature = "custom-policy"))]
+    #[cfg(any(not(feature = "custom-policy"), feature = "thunderagent-e2e"))]
     let _ = (policy_model_name, policy_worker_role);
+    #[cfg(feature = "thunderagent-e2e")]
+    let _ = worker_selection_policy_factory;
 
     let load_context = llm_rs::kv_router::RoutingLoadContext::start(
         client.clone(),
@@ -2026,6 +2035,20 @@ async fn create_kv_router_from_endpoint(
     #[cfg(feature = "custom-policy")]
     let kv_router = {
         let effective_config = kv_router_config.clone().unwrap_or_default();
+        #[cfg(feature = "thunderagent-e2e")]
+        let (selector, classifier) = {
+            let snapshot = Arc::new(WorkerCapacitySnapshot::default());
+            let capacity_provider: Arc<dyn WorkerCapacityProvider> =
+                Arc::new(move || Arc::clone(&snapshot));
+            let components = ThunderAgentComponents::new(
+                effective_config.clone(),
+                metric_worker_type,
+                ThunderAgentConfig::default(),
+                capacity_provider,
+            )?;
+            (components.worker_selection_policy, components.classifier)
+        };
+        #[cfg(not(feature = "thunderagent-e2e"))]
         let selector = worker_selection_policy_factory.map_or_else(
             || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
             |factory| {
@@ -2042,7 +2065,7 @@ async fn create_kv_router_from_endpoint(
                 )
             },
         );
-        model_manager
+        let kv_router = model_manager
             .kv_chooser_for_with_selector_and_client(
                 client,
                 block_size as u32,
@@ -2056,7 +2079,14 @@ async fn create_kv_router_from_endpoint(
                 load_context.scheduler_load_sender(),
                 load_context.cancellation_token(),
             )
-            .await?
+            .await?;
+        #[cfg(feature = "thunderagent-e2e")]
+        let kv_router = Arc::new(
+            Arc::try_unwrap(kv_router)
+                .map_err(|_| anyhow::anyhow!("ThunderAgent test router unexpectedly shared"))?
+                .with_request_classifier(classifier)?,
+        );
+        kv_router
     };
 
     Ok(llm_rs::kv_router::ManagedKvRouter::new(

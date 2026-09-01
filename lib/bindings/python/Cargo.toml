@@ -29,6 +29,8 @@ custom-policy = [
   "dep:dynamo-worker-selection-policy-catalog",
   "dynamo-kv-router/standalone-selection",
 ]
+# Test-only source-build adapter for the external ThunderAgent classifier.
+thunderagent-e2e = ["custom-policy", "dep:thunderagent-dynamo-policy"]
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
@@ -96,6 +98,7 @@ uuid = { version = "1.18.1" }
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
+thunderagent-dynamo-policy = { git = "https://github.com/ishandhanani/router-sandbox.git", rev = "de9c72c4e0136468f84637157ea2c6545097409f", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
@@ -134,3 +137,6 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+[patch."https://github.com/ai-dynamo/dynamo.git"]
+dynamo-kv-router = { path = "../../kv-router" }

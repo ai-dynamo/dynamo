@@ -2124,6 +2124,7 @@ dependencies = [
  "dynamo-truthy",
  "fastrand",
  "flume",
+ "futures-util",
  "indexmap 2.14.0",
  "once_cell",
  "ordered-float 4.6.0",
@@ -2391,6 +2392,7 @@ dependencies = [
  "serde-transcode",
  "serde_json",
  "thiserror 2.0.18",
+ "thunderagent-dynamo-policy",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -8296,6 +8298,19 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float 2.10.1",
+]
+
+[[package]]
+name = "thunderagent-dynamo-policy"
+version = "0.1.0"
+source = "git+https://github.com/ishandhanani/router-sandbox.git?rev=de9c72c4e0136468f84637157ea2c6545097409f#de9c72c4e0136468f84637157ea2c6545097409f"
+dependencies = [
+ "async-trait",
+ "dynamo-kv-router",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
