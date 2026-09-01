@@ -134,6 +134,7 @@ The common local environment variables are:
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. The Rust EPP currently rejects `container`. |
+| `DYN_EPP_ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING` | `false` | Accept a full-duplex gateway that omits the request-body streaming flag. Enable only after verifying that the gateway sends request bodies without waiting for the EPP header response. |
 | `RUST_LOG` | `info` | Tracing log filter. |
 
 ## Cleaning
