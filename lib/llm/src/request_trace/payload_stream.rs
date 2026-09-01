@@ -6,7 +6,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
-use crate::protocols::common::metrics::LLMMetricAnnotation;
+use crate::protocols::common::metrics::{
+    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation,
+};
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::chat_completions::{
     DeltaAggregator, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
@@ -116,39 +118,77 @@ where
     )
 }
 
-/// Collect all chunks, aggregate them, then emit a single final chunk (for non-streaming)
+/// Fold a non-streaming payload into one final client chunk while forwarding
+/// metric annotations as they arrive.
+///
+/// Metrics must bypass the fold because downstream latency metrics depend on
+/// observation time. Typed metrics are moved out of buffered chunks, while
+/// event-tagged annotations are forwarded without their payload data.
+///
+/// At end of stream, the remaining client data is aggregated into one chunk.
+/// The folded chunk carries no `llm_metrics` because they were already emitted
+/// in-stream (#11349).
 pub fn fold_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
     let (tx, rx) = oneshot::channel::<NvCreateChatCompletionResponse>();
 
-    let single_chunk_stream = async move {
-        let chunks: Vec<_> = stream.collect().await;
+    let out = async_stream::stream! {
+        let mut stream = std::pin::pin!(stream);
+        let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+        let mut forwarded_frames: usize = 0;
+        let mut total_chunk_tokens: usize = 0;
 
-        // Folding discards the per-chunk metrics: capture the last
-        // LLMMetricAnnotation (either transport) and re-attach it to the
-        // folded chunk for audit-enabled non-streaming requests (#11349).
-        let mut last_llm_metrics: Option<LLMMetricAnnotation> = None;
-        for chunk in &chunks {
-            if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(chunk) {
-                last_llm_metrics = Some(metrics);
-            } else if let Some(metrics) = chunk
-                .data
-                .as_ref()
-                .and_then(|data| data.llm_metrics.as_ref())
-            {
-                last_llm_metrics = Some(metrics.clone());
+        while let Some(mut chunk) = stream.next().await {
+            // Move typed metrics out of the buffered chunk and forward them
+            // immediately as an annotation frame.
+            if let Some(metrics) = chunk.data.as_mut().and_then(|data| data.llm_metrics.take()) {
+                total_chunk_tokens += metrics.chunk_tokens;
+                forwarded_frames += 1;
+                match metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    Ok(frame) => yield frame,
+                    Err(e) => {
+                        tracing::warn!(
+                            "request payload: failed to serialize metric annotation: {e}"
+                        );
+                    }
+                }
             }
+
+            // Forward the event annotation as a data-less shell, leaving any
+            // payload data behind for aggregation.
+            if matches!(
+                chunk.event.as_deref(),
+                Some(ANNOTATION_LLM_METRICS) | Some(ANNOTATION_PAYLOAD_USAGE)
+            ) {
+                if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&chunk) {
+                    total_chunk_tokens += metrics.chunk_tokens;
+                }
+                forwarded_frames += 1;
+                yield Annotated {
+                    data: None,
+                    id: chunk.id.take(),
+                    event: chunk.event.take(),
+                    comment: chunk.comment.take(),
+                    error: None,
+                };
+            }
+
+            buffered.push(chunk);
         }
 
-        let chunks_stream = futures::stream::iter(chunks);
-        let parsing_options = ParsingOptions::default();
+        tracing::debug!(
+            forwarded_frames,
+            total_chunk_tokens,
+            "request payload: metric annotations forwarded ahead of the non-streaming fold"
+        );
 
-        match DeltaAggregator::apply(chunks_stream, parsing_options).await {
+        let parsing_options = ParsingOptions::default();
+        match DeltaAggregator::apply(futures::stream::iter(buffered), parsing_options).await {
             Ok(final_resp) => {
                 let _ = tx.send(final_resp.clone());
-                final_response_to_one_chunk_stream_with_metrics(final_resp, last_llm_metrics)
+                yield final_response_to_one_chunk(final_resp);
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
@@ -170,7 +210,7 @@ where
                     },
                     nvext: None,
                 };
-                final_response_to_one_chunk_stream(fallback)
+                yield final_response_to_one_chunk(fallback);
             }
         }
     };
@@ -187,31 +227,17 @@ where
         }
     });
 
-    (
-        Box::pin(futures::stream::once(single_chunk_stream).flatten()),
-        future,
-    )
+    (Box::pin(out), future)
 }
 
-/// Convert a final (non-streaming) response into a single "final chunk" stream.
-/// Put the entire final text/tool-calls into `delta` so downstream aggregate is a no-op.
-pub fn final_response_to_one_chunk_stream(
+/// Build the single client chunk for a folded non-streaming response.
+///
+/// The complete response is placed in one `delta`. `llm_metrics` remains
+/// `None` because metrics were already forwarded before the fold; attaching
+/// them here would double-observe them downstream (#11349).
+fn final_response_to_one_chunk(
     resp: NvCreateChatCompletionResponse,
-) -> std::pin::Pin<
-    Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-> {
-    final_response_to_one_chunk_stream_with_metrics(resp, None)
-}
-
-/// Same as [`final_response_to_one_chunk_stream`], but attaches the request's
-/// final `LLMMetricAnnotation` to the emitted chunk so downstream metric
-/// collectors observe the per-request usage exactly once (#11349).
-pub(crate) fn final_response_to_one_chunk_stream_with_metrics(
-    resp: NvCreateChatCompletionResponse,
-    llm_metrics: Option<LLMMetricAnnotation>,
-) -> std::pin::Pin<
-    Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-> {
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
     let mut choices: Vec<ChatChoiceStream> = Vec::with_capacity(resp.inner.choices.len());
     for (idx, ch) in resp.inner.choices.iter().enumerate() {
         // Convert FunctionCall to FunctionCallStream if present
@@ -273,17 +299,16 @@ pub(crate) fn final_response_to_one_chunk_stream_with_metrics(
             usage: resp.inner.usage.clone(),
         },
         nvext: resp.nvext.clone(),
-        llm_metrics,
+        llm_metrics: None,
     };
 
-    let annotated = Annotated {
+    Annotated {
         data: Some(chunk),
         id: None,
         event: None,
         comment: None,
         error: None,
-    };
-    Box::pin(futures::stream::once(async move { annotated }))
+    }
 }
 
 #[cfg(test)]
@@ -582,8 +607,8 @@ mod tests {
         assert_eq!(tool_call.function.arguments, "{\"city\":\"Tokyo\"}");
     }
 
-    #[tokio::test]
-    async fn test_final_response_to_one_chunk_preserves_reasoning_and_tool_calls() {
+    #[test]
+    fn test_final_response_to_one_chunk_preserves_reasoning_and_tool_calls() {
         let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -609,9 +634,8 @@ mod tests {
         }))
         .expect("response parses");
 
-        let chunks: Vec<_> = final_response_to_one_chunk_stream(response).collect().await;
-        assert_eq!(chunks.len(), 1);
-        let delta = &chunks[0].data.as_ref().unwrap().inner.choices[0].delta;
+        let chunk = final_response_to_one_chunk(response);
+        let delta = &chunk.data.as_ref().unwrap().inner.choices[0].delta;
 
         assert_eq!(
             delta.content.as_ref().unwrap(),
@@ -737,42 +761,107 @@ mod tests {
         assert!(resp2.is_none());
     }
 
-    fn sample_llm_metrics(output_tokens: usize) -> LLMMetricAnnotation {
+    fn typed_metrics(chunk_tokens: usize, output_tokens: usize) -> LLMMetricAnnotation {
         LLMMetricAnnotation {
             input_tokens: 10,
             output_tokens,
-            chunk_tokens: 1,
+            chunk_tokens,
             cached_tokens: Some(4),
             ..Default::default()
         }
     }
 
+    /// Production-shaped payload-usage tail: usage data plus its metric
+    /// annotation, with `chunk_tokens = 0`.
+    fn payload_usage_tail(output_tokens: usize) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens,
+            chunk_tokens: 0,
+            cached_tokens: Some(4),
+            ..Default::default()
+        };
+        let annotation = metrics.to_annotation::<()>().unwrap();
+
+        let usage_chunk = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices: vec![],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: output_tokens as u32,
+                    total_tokens: 10 + output_tokens as u32,
+                    ..Default::default()
+                }),
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+
+        Annotated {
+            data: Some(usage_chunk),
+            id: None,
+            event: annotation.event,
+            comment: annotation.comment,
+            error: None,
+        }
+    }
+
     #[tokio::test]
-    async fn test_fold_attaches_last_llm_metrics_to_folded_chunk() {
-        let mut field_chunk = create_mock_chunk("Hello ".to_string(), 0);
-        field_chunk.data.as_mut().unwrap().llm_metrics = Some(sample_llm_metrics(1));
+    async fn test_fold_forwards_metric_frames_before_folded_chunk() {
+        let mut chunk1 = create_mock_chunk("Hello ".to_string(), 0);
+        chunk1.data.as_mut().unwrap().llm_metrics = Some(typed_metrics(1, 1));
+        let mut chunk2 = create_mock_chunk("World".to_string(), 0);
+        chunk2.data.as_mut().unwrap().llm_metrics = Some(typed_metrics(2, 3));
 
-        let mut event_chunk = create_mock_chunk("World".to_string(), 0);
-        let final_metrics = sample_llm_metrics(2);
-        let annotation = final_metrics.to_annotation::<()>().unwrap();
-        event_chunk.event = annotation.event;
-        event_chunk.comment = annotation.comment;
-
-        let chunks = vec![field_chunk, event_chunk, create_final_chunk(0)];
+        let chunks = vec![chunk1, chunk2, create_final_chunk(0), payload_usage_tail(3)];
 
         let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
         let results: Vec<_> = folded.collect().await;
         let final_resp = future.await.expect("aggregation should produce a record");
 
-        assert_eq!(results.len(), 1, "fold must emit exactly one chunk");
-        let folded_metrics = results[0]
-            .data
-            .as_ref()
+        // Two typed metric frames, one payload-usage shell, then one
+        // folded client chunk.
+        assert_eq!(results.len(), 4);
+
+        for (frame, expected_chunk_tokens) in results[..2].iter().zip([1usize, 2]) {
+            assert!(frame.data.is_none(), "metric frames must be data-less");
+            let metrics = LLMMetricAnnotation::from_annotation(frame)
+                .unwrap()
+                .expect("metric frame must parse");
+            assert_eq!(metrics.chunk_tokens, expected_chunk_tokens);
+        }
+
+        // The annotation is forwarded without payload data; usage remains
+        // in the fold.
+        let shell = &results[2];
+        assert!(shell.data.is_none());
+        let tail_metrics = LLMMetricAnnotation::from_annotation(shell)
             .unwrap()
-            .llm_metrics
-            .as_ref()
-            .expect("folded chunk must carry the final LLMMetricAnnotation (#11349)");
-        assert_eq!(folded_metrics, &final_metrics);
+            .expect("payload-usage shell must parse");
+        assert_eq!(tail_metrics.chunk_tokens, 0);
+        assert_eq!(tail_metrics.output_tokens, 3);
+
+        // Exactly one folded client chunk; metrics must not be replayed on it.
+        let folded_chunk = results[3].data.as_ref().expect("folded client chunk");
+        assert!(folded_chunk.llm_metrics.is_none());
+        assert_eq!(
+            folded_chunk.inner.choices[0]
+                .delta
+                .content
+                .as_ref()
+                .unwrap(),
+            &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
+        assert_eq!(
+            folded_chunk.inner.usage.as_ref().unwrap().completion_tokens,
+            3
+        );
 
         assert_eq!(
             final_resp.inner.choices[0]
@@ -781,6 +870,10 @@ mod tests {
                 .as_ref()
                 .unwrap(),
             &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
+        assert_eq!(
+            final_resp.inner.usage.as_ref().unwrap().completion_tokens,
+            3
         );
     }
 
