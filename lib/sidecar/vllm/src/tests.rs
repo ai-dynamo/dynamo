@@ -537,6 +537,53 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
 }
 
 #[test]
+fn encode_response_enforces_terminal_contract() {
+    let request = epd_image_request();
+    let ec_transfer_params = || json_to_struct(encoder_handoff()).expect("encoder handoff");
+
+    let mut length = encode_response(Some(ec_transfer_params()));
+    length
+        .outputs
+        .as_mut()
+        .and_then(|output| output.finish_info.as_mut())
+        .expect("finish info")
+        .finish_reason = pb::finish_info::FinishReason::Length as i32;
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .convert(length)
+        .expect_err("Length must not become a successful encoder handoff");
+    assert!(error.to_string().contains("invalid finish reason"));
+
+    let mut token_producing = encode_response(Some(ec_transfer_params()));
+    let output = token_producing.outputs.as_mut().expect("sequence output");
+    output.text = "unexpected".to_string();
+    output.num_tokens = 1;
+    output.token_ids = vec![42];
+    output
+        .finish_info
+        .as_mut()
+        .expect("finish info")
+        .num_output_tokens = 1;
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .convert(token_producing)
+        .expect_err("Encode must remain tokenless");
+    assert!(error.to_string().contains("produced output tokens"));
+
+    let mut cancelled = encode_response(None);
+    cancelled
+        .outputs
+        .as_mut()
+        .and_then(|output| output.finish_info.as_mut())
+        .expect("finish info")
+        .finish_reason = pb::finish_info::FinishReason::Aborted as i32;
+    let terminal = ResponseState::new(&request, DisaggregationMode::Encode)
+        .convert(cancelled)
+        .expect("cancelled response")
+        .expect("cancelled terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(terminal.encoder_result.is_none());
+}
+
+#[test]
 fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
     let request = request();
     let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -893,6 +940,27 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
     *server.service.model_info_override.lock().await = Some(changed);
 
     assert!(engine.start(0).await.is_err());
+}
+
+#[tokio::test]
+async fn encode_startup_rejects_non_multimodal_engine() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let argv = vec![
+        "dynamo-vllm-sidecar".to_string(),
+        "--grpc-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--disaggregation-mode".to_string(),
+        "encode".to_string(),
+    ];
+    let result = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .expect("bootstrap task");
+    let error = result.err().expect("text-only Encode startup must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("encode mode requires a multimodal engine")
+    );
 }
 
 #[tokio::test]
@@ -1359,6 +1427,33 @@ async fn multimodal_image_is_forwarded_with_uuid() {
     );
 }
 
+#[test]
+fn unsafe_media_uuids_are_rejected() {
+    for uuid in [
+        "/tmp/escape",
+        "../escape",
+        "nested/item",
+        "nested\\item",
+        ".",
+        "..",
+        "nul\0item",
+    ] {
+        let mut request = epd_image_request();
+        request
+            .multi_modal_uuids
+            .as_mut()
+            .and_then(|by_modality| by_modality.get_mut("image_url"))
+            .expect("image UUIDs")[0] = Some(uuid.to_string());
+        let error = build_generate_request(
+            request,
+            "unsafe-media-uuid".to_string(),
+            DisaggregationMode::Encode,
+        )
+        .expect_err("unsafe UUID must be rejected");
+        assert!(error.to_string().contains("safe identifier"), "uuid={uuid}");
+    }
+}
+
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     let service = FakeVllm::default();
@@ -1375,7 +1470,12 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         discovered.clone(),
     );
     encoder.start(0).await.expect("start encoder");
-    let source_request = epd_image_request();
+    let mut source_request = epd_image_request();
+    source_request
+        .routing
+        .as_mut()
+        .expect("routing hints")
+        .dp_rank = Some(1);
     let encode_outputs = collect(&encoder, source_request.clone()).await;
     assert_eq!(encode_outputs.len(), 1);
     assert!(encode_outputs[0].token_ids.is_empty());
@@ -1386,6 +1486,17 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         .clone()
         .expect("encoder result");
     assert_eq!(encoder_result, encoder_handoff());
+    assert_eq!(
+        server
+            .service
+            .data_parallel_rank_metadata
+            .lock()
+            .await
+            .last()
+            .cloned(),
+        Some(None),
+        "Encode must not reuse the downstream worker's DP rank"
+    );
 
     {
         let requests = server.service.requests.lock().await;
@@ -1446,11 +1557,16 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
 
         if mode.is_prefill() {
             let mut decode_request = downstream_request;
+            let mut disaggregated_params = outputs[0]
+                .disaggregated_params
+                .clone()
+                .expect("prefill KV handoff");
+            disaggregated_params
+                .as_object_mut()
+                .expect("prefill KV object")
+                .remove("_dynamo_sidecar_multimodal_prompt_token_ids");
             decode_request.prefill_result = Some(PrefillResult {
-                disaggregated_params: outputs[0]
-                    .disaggregated_params
-                    .clone()
-                    .expect("prefill KV handoff"),
+                disaggregated_params,
                 prompt_tokens_details: None,
             });
             let decode = engine(
@@ -1575,7 +1691,11 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
 #[tokio::test]
 async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
-    let server = FakeServer::start(FakeVllm::default()).await;
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
     for (extra, expected_component, expected_route_to_encoder) in [
         (Vec::<&str>::new(), "custom", false),
         (vec!["--route-to-encoder"], "custom", true),

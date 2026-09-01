@@ -93,6 +93,8 @@ print_launch_banner --multimodal "Launching vLLM Sidecar E+PD Serving (2 GPUs)" 
 
 python -m dynamo.frontend &
 
+# Encoder-only vLLM has no KV cache, so the profiler's KV-cache memory override
+# is inapplicable; cap the encoder allocation separately.
 CUDA_VISIBLE_DEVICES="$VLLM_ENCODER_GPU" \
 vllm-rs serve "$MODEL" \
     --host 127.0.0.1 \

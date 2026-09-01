@@ -39,11 +39,11 @@ pub(crate) fn build_generate_request(
     let mut prefill_result = request.prefill_result;
     let token_ids = request.token_ids;
     if mode.is_decode() && has_media {
-        // Validate and consume sidecar-private prefill metadata before the KV
+        // Remove sidecar-private prefill metadata before the KV
         // handoff is serialized to vLLM. Decode rebuilds the same expanded
         // prompt and multimodal positions from the original prompt, media, and
         // encoder-cache handoff while NIXL supplies the prompt KV.
-        take_multimodal_prompt_token_ids(&mut prefill_result)?;
+        strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
@@ -133,12 +133,10 @@ pub(crate) fn data_parallel_rank(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
 ) -> Option<u32> {
-    request.routing.as_ref().and_then(|routing| {
-        if mode.is_prefill() {
-            routing.prefill_dp_rank.or(routing.dp_rank)
-        } else {
-            routing.dp_rank
-        }
+    request.routing.as_ref().and_then(|routing| match mode {
+        DisaggregationMode::Encode => None,
+        DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
+        DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
 }
 
@@ -191,32 +189,13 @@ fn consume_redundant_nvext(
     Ok(())
 }
 
-fn take_multimodal_prompt_token_ids(
-    prefill_result: &mut Option<PrefillResult>,
-) -> Result<Vec<u32>, DynamoError> {
-    let params = &mut prefill_result
+fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>) {
+    if let Some(params) = prefill_result
         .as_mut()
-        .ok_or_else(|| {
-            client::invalid_argument("multimodal decode request is missing the prefill result")
-        })?
-        .disaggregated_params;
-    let value = params
-        .as_object_mut()
-        .and_then(|params| params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY))
-        .ok_or_else(|| {
-            client::invalid_argument(
-                "multimodal decode request is missing expanded prefill token IDs",
-            )
-        })?;
-    let token_ids: Vec<u32> = serde_json::from_value(value).map_err(|error| {
-        client::invalid_argument(format!("multimodal prefill token IDs are invalid: {error}"))
-    })?;
-    if token_ids.is_empty() {
-        return Err(client::invalid_argument(
-            "multimodal prefill token IDs must not be empty",
-        ));
+        .and_then(|result| result.disaggregated_params.as_object_mut())
+    {
+        params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY);
     }
-    Ok(token_ids)
 }
 
 fn media_source(source: &str) -> Result<pb::media_item::Source, DynamoError> {
@@ -278,6 +257,20 @@ fn forwarded_mm_uuids(request: &PreprocessedRequest) -> Result<Option<Vec<String
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
+    if uuid == "."
+        || uuid == ".."
+        || uuid
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        return Err(client::invalid_argument(
+            "multimodal media uuid must be a safe identifier without path separators, NUL bytes, or dot path components",
+        ));
+    }
+    Ok(())
 }
 
 fn build_media(
@@ -350,6 +343,9 @@ fn build_media(
                 .and_then(Clone::clone)
                 .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
                 .unwrap_or_default();
+            if !uuid.is_empty() {
+                validate_media_uuid(&uuid)?;
+            }
             media.push(pb::MediaItem {
                 modality: pb::Modality::Image as i32,
                 source: Some(source),
@@ -803,6 +799,15 @@ impl ResponseState {
                 Some(dynamo_backend_common::FinishReason::Cancelled)
             ) {
                 return Ok(Some(mapped));
+            }
+            if !matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Stop)
+            ) {
+                return Err(client::protocol_error(format!(
+                    "encode terminal has invalid finish reason {:?}; expected stop or cancelled",
+                    mapped.finish_reason
+                )));
             }
             let params = finish
                 .ec_transfer_params

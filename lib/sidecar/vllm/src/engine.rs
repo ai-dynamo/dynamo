@@ -92,6 +92,12 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        if mode.is_encode() && !model.supports_multimodal {
+            return Err(client::invalid_argument(format!(
+                "encode mode requires a multimodal engine; `{}` does not advertise multimodal support",
+                model.served_name
+            )));
+        }
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
