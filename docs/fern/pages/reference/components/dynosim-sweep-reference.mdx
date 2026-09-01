@@ -40,6 +40,9 @@ Recommendation accepts the prediction sections plus search controls:
 
 Unknown fields are rejected. Conditional validation runs after each candidate is materialized.
 
+When `traffic` is omitted, recommendation uses the same default as prediction: 100 independent
+synthetic requests at concurrency 10, with 1,024 input tokens and 128 output tokens per request.
+
 ## Domain Syntax
 
 ### Choices
@@ -81,6 +84,18 @@ enumeration and projection. A custom list treats each complete parallelism mappi
 choice. With `preset: false`, each parallelism knob becomes an independent dimension before
 feasibility filtering.
 
+## Traffic Domains
+
+Recommendation accepts `choices` or `range` on `traffic.load.concurrency`, request or session
+rate, `traffic.load.speedup` for trace timestamps, and `traffic.load.fraction` for
+KV-capacity-relative load. The
+`kv_capacity_fraction` load type is recommendation-only: it derives candidate concurrency from
+that candidate's estimated KV capacity. Fractions above 1 are valid and model oversubscribed load.
+
+For a swept load, use `stop.requests_per_load_unit` or `stop.sessions_per_load_unit` to scale the
+simulation length with each concrete candidate. Fixed `stop.requests` and `stop.sessions` keep the
+same simulation length across the load domain.
+
 ## Optimization
 
 `optimization.target` accepts:
@@ -94,13 +109,20 @@ feasibility filtering.
 | `goodput_per_gpu` | Highest goodput per simulated GPU |
 | `ttft` | Lowest Time to First Token (TTFT) |
 | `e2e_latency` | Lowest end-to-end latency |
-| `pareto` | Complete nondominated objective front |
+| `pareto` | Complete nondominated front over the public CLI's fixed pair: throughput per GPU and throughput per user |
 
 `goodput` and `goodput_per_gpu` require `evaluation.sla` with either `e2e_ms` or both `ttft_ms` and
 `itl_ms`.
 
+The public recommendation schema does not expose `pareto_objectives`. Custom objective lists remain
+available only through the legacy Sweeper Python SDK.
+
 `optimization.constraints.min_candidate_gpus` and `max_candidate_gpus` bound the simulated GPU
 footprint. When `engine.hardware: auto`, set one concrete `optimization.hardware` value.
+
+Recommendation searches aggregated and disaggregated modes by default, and vLLM and SGLang
+backends by default. TensorRT-LLM can be selected explicitly for aggregated mode. The default
+`engine.context_length: max` resolves from the model's Hugging Face configuration.
 
 ## Optimizer Controls
 
