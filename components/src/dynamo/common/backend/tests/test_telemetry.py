@@ -201,6 +201,7 @@ def test_engine_trace_kwargs_returns_empty_when_disabled_or_no_headers():
 
 
 def test_start_lifecycle_span_is_gated_and_timing_only(monkeypatch):
+    monkeypatch.delenv("DYN_LIFECYCLE_TRACE_ENABLED", raising=False)
     ctx = _FakeContext()
     with telemetry.start_lifecycle_span(ctx, "engine.queue"):
         pass
