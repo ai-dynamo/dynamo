@@ -118,10 +118,14 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected %s mount, got %#v", SnapshotControlVolumeName, main.VolumeMounts)
 	}
 	foundEnv := false
+	foundLegacyEnv := false
 	foundStandbyEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
+		}
+		if e.Name == LegacySnapshotControlDirEnv {
+			foundLegacyEnv = true
 		}
 		if e.Name == RestoreStandbyModeEnv {
 			foundStandbyEnv = true
@@ -132,6 +136,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
+	}
+	if !foundLegacyEnv {
+		t.Fatalf("expected %s env, got %#v", LegacySnapshotControlDirEnv, main.Env)
 	}
 	if !foundStandbyEnv {
 		t.Fatalf("expected %s env, got %#v", RestoreStandbyModeEnv, main.Env)
@@ -312,10 +319,14 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
+	legacyEnvCount := 0
 	standbyEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
+		}
+		if e.Name == LegacySnapshotControlDirEnv {
+			legacyEnvCount++
 		}
 		if e.Name == RestoreStandbyModeEnv {
 			standbyEnvCount++
@@ -326,6 +337,9 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
+	}
+	if legacyEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", LegacySnapshotControlDirEnv, container.Env)
 	}
 	if standbyEnvCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", RestoreStandbyModeEnv, container.Env)

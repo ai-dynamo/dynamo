@@ -24,8 +24,10 @@ func TestEnsureControlVolume(t *testing.T) {
 		if c.VolumeMounts[0].SubPath != "main" {
 			t.Fatalf("expected subPath=%q, got %q", "main", c.VolumeMounts[0].SubPath)
 		}
-		if len(c.Env) != 1 || c.Env[0].Name != SnapshotControlDirEnv || c.Env[0].Value != SnapshotControlMountPath {
-			t.Fatalf("expected env %s=%s, got %#v", SnapshotControlDirEnv, SnapshotControlMountPath, c.Env)
+		if len(c.Env) != 2 ||
+			c.Env[0] != (corev1.EnvVar{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}) ||
+			c.Env[1] != (corev1.EnvVar{Name: LegacySnapshotControlDirEnv, Value: SnapshotControlMountPath}) {
+			t.Fatalf("expected canonical and legacy control envs, got %#v", c.Env)
 		}
 	})
 
@@ -53,8 +55,8 @@ func TestEnsureControlVolume(t *testing.T) {
 		EnsureControlVolume(ps, &ps.Containers[0])
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 1 {
-			t.Fatalf("expected single volume/mount/env after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
+		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 2 {
+			t.Fatalf("expected single volume/mount and two control envs after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
 		}
 	})
 
@@ -89,8 +91,34 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 2 {
+		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 3 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)
+		}
+	})
+
+	t.Run("adds missing canonical env beside legacy alias", func(t *testing.T) {
+		ps := &corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main",
+			Env: []corev1.EnvVar{{
+				Name:  LegacySnapshotControlDirEnv,
+				Value: SnapshotControlMountPath,
+			}},
+		}}}
+
+		EnsureControlVolume(ps, &ps.Containers[0])
+
+		canonicalCount := 0
+		legacyCount := 0
+		for _, env := range ps.Containers[0].Env {
+			switch env.Name {
+			case SnapshotControlDirEnv:
+				canonicalCount++
+			case LegacySnapshotControlDirEnv:
+				legacyCount++
+			}
+		}
+		if canonicalCount != 1 || legacyCount != 1 {
+			t.Fatalf("expected one canonical and one legacy env, got %#v", ps.Containers[0].Env)
 		}
 	})
 }
