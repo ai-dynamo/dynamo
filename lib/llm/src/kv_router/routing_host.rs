@@ -41,8 +41,8 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
-        invalid_argument,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
+        explicit_target, invalid_argument,
     },
 };
 
@@ -64,15 +64,6 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
-}
-
-fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
-    if is_cancelled(error) {
-        return;
-    }
-    if let Some(operation) = operation.take() {
-        operation.invalidate();
-    }
 }
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
@@ -196,6 +187,7 @@ where
     policy: RoutingPolicy<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
+    session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
@@ -278,7 +270,12 @@ where
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
+        Ok(Self::new_with_coordinator(
+            inner,
+            kv_router,
+            affinity,
+            SessionAffinityMode::Hard,
+        ))
     }
 
     pub fn new_with_load_context(
@@ -286,6 +283,7 @@ where
         kv_router: Arc<KvRouter<Sel>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         session_affinity_ttl: Option<Duration>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
@@ -296,6 +294,7 @@ where
             kv_router,
             load_context,
             affinity,
+            session_affinity_mode,
         ))
     }
 
@@ -303,8 +302,15 @@ where
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
+        Self::new_with_optional_load_context_and_coordinator(
+            inner,
+            kv_router,
+            None,
+            affinity,
+            session_affinity_mode,
+        )
     }
 
     pub(crate) fn new_with_load_context_and_coordinator(
@@ -312,12 +318,14 @@ where
         kv_router: Arc<KvRouter<Sel>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         Self::new_with_optional_load_context_and_coordinator(
             inner,
             kv_router,
             Some(load_context),
             affinity,
+            session_affinity_mode,
         )
     }
 
@@ -326,6 +334,7 @@ where
         kv_router: Arc<KvRouter<Sel>>,
         load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -338,6 +347,7 @@ where
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
             affinity,
+            session_affinity_mode,
             hosted_occupancy: None,
             lora: None,
             routing_context: load_context,
@@ -349,21 +359,35 @@ where
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, None, None)
+        Self::new_builtin_with_capabilities(
+            inner,
+            load_context,
+            None,
+            SessionAffinityMode::Hard,
+            None,
+        )
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
+        Self::new_builtin_with_capabilities(
+            inner,
+            load_context,
+            affinity,
+            session_affinity_mode,
+            None,
+        )
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
@@ -411,6 +435,7 @@ where
             policy,
             request_metrics,
             affinity,
+            session_affinity_mode,
             hosted_occupancy,
             lora: lora
                 .zip(lora_selector)
@@ -472,39 +497,23 @@ where
         }
     }
 
-    fn affinity_target_requires_rebind(
-        &self,
-        request: &PreprocessedRequest,
-        target: AffinityTarget,
-    ) -> bool {
-        if request
-            .migration_state
-            .as_ref()
-            .is_some_and(|state| state.excluded_worker_ids().contains(&target.worker_id))
-        {
-            return true;
-        }
-        if !self
-            .inner
-            .client
-            .instance_ids_avail()
-            .contains(&target.worker_id)
-        {
-            return true;
+    fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
+        if !self.inner.client.is_instance_discovered(target.worker_id) {
+            return false;
         }
         let Some(kv_router) = self.kv_router_if_enabled() else {
-            return false;
+            return true;
         };
         let workers = kv_router.workers_with_configs.borrow();
         let Some(config) = workers.get(&target.worker_id) else {
             return true;
         };
         let Some(dp_rank) = target.dp_rank else {
-            return false;
+            return true;
         };
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
-        !(start..end).contains(&dp_rank)
+        (start..end).contains(&dp_rank)
     }
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
@@ -524,7 +533,7 @@ where
         let Some(session_id) = affinity_id(request)? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request, phase)?;
+        let explicit = explicit_target(request.content(), phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));
@@ -538,20 +547,17 @@ where
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(_)
-                if explicit.is_none()
-                    && target.is_some_and(|target| {
-                        self.affinity_target_requires_rebind(request.content(), target)
-                    }) =>
+            Err(_error)
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && explicit.is_none()
+                    && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
-                match select(retry.target()).await {
-                    Ok(selection) => Ok((selection, Some(retry))),
-                    Err(retry_error) => Err(retry_error),
-                }
+                let selection = select(retry.target()).await?;
+                Ok((selection, Some(retry)))
             }
             Err(error) => Err(error),
         }
@@ -680,22 +686,26 @@ where
 
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = operation.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
         match operation {
-            Some(operation) => operation.into_stream(selected_target, stream),
+            Some(operation) => {
+                operation.into_stream(selected_target, stream, self.session_affinity_mode)
+            }
             None => Ok(stream),
         }
     }

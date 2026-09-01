@@ -33,7 +33,14 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_target,
+                    pinned_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => affinity_target,
+                        SessionAffinityMode::Soft => None,
+                    },
+                    affinity_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => None,
+                        SessionAffinityMode::Soft => affinity_target,
+                    },
                     planned_worker,
                     policy_class,
                     session_context,
@@ -194,26 +201,30 @@ where
             mut affinity,
             ..
         } = plan;
+        let selected_target = route_target(selection.worker);
         let guard = match self
             .track_planned_selection(&request, &mut selection, cleanup)
             .await
         {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        let selected_target = route_target(selection.worker);
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = affinity.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
         match affinity {
-            Some(affinity) => affinity.into_stream(selected_target, stream),
+            Some(affinity) => {
+                affinity.into_stream(selected_target, stream, self.session_affinity_mode)
+            }
             None => Ok(stream),
         }
     }
@@ -523,17 +534,13 @@ where
             .await
         {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let selected_target = route_target(selection.worker);
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -541,13 +548,21 @@ where
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = operation.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
         let Some(operation) = operation else {
             return Ok((metadata, stream));
         };
-        Ok((metadata, operation.into_stream(selected_target, stream)?))
+        Ok((
+            metadata,
+            operation.into_stream(selected_target, stream, self.session_affinity_mode)?,
+        ))
     }
 }

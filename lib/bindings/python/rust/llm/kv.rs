@@ -59,6 +59,7 @@ type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolic
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -2200,7 +2201,8 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -2209,12 +2211,16 @@ impl KvRouter {
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let kv_router_config = kv_router_config.inner();
         let load_threshold_config = load_threshold_config
             .map(LoadThresholdConfig::as_rust)
@@ -2284,6 +2290,7 @@ impl KvRouter {
                     managed_router.router().clone(),
                     managed_router.load_context().clone(),
                     session_affinity_ttl_secs.map(Duration::from_secs),
+                    session_affinity_mode,
                 )
                 .map_err(to_pyerr)?;
 
