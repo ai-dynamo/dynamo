@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -23,13 +24,6 @@ from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-
-try:
-    from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
-        smart_resize as qwen3_smart_resize,
-    )
-except ImportError:
-    qwen3_smart_resize = None
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -91,6 +85,16 @@ from .state_agent import (
     start_attachment_owner,
     state_agent_settings,
 )
+
+qwen3_smart_resize: Optional[Callable[..., Any]]
+try:
+    from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
+        smart_resize as _qwen3_smart_resize,
+    )
+except ImportError:
+    qwen3_smart_resize = None
+else:
+    qwen3_smart_resize = _qwen3_smart_resize
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)

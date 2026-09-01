@@ -49,7 +49,6 @@ pub(crate) struct VideoRoutingInput<'a> {
     pub sampled_timestamps: &'a [f64],
 }
 
-/// Router-side replacement for one video placeholder.
 pub(crate) struct VideoRoutingReplacement {
     pub placeholder_token_id: TokenIdType,
     /// Exact chat-template token sequence replaced by the model processor.
@@ -61,7 +60,6 @@ enum SupportedVideoModel {
     Qwen3(qwen3::Qwen3VideoRoutingSpec),
 }
 
-/// Model-specific video routing facade constructed once at frontend startup.
 pub(crate) struct VideoRoutingProcessor {
     model: SupportedVideoModel,
 }

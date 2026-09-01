@@ -3161,7 +3161,6 @@ impl OpenAIPreprocessor {
         // Decoded results are written back into these reserved modality slots so
         // URL-backed and UUID-only inputs retain request order.
         let mut fetch_tasks: Vec<MediaFetchTask<'_>> = Vec::new();
-        // Exact-routing entries accumulated in original mixed-media order.
         #[cfg(feature = "mm-routing")]
         let mut mm_routing_entries: Vec<MmRoutingEntry> = Vec::new();
         // Private per-request total for frontend metrics. `None` means the SMG

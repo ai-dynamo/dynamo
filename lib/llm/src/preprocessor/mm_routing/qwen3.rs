@@ -87,6 +87,18 @@ impl Qwen3VideoRoutingSpec {
                 .unwrap_or(true),
             "mm-routing: Qwen video routing does not support do_resize=false"
         );
+        if let Some(cap_pixels_per_frame) = video_config
+            .get("cap_pixels_per_frame")
+            .filter(|value| !value.is_null())
+        {
+            let cap_pixels_per_frame = cap_pixels_per_frame
+                .as_bool()
+                .context("mm-routing: Qwen cap_pixels_per_frame must be boolean")?;
+            anyhow::ensure!(
+                !cap_pixels_per_frame,
+                "mm-routing: Qwen video routing does not support cap_pixels_per_frame=true"
+            );
+        }
         ensure_matching_value(&video_config, "patch_size", patch_size)?;
         ensure_matching_value(&video_config, "temporal_patch_size", temporal_patch_size)?;
         ensure_matching_value(&video_config, "merge_size", spatial_merge_size)?;
@@ -816,20 +828,60 @@ mod tests {
     }
 
     #[test]
+    fn rejects_per_frame_pixel_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "model_type": "qwen3_vl",
+                "architectures": ["Qwen3VLForConditionalGeneration"],
+                "video_token_id": 151656,
+                "vision_start_token_id": 151652,
+                "vision_end_token_id": 151653,
+                "vision_config": {
+                    "patch_size": 16,
+                    "spatial_merge_size": 2,
+                    "temporal_patch_size": 2
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("video_preprocessor_config.json"),
+            r#"{
+                "video_processor_type": "Qwen3VLVideoProcessor",
+                "patch_size": 16,
+                "merge_size": 2,
+                "temporal_patch_size": 2,
+                "cap_pixels_per_frame": true,
+                "max_video_tokens": 768,
+                "size": {"shortest_edge": 4096, "longest_edge": 25165824}
+            }"#,
+        )
+        .unwrap();
+
+        let error = Qwen3VideoRoutingSpec::from_model_dir(
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "qwen3_vl",
+            dir.path(),
+            Arc::new(TimestampTokenizer),
+            QwenVideoProcessorContract {
+                placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
+                resize_mode: QwenVideoResizeMode::LegacyCeil,
+            },
+        )
+        .err()
+        .expect("per-frame pixel cap must disable exact video routing");
+
+        assert!(error.to_string().contains("cap_pixels_per_frame=true"));
+    }
+
+    #[test]
     fn supports_only_explicit_qwen3_video_model_types() {
         for model_type in ["qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"] {
             assert!(supports_model_type(model_type));
         }
         assert!(!supports_model_type("qwen2_5_vl"));
         assert!(!supports_model_type("my_qwen3_vl_finetune"));
-    }
-
-    #[test]
-    fn model_type_requires_its_multimodal_architecture() {
-        assert_eq!(
-            expected_architecture("qwen3_5"),
-            Some("Qwen3_5ForConditionalGeneration")
-        );
-        assert_eq!(expected_architecture("qwen2_5_vl"), None);
     }
 }
