@@ -42,8 +42,6 @@ _LIFECYCLE_STAGES = frozenset({"engine.queue", "kv.transfer"})
 
 
 class _NoopSpan:
-    """Context-manager-shaped no-op for a disabled lifecycle stage."""
-
     def close(self) -> None:
         pass
 

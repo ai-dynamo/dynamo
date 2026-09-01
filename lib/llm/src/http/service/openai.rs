@@ -2040,12 +2040,12 @@ async fn handler_chat_completions(
         return Err(error);
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    if !resolved_model.is_empty() {
-        if let Err(error) = check_model_serving_ready(&state, resolved_model) {
-            lifecycle_request.record_session(&request_id, None);
-            terminal.finish(terminal_outcome_for_error_response(&error));
-            return Err(error);
-        }
+    if !resolved_model.is_empty()
+        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+    {
+        lifecycle_request.record_session(&request_id, None);
+        terminal.finish(terminal_outcome_for_error_response(&error));
+        return Err(error);
     }
 
     if !state.nvext_enabled() {
