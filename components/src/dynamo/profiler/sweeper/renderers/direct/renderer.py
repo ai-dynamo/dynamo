@@ -54,6 +54,7 @@ def render(
 
     return patch_dgd_manifest(
         yaml.safe_dump(result.dgd, sort_keys=False),
+        candidate,
         options,
         dgd_name=dgd_name,
     )

@@ -11,6 +11,12 @@ from typing import Any, Protocol
 
 import yaml
 
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.dgd_materialization import (
+    DGDMaterializationPurpose,
+    materialize_dgd,
+)
+
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
 _RUNTIME_VERSION_PATTERN = re.compile(
     r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$"
@@ -95,24 +101,48 @@ def validate_candidate(candidate: CandidateLike) -> None:
 
 def patch_dgd_manifest(
     rendered: str,
+    candidate: CandidateLike,
     options: DGDGenerationOptions,
     *,
     dgd_name: str,
 ) -> str:
-    """Apply Dynamo-owned identity and runtime fields to one rendered DGD."""
+    """Apply shared v1 finalization and CLI-owned fields to one rendered DGD."""
     documents = [document for document in yaml.safe_load_all(rendered) if document]
-    dgds = [
-        document
-        for document in documents
+    indexed_dgds = [
+        (index, document)
+        for index, document in enumerate(documents)
         if isinstance(document, dict)
         and document.get("kind") == "DynamoGraphDeployment"
     ]
-    if len(dgds) != 1:
+    if len(indexed_dgds) != 1:
         raise CandidateMaterializationError(
             "renderer output must contain exactly one DynamoGraphDeployment"
         )
 
-    dgd = dgds[0]
+    dgd_index, dgd = indexed_dgds[0]
+
+    # TODO(#13770 follow-up after #14040): Remove this explicit TRT-LLM patch
+    # when required runtime rules run once during base rendering.
+    if candidate.config.get("backend") == "trtllm":
+        dgd = enable_trtllm_chunked_prefill(dgd)
+
+    # TODO(#13770 follow-up after #14040): Remove this materialize_dgd() call
+    # once required runtime rules run during base rendering and optional patches
+    # move into the common assembler. That follow-up also removes
+    # ConfigModifier.finalize_dgd() and its call sites.
+    try:
+        dgd = materialize_dgd(
+            dgd,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend=candidate.config.get("backend"),
+            model_name_or_path=candidate.config.get("model_name"),
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise CandidateMaterializationError(
+            f"renderer output failed legacy DGD finalization: {exc}"
+        ) from exc
+
+    documents[dgd_index] = dgd
     metadata = dgd.setdefault("metadata", {})
     metadata["name"] = dgd_name
     if options.namespace:
