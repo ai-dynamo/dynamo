@@ -35,7 +35,7 @@ on:
         type: string
         default: '0'
       containers:
-        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner.'
+        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,sidecar.'
         required: false
         type: string
         default: all
@@ -201,7 +201,7 @@ jobs:
 
           FRAMEWORKS = {"vllm", "sglang", "trtllm"}
           VARIANTS = {"runtime", "efa"}
-          COMPONENTS = {"frontend", "operator", "planner"}
+          COMPONENTS = {"frontend", "operator", "planner", "sidecar"}
           WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
           HELM_TOKENS = {"platform"}
 
@@ -497,6 +497,7 @@ jobs:
             [sglang-runtime]=sglang-runtime [sglang-efa]=sglang-runtime-efa
             [trtllm-runtime]=trtllm-runtime [trtllm-efa]=trtllm-runtime-efa
             [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner
+            [sidecar]=dynamo-sidecar
           )
           declare -a TAGS=()
           for tok in "${!CTR[@]}"; do

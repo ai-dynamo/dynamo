@@ -97,6 +97,7 @@ HELM_IMAGE_TAG_SITES = [
 CONTAINER_TOKENS = {
     "vllm-runtime", "vllm-efa", "sglang-runtime", "sglang-efa",
     "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner",
+    "sidecar",
 }
 HELM_TOKENS = {"platform"}
 
@@ -115,6 +116,7 @@ IMAGE_REF_TOKENS = {
     "frontend": "dynamo-frontend",
     "operator": "kubernetes-operator",
     "planner": "dynamo-planner",
+    "sidecar": "dynamo-sidecar",
 }
 GA_REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 PLACEHOLDER_REGISTRY = "my-registry"
