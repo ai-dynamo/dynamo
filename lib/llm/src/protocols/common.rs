@@ -533,7 +533,6 @@ impl GuidedDecodingOptions {
             && regex.is_none()
             && is_empty_choice
             && grammar.is_none()
-            && whitespace_pattern.is_none()
             && structural_tag.is_none()
         {
             return Ok(None);
@@ -559,6 +558,10 @@ impl GuidedDecodingOptions {
     /// `whitespace_pattern` made `guided_json` + `guided_whitespace_pattern` fail while
     /// the error text below never named it, and while the Python frontend
     /// (`components/src/dynamo/frontend/prepost.py`) builds exactly that pair on purpose.
+    ///
+    /// `from_optional` above skips the same two fields when it decides whether any
+    /// constraint was requested at all, so a request carrying only a modifier engages no
+    /// guided decoding rather than building a constraint-less object.
     pub fn validate(&self) -> Result<()> {
         let constraints = [
             ("json", self.json.is_some()),
@@ -1154,6 +1157,22 @@ mod tests {
         // Choice set but empty vector should not count as set
         let opts =
             GuidedDecodingOptions::from_optional(None, None, Some(vec![]), None, None, None, None);
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_none());
+
+        // whitespace_pattern modifies a constraint rather than being one, so on its own it
+        // must not engage guided decoding. Returning Some here would hand the backend a
+        // constraint-less object, which vLLM rejects and which disables request migration.
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(r"[\n ]?".to_string()),
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_none());

@@ -649,10 +649,24 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::{
-        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        GuidedDecodingOptions, OutputOptionsProvider, SamplingOptionsProvider,
+        StopConditionsProvider,
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    /// Builds a minimal chat request and merges `extra` into its top-level fields.
+    fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 20
+        });
+        for (key, value) in extra.as_object().expect("fixture is an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("Failed to deserialize request")
+    }
 
     #[test]
     fn test_conflicting_guided_decoding_options_return_invalid_argument() {
@@ -664,19 +678,9 @@ mod tests {
         ];
 
         for extra in conflicts {
-            let mut body = json!({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 20
-            });
-            for (key, value) in extra.as_object().expect("conflict fixture is an object") {
-                body[key] = value.clone();
-            }
-
-            let request: NvCreateChatCompletionRequest =
-                serde_json::from_value(body.clone()).expect("Failed to deserialize request");
-
-            let error = request.extract_sampling_options().unwrap_err();
+            let error = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_err();
             let dynamo_error = error
                 .downcast_ref::<dynamo_runtime::error::DynamoError>()
                 .expect("sampling extraction must preserve the HTTP error type");
@@ -688,41 +692,74 @@ mod tests {
         }
     }
 
-    /// The guard for the above: a request with exactly ONE guided-decoding constraint
-    /// is legal and must keep validating, so the new check cannot be satisfied by
-    /// rejecting guided decoding outright.
+    /// The guard for the above: a legal request must keep validating, so the conflict
+    /// check cannot be satisfied by rejecting guided decoding outright.
     ///
-    /// This also covers `guided_whitespace_pattern` paired with a constraint.
-    /// `GuidedDecodingOptions::validate` used to count it toward the exclusivity limit,
-    /// which rejected `guided_json` + `guided_whitespace_pattern` even though the error
-    /// text never named `whitespace_pattern` and the Python frontend
-    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair.
+    /// `whitespace_pattern` is a modifier, not a constraint -- it changes how a JSON
+    /// grammar is applied. `GuidedDecodingOptions::validate` used to count it toward the
+    /// exclusivity limit, which rejected `guided_json` + `guided_whitespace_pattern` even
+    /// though the error text never named `whitespace_pattern` and the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Each case
+    /// below asserts the resulting options, not merely that extraction returned `Ok`.
     #[test]
-    fn test_single_guided_decoding_option_passes_sampling_extraction() {
-        for extra in [
-            json!({"guided_json": {"type": "object"}}),
-            json!({"guided_regex": "a+"}),
-            json!({"guided_choice": ["x", "y"]}),
-            json!({"guided_whitespace_pattern": "[\n ]?"}),
+    fn test_guided_decoding_constraint_with_modifier_stays_valid() {
+        let cases: [(serde_json::Value, fn(&GuidedDecodingOptions)); 5] = [
+            (json!({"guided_json": {"type": "object"}}), |guided| {
+                assert!(guided.json.is_some())
+            }),
+            (json!({"guided_regex": "a+"}), |guided| {
+                assert_eq!(guided.regex.as_deref(), Some("a+"))
+            }),
+            (json!({"guided_choice": ["x", "y"]}), |guided| {
+                assert_eq!(guided.choice.as_deref(), Some(&["x".to_string(), "y".to_string()][..]))
+            }),
             // The companion pair: whitespace_pattern modifies the JSON grammar rather
             // than being a second grammar, so setting both is one constraint, not two.
-            json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
-            json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}),
-        ] {
-            let mut body = json!({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 20
-            });
-            for (key, value) in extra.as_object().expect("fixture is an object") {
-                body[key] = value.clone();
-            }
+            (
+                json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+                |guided| {
+                    assert!(guided.json.is_some());
+                    assert_eq!(guided.whitespace_pattern.as_deref(), Some("[\n ]?"));
+                },
+            ),
+            (
+                json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}),
+                |guided| {
+                    assert_eq!(guided.regex.as_deref(), Some("a+"));
+                    assert_eq!(guided.whitespace_pattern.as_deref(), Some("[\n ]?"));
+                },
+            ),
+        ];
 
-            let request: NvCreateChatCompletionRequest =
-                serde_json::from_value(body.clone()).expect("Failed to deserialize request");
-            request
+        for (extra, check) in cases {
+            let request = chat_request_with(&extra);
+            let sampling = request
                 .extract_sampling_options()
-                .unwrap_or_else(|e| panic!("{body} must stay valid, got: {e}"));
+                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
+            let guided = sampling
+                .guided_decoding
+                .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"));
+            check(&guided);
+        }
+    }
+
+    /// A modifier on its own describes how to apply a constraint that was never supplied.
+    /// It must engage no guided decoding at all: emitting a constraint-less
+    /// `GuidedDecodingOptions` makes vLLM raise `ValueError` on the worker and disables
+    /// request migration, for a request the caller never meant as structured output.
+    #[test]
+    fn test_guided_decoding_modifier_alone_engages_nothing() {
+        for extra in [
+            json!({"guided_whitespace_pattern": "[\n ]?"}),
+            json!({"guided_decoding_backend": "xgrammar"}),
+        ] {
+            let sampling = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
+            assert!(
+                sampling.guided_decoding.is_none(),
+                "{extra} sets no constraint, so guided decoding must not be engaged",
+            );
         }
     }
 
