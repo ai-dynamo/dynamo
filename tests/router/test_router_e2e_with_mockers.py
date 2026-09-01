@@ -23,6 +23,8 @@ import pytest
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
+    _test_disagg_per_role_router_modes,
+    _test_disagg_per_role_session_affinity,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -838,22 +840,24 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
+    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,router_approximate_cache_policy,event_plane",
     [
-        (True, False, False, None, None),  # Event plane with local indexer
-        (True, False, False, 5.0, None),  # Event plane with local side indexer
-        (True, False, True, None, None),  # Event plane with remote indexer
-        (True, False, True, 5.0, None),  # Remote plus local side indexer
-        (False, False, False, None, None),  # Approximate (--no-kv-events)
+        (True, False, False, None, "ttl", None),  # Event plane with local indexer
+        (True, False, False, 5.0, "ttl", None),  # Event plane with local side indexer
+        (True, False, True, None, "ttl", None),  # Event plane with remote indexer
+        (True, False, True, 5.0, "ttl", None),  # Remote plus local side indexer
+        (False, False, False, None, "ttl", None),  # Approximate (--no-kv-events)
+        (False, False, False, None, "lru", None),  # Capacity-bounded approximate LRU
         (
             False,
             False,
             True,
             None,
+            "ttl",
             None,
         ),  # Approximate mode with a singleton served remote indexer
         # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
-        (True, True, False, None, "zmq"),
+        (True, True, False, None, "ttl", "zmq"),
     ],
     ids=[
         "local_indexer",
@@ -861,6 +865,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         "remote_indexer",
         "remote_indexer_predict_on_route",
         "no_kv_events",
+        "no_kv_events_lru",
         "no_kv_events_remote",
         "zmq_nats_free",
     ],
@@ -875,6 +880,7 @@ def test_router_decisions(
     raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    router_approximate_cache_policy,
     event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
@@ -883,7 +889,7 @@ def test_router_decisions(
     - Event-plane mode with local indexers on workers
     - Event-plane mode with a served remote indexer
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
-      based on routing decisions with TTL-based expiration and pruning
+      based on routing decisions using either TTL or capacity-bounded LRU retention
     - Approximate mode with a singleton served remote indexer
     - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
@@ -894,10 +900,11 @@ def test_router_decisions(
 
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
+        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, router_approximate_cache_policy=%s, event_plane=%s",
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        router_approximate_cache_policy,
         event_plane,
     )
 
@@ -948,6 +955,7 @@ def test_router_decisions(
         test_kwargs={
             "use_kv_events": use_kv_events,
             "router_predicted_ttl_secs": router_predicted_ttl_secs,
+            "router_approximate_cache_policy": router_approximate_cache_policy,
         },
     )
 
@@ -1423,6 +1431,93 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
         enable_disagg_bootstrap=enable_disagg_bootstrap,
     ) as (prefill_workers, decode_workers):
         run_case(prefill_workers, decode_workers)
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_router_modes(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """KV-routed prefill in front of round-robin decode, via per-role MDC config.
+
+    The prefill mockers advertise RouterConfig(RouterMode.KV) in their cards; the
+    decode mockers advertise nothing and inherit the frontend's round-robin. Both
+    hops must then route on their own terms rather than sharing one mode.
+    """
+    logger.info("Starting per-role router mode disagg test (KV prefill, RR decode)")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Only the prefill tier advertises a mode; decode inherits the frontend's.
+        prefill_mocker_args={**base_mocker_args, "router_mode": "kv"},
+        decode_mocker_args=base_mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Session affinity is configured per hop: prefill pins, decode does not.
+
+    Both tiers advertise round-robin; only prefill advertises a TTL. If the two
+    hops shared a session-affinity setting, decode would pin alongside prefill.
+    """
+    logger.info("Starting per-hop session affinity disagg test")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Same mode on both tiers, so affinity is the only difference between them.
+        prefill_mocker_args={
+            **base_mocker_args,
+            "router_mode": "round-robin",
+            "router_session_affinity_ttl_secs": 300,
+        },
+        decode_mocker_args={**base_mocker_args, "router_mode": "round-robin"},
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_session_affinity(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
 
 
 @pytest.mark.timeout(180)

@@ -67,11 +67,36 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+# Twice vLLM's 165,900,288-byte minimum for TinyLlama at max_model_len=1024.
+DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-def _vllm_gpu_mem_args(gpu_memory_utilization: Optional[float]) -> list[str]:
+# Avoid device-wide profiling across the two prefill workers on GPU 0.
+VLLM_ARGS_DISAGG: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": MODEL_NAME,
+    "kv_cache_memory_bytes": DISAGG_KV_CACHE_MEMORY_BYTES,
+    "max_model_len": 1024,
+    "enforce_eager": True,
+}
+
+
+def _vllm_gpu_mem_args(
+    gpu_memory_utilization: Optional[float],
+    kv_cache_memory_bytes: Optional[int] = None,
+) -> list[str]:
     args = build_gpu_mem_args("build_vllm_gpu_mem_args")
-    if args or gpu_memory_utilization is None:
+    if args:
         return args
+    if kv_cache_memory_bytes is not None:
+        # vLLM checks this admission fraction before applying the byte cap.
+        return [
+            "--kv-cache-memory-bytes",
+            str(kv_cache_memory_bytes),
+            "--gpu-memory-utilization",
+            "0.01",
+        ]
+    if gpu_memory_utilization is None:
+        return []
     return ["--gpu-memory-utilization", str(gpu_memory_utilization)]
 
 
@@ -107,6 +132,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
+                - kv_cache_memory_bytes: Per-GPU cache budget (optional)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
@@ -191,6 +217,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
+        kv_cache_memory_bytes = vllm_args.get("kv_cache_memory_bytes")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
@@ -242,7 +269,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 command.append("--enforce-eager")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
-            command.extend(_vllm_gpu_mem_args(gpu_memory_utilization))
+            command.extend(
+                _vllm_gpu_mem_args(gpu_memory_utilization, kv_cache_memory_bytes)
+            )
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
@@ -601,6 +630,7 @@ def test_router_decisions_vllm_multiple_workers(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -635,6 +665,7 @@ def test_router_decisions_vllm_dp(
     )
 
 
+# The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(600)
@@ -649,7 +680,7 @@ def test_router_decisions_vllm_disagg(
     run_disagg_router_decisions_test(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
-        engine_args=VLLM_ARGS,
+        engine_args=VLLM_ARGS_DISAGG,
         request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,

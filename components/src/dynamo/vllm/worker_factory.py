@@ -34,12 +34,12 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    get_dp_range_for_worker,
 )
 from .health_check import (
     VllmEmbeddingHealthCheckPayload,
@@ -51,6 +51,7 @@ from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from .state_agent import StateAgentLifecycle, state_agent_settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ logger = logging.getLogger(__name__)
 # and scheduler-loop slack before failing closed.
 BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+# (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
@@ -536,6 +537,7 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
+SetupKvStateAttachmentOwnerFn = Callable[..., Awaitable[Optional[Any]]]
 RegisterVllmModelFn = Callable[..., Awaitable[None]]
 SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
@@ -589,12 +591,51 @@ class WorkerFactory:
         register_vllm_model_fn: RegisterVllmModelFn,
         setup_fpm_relay_fn: SetupFpmRelayFn,
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
+        setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
+        state_agent_lifecycle: StateAgentLifecycle | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
+        self.setup_kv_state_attachment_owner = setup_kv_state_attachment_owner_fn
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+        self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+
+    async def _setup_kv_routing(
+        self,
+        config: Config,
+        generate_endpoint: Endpoint,
+        vllm_config: VllmConfig,
+        *,
+        consolidator_enabled: bool,
+        consolidator_port: int | None,
+    ) -> Optional[Any]:
+        if state_agent_settings(config) is None:
+            return self.setup_kv_event_publisher(
+                config,
+                generate_endpoint,
+                vllm_config,
+                consolidator_enabled=consolidator_enabled,
+                consolidator_port=consolidator_port,
+            )
+
+        # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
+        # worker never falls back to, or concurrently starts, the ordinary KV
+        # publisher; setup failure disables KV routing while serving continues.
+        try:
+            if self.setup_kv_state_attachment_owner is None:
+                raise RuntimeError("KV state-agent attachment setup is unavailable")
+            owner = await self.setup_kv_state_attachment_owner(
+                config, generate_endpoint, vllm_config
+            )
+            if owner is not None:
+                await self.state_agent_lifecycle.install(owner)
+        except Exception:
+            logger.exception(
+                "KV state-agent attachment setup failed; KV routing remains disabled"
+            )
+        return None
 
     async def create(
         self,
@@ -771,6 +812,7 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            enable_frontend_decoding=config.frontend_decoding,
         )
         await handler.async_init(runtime)
 
@@ -869,7 +911,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             _default_sampling_params,
-            _prometheus_temp_dir,
+            engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
@@ -894,7 +936,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,
@@ -912,6 +958,18 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            # Attached multi-client AsyncLLMs do not own EngineCore. Close all
+            # clients first, then let the parent cleanup resource terminate
+            # child endpoints and finally the shared EngineCore.
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down embedding AsyncLLM client")
+            if engine_cleanup_resource is not None:
+                try:
+                    engine_cleanup_resource.cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up embedding engine resources")
 
     async def _create_classify_worker(
         self,
@@ -1061,14 +1119,17 @@ class WorkerFactory:
         Instantiate and serve
         """
         with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
-            await self._run_decode_worker(
-                runtime,
-                config,
-                shutdown_event,
-                shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
-                lifecycle=lifecycle,
-            )
+            try:
+                await self._run_decode_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
 
     async def _run_decode_worker(
         self,
@@ -1206,7 +1267,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -1283,6 +1344,10 @@ class WorkerFactory:
         if config.route_to_encoder:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
+        handler._first_token_source = await generate_endpoint.first_token_source(
+            worker_type
+        )
 
         await self.register_vllm_model(
             model_input,
@@ -1380,6 +1445,26 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        try:
+            await self._run_prefill_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine,
+            )
+        except BaseException:
+            await self.state_agent_lifecycle.close()
+            raise
+
+    async def _run_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
@@ -1473,7 +1558,7 @@ class WorkerFactory:
 
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -1627,6 +1712,7 @@ class WorkerFactory:
             raise
         finally:
             logger.debug("Cleaning up prefill worker")
+            await self.state_agent_lifecycle.close()
             handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
@@ -1665,6 +1751,7 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -1700,7 +1787,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",

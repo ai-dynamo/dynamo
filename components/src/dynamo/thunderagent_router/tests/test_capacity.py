@@ -25,10 +25,21 @@ class _FakeSubscriber:
         return self._cards
 
 
+class _FakeClient:
+    def __init__(self, worker_ids: list[int] | None = None) -> None:
+        self._worker_ids = worker_ids or []
+
+    def instance_ids(self) -> list[int]:
+        return list(self._worker_ids)
+
+
 def _make_provider(
     cards: dict[str, str],
 ) -> tuple[WorkerCapacityProvider, _FakeSubscriber]:
-    provider = WorkerCapacityProvider(endpoint=None)  # type: ignore[arg-type]
+    provider = WorkerCapacityProvider(  # type: ignore[arg-type]
+        endpoint=None,
+        client=_FakeClient(),
+    )
     subscriber = _FakeSubscriber(cards)
     provider._subscriber = subscriber  # type: ignore[assignment]
     return provider, subscriber
@@ -103,5 +114,16 @@ def test_parsed_cards_cache_hits_on_repeat_snapshot():
 
 
 def test_snapshot_returns_empty_when_subscriber_unset():
-    provider = WorkerCapacityProvider(endpoint=None)  # type: ignore[arg-type]
+    provider = WorkerCapacityProvider(  # type: ignore[arg-type]
+        endpoint=None,
+        client=_FakeClient(),
+    )
     assert provider.snapshot() == {}
+
+
+def test_live_worker_ids_uses_endpoint_client():
+    provider = WorkerCapacityProvider(  # type: ignore[arg-type]
+        endpoint=None,
+        client=_FakeClient([1, 2]),
+    )
+    assert provider.live_worker_ids() == {1, 2}
