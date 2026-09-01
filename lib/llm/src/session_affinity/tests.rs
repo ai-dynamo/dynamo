@@ -614,12 +614,39 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     assert_eq!(after_dispatch.session_id, session_id().as_str());
     assert_eq!(after_dispatch.worker_id, selected_target.worker_id);
     assert_eq!(after_dispatch.dp_rank, selected_target.dp_rank);
-    assert_eq!(after_dispatch.router_id, 99);
+    assert_eq!(after_dispatch.writer_id, 99);
 
     drop(stream);
     let after_completion = updates.recv().await.unwrap();
     assert_eq!(after_completion, after_dispatch);
     assert!(updates.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_republishes_the_stored_replica_version() {
+    let coordinator = coordinator();
+    let mut updates = coordinator.enable_test_replica(99, 1);
+    let replicated_target = target(7, Some(0));
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test(
+            session_id().as_str(),
+            replicated_target,
+            123,
+            7,
+        ),
+        ReplicaApplyOutcome::Inserted
+    );
+
+    let AffinityAcquire::Bound { lease, .. } =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("replicated binding must be acquired");
+    };
+    drop(lease);
+
+    let update = updates.recv().await.unwrap();
+    assert_eq!(update.sequence, 123);
+    assert_eq!(update.writer_id, 7);
 }
 
 #[tokio::test(start_paused = true)]

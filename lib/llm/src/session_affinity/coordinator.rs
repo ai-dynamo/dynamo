@@ -407,12 +407,22 @@ impl AffinityCoordinator {
         capacity: usize,
     ) -> tokio::sync::mpsc::Receiver<SessionAffinityUpdate> {
         self.inner.writer_id.store(router_id, Ordering::Relaxed);
-        let (replica, rx) = ReplicaSyncRuntime::for_test(router_id, capacity);
+        let (replica, rx) = ReplicaSyncRuntime::for_test(capacity);
         self.inner
             .replica
             .set(replica)
             .unwrap_or_else(|_| panic!("session affinity test replica already enabled"));
         rx
+    }
+
+    #[cfg(test)]
+    pub(super) fn downgrade_for_test(&self) -> Weak<AffinityCoordinatorInner> {
+        Arc::downgrade(&self.inner)
+    }
+
+    #[cfg(test)]
+    pub(super) fn next_version_for_test(&self) -> AffinityVersion {
+        self.inner.next_version()
     }
 
     #[cfg(test)]
@@ -494,6 +504,11 @@ impl AffinityCoordinatorInner {
         }
     }
 
+    pub(super) fn observe_replica_sequence(&self, sequence: u64) {
+        self.next_sequence
+            .fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+    }
+
     pub(super) fn apply_replica_update(
         &self,
         session_id: String,
@@ -503,8 +518,7 @@ impl AffinityCoordinatorInner {
         if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
         }
-        self.next_sequence
-            .fetch_max(version.sequence.saturating_add(1), Ordering::Relaxed);
+        self.observe_replica_sequence(version.sequence);
 
         let now = Instant::now();
         match self.entries.entry(session_id) {

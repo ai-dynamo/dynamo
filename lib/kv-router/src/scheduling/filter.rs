@@ -238,6 +238,28 @@ impl<'a> RoutingEligibility<'a> {
             return predicate(worker, config);
         }
 
+        if let Some(target) = self.affinity_target {
+            let Some(config) = workers.get(&target.worker_id) else {
+                return false;
+            };
+            if !self.allows_worker(target.worker_id, config) {
+                return false;
+            }
+
+            let dp_start = config.data_parallel_start_rank();
+            let dp_end = dp_start + config.data_parallel_size();
+            if let Some(dp_rank) = target.dp_rank {
+                return (dp_start..dp_end).contains(&dp_rank)
+                    && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
+            }
+            for dp_rank in dp_start..dp_end {
+                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         for (&worker_id, config) in workers {
             if !self.allows_worker(worker_id, config) {
                 continue;
@@ -246,13 +268,6 @@ impl<'a> RoutingEligibility<'a> {
             let dp_start = config.data_parallel_start_rank();
             let dp_end = dp_start + config.data_parallel_size();
             for dp_rank in dp_start..dp_end {
-                if self
-                    .affinity_target
-                    .and_then(|target| target.dp_rank)
-                    .is_some_and(|target_rank| target_rank != dp_rank)
-                {
-                    continue;
-                }
                 if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
                     return true;
                 }
@@ -615,6 +630,39 @@ mod tests {
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
         ranks.sort_by_key(|worker| (worker.worker_id, worker.dp_rank));
+
+        assert_eq!(
+            ranks,
+            vec![WorkerWithDpRank::new(8, 4), WorkerWithDpRank::new(8, 5)]
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_expands_only_the_affinity_target() {
+        let workers = HashMap::from([
+            (
+                7,
+                TestWorkerConfig {
+                    dp_start: 2,
+                    dp_size: 2,
+                    ..Default::default()
+                },
+            ),
+            (
+                8,
+                TestWorkerConfig {
+                    dp_start: 4,
+                    dp_size: 2,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_affinity_target(WorkerAffinityTarget::new(8, None));
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
 
         assert_eq!(
             ranks,

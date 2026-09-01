@@ -503,7 +503,7 @@ where
         };
         let workers = kv_router.workers_with_configs.borrow();
         let Some(config) = workers.get(&target.worker_id) else {
-            return false;
+            return true;
         };
         let Some(dp_rank) = target.dp_rank else {
             return true;
@@ -511,18 +511,6 @@ where
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
         (start..end).contains(&dp_rank)
-    }
-
-    fn affinity_target_requires_rebind(
-        &self,
-        request: &PreprocessedRequest,
-        target: AffinityTarget,
-    ) -> bool {
-        request
-            .migration_state
-            .as_ref()
-            .is_some_and(|state| state.excluded_worker_ids().contains(&target.worker_id))
-            || !self.affinity_target_is_valid(target)
     }
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
@@ -559,9 +547,7 @@ where
             Err(_error)
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && explicit.is_none()
-                    && target.is_some_and(|target| {
-                        self.affinity_target_requires_rebind(request.content(), target)
-                    }) =>
+                    && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
                 let retry = affinity

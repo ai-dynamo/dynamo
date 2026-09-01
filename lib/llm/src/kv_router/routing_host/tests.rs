@@ -1363,7 +1363,45 @@ async fn stale_affinity_rank_recovers_within_request() {
 }
 
 #[tokio::test]
-async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_pins() {
+async fn config_watch_gap_preserves_hard_affinity() {
+    let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+    let session_id = SessionAffinityId::new("config-watch-gap");
+    let target = AffinityTarget::new(8, Some(0));
+    router
+        .inner
+        .client
+        .override_discovered_instances(vec![7, target.worker_id]);
+    router
+        .inner
+        .client
+        .override_instance_avail(vec![7, target.worker_id]);
+    bind_affinity_target(&router, &session_id, target).await;
+    assert!(router.affinity_target_is_valid(target));
+
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+    assert!(
+        router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .query_target(&session_id, None)
+            .unwrap(),
+        Some(target)
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escaping_hard_pins() {
     let mut constrained_worker = ModelRuntimeConfig::default();
     constrained_worker.taints.insert("retry-pool".to_string());
     let workers = HashMap::from([
@@ -1407,16 +1445,24 @@ async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_
             ),
         );
     let mut retry_request = Context::new(retry_input);
-    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+    retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
-    let (selection, operation) = router
+    let Err(error) = router
         .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
         .await
-        .unwrap();
-    assert_eq!(selection.worker.worker_id, 8);
-    assert!(matches!(operation, Some(AffinityAcquire::Initialize(_))));
-    router.kv_router().free(retry_request.id()).await.unwrap();
-    drop(operation);
+    else {
+        panic!("migration exclusions must not rebind hard affinity");
+    };
+    assert!(error.to_string().contains("worker 7"));
+    assert_eq!(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .query_target(&session_id, None)
+            .unwrap(),
+        Some(original_target)
+    );
 
     let mut exhausted_input = request();
     exhausted_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 10]));
