@@ -47,7 +47,7 @@ where
     RF: OverlapScoresRefresh,
 {
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
-    replica_request_lease_observer: Arc<DeferredReplicaRequestLeaseObserver>,
+    replica_request_lease_observer: Option<Arc<DeferredReplicaRequestLeaseObserver>>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
 }
@@ -75,13 +75,88 @@ where
         scheduler_load: SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
+        Self::start_inner(
+            endpoint,
+            block_size,
+            workers_with_configs,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+            model_name,
+            worker_type,
+            scheduler_load,
+            cancellation_token,
+            false,
+        )
+        .await
+    }
+
+    /// Start the embedded router scheduler whose request lifecycle is owned by
+    /// `RequestLeaseManager` rather than the standalone slot-tracker expiry.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) async fn start_with_shared_request_leases(
+        endpoint: Endpoint,
+        block_size: u32,
+        workers_with_configs: RuntimeConfigWatch,
+        selector: Sel,
+        kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        model_name: Option<&str>,
+        worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
+        cancellation_token: CancellationToken,
+    ) -> Result<Self, KvSchedulerError> {
+        Self::start_inner(
+            endpoint,
+            block_size,
+            workers_with_configs,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            available_worker_provider,
+            model_name,
+            worker_type,
+            scheduler_load,
+            cancellation_token,
+            true,
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    async fn start_inner(
+        endpoint: Endpoint,
+        block_size: u32,
+        workers_with_configs: RuntimeConfigWatch,
+        selector: Sel,
+        kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        model_name: Option<&str>,
+        worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
+        cancellation_token: CancellationToken,
+        use_shared_request_leases: bool,
+    ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
-        let replica_request_lease_observer =
-            Arc::new(DeferredReplicaRequestLeaseObserver::default());
-        let observer: Arc<dyn ReplicaRequestLeaseObserver> = replica_request_lease_observer.clone();
+        let replica_request_lease_observer = use_shared_request_leases
+            .then(|| Arc::new(DeferredReplicaRequestLeaseObserver::default()));
+        let observer = replica_request_lease_observer
+            .as_ref()
+            .map(|observer| Arc::clone(observer) as Arc<dyn ReplicaRequestLeaseObserver>);
         let slots = create_multi_worker_sequences_with_observer(
             endpoint,
             block_size as usize,
@@ -89,7 +164,7 @@ where
             kv_router_config.router_replica_sync,
             router_id,
             scheduler_load,
-            Some(observer),
+            observer,
             cancellation_token.child_token(),
         )
         .await
@@ -429,7 +504,9 @@ where
         &self,
         observer: Arc<dyn ReplicaRequestLeaseObserver>,
     ) -> bool {
-        self.replica_request_lease_observer.install(observer)
+        self.replica_request_lease_observer
+            .as_ref()
+            .is_some_and(|deferred| deferred.install(observer))
     }
 
     pub(crate) async fn mark_prefill_completed_if_booking(

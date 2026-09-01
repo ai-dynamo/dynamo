@@ -4,10 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -196,7 +197,7 @@ impl AdmissionLifecycleTransfer {
     }
 
     fn arm_pending(&self) {
-        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        let mut state = self.state.lock();
         let AdmissionLifecycleState::Unarmed { request_id } = &*state else {
             return;
         };
@@ -206,7 +207,7 @@ impl AdmissionLifecycleTransfer {
     }
 
     fn arm_booking(&self, booking: SchedulerBookingDescriptor) {
-        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        let mut state = self.state.lock();
         if matches!(
             *state,
             AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Pending { .. }
@@ -216,12 +217,11 @@ impl AdmissionLifecycleTransfer {
     }
 
     fn disarm(&self) {
-        *self.state.lock().expect("admission lifecycle poisoned") =
-            AdmissionLifecycleState::Disarmed;
+        *self.state.lock() = AdmissionLifecycleState::Disarmed;
     }
 
     fn cleanup_target(&self) -> Option<AdmissionLifecycleCleanup> {
-        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        let mut state = self.state.lock();
         let cleanup = match &*state {
             AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Disarmed => None,
             AdmissionLifecycleState::Pending { request_id } => {
@@ -239,7 +239,7 @@ impl AdmissionLifecycleTransfer {
 
     fn is_armed(&self) -> bool {
         matches!(
-            *self.state.lock().expect("admission lifecycle poisoned"),
+            *self.state.lock(),
             AdmissionLifecycleState::Pending { .. } | AdmissionLifecycleState::Booking(_)
         )
     }

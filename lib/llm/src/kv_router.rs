@@ -774,7 +774,7 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let scheduler = KvScheduler::start(
+        let scheduler = KvScheduler::start_with_shared_request_leases(
             endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
@@ -1120,8 +1120,8 @@ where
     }
 
     /// Install the detached lifecycle used by public request-ID admissions.
-    /// Registration precedes the fallible LRU acquire so an indexing failure
-    /// cannot strand the scheduler booking.
+    /// Registration precedes the fallible routing update, and its temporary
+    /// owner releases the exact booking if this future is cancelled.
     #[doc(hidden)]
     pub async fn enroll_public_request_attempt(
         &self,
@@ -1140,10 +1140,12 @@ where
             worker,
             attempt_id,
         };
-        self.request_leases
-            .register_detached(booking.clone(), approximate_lru.clone());
+        let enrollment = self
+            .request_leases
+            .register_detached(booking, approximate_lru.clone());
 
         let Some(mut tokens_with_hashes) = routing_decision else {
+            enrollment.commit();
             return Ok(());
         };
         if let Some(mut lease) = approximate_lru {
@@ -1166,21 +1168,29 @@ where
                 )
                 .await
             {
-                self.request_leases.finish_booking(&booking).await;
+                enrollment.finish().await;
                 return Err(error);
             }
+            enrollment.commit();
             return Ok(());
         }
         if self.indexer.uses_approximate_lru() {
+            enrollment.commit();
             return Ok(());
         }
         let result = self
             .record_routing_decision(tokens_with_hashes, worker)
             .await;
-        if result.is_err() {
-            self.request_leases.finish_booking(&booking).await;
+        match result {
+            Ok(()) => {
+                enrollment.commit();
+                Ok(())
+            }
+            Err(error) => {
+                enrollment.finish().await;
+                Err(error)
+            }
         }
-        result
     }
 
     pub(crate) async fn record_routing_decision_hashes(
@@ -1820,18 +1830,20 @@ where
         let attempt_id = match admission {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
-                tracing::warn!("Failed to add request {request_id}: {error}");
+                tracing::warn!(%request_id, %error, "Failed to add request");
                 return;
             }
         };
-        self.request_leases.register_detached(
-            scheduler::SchedulerBookingDescriptor {
-                request_id,
-                worker,
-                attempt_id,
-            },
-            None,
-        );
+        self.request_leases
+            .register_detached(
+                scheduler::SchedulerBookingDescriptor {
+                    request_id,
+                    worker,
+                    attempt_id,
+                },
+                None,
+            )
+            .commit();
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {

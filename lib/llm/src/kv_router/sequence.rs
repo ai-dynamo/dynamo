@@ -26,9 +26,10 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -77,7 +78,7 @@ pub(crate) struct DeferredReplicaRequestLeaseObserver {
 impl DeferredReplicaRequestLeaseObserver {
     pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
         let mut pending = {
-            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            let mut state = self.state.lock();
             let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
                 return false;
             };
@@ -93,7 +94,7 @@ impl DeferredReplicaRequestLeaseObserver {
             for event in pending {
                 Self::notify(&target, event);
             }
-            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            let mut state = self.state.lock();
             let DeferredReplicaLeaseState::Installing {
                 target: installing_target,
                 pending: queued,
@@ -111,7 +112,7 @@ impl DeferredReplicaRequestLeaseObserver {
 
     fn observe(&self, event: DeferredReplicaLeaseEvent) {
         let target = {
-            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            let mut state = self.state.lock();
             match &mut *state {
                 DeferredReplicaLeaseState::Buffering(pending)
                 | DeferredReplicaLeaseState::Installing { pending, .. } => {

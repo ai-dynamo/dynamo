@@ -240,11 +240,14 @@ impl RequestLeaseManager {
         &self,
         booking: SchedulerBookingDescriptor,
         approximate_lru: Option<ApproximateRequestLease>,
-    ) {
-        self.inner.insert(
-            Arc::new(RequestLeaseRecord::new(booking, approximate_lru)),
-            true,
-        );
+    ) -> DetachedRequestLeaseEnrollment {
+        let record = Arc::new(RequestLeaseRecord::new(booking, approximate_lru));
+        self.inner.insert(Arc::clone(&record), true);
+        DetachedRequestLeaseEnrollment {
+            manager: self.clone(),
+            record,
+            armed: true,
+        }
     }
 
     pub(crate) fn touch_request(&self, request_id: &str) {
@@ -255,14 +258,6 @@ impl RequestLeaseManager {
 
     pub(crate) async fn finish_request(&self, request_id: &str) -> bool {
         let Some(record) = self.inner.current_record(request_id) else {
-            return false;
-        };
-        self.finish(&record).await;
-        true
-    }
-
-    pub(crate) async fn finish_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
-        let Some(record) = self.inner.matching_record(booking) else {
             return false;
         };
         self.finish(&record).await;
@@ -388,6 +383,34 @@ impl RequestAttemptLease {
 impl Drop for RequestAttemptLease {
     fn drop(&mut self) {
         self.manager.enqueue_completion(&self.record);
+    }
+}
+
+/// Cancellation owner while a public admission installs its detached lifecycle.
+/// Once committed, the manager retains the record until explicit completion or expiry.
+#[must_use = "detached request enrollment must be committed or cleaned up"]
+pub(crate) struct DetachedRequestLeaseEnrollment {
+    manager: RequestLeaseManager,
+    record: Arc<RequestLeaseRecord>,
+    armed: bool,
+}
+
+impl DetachedRequestLeaseEnrollment {
+    pub(crate) fn commit(mut self) {
+        self.armed = false;
+    }
+
+    pub(crate) async fn finish(mut self) {
+        self.manager.finish(&self.record).await;
+        self.armed = false;
+    }
+}
+
+impl Drop for DetachedRequestLeaseEnrollment {
+    fn drop(&mut self) {
+        if self.armed {
+            self.manager.enqueue_completion(&self.record);
+        }
     }
 }
 

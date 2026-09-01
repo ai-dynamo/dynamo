@@ -19,6 +19,10 @@ use std::sync::{
 
 use super::{Indexer, SideIndexer, remote::RemoteIndexer};
 
+const MODE_INACTIVE: u8 = 0;
+const MODE_LRU: u8 = 1;
+const MODE_TTL_FALLBACK: u8 = 2;
+
 #[derive(Clone)]
 pub(crate) struct ApproximateRequestLease {
     lease: ApproximateLruLease,
@@ -43,18 +47,12 @@ impl ApproximateRequestLease {
         let mode = self.lease.acquire(blocks, private_blocks).await?;
         self.mode.store(
             match mode {
-                ApproximateAcquireMode::Lru => 1,
-                ApproximateAcquireMode::TtlFallback => 2,
-                ApproximateAcquireMode::Ignored => 0,
+                ApproximateAcquireMode::Lru => MODE_LRU,
+                ApproximateAcquireMode::TtlFallback => MODE_TTL_FALLBACK,
+                ApproximateAcquireMode::Ignored => MODE_INACTIVE,
             },
             Ordering::Release,
         );
-        if mode == ApproximateAcquireMode::Lru {
-            return Ok(mode);
-        }
-        if mode == ApproximateAcquireMode::Ignored {
-            return Ok(mode);
-        }
         Ok(mode)
     }
 
@@ -81,7 +79,7 @@ impl ApproximateRequestLease {
     }
 
     pub(crate) fn is_active_lru(&self) -> bool {
-        self.mode.load(Ordering::Acquire) == 1
+        self.mode.load(Ordering::Acquire) == MODE_LRU
     }
 }
 
@@ -112,7 +110,7 @@ impl Indexer {
         };
         Some(ApproximateRequestLease {
             lease,
-            mode: Arc::new(AtomicU8::new(0)),
+            mode: Arc::new(AtomicU8::new(MODE_INACTIVE)),
         })
     }
 
