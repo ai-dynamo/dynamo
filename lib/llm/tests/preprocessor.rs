@@ -805,6 +805,94 @@ mod cached_multimodal_uuid {
     }
 }
 
+/// The frontend's contract for `media_io_kwargs`: forward it to the worker untouched
+/// when the worker owns media decoding, and withhold it when the frontend decodes.
+mod media_io_kwargs_forwarding {
+    use std::sync::Arc;
+
+    use super::Request;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::preprocessor::media::MediaDecoder;
+    use rstest::rstest;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    /// Preprocessor with no media decoder on its MDC, so the worker owns decoding.
+    fn make_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    /// Preprocessor whose MDC carries a media decoder, so the frontend owns decoding.
+    /// Returns `None` when NIXL/UCX is unavailable: `MediaLoader::new` calls
+    /// `get_nixl_agent()?`, so the preprocessor cannot be built at all. Mirrors the
+    /// skip-with-message idiom in `preprocessor/media/loader.rs`.
+    fn make_frontend_decoding_preprocessor() -> Option<Arc<OpenAIPreprocessor>> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        mdc.media_decoder = Some(MediaDecoder::default());
+        OpenAIPreprocessor::new(mdc).ok()
+    }
+
+    /// `media_io_kwargs` reaches the worker exactly when the worker owns decoding,
+    /// and when it does it is byte-identical to what the client sent -- no MDC
+    /// `limits`, no `fps: null`, no `strict: false` injected by a round-trip through
+    /// the frontend's decoder schema.
+    ///
+    /// The request is text-only on purpose: the forwarding rule lives in
+    /// `builder_with_lora` and keys off `self.media_loader` alone, so no media part is
+    /// needed and nothing is fetched, decoded, or NIXL-registered.
+    #[rstest]
+    // Worker decodes: a key the frontend's schema happens to know...
+    #[case::worker_known_key(false, serde_json::json!({"video": {"fps": 2.0}}))]
+    // ...and one it does not. Both must pass through untouched.
+    #[case::worker_unknown_key(false, serde_json::json!({"video": {"do_sample_frames": false}}))]
+    // Frontend decodes: it consumes the kwargs itself, so the worker must not see them.
+    // Only a known key here -- an unknown one is a decode-time error, a separate concern.
+    #[case::frontend_known_key(true, serde_json::json!({"video": {"fps": 2.0}}))]
+    #[tokio::test]
+    async fn media_io_kwargs_forwarded_only_when_worker_decodes(
+        #[case] frontend_decodes: bool,
+        #[case] media_io_kwargs: serde_json::Value,
+    ) {
+        let preprocessor = if frontend_decodes {
+            match make_frontend_decoding_preprocessor() {
+                Some(preprocessor) => preprocessor,
+                None => {
+                    println!(
+                        "test media_io_kwargs_forwarded_only_when_worker_decodes ... \
+                         ignored (NIXL/UCX not available)"
+                    );
+                    return;
+                }
+            }
+        } else {
+            make_preprocessor()
+        };
+
+        let messages = r#"[{"role": "user", "content": "describe this"}]"#;
+        let mut request = Request::from(messages, None, None, "test-model".to_string());
+        request.media_io_kwargs = Some(media_io_kwargs.clone());
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        let worker_request = serde_json::to_value(preprocessed).unwrap();
+
+        let expected = (!frontend_decodes).then_some(media_io_kwargs);
+        assert_eq!(
+            worker_request.get("media_io_kwargs"),
+            expected.as_ref(),
+            "frontend_decodes={frontend_decodes}: worker-bound media_io_kwargs must be \
+             absent when the frontend decodes, and preserve the request JSON exactly \
+             otherwise"
+        );
+    }
+}
+
 mod context_length_validation {
     use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
     use dynamo_llm::model_card::ModelDeploymentCard;
