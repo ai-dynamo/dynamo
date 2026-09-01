@@ -5,7 +5,7 @@ title: DynamoGraphDeployment (DGD) Reference
 subtitle: Field reference for the DynamoGraphDeployment custom resource — the canonical, live description of a Dynamo inference graph.
 ---
 
-A `DynamoGraphDeployment` (DGD) is the canonical description of a running Dynamo inference graph. You list the components that make up the graph — frontend, workers, prefill and decode workers, planner, EPP — and the [operator](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md) reconciles them into [`DynamoComponentDeployment`](dynamo-component-deployment.mdx) resources, pods, and Services.
+A `DynamoGraphDeployment` (DGD) is the canonical description of a running Dynamo inference graph. You list the components that make up the graph — frontend, workers, prefill and decode workers, planner, EPP — and the [operator](../../kubernetes/installation/install-dynamo.md) reconciles them into [`DynamoComponentDeployment`](dynamo-component-deployment.mdx) resources, pods, and Services.
 
 A DGD is the resource that persists and serves traffic. Author one directly when you have a known-good configuration or a tuned [recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes); generate one from intent with a [`DynamoGraphDeploymentRequest`](dynamo-graph-deployment-request.mdx) (DGDR).
 
@@ -65,7 +65,7 @@ spec:
 </ParamField>
 
 <ParamField path="priorityClassName" type="string">
-  Name of the `PriorityClass` to use for Grove `PodCliqueSet`s. Requires the Grove pathway. See [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md).
+  Name of the `PriorityClass` to use for Grove `PodCliqueSet`s. Requires the Grove pathway. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
 <ParamField path="restart" type="Restart">
@@ -92,7 +92,7 @@ spec:
 </Indent>
 
 <ParamField path="topologyConstraint" type="SpecTopologyConstraint">
-  Deployment-level topology constraint. Components without their own `topologyConstraint` inherit this value. See [Topology-Aware Scheduling](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-scheduling.md).
+  Deployment-level topology constraint. Components without their own `topologyConstraint` inherit this value. See the [SpecTopologyConstraint API](full-api-reference.mdx#spectopologyconstraint).
 </ParamField>
 
 <Indent>
@@ -110,7 +110,7 @@ spec:
 
 <Indent>
   <ParamField path="kvTransferPolicy" type="KvTransferPolicy">
-    Topology-aware routing for KV-cache transfers between prefill and decode workers. Set exactly one of `labelKey` or `clusterTopologyName`. See [Topology-Aware KV Transfer](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-kv-transfer.md).
+    Topology-aware routing for KV-cache transfers between prefill and decode workers. Set exactly one of `labelKey` or `clusterTopologyName`. See the [KvTransferPolicy API](full-api-reference.mdx#kvtransferpolicy).
   </ParamField>
   <Indent>
     <ParamField path="clusterTopologyName" type="string">
@@ -176,13 +176,13 @@ The operator maintains observed state under `status`.
 </Indent>
 
 <ParamField path="status.checkpoints" type="map[string]ComponentCheckpointStatus">
-  Per-component checkpoint status, keyed by component name. See [Snapshot and Restore](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md).
+  Per-component checkpoint status, keyed by component name. See the [DynamoCheckpoint API](full-api-reference.mdx#dynamocheckpoint).
 
   See: [ComponentCheckpointStatus](#componentcheckpointstatus)
 </ParamField>
 
 <ParamField path="status.rollingUpdate" type="RollingUpdateStatus">
-  Progress of operator-managed rolling updates. Currently supported only for single-node, non-Grove deployments. See [Rolling Update](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/rolling-update.md).
+  Progress of operator-managed rolling updates. Currently supported only for single-node, non-Grove deployments. See the [RollingUpdateStatus API](full-api-reference.mdx#rollingupdatestatus).
 </ParamField>
 
 <Indent>
@@ -285,7 +285,7 @@ kubectl get dgd my-graph -n $NAMESPACE -o jsonpath='{.status.components}'
   <Card title="Deploy with DGD" icon="rocket" href="../../kubernetes/model-deployment/deploy-with-dgd.md">
     Task-oriented walkthrough of authoring a graph deployment.
   </Card>
-  <Card title="Dynamo Operator" icon="gears" href="../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md">
-    Operator-injected defaults, environment variables, and reconciliation.
+  <Card title="Install Dynamo" icon="gears" href="../../kubernetes/installation/install-dynamo.md">
+    Install and configure the Dynamo platform and operator.
   </Card>
 </CardGroup>

@@ -1750,6 +1750,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "libc",
+ "libloading 0.8.9",
  "lru",
  "minijinja",
  "modelexpress-client",
@@ -1887,9 +1888,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.3.1"
+version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
+checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1932,6 +1933,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4413,9 +4415,9 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "1.0.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ebc0a255ea1cbd18ba08d7bc430ea781105c5ceb278a46b52b93fc2dca0ed06"
+checksum = "858d83bef88bf58fbd29b33df9974fdc91a47b80aebe0de26b8614b1a801064c"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
