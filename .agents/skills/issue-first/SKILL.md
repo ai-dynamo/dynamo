@@ -1,5 +1,5 @@
 ---
-name: link-work-to-issues
+name: issue-first
 description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
 license: Apache-2.0
 metadata:
