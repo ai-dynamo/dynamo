@@ -1497,8 +1497,6 @@ enum TargetsFilterFallback {
     Other,
 }
 
-/// Build the OpenTelemetry-layer filter.
-///
 /// Lifecycle spans bypass `DYN_LOG` only in the OTel layer. The console
 /// formatter keeps its normal filter, so enabling lifecycle tracing does not
 /// increase stderr logging volume.

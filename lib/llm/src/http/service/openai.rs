@@ -138,6 +138,16 @@ pub(super) fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
+/// Records cancellation if an SSE response is dropped before its stream reaches
+/// an explicit terminal outcome.
+struct StreamingLifecycleTerminal(LifecycleTerminal);
+
+impl Drop for StreamingLifecycleTerminal {
+    fn drop(&mut self) {
+        self.0.finish(TerminalOutcome::Cancelled);
+    }
+}
+
 fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
     if response.0.is_client_error() {
         TerminalOutcome::Rejected
@@ -3130,6 +3140,7 @@ async fn chat_completions(
         let terminal = terminal.clone();
         let stream = async_stream::stream! {
             let _request_lifecycle = request_lifecycle;
+            let _stream_terminal = StreamingLifecycleTerminal(terminal.clone());
             let mut inner = Box::pin(stream);
             while let Some(item) = inner.next().await {
                 yield item;

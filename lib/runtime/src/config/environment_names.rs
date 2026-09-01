@@ -89,8 +89,7 @@ pub mod lifecycle_tracing {
     /// Versioned lifecycle capability profile. Defaults to `generic.v1`.
     pub const DYN_LIFECYCLE_TRACE_PROFILE: &str = "DYN_LIFECYCLE_TRACE_PROFILE";
 
-    /// Lifecycle detail mode. `core` is the default; `investigation` is
-    /// reserved for bounded future detail fields.
+    /// Lifecycle detail mode. Defaults to `core`.
     pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
 
     /// Backend disaggregation role, shared with backend-common's CLI
