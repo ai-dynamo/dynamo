@@ -472,7 +472,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
     let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
-    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal.clone());
 
     async_stream::try_stream! {
         tokio::pin!(stream);
