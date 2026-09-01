@@ -451,6 +451,7 @@ mod tests {
                     env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
                     Some("http://collector:4317"),
                 ),
+                (env_otlp::OTEL_METRIC_EXPORT_INTERVAL, None),
             ],
             || {
                 let config = ExportConfig::from_env()
@@ -473,8 +474,6 @@ mod tests {
         );
     }
 
-    /// Summaries only survive because we bypass the SDK, whose data model has
-    /// no `Summary` variant.
     /// Every family from a real vLLM 0.18.0 registry survives the mapping with
     /// at least one datapoint. Constructed registries only contain shapes
     /// someone thought to write down; this is the capture.
@@ -516,6 +515,8 @@ mod tests {
         assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
     }
 
+    /// Summaries only survive because we bypass the SDK, whose data model has
+    /// no `Summary` variant.
     #[test]
     fn summary_quantiles_survive() {
         let metrics = export(

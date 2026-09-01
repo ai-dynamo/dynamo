@@ -709,12 +709,12 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
 /// The Arc wrapper is included in the type to make sharing explicit.
 pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
 
-/// Returns already-built families, so engine metrics reach the structured
-/// path without being rendered to text and parsed back.
 /// Type alias for exposition text callback functions that return Prometheus text
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
+/// Returns already-built families, so engine metrics reach the structured
+/// path without being rendered to text and parsed back.
 pub type PrometheusTypedCallback =
     Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync + 'static>;
 
@@ -1509,16 +1509,20 @@ mod test_metricsregistry_prefixes {
     }
 
     #[tokio::test]
-    async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
-        // Sanity test: if an expfmt callback is registered only on the endpoint registry,
-        // scraping from the root (DRT) should still include it exactly once via the
-        // child-registry traversal.
+    async fn test_typed_callback_only_registered_on_endpoint_is_collected_once() {
+        // The registry tree is traversed once, so a callback registered on the
+        // endpoint must not be collected again via its parents. Count
+        // invocations rather than emitted series: the merger drops duplicate
+        // series, so a double traversal would be invisible in the output.
         let drt = create_test_drt_async().await;
-        let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
-        let component = namespace.component("comp_expfmt_ep_only").unwrap();
-        let endpoint = component.endpoint("ep_expfmt_ep_only");
+        let namespace = drt.namespace("ns_typed_ep_only").unwrap();
+        let component = namespace.component("comp_typed_ep_only").unwrap();
+        let endpoint = component.endpoint("ep_typed_ep_only");
 
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
         let callback: PrometheusTypedCallback = Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut family = prometheus::proto::MetricFamily::new();
             family.set_name("dynamo_component_active_decode_blocks".to_string());
             family.set_field_type(prometheus::proto::MetricType::GAUGE);
@@ -1534,16 +1538,22 @@ mod test_metricsregistry_prefixes {
 
         endpoint.get_metrics_registry().add_typed_callback(callback);
 
-        let output = drt.metrics().prometheus_expfmt().unwrap();
-        // The registry tree is traversed once, so a callback registered on the
-        // endpoint must not be collected again via its parents.
-        let expected = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0";
-        let occurrences = output.lines().filter(|line| *line == expected).count();
+        // Typed callbacks feed the OTLP collection, not the exposition path.
+        let families = drt
+            .get_metrics_registry()
+            .metric_families_combined()
+            .unwrap();
 
         assert_eq!(
-            occurrences, 1,
-            "endpoint-registered typed callback should appear once, got {} occurrences\n\n{}",
-            occurrences, output
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "endpoint-registered typed callback should be collected once"
+        );
+        assert!(
+            families
+                .iter()
+                .any(|f| f.name() == "dynamo_component_active_decode_blocks"),
+            "typed family missing from the combined collection"
         );
     }
 
