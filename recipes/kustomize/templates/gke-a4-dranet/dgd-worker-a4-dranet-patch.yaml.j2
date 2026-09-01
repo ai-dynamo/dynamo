@@ -37,12 +37,6 @@ spec:
               value: "{{ gpu_count }}"
             - name: UCX_RNDV_SCHEME
               value: get_zcopy
-            - name: UCX_PROTO_INFO
-              value: "y"
-            - name: UCX_LOG_LEVEL
-              value: info
-            - name: NIXL_LOG_LEVEL
-              value: INFO
           resources:
             claims:
               - name: devices

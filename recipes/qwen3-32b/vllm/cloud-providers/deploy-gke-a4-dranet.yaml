@@ -61,12 +61,6 @@ spec:
             value: "4"
           - name: UCX_RNDV_SCHEME
             value: get_zcopy
-          - name: UCX_PROTO_INFO
-            value: "y"
-          - name: UCX_LOG_LEVEL
-            value: info
-          - name: NIXL_LOG_LEVEL
-            value: INFO
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
@@ -199,12 +193,6 @@ spec:
             value: "4"
           - name: UCX_RNDV_SCHEME
             value: get_zcopy
-          - name: UCX_PROTO_INFO
-            value: "y"
-          - name: UCX_LOG_LEVEL
-            value: info
-          - name: NIXL_LOG_LEVEL
-            value: INFO
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
