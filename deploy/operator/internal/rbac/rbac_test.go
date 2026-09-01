@@ -50,31 +50,29 @@ func testClusterRole(name string) *rbacv1.ClusterRole {
 	}
 }
 
-func managedLabels(serviceAccountName string) map[string]string {
+func managedLabels() map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/managed-by": "dynamo-operator",
 		"app.kubernetes.io/component":  "rbac",
-		"app.kubernetes.io/name":       serviceAccountName,
+		"app.kubernetes.io/name":       testServiceAccountName,
 	}
 }
 
-func testServiceAccount(namespace, name string, labels map[string]string) *corev1.ServiceAccount {
+func testServiceAccount(labels map[string]string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceAccountName, Namespace: testNamespace, Labels: labels},
 	}
 }
 
 func testRoleBinding(
-	namespace string,
-	serviceAccountName string,
 	subjects []rbacv1.Subject,
 	roleRef rbacv1.RoleRef,
 	labels map[string]string,
 ) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceAccountName + "-binding",
-			Namespace: namespace,
+			Name:      testServiceAccountName + "-binding",
+			Namespace: testNamespace,
 			Labels:    labels,
 		},
 		Subjects: subjects,
@@ -82,11 +80,11 @@ func testRoleBinding(
 	}
 }
 
-func desiredSubjects(namespace, serviceAccountName string) []rbacv1.Subject {
+func desiredSubjects() []rbacv1.Subject {
 	return []rbacv1.Subject{{
 		Kind:      kindServiceAccount,
-		Name:      serviceAccountName,
-		Namespace: namespace,
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
 	}}
 }
 
@@ -116,11 +114,10 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			serviceAccountName: testServiceAccountName,
 			clusterRoleName:    testClusterRoleName,
 			initialObjects:     []client.Object{testClusterRole(testClusterRoleName)},
-			wantServiceAccount: testServiceAccount(testNamespace, testServiceAccountName, managedLabels(testServiceAccountName)),
+			wantServiceAccount: testServiceAccount(managedLabels()),
 			wantRoleBinding: testRoleBinding(
-				testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName),
-				desiredRoleRef(testClusterRoleName), managedLabels(testServiceAccountName),
-			),
+				desiredSubjects(),
+				desiredRoleRef(testClusterRoleName), managedLabels()),
 		},
 		{
 			name:               "preserves existing resources",
@@ -129,11 +126,11 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			clusterRoleName:    testClusterRoleName,
 			initialObjects: []client.Object{
 				testClusterRole(testClusterRoleName),
-				testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-				testRoleBinding(testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName), desiredRoleRef(testClusterRoleName), existingLabels),
+				testServiceAccount(existingLabels),
+				testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
 			},
-			wantServiceAccount: testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-			wantRoleBinding:    testRoleBinding(testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName), desiredRoleRef(testClusterRoleName), existingLabels),
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
 		},
 		{
 			name:               "updates an incorrect subject name",
@@ -142,11 +139,11 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			clusterRoleName:    testClusterRoleName,
 			initialObjects: []client.Object{
 				testClusterRole(testClusterRoleName),
-				testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-				testRoleBinding(testNamespace, testServiceAccountName, []rbacv1.Subject{{Kind: kindServiceAccount, Name: "wrong-sa", Namespace: testNamespace}}, desiredRoleRef(testClusterRoleName), existingLabels),
+				testServiceAccount(existingLabels),
+				testRoleBinding([]rbacv1.Subject{{Kind: kindServiceAccount, Name: "wrong-sa", Namespace: testNamespace}}, desiredRoleRef(testClusterRoleName), existingLabels),
 			},
-			wantServiceAccount: testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-			wantRoleBinding:    testRoleBinding(testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName), desiredRoleRef(testClusterRoleName), existingLabels),
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
 		},
 		{
 			name:               "rejects a missing cluster role",
@@ -184,11 +181,11 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			initialObjects: []client.Object{
 				testClusterRole("old-cluster-role"),
 				testClusterRole("new-cluster-role"),
-				testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-				testRoleBinding(testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName), desiredRoleRef("old-cluster-role"), existingLabels),
+				testServiceAccount(existingLabels),
+				testRoleBinding(desiredSubjects(), desiredRoleRef("old-cluster-role"), existingLabels),
 			},
-			wantServiceAccount: testServiceAccount(testNamespace, testServiceAccountName, existingLabels),
-			wantRoleBinding:    testRoleBinding(testNamespace, testServiceAccountName, desiredSubjects(testNamespace, testServiceAccountName), desiredRoleRef("new-cluster-role"), managedLabels(testServiceAccountName)),
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef("new-cluster-role"), managedLabels()),
 		},
 	}
 
