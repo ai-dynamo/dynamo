@@ -77,14 +77,9 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodFailed,
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-				{
-					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
-					Status: corev1.ConditionFalse,
-					Reason: podcontract.RestoreReasonFailed,
-				},
-			},
+			Conditions: []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: corev1.ConditionTrue,
+			}},
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name: ContainerNameProfiler,
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
@@ -92,7 +87,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 				}},
 			}},
 			InitContainerStatuses: []corev1.ContainerStatus{{
-				Name: gms.ServerContainerName,
+				Name: gms.ServerContainerName, RestartCount: 1,
 			}},
 		},
 	})
@@ -106,13 +101,13 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		assert.True(t, failoverCascadePredicate().Create(event.CreateEvent{Object: pod}))
 	})
 
-	t.Run("restore Pod replacement", func(t *testing.T) {
+	t.Run("GMS Pod replacement", func(t *testing.T) {
 		t.Log("Build a projected Dynamo Pod carrying standalone Snapshot restore state")
 		nativeRestorePod := pod.DeepCopy()
 		nativeRestorePod.Annotations[podcontract.RestoreFromAnnotation] = "snapshot-a"
 
-		t.Log("Verify restore replacement observes the projected terminal outcome")
-		assert.True(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: nativeRestorePod}))
+		t.Log("Verify GMS replacement observes the projected native sidecar restart")
+		assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: nativeRestorePod}))
 	})
 
 	t.Run("model", func(t *testing.T) {

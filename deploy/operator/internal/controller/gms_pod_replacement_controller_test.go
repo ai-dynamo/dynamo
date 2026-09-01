@@ -30,16 +30,16 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 )
 
-func TestRestorePodReplacementPredicate(t *testing.T) {
-	pred := restorePodReplacementPredicate()
+func TestGMSPodReplacementPredicate(t *testing.T) {
+	pred := gmsPodReplacementPredicate()
 
-	t.Run("admits terminal native restore failures", func(t *testing.T) {
+	t.Run("retains terminal restore failures without a GMS restart", func(t *testing.T) {
 		for _, reason := range []string{
 			podcontract.RestoreReasonFailed,
 			podcontract.RestoreReasonPartiallySucceeded,
 		} {
 			t.Run(reason, func(t *testing.T) {
-				t.Log("Given an owned native restore Pod with a terminal failure outcome")
+				t.Log("Build an owned native restore Pod with a terminal outcome and no GMS restart")
 				pod := gmsPodReplacementTestPod("pod-uid", 0)
 				pod.Status.Conditions = []corev1.PodCondition{{
 					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
@@ -47,39 +47,10 @@ func TestRestorePodReplacementPredicate(t *testing.T) {
 					Reason: reason,
 				}}
 
-				t.Log("Then the controller observes the transition for whole-Pod replacement")
-				assert.True(t, pred.Create(event.CreateEvent{Object: pod}))
+				t.Log("Verify the terminal failure remains visible instead of causing an identical retry")
+				assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
 			})
 		}
-	})
-
-	t.Run("rejects terminal failure from an unrelated Snapshot workload", func(t *testing.T) {
-		t.Log("Given a controller-owned native restore Pod without Dynamo workload identity")
-		pod := gmsPodReplacementTestPod("pod-uid", 0)
-		delete(pod.Labels, consts.KubeLabelDynamoComponent)
-		delete(pod.Labels, consts.KubeLabelDynamoNamespace)
-		pod.Status.Conditions = []corev1.PodCondition{{
-			Type:   corev1.PodConditionType(podcontract.RestoredCondition),
-			Status: corev1.ConditionFalse,
-			Reason: podcontract.RestoreReasonFailed,
-		}}
-
-		t.Log("Then the replacement predicate leaves the unrelated Pod to its own controller")
-		assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
-	})
-
-	t.Run("rejects terminal Snapshot outcomes on non-restore Pods", func(t *testing.T) {
-		t.Log("Given a Pod with no restore annotation and no GMS restart")
-		pod := gmsPodReplacementTestPod("pod-uid", 0)
-		delete(pod.Annotations, podcontract.RestoreFromAnnotation)
-		pod.Status.Conditions = []corev1.PodCondition{{
-			Type:   corev1.PodConditionType(podcontract.RestoredCondition),
-			Status: corev1.ConditionFalse,
-			Reason: podcontract.RestoreReasonFailed,
-		}}
-
-		t.Log("Then the controller ignores the standalone Snapshot outcome")
-		assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
 	})
 
 	t.Run("admits restart transition", func(t *testing.T) {
@@ -105,6 +76,12 @@ func TestRestorePodReplacementPredicate(t *testing.T) {
 			},
 			"ownerless": func(pod *corev1.Pod) {
 				pod.OwnerReferences = nil
+			},
+			"missing Dynamo component identity": func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoComponent)
+			},
+			"missing Dynamo namespace identity": func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoNamespace)
 			},
 			"ordinary init container": func(pod *corev1.Pod) {
 				pod.Spec.InitContainers[0].RestartPolicy = nil
@@ -139,7 +116,7 @@ func TestRestorePodReplacementPredicate(t *testing.T) {
 	})
 }
 
-func TestRestorePodReplacementReconcile(t *testing.T) {
+func TestGMSPodReplacementReconcile(t *testing.T) {
 	tests := []struct {
 		name        string
 		podExists   bool
@@ -160,11 +137,6 @@ func TestRestorePodReplacementReconcile(t *testing.T) {
 			mutate: func(pod *corev1.Pod) {
 				delete(pod.Labels, consts.KubeLabelDynamoComponent)
 				delete(pod.Labels, consts.KubeLabelDynamoNamespace)
-				pod.Status.Conditions = []corev1.PodCondition{{
-					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
-					Status: corev1.ConditionFalse,
-					Reason: podcontract.RestoreReasonFailed,
-				}}
 			},
 		},
 		{
@@ -199,7 +171,7 @@ func TestRestorePodReplacementReconcile(t *testing.T) {
 				builder = builder.WithObjects(pod)
 			}
 			c := builder.Build()
-			reconciler := &restorePodReplacementReconciler{Client: c}
+			reconciler := &gmsPodReplacementReconciler{Client: c}
 			key := client.ObjectKeyFromObject(pod)
 
 			result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
@@ -223,7 +195,7 @@ func TestRestorePodReplacementReconcile(t *testing.T) {
 	}
 }
 
-func TestRestorePodReplacementErrors(t *testing.T) {
+func TestGMSPodReplacementErrors(t *testing.T) {
 	retryErr := errors.New("client failed")
 
 	t.Run("get error is returned for retry", func(t *testing.T) {
@@ -235,20 +207,20 @@ func TestRestorePodReplacementErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		reconciler := &restorePodReplacementReconciler{Client: c}
+		reconciler := &gmsPodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: types.NamespacedName{Namespace: "inference", Name: "restore-worker"},
 		})
 		require.ErrorIs(t, err, retryErr)
-		assert.ErrorContains(t, err, "get restore Pod replacement candidate")
+		assert.ErrorContains(t, err, "get GMS Pod replacement candidate")
 	})
 
 	t.Run("delete NotFound is harmless", func(t *testing.T) {
 		pod := gmsPodReplacementTestPod("observed-uid", 1)
 		c := gmsPodReplacementErrorClient(t, pod,
 			apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, pod.Name))
-		reconciler := &restorePodReplacementReconciler{Client: c}
+		reconciler := &gmsPodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: client.ObjectKeyFromObject(pod),
@@ -259,13 +231,13 @@ func TestRestorePodReplacementErrors(t *testing.T) {
 	t.Run("delete error is returned for retry", func(t *testing.T) {
 		pod := gmsPodReplacementTestPod("observed-uid", 1)
 		c := gmsPodReplacementErrorClient(t, pod, retryErr)
-		reconciler := &restorePodReplacementReconciler{Client: c}
+		reconciler := &gmsPodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: client.ObjectKeyFromObject(pod),
 		})
 		require.ErrorIs(t, err, retryErr)
-		assert.ErrorContains(t, err, "delete restore Pod replacement candidate inference/restore-worker")
+		assert.ErrorContains(t, err, "delete GMS Pod replacement candidate inference/restore-worker")
 	})
 }
 

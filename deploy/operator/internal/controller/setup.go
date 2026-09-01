@@ -152,13 +152,13 @@ func SetupFailoverCascade(mgr ctrl.Manager) error {
 	return nil
 }
 
-func SetupRestorePodReplacement(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&restorePodReplacementReconciler{
+func SetupGMSPodReplacement(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := (&gmsPodReplacementReconciler{
 		Client:        mgr.GetClient(),
 		config:        opts.Config,
 		runtimeConfig: opts.RuntimeConfig,
 	}).setupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create restore Pod replacement controller: %w", err)
+		return fmt.Errorf("unable to create GMS Pod replacement controller: %w", err)
 	}
 	return nil
 }

@@ -639,7 +639,7 @@ func registerControllers(
 	}
 
 	if runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if err := controller.SetupRestorePodReplacement(mgr, setupOptions); err != nil {
+		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
 			return err
 		}
 	}
