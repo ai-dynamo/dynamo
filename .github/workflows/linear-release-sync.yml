@@ -63,8 +63,11 @@ jobs:
           command: sync
           version: ${{ steps.version.outputs.version }}
           name: Dynamo v${{ steps.version.outputs.version }}
-          # Dry run for the rollout: scans and logs what it would attach
-          # without creating or modifying anything in Linear. Flip to false
-          # after one observed run confirms it targets the existing
-          # "Dynamo v1.6.0" release rather than creating a duplicate.
+          # Deliberate rollout gate: the workflow does not sync until this is
+          # flipped. Dry run scans and logs what it would attach without
+          # creating or modifying anything in Linear. Flip to false in a
+          # follow-up PR once one observed run confirms it targets the
+          # existing "Dynamo v1.6.0" release rather than creating a
+          # duplicate, and LINEAR_ACCESS_KEY is confirmed to be a pipeline
+          # access key.
           dry_run: true
