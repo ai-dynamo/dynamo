@@ -54,6 +54,7 @@ BLOCK_SIZE = 16
 NAMESPACE = "router-rust-mm"
 
 pytestmark = [
+    pytest.mark.router,
     pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,

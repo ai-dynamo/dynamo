@@ -25,7 +25,8 @@ adding required approvals.
 
 | File | What it is |
 |------|------------|
-| `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
+| `areas.yaml` | The single source of truth: path globs to GitHub team and pytest markers, by subsystem. **Edit this.** |
+| `pytest_markers.py` | Canonical framework and selective-feature marker vocabulary allowed in `areas.yaml`. |
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
@@ -48,6 +49,61 @@ adding required approvals.
    ```
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
+
+## Select pytest coverage
+
+An area can associate its owned paths with pytest markers:
+
+```yaml
+- label: router
+  github_team: '@ai-dynamo/dynamo-router-codeowners'
+  pytest:
+    markers: [router]
+  path_globs:
+  - components/src/dynamo/router/
+  - lib/kv-router/
+  - tests/router/
+```
+
+The PR workflow evaluates every ownership area matching each changed path.
+Backend markers narrow a feature to that framework, while other markers select
+the affected feature tests. Different changed paths are unioned. An area with no
+`pytest` policy contributes no markers; selection falls back to the full suite
+only when none of the areas matching a changed path provides a marker mapping.
+
+The marker report collects effective pytest markers, including module, class,
+function, and parameter inheritance. Unit tests are the always-on smoke slice.
+Every non-unit test carrying a framework marker (`vllm`, `sglang`, or `trtllm`)
+must also carry at least one selective feature marker. The allowed vocabulary is
+defined once in `pytest_markers.py`; `areas.yaml` maps those markers to paths.
+Policy validation, selection, and the marker audit share that vocabulary. The
+audit also fails if a configured feature has no runnable test or a mapped
+non-unit test does not intersect its path's feature and framework markers. Tests
+that span features may carry more than one. In selective mode, triggered backend
+lanes run their `unit` tests in addition to the selected feature expression.
+
+The selector exports one feature expression per backend. Lifecycle, framework,
+and GPU-count markers remain in `.github/workflows/pr.yaml`; the selector does
+not generate or replace them. An empty feature expression preserves that job's
+existing full-suite marker expression, so an unmapped or inapplicable selection
+fails safely by running the lane already triggered by changed-files detection.
+For example, `tests/router/**` is explicitly mapped to the `router` area and
+feature. Mixed-feature files such as `tests/serve/test_vllm.py` belong to each
+applicable feature area, so their mapping selects the union of their `core`,
+`router`, and `multimodal` tests in the vLLM lane.
+
+The default rollout mode reports the effective feature markers for each backend
+and exact selected pytest node IDs without reducing coverage. Candidate marker
+clauses are kept in the JSON plan for debugging but are not presented as the
+effective selection when a full-suite fallback wins. Non-test documentation
+extensions (`.md`, `.mdx`, `.rst`, and `.txt`) do not participate in pytest
+selection; the existing CI path filters independently decide which jobs a
+documentation change triggers. The complete selection is uploaded
+as the `pytest-shadow-selection-<run id>` JSON artifact; the job summary shows
+counts and the first 200 node IDs per lane. Listed items are selected by the
+marker expression; pytest evaluates `skip` and `skipif` conditions later, so
+some may still skip at runtime. Set repository variable
+`PYTEST_SELECTION_MODE` to `selective` to apply it to backend pytest jobs.
 
 ## External contributors
 

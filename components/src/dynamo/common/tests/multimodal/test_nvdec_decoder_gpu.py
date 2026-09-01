@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = [
+    pytest.mark.multimodal,
     pytest.mark.integration,
     pytest.mark.post_merge,
     pytest.mark.gpu_1,

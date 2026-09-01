@@ -45,6 +45,9 @@ areas:
   path_globs: []
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
+  pytest:
+    markers:
+    - router
   path_globs:
   - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/kv_state_agent/
@@ -72,6 +75,9 @@ areas:
   - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
+  pytest:
+    markers:
+    - vllm
   path_globs:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
@@ -79,6 +85,9 @@ areas:
   - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
+  pytest:
+    markers:
+    - trtllm
   path_globs:
   - components/src/dynamo/trtllm/
   - components/src/dynamo/trtllm/configs/
@@ -92,6 +101,9 @@ areas:
   - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
+  pytest:
+    markers:
+    - sglang
   path_globs:
   - components/src/dynamo/sglang/
   - components/src/dynamo/sglang/request_handlers/
@@ -101,6 +113,10 @@ areas:
   - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
+  pytest:
+    markers:
+    - kvbm
+    - lmcache
   path_globs:
   - deploy/pre-deployment/nixl/
   - lib/bindings/kvbm/
@@ -181,6 +197,9 @@ areas:
   - tests/lmcache/
 - label: multimodal
   github_team: '@ai-dynamo/dynamo-multimodal-codeowners'
+  pytest:
+    markers:
+    - multimodal
   path_globs:
   - benchmarks/multimodal/
   - benchmarks/omni/
@@ -203,6 +222,9 @@ areas:
   - examples/diffusers/
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
+  pytest:
+    markers:
+    - planner
   path_globs:
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
@@ -218,6 +240,16 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+- label: core-tests
+  github_team: '@ai-dynamo/dynamo-runtime-codeowners'
+  pytest:
+    markers:
+    - core
+  path_globs:
+  - tests/report_pytest_markers.py
+  - tests/serve/test_sample.py
+  - tests/serve/test_vllm.py
+  - tests/vllm_self_benchmark/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -302,6 +334,9 @@ areas:
   - lib/runtime/src/metrics/
 - label: fault-tolerance
   github_team: '@ai-dynamo/dynamo-fault-tolerance-codeowners'
+  pytest:
+    markers:
+    - fault_tolerance
   path_globs:
   - tests/fault_tolerance/
   - tests/fault_tolerance/cancellation/
@@ -546,6 +581,33 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 shared:
+- glob: components/src/dynamo/common/tests/memory/*multimodal*
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/tests/multimodal/
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/runtime/test_sample_multimodal_smoke.py
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/serve/test_sample.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_vllm.py
+  owners:
+  - runtime
+  - backend-vllm
+  - router
+  - multimodal
+- glob: tests/vllm_self_benchmark/
+  owners:
+  - runtime
+  - backend-vllm
+  - performance
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router

@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.pre_merge,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),

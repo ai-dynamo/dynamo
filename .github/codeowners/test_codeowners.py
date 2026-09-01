@@ -289,6 +289,7 @@ class TestComputeResolution:
                     "label": "kvbm",
                     "github_team": "@kvbm",
                     "path_globs": [],
+                    "pytest": {"markers": ["kvbm"]},
                 },
                 {
                     "label": "docs",
@@ -321,6 +322,47 @@ class TestComputeResolution:
         # docs area unchanged
         docs = next(a for a in model.areas if a.label == "docs")
         assert "docs/" in docs.path_globs
+
+    def test_pytest_metadata_is_preserved(self) -> None:
+        model = compute_resolution(self._spec())
+        runtime = next(area for area in model.areas if area.label == "runtime")
+        kvbm = next(area for area in model.areas if area.label == "kvbm")
+
+        assert runtime.pytest_markers == []
+        assert kvbm.pytest_markers == ["kvbm"]
+
+    def test_matching_areas_returns_all_overlaps(self) -> None:
+        spec = self._spec()
+        spec["areas"][1]["path_globs"] = ["lib/llm/shared/"]
+        model = compute_resolution(spec)
+
+        assert [area.label for area in model.matching_areas("lib/llm/shared/x.rs")] == [
+            "runtime",
+            "kvbm",
+        ]
+
+    @pytest.mark.parametrize(
+        ("pytest_spec", "message"),
+        [
+            (None, "pytest must be a mapping"),
+            (False, "pytest must be a mapping"),
+            ("", "pytest must be a mapping"),
+            ([], "pytest must be a mapping"),
+            ({"mode": "none"}, "unsupported key"),
+            ({"markers": "router"}, "pytest.markers"),
+            ({"markers": False}, "pytest.markers"),
+            ({"markers": None}, "pytest.markers"),
+            ({"unknown": True}, "unsupported key"),
+        ],
+    )
+    def test_invalid_pytest_metadata_is_rejected(
+        self, pytest_spec: object, message: str
+    ) -> None:
+        spec = self._spec()
+        spec["areas"][0]["pytest"] = pytest_spec
+
+        with pytest.raises(SystemExit, match=message):
+            compute_resolution(spec)
 
     @pytest.mark.parametrize(
         "rule",

@@ -16,6 +16,7 @@ from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 
 # Total runtime ~0.75s — no need for parallel marker.
 pytestmark = [
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
