@@ -7,6 +7,10 @@
 # Requires a vLLM build containing vllm-project/vllm#52840, which adds the
 # LoadLora, UnloadLora, and ListLoras control RPCs and per-request lora_name.
 #
+# Also requires NIXL, which the disaggregated KV transfer depends on. The Dynamo
+# containers install it; a bare `pip install vllm` does not, and the engines fail
+# with "NIXL is not available" only after the model has finished loading.
+#
 # Both workers load every adapter eagerly. GenerateRequest carries only lora_name
 # and vLLM rejects names it has not already loaded, so an adapter must be loaded on
 # each worker that may receive it -- unlike the Python worker, which can defer
@@ -19,16 +23,7 @@ export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, echo ""
-echo "Load each adapter on BOTH workers before routing traffic to it:"
-echo "  for port in ${DYN_SYSTEM_PORT1:-8081} ${DYN_SYSTEM_PORT2:-8082}; do"
-echo "    curl -s -X POST http://localhost:\$port/v1/loras \\"
-echo "      -H 'Content-Type: application/json' \\"
-echo "      -d '{\"lora_name\": \"${LORA_NAME}\", \"source\": {\"uri\": \"hf://${LORA_NAME}\"}}' | jq ."
-echo "  done"
-echo ""
-
-wait_any_exit
+source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
@@ -120,6 +115,15 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecar Disaggregated Serving + LoRA (2 GPUs)" "$MODEL" "$HTTP_PORT" \
     "Decode:      GPU ${VLLM_DECODE_GPU}, gRPC 127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     "Prefill:     GPU ${VLLM_PREFILL_GPU}, gRPC 127.0.0.1:${VLLM_PREFILL_GRPC_PORT}"
+
+echo ""
+echo "Load each adapter on BOTH workers before routing traffic to it:"
+echo "  for port in ${DYN_SYSTEM_PORT1:-8081} ${DYN_SYSTEM_PORT2:-8082}; do"
+echo "    curl -s -X POST http://localhost:\$port/v1/loras \\"
+echo "      -H 'Content-Type: application/json' \\"
+echo "      -d '{\"lora_name\": \"${LORA_NAME}\", \"source\": {\"uri\": \"hf://${LORA_NAME}\"}}' | jq ."
+echo "  done"
+echo ""
 
 python -m dynamo.frontend &
 

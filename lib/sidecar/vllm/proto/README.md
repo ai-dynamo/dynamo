@@ -14,8 +14,9 @@ Both files are copied from vLLM without modification.
 - `inference.proto` SHA-256: `078a3d2a94bd03a96fdfdfa31c13a805d00575b365dec5b3f8ed82d36f065e85`
 - `control.proto` SHA-256: `1a050496e7d0f919f398d150d4bff1660d5a5eac57951137aeb0ca5970436696`
 
-`proto_conformance` in `lib/sidecar/vllm/src/tests.rs` pins these checksums and the
-LoRA-relevant field numbers so the vendored copies cannot silently drift from upstream.
+`vendored_protos_match_the_merged_vllm_release` and `lora_wire_fields_keep_their_upstream_numbers`
+in `lib/sidecar/vllm/src/tests.rs` pin these checksums and the LoRA-relevant field numbers
+respectively, so the vendored copies cannot silently drift from upstream.
 When resyncing, copy both files verbatim and update the commit and both checksums together.
 
 `dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`.
