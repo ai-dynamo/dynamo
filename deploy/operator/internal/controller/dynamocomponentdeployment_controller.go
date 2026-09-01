@@ -79,6 +79,13 @@ type DynamoComponentDeploymentReconciler struct {
 	DockerSecretRetriever DockerSecretRetriever
 }
 
+// elasticEPRayEnabled reports whether the operator may act on the Ray elastic-EP
+// path. Gated off, the leader Service, the follower, and the node lookup are all
+// skipped and an elastic-EP component reconciles as an ordinary one.
+func (r *DynamoComponentDeploymentReconciler) elasticEPRayEnabled() bool {
+	return r.RuntimeConfig != nil && r.RuntimeConfig.Gate.Enabled(features.ElasticEPRay)
+}
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
@@ -742,7 +749,7 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	// labels, so this addresses one Ray head only while the component is one pod.
 	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
 	// workers as if they were the head.
-	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec, r.elasticEPRayEnabled()) {
 		return deleteStub, true, nil
 	}
 	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)

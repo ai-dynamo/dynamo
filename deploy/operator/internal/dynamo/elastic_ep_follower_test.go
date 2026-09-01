@@ -141,7 +141,7 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("deriving the follower from the leader DCD")
-			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent)
+			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent, true)
 
 			t.Log("a follower is synthesized only for a shape whose leader Service is emitted")
 			if gotSynthesis := follower != nil; gotSynthesis != tt.wantSynthesis {
@@ -166,7 +166,7 @@ func TestSynthesizeElasticEPFollowerDCD_StripsCheckpointConfig(t *testing.T) {
 	}
 
 	t.Log("derive the follower from a leader with an explicit checkpoint reference")
-	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
 	if follower == nil {
 		t.Fatal("expected a follower to be synthesized")
 	}
@@ -205,7 +205,7 @@ func TestIsSinglePodElasticEPLeader_RequiresAWorkerComponent(t *testing.T) {
 			component.ComponentType = tt.componentType
 
 			t.Log("elastic EP is a worker topology: the leader is the engine heading the Ray cluster")
-			if got := IsSinglePodElasticEPLeader(component); got != tt.want {
+			if got := IsSinglePodElasticEPLeader(component, true); got != tt.want {
 				t.Errorf("IsSinglePodElasticEPLeader(%s) = %v, want %v", tt.componentType, got, tt.want)
 			}
 		})
@@ -233,7 +233,7 @@ func TestElasticEPComponentIdentity(t *testing.T) {
 		{
 			name: "a synthesized follower resolves under the leader's name",
 			component: func() *v1beta1.DynamoComponentDeploymentSharedSpec {
-				follower := synthesizeElasticEPFollowerDCD(leaderDCD(elasticEPComponent()), leaderComponent)
+				follower := synthesizeElasticEPFollowerDCD(leaderDCD(elasticEPComponent()), leaderComponent, true)
 				if follower == nil {
 					t.Fatal("expected a follower to be synthesized")
 				}
@@ -343,7 +343,7 @@ func TestGenerateDynamoComponentsDeployments_RejectsFollowerNameCollision(t *tes
 	}
 
 	t.Log("generate with an elastic-EP leader and a declared component of the derived name")
-	_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{}, true)
 
 	t.Log("generation fails loudly rather than silently dropping one of them")
 	if err == nil {
@@ -359,7 +359,7 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 	wantSuffixed := "decode-" + commonconsts.GroveRoleSuffixFollower
 
 	t.Log("deriving the follower from a single-pod elastic-EP leader")
-	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
 	if follower == nil {
 		t.Fatal("expected a follower DCD for an elastic-EP leader")
 	}

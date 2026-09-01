@@ -122,7 +122,7 @@ func createTestReconcilerWithStatus(
 func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
-	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout, true)
 }
 
 func TestGroveWorkerHashSuffixMigration(t *testing.T) {
@@ -695,7 +695,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
 	require.False(t, rollingCtx.InProgress())
 
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx, true)
 	require.NoError(t, err)
 	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
 	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)

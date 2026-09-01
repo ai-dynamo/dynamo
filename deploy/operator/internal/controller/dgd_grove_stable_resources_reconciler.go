@@ -102,7 +102,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 			dgd,
 			renderDeployment,
 			component,
-			!dynamo.IsSinglePodElasticEPLeader(component),
+			!dynamo.IsSinglePodElasticEPLeader(component, r.config != nil && r.config.ElasticEPRay.Enabled),
 		)
 		if err != nil {
 			return nil, err

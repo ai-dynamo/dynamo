@@ -293,6 +293,7 @@ func GenerateDynamoComponentsDeployments(
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
+	elasticEPRayEnabled bool,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
 	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
@@ -337,7 +338,7 @@ func GenerateDynamoComponentsDeployments(
 		// An elastic-EP leader also gets an optional follower: its own DCD resting at
 		// zero replicas, scaled up on demand without gang-blocking the leader. It lives
 		// on this pathway because a Grove clique cannot rest at zero (grove#676).
-		follower := synthesizeElasticEPFollowerDCD(dcd, componentName)
+		follower := synthesizeElasticEPFollowerDCD(dcd, componentName, elasticEPRayEnabled)
 		if follower == nil {
 			continue
 		}
@@ -422,7 +423,13 @@ func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentShar
 // gives each replica its own independent head behind one DNS name; numberOfNodes > 1
 // renders leader and worker pods that share the component labels, reconciles through
 // the LWS path, and already reaches its leader through the framework hostname.
-func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec, elasticEPRayEnabled bool) bool {
+	// The gate is checked here, in the one predicate the leader Service (both
+	// pathways), follower synthesis, and follower rendering all defer to. Gated off,
+	// every one of them sees an ordinary component and leaves it alone.
+	if !elasticEPRayEnabled {
+		return false
+	}
 	// Elastic EP is a worker topology: the leader is the engine that heads the Ray
 	// cluster and the follower lends it a GPU. Admission accepts the launch flags on any
 	// component, so without this a global-vLLM graph could put them on a planner or
@@ -452,8 +459,8 @@ func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentShar
 // useful where a leader Service exists to join. Gating on the launch flags alone would
 // derive followers for shapes that never get one: replicas > 1, or multinode, which takes
 // the LWS path and never renders RoleFollower at all.
-func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
-	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
+func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string, elasticEPRayEnabled bool) *v1beta1.DynamoComponentDeployment {
+	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec, elasticEPRayEnabled) {
 		return nil
 	}
 	// Synthesis needs strictly more than Service emission does: a Ray head must actually
@@ -1767,7 +1774,14 @@ func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1a
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
-		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
+		// Read straight from configuration rather than features.Gates, which is not
+		// threaded this deep. The two cannot disagree: features.New resolves
+		// ElasticEPRay from this field with no capability detection. Add detection
+		// there and this needs the resolved gate passed in instead.
+		return &VLLMBackend{
+			ParentGraphDeploymentName: parentGraphDeploymentName,
+			ElasticEPRayEnabled:       operatorConfig != nil && operatorConfig.ElasticEPRay.Enabled,
+		}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,

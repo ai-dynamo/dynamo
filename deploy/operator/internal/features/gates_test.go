@@ -62,6 +62,7 @@ func allEnabledGates() Gates {
 		VolcanoScheduler: true,
 		DRA:              true,
 		Istio:            true,
+		ElasticEPRay:     true,
 		GPUDiscovery:     true,
 	}
 }

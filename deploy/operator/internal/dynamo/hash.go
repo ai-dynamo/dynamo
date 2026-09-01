@@ -62,6 +62,12 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 		nil,
 		nil,
 		RollingUpdateContext{NewWorkerHash: dgdWorkerHashPlaceholderValue},
+		// Constant, never the live gate: the hash must not move when an administrator
+		// flips features.ElasticEPRay, or enabling it would restart every worker in
+		// the cluster. false is the cheap spelling of that constant -- the follower is
+		// excluded by participatesInWorkerSpecHash either way, so synthesizing one
+		// here would only be discarded.
+		false,
 	)
 	if err != nil {
 		return "", err

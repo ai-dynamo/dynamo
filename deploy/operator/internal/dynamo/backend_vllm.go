@@ -32,6 +32,13 @@ const (
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
+	// ElasticEPRayEnabled carries the features.ElasticEPRay gate. When false the
+	// backend leaves an elastic-EP container exactly as the user wrote it: no Ray
+	// head wrapped around the leader's command, no Ray-join rewrite on a follower,
+	// and none of the environment either arm injects. Rewriting the command changes
+	// the pod template, which rolls a serving deployment, so this has to be off by
+	// default rather than inferred from the engine flags.
+	ElasticEPRayEnabled bool
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -80,7 +87,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
-	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
+	} else if role == RoleMain && b.elasticEPRayLaunch(container) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
@@ -112,7 +119,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
 		}
-	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
+	} else if role == RoleFollower && b.elasticEPRayLaunch(container) {
 		// The leader's Service name is carried on the follower rather than rebuilt here.
 		// Its absence means synthesis and rendering have gone out of step, and guessing
 		// an address would produce a pod that polls a hostname nothing backs for three
@@ -609,6 +616,14 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 	}
 	container.Command = []string{"/bin/sh", "-c"}
 	return true
+}
+
+// elasticEPRayLaunch reports whether the container asks for the Ray elastic-EP path
+// and the operator is allowed to act on it. IsElasticEPRayLaunch answers the first
+// half -- what the engine intends -- and the gate answers the second, which is the
+// administrator's to grant.
+func (b *VLLMBackend) elasticEPRayLaunch(container *corev1.Container) bool {
+	return b.ElasticEPRayEnabled && IsElasticEPRayLaunch(container)
 }
 
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
