@@ -635,6 +635,45 @@ def _prepare_request(
     )
 
 
+# The forced-choice fallback first decided by #12876 assumed the parser either
+# installs a grammar or the request dies without tool decoding. Parsers that
+# decline forced-choice grammars still differ in what their models emit: GLM's
+# declarative engine adapters are trained to produce Dynamo's bare-JSON shape,
+# while native-syntax parsers (Mistral, Gemma4Engine, PoolsideV1, ...) emit
+# markup meant for their own extract_tool_calls_streaming. Only the former may
+# use the buffer-and-decode fallback; extending it to the latter hides native
+# tool markup as assistant content. Extend the list when a parser is verified
+# to emit bare JSON for forced choices; never derive it from
+# supports_required_and_named alone, which native-syntax parsers also clear.
+_BARE_JSON_FORCED_CHOICE_PARSER_NAMES = frozenset(
+    {
+        "Glm47MoeModelToolParser",
+        "Glm47MoeParserToolAdapter",
+    }
+)
+
+
+def _parser_cannot_force_choice_but_emits_bare_json(
+    tool_parser: ToolParser | None,
+    guided_decoding: dict[str, Any] | None,
+    parser_guided_decoding: dict[str, Any] | None,
+) -> bool:
+    if tool_parser is None:
+        return False
+    if getattr(tool_parser, "supports_required_and_named", True):
+        return False
+    if type(tool_parser).__name__ not in _BARE_JSON_FORCED_CHOICE_PARSER_NAMES:
+        return False
+    if parser_guided_decoding is not None:
+        # The parser adjusted the request itself; its guidance owns the stream.
+        return False
+    if isinstance(guided_decoding, dict) and "structural_tag" in guided_decoding:
+        # A structural tag is a native forced-choice grammar: its output must
+        # go through the parser's native-syntax decoder, not the JSON fallback.
+        return False
+    return True
+
+
 async def preprocess_chat_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -776,12 +815,16 @@ async def preprocess_chat_request(
     # adjust_request() leaves structured_outputs unchanged.  In either case the
     # model emits Dynamo's bare JSON wire format, which must bypass the parser's
     # native-syntax decoder during postprocessing.
-    uses_dynamo_json_tool_call_fallback = (
-        is_forced_tool_choice
-        and parser_guided_decoding is None
-        and guided_decoding is tool_guided_decoding
-        and isinstance(tool_guided_decoding, dict)
-        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
+    uses_dynamo_json_tool_call_fallback = is_forced_tool_choice and (
+        (
+            parser_guided_decoding is None
+            and guided_decoding is tool_guided_decoding
+            and isinstance(tool_guided_decoding, dict)
+            and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
+        )
+        or _parser_cannot_force_choice_but_emits_bare_json(
+            tool_parser, guided_decoding, parser_guided_decoding
+        )
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -939,9 +982,18 @@ class StreamingPostProcessor:
             )
             if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
             and response_reasoning_ended is not True
-            and not guided_output_is_content
             else None
         )
+        # Guided output is structured content, not reasoning. A reasoning parser
+        # whose turn starts in reasoning mode would swallow a bare-JSON guided
+        # payload into reasoning_content entirely, so such streams bypass the
+        # parser -- but only once the stream's first payload text proves the
+        # bare-shape (guided JSON with no reasoning opener), mirroring the Rust
+        # preprocessor's bypass_reasoning_for_bare_guided_json. Otherwise the
+        # parser stays active so deferred grammar output still flows through
+        # the reasoning channel.
+        self._guided_output_is_content = guided_output_is_content
+        self._guided_shape_checked = False
         if self.reasoning_parser is not None:
             if response_reasoning_ended is None:
                 self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
@@ -1231,13 +1283,6 @@ class StreamingPostProcessor:
         return self._marker_strip_re.sub("", text)
 
     def _strip_parser_control_markers(self, text: str | None) -> str | None:
-        """Strip parser-declared composite markers and stop-trimmed suffixes.
-
-        Complements `_strip_control_markers`, which only sees whole special
-        tokens: this one sees the parser's own multi-token markers
-        (`<|open|>response<|sep|>`) and their orphaned remainders
-        (`message<|sep|>`), whitespace-tolerantly.
-        """
         if not text or self._parser_marker_re is None:
             return text
         return self._parser_marker_re.sub("", text)
@@ -1408,7 +1453,11 @@ class StreamingPostProcessor:
 
         saved_reasoning = None
         content = current_text
-        if self.reasoning_parser:
+        bare_guided_json = (
+            self._guided_output_is_content
+            and current_text.lstrip().startswith(("{", "["))
+        )
+        if self.reasoning_parser and not bare_guided_json:
             saved_reasoning, content = self.reasoning_parser.extract_reasoning(
                 current_text,
                 request=self.request_for_sampling,
@@ -1470,6 +1519,19 @@ class StreamingPostProcessor:
         current_token_ids = self.previous_token_ids + delta_token_ids
 
         delta_message: DeltaMessage | None = DeltaMessage(content=delta_text)
+
+        if (
+            self.reasoning_parser is not None
+            and not self.reasoning_is_done
+            and not self._guided_shape_checked
+            and self._guided_output_is_content
+        ):
+            self._guided_shape_checked = True
+            if current_text.lstrip().startswith(("{", "[")):
+                # Bare structured payload with no reasoning opener: keep it as
+                # content instead of letting the parser trap it as reasoning.
+                self.reasoning_is_done = True
+                self.reasoning_parser = None
 
         # ------------------------------------------------------------------
         # Drain the tool-text buffer (populated when </think> and <tool_call>
