@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from contextlib import nullcontext
 from functools import cache
@@ -28,12 +29,15 @@ _RELEASE_MEMORY_OCCUPATION_TARGET = (
     "sglang.srt.managers.scheduler_components.weight_updater."
     "SchedulerWeightUpdaterManager.release_memory_occupation"
 )
-_CREATE_DSA_INDEX_BUFFERS_TARGET = (
-    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers"
+_CREATE_DSA_INDEX_TARGETS = (
+    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache",
+    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
 )
-_CREATE_LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET = (
+_CREATE_LAYER_SPLIT_DSA_INDEX_TARGETS = (
     "sglang.srt.mem_cache.dsa_cache_layer_split."
-    "LayerSplitDSATokenToKVPool._create_index_buffers"
+    "LayerSplitDSATokenToKVPool._create_index_key_cache",
+    "sglang.srt.mem_cache.dsa_cache_layer_split."
+    "LayerSplitDSATokenToKVPool._create_index_buffers",
 )
 
 
@@ -115,9 +119,46 @@ def _after_release_memory_occupation(result, manager, *args, **kwargs):
     return result
 
 
-def _around_create_dsa_index_buffers(original, *args, **kwargs):
+def _around_create_dsa_index_cache(original, *args, **kwargs):
+    """Allocate DSA index-K storage inside the GMS KV-cache region.
+
+    SGLang wraps the DSA pool's main latent-KV allocation in its own
+    ``region(GPU_MEMORY_TYPE_KV_CACHE)``, but not the index-K storage. Without
+    this hook those buffers come from the default torch allocator, inside the
+    ``mem_fraction_static`` budget that was sized assuming they live in GMS.
+
+    The return value matters: ``_create_index_key_cache`` returns the
+    ``IndexKeyCache`` the caller assigns to ``self.index_key_cache``, unlike the
+    pre-#28609 ``_create_index_buffers``, which returned nothing.
+    """
     with _adapter().region("kv_cache"):
         return original(*args, **kwargs)
+
+
+def _register_first_resolvable(targets, hook, hook_type) -> None:
+    """Register the first target that resolves, or refuse to start.
+
+    ``HookRegistry.apply_hooks`` logs and swallows a target that does not
+    resolve, so an upstream rename leaves DSA index-K buffers outside GMS and
+    surfaces much later as a CUDA OOM during KV allocation rather than as a
+    startup error. Fail loudly instead: a missing hook is a correctness bug, not
+    a degraded mode.
+    """
+    for target in targets:
+        module_path, _, attr = target.rpartition(".")
+        obj_path, _, cls_name = module_path.rpartition(".")
+        try:
+            cls = getattr(importlib.import_module(obj_path), cls_name)
+        except (ImportError, AttributeError):
+            continue
+        if hasattr(cls, attr):
+            HookRegistry.register(target, hook, hook_type)
+            return
+    raise RuntimeError(
+        f"GMS V1: no DSA index-cache hook target resolved among {targets}. "
+        "SGLang's DSA memory-pool API has changed. Refusing to start: skipping "
+        "this hook would allocate DSA index buffers outside GMS."
+    )
 
 
 def register_gms_v1_plugin() -> None:
@@ -149,15 +190,16 @@ def register_gms_v1_plugin() -> None:
         _after_release_memory_occupation,
         HookType.AFTER,
     )
-    HookRegistry.register(
-        _CREATE_DSA_INDEX_BUFFERS_TARGET,
-        _around_create_dsa_index_buffers,
+    _register_first_resolvable(
+        _CREATE_DSA_INDEX_TARGETS,
+        _around_create_dsa_index_cache,
         HookType.AROUND,
     )
-    # Layer-split DSA overrides the parent method, so the parent hook does not
-    # wrap index_k_with_scale_buffer or remote_index_k_with_scale_buffer.
-    HookRegistry.register(
-        _CREATE_LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET,
-        _around_create_dsa_index_buffers,
+    # Layer-split DSA overrides the factory, so the parent-class hook never runs
+    # for it; it also adds LayerSplitIndexKeyCache.remote_buffer, which the one
+    # AROUND on the factory covers because both allocations happen inside it.
+    _register_first_resolvable(
+        _CREATE_LAYER_SPLIT_DSA_INDEX_TARGETS,
+        _around_create_dsa_index_cache,
         HookType.AROUND,
     )
