@@ -6,6 +6,7 @@ import base64
 import functools
 import importlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -121,6 +122,28 @@ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 # Set by the router when the decode pool has no room for this request. The
 # prefill worker then generates the whole response instead of handing off.
 PREFILL_CONTINUE_ANNOTATION = "x-prefill-continue"
+# Runtime-config key this worker publishes so the router knows the marker above
+# will be honored. A worker that does not publish it ignores the marker and
+# answers with a handoff message, so the router must never mark its requests.
+# Must match PREFILL_CONTINUE_CAPABILITY in lib/llm/src/local_model/runtime_config.rs.
+PREFILL_CONTINUE_CAPABILITY = "prefill_continue"
+
+
+def publish_prefill_continue_capability(
+    runtime_config: ModelRuntimeConfig,
+    worker_type: WorkerType,
+) -> bool:
+    """Tell the router this worker honors PREFILL_CONTINUE_ANNOTATION.
+
+    Only a prefill worker can be asked to keep decoding, so only a prefill
+    worker declares it. The router refuses to mark a request unless every
+    worker in the pool declared it.
+    """
+    if worker_type != WorkerType.Prefill:
+        return False
+    runtime_config.set_engine_specific(PREFILL_CONTINUE_CAPABILITY, json.dumps(True))
+    return True
+
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA

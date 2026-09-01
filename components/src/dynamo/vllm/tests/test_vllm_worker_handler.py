@@ -22,6 +22,7 @@ import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.llm import WorkerType
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
@@ -776,6 +777,29 @@ class TestPrefillContinueAnnotation:
 
     async def test_the_two_markers_are_distinct(self):
         assert mod.PREFILL_CONTINUE_ANNOTATION != mod.BYPASS_REMOTE_PREFILL_ANNOTATION
+
+    async def test_a_prefill_worker_declares_the_capability(self):
+        """The router only marks a request when every worker declared this."""
+        runtime_config = MagicMock()
+
+        published = mod.publish_prefill_continue_capability(
+            runtime_config, WorkerType.Prefill
+        )
+
+        assert published
+        runtime_config.set_engine_specific.assert_called_once_with(
+            mod.PREFILL_CONTINUE_CAPABILITY, "true"
+        )
+
+    @pytest.mark.parametrize("worker_type", [WorkerType.Decode, WorkerType.Aggregated])
+    async def test_only_a_prefill_worker_declares_the_capability(self, worker_type):
+        """A decode or aggregated worker is never asked to continue."""
+        runtime_config = MagicMock()
+
+        published = mod.publish_prefill_continue_capability(runtime_config, worker_type)
+
+        assert not published
+        runtime_config.set_engine_specific.assert_not_called()
 
 
 @pytest.mark.asyncio(loop_scope="function")

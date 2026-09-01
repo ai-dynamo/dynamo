@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
@@ -16,7 +17,7 @@ use dynamo_kv_router::{
     conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
     prefill_continue::PrefillContinuePolicy,
-    protocols::RoutingConstraints,
+    protocols::{RoutingConstraints, WorkerId},
     scheduling::QueueRejection,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
@@ -30,9 +31,9 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::ModelManager,
+    discovery::{ModelManager, RuntimeConfigWatch},
     kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    local_model::runtime_config::{ModelRuntimeConfig, PREFILL_CONTINUE_CAPABILITY},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -261,6 +262,104 @@ where
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
+    /// Live per-worker runtime configuration for the prefill endpoint.
+    ///
+    /// Read rather than snapshotted, because the binding is only rebuilt when
+    /// the endpoint itself changes: a worker joining an existing endpoint would
+    /// never be seen by a value captured at activation.
+    prefill_runtime_configs: RuntimeConfigWatch,
+}
+
+/// Why the router may not ask this prefill pool for a continuation.
+///
+/// Carries the reason rather than a bare `false`, for the same reason
+/// [`PrefillContinueSkip`] does: during bring-up this gate is the likeliest
+/// explanation for "the feature never fired", and an operator needs to be told
+/// which worker is holding it back.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefillPoolCapability {
+    /// Every routable worker declared it understands the marker.
+    Supported,
+    /// Nothing to route to, so nothing declared anything.
+    NoRoutableWorkers,
+    /// These routable workers did not declare support. A worker with no card
+    /// yet lands here too: absent is not a yes.
+    Undeclared(Vec<WorkerId>),
+}
+
+/// Ask whether every worker the router could pick declared it understands the
+/// continuation marker.
+///
+/// Unanimous, not first-wins. One worker that ignores the marker answers with a
+/// handoff message and pins cache blocks, so a mixed pool turns the feature off
+/// rather than gambling on which worker gets selected.
+///
+/// The question is asked of `routable`, not of the config map, because the two
+/// are not the same set. The map holds only workers that have both registered
+/// and had a card discovered, so a worker that is already selectable but whose
+/// card has not arrived yet is missing from it entirely — and a check that only
+/// walked the map would read unanimous while that worker took a marked request.
+///
+/// Both inputs are sampled before a worker is selected, and they are sampled
+/// separately, so this narrows the window rather than closing it: a worker that
+/// becomes routable afterwards can still be handed a marked request. Closing it
+/// for good means re-checking the chosen worker at dispatch.
+fn prefill_pool_capability(
+    routable: &[WorkerId],
+    runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> PrefillPoolCapability {
+    if routable.is_empty() {
+        return PrefillPoolCapability::NoRoutableWorkers;
+    }
+    // The same truthy vocabulary every other runtime capability uses. Being
+    // stricter here would refuse a backend that spells the flag as a string,
+    // and refuse it silently.
+    let undeclared: Vec<WorkerId> = routable
+        .iter()
+        .copied()
+        .filter(|worker_id| {
+            !runtime_configs.get(worker_id).is_some_and(|config| {
+                config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY)
+            })
+        })
+        .collect();
+    if undeclared.is_empty() {
+        PrefillPoolCapability::Supported
+    } else {
+        PrefillPoolCapability::Undeclared(undeclared)
+    }
+}
+
+/// Read the live pool state and say whether a continuation may be asked for,
+/// logging the reason when it may not.
+fn prefill_pool_allows_continuation<Sel>(binding: &PrefillBinding<Sel>, request_id: &str) -> bool
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    let routable = binding.router.routable_instance_ids();
+    // The watch guard lives only for this statement, so no lock is held across
+    // the awaits that follow.
+    let capability = prefill_pool_capability(&routable, &binding.prefill_runtime_configs.borrow());
+    match capability {
+        PrefillPoolCapability::Supported => true,
+        PrefillPoolCapability::NoRoutableWorkers => {
+            tracing::debug!(
+                request_id,
+                "Prefill continuation declined: no routable prefill workers"
+            );
+            false
+        }
+        PrefillPoolCapability::Undeclared(undeclared) => {
+            tracing::debug!(
+                request_id,
+                ?undeclared,
+                routable = routable.len(),
+                "Prefill continuation declined: these routable prefill workers did not declare \
+                 support for the continuation marker, so the whole pool hands off as today"
+            );
+            false
+        }
+    }
 }
 
 struct PrefillBuildContext<Sel>
@@ -415,14 +514,21 @@ where
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
+        // The binding is what makes a prefill hop possible at all, so read it
+        // before building the hop. It also carries the prefill pool's declared
+        // capabilities, which the continuation decision below needs.
+        let Some(binding) = self.binding.load_full() else {
+            return next.generate(context.map(|_| req)).await;
+        };
+
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set).
         // A continuation is the whole response, so it keeps the request's own
         // budget; clamping it here would silently reduce the feature to a no-op.
         let mut prefill_req = req.clone();
-        // T5 wires only the bring-up path: force continues every request. The
-        // load-driven predicate lands with the decision wiring; until then this
-        // is the only way in.
-        let prefill_continues = self.prefill_continue_policy.force_enabled();
+        // T6 wires the capability gate. The load-driven predicate is still to
+        // come, so the bring-up override remains the only way in.
+        let prefill_continues = self.prefill_continue_policy.force_enabled()
+            && prefill_pool_allows_continuation(&binding, &request_id);
         if prefill_continues {
             prefill_req
                 .annotations
@@ -461,12 +567,7 @@ where
                 session_affinity.as_ref().clone(),
             );
         }
-        let Some(binding) = self.binding.load_full() else {
-            return next.generate(context.map(|_| req)).await;
-        };
-
-        // Keyed on the prefill mode, not the decode set's, and checked after
-        // the binding loads because that is where the prefill mode lives.
+        // Keyed on the prefill mode, not the decode set's.
         if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
@@ -1141,6 +1242,133 @@ mod tests {
         // The mock asserts the markers are gone; reaching it at all proves the
         // strip ran before generate()'s earliest return.
         assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    /// A pool of workers. `true` publishes the capability; `false` publishes
+    /// nothing at all, which is how a worker that has never heard of the
+    /// feature looks.
+    fn pool(publishes: &[bool]) -> HashMap<WorkerId, ModelRuntimeConfig> {
+        publishes
+            .iter()
+            .enumerate()
+            .map(|(index, publishes)| {
+                let mut config = ModelRuntimeConfig::default();
+                if *publishes {
+                    config
+                        .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, true)
+                        .unwrap();
+                }
+                (index as WorkerId, config)
+            })
+            .collect()
+    }
+
+    /// A one-worker pool that published `value` under the capability key.
+    fn pool_declaring<T: serde::Serialize>(value: T) -> HashMap<WorkerId, ModelRuntimeConfig> {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, value)
+            .unwrap();
+        HashMap::from([(0, config)])
+    }
+
+    /// Every worker in `configs`, which is what the router can route to once
+    /// discovery has settled.
+    fn all_routable(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> Vec<WorkerId> {
+        let mut ids: Vec<WorkerId> = configs.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn a_unanimous_pool_supports_continuation() {
+        let configs = pool(&[true, true, true]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Supported
+        );
+    }
+
+    #[test]
+    fn one_undeclared_worker_disables_the_whole_pool() {
+        let configs = pool(&[true, true, false]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Undeclared(vec![2])
+        );
+    }
+
+    #[test]
+    fn a_pool_that_declared_nothing_names_every_worker() {
+        let configs = pool(&[false, false]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Undeclared(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn a_routable_worker_with_no_card_yet_is_a_refusal() {
+        // The runtime-config watch lists only workers that both registered and
+        // had a card discovered, so a worker can be selectable before it
+        // appears there. Walking the map alone would read this pool as
+        // unanimous and send the marker to a worker of unknown capability.
+        let configs = pool(&[true, true]);
+        let mut routable = all_routable(&configs);
+        routable.push(99);
+
+        assert_eq!(
+            prefill_pool_capability(&routable, &configs),
+            PrefillPoolCapability::Undeclared(vec![99])
+        );
+    }
+
+    #[test]
+    fn an_empty_pool_is_not_capable() {
+        assert_eq!(
+            prefill_pool_capability(&[], &pool(&[])),
+            PrefillPoolCapability::NoRoutableWorkers
+        );
+    }
+
+    #[test]
+    fn an_explicit_false_declaration_is_a_refusal() {
+        assert_eq!(
+            prefill_pool_capability(&[0], &pool_declaring(false)),
+            PrefillPoolCapability::Undeclared(vec![0])
+        );
+    }
+
+    #[test]
+    fn a_string_encoded_declaration_is_accepted() {
+        // Deliberately the same truthy vocabulary as every other runtime
+        // capability. A backend that spells the flag as a string must not be
+        // refused, because that refusal would be silent.
+        for spelling in ["true", "1", "on", "yes"] {
+            assert_eq!(
+                prefill_pool_capability(&[0], &pool_declaring(spelling)),
+                PrefillPoolCapability::Supported,
+                "{spelling} should read as support"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_means_nothing_is_a_refusal() {
+        for value in [
+            serde_json::json!("banana"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                prefill_pool_capability(&[0], &pool_declaring(value.clone())),
+                PrefillPoolCapability::Undeclared(vec![0]),
+                "{value} must not read as support"
+            );
+        }
     }
 
     #[test]

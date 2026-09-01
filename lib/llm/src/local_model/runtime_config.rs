@@ -95,6 +95,19 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
+/// Worker-advertised support for the prefill-continues-decode marker.
+///
+/// A worker that does not know the marker ignores it and takes its normal
+/// prefill path: it answers with a handoff message and holds cache for a decode
+/// worker that will never connect. So the router must never ask a worker for a
+/// continuation unless that worker declared it here.
+///
+/// Read with [`ModelRuntimeConfig::supports_runtime_capability`], so a JSON
+/// bool `true` and the canonical truthy strings both count. Absent, `false`,
+/// and anything else all mean no, and the router refuses the whole pool if any
+/// worker it could route to fails this.
+pub const PREFILL_CONTINUE_CAPABILITY: &str = "prefill_continue";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///

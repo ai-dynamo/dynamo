@@ -118,6 +118,7 @@ mod tests {
     use crate::{
         discovery::ModelManager,
         kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext},
+        local_model::runtime_config::PREFILL_CONTINUE_CAPABILITY,
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
@@ -260,6 +261,17 @@ mod tests {
         }
     }
 
+    /// How much of the prefill pool declares the continuation capability.
+    #[derive(Clone, Copy)]
+    enum PoolSupport {
+        /// Every worker declares it, so the gate opens.
+        Unanimous,
+        /// All but one, so the gate must refuse the whole pool.
+        AllButOne,
+        /// Nobody declares it; for the tests that do not exercise the gate.
+        None,
+    }
+
     async fn shared_router(
         runtime: &Runtime,
         discovery_root: &std::path::Path,
@@ -267,6 +279,7 @@ mod tests {
         mode: RouterMode,
         dispatch: Arc<RecordingDispatch>,
         prefill_continue: Option<&dynamo_kv_router::config::KvRouterConfig>,
+        pool_support: PoolSupport,
     ) -> (
         Arc<RoutingHost>,
         Arc<PrefillRouter>,
@@ -346,6 +359,30 @@ mod tests {
             ),
             None => PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None),
         };
+        // Derived from the pool that was actually discovered, so a change to
+        // the harness's worker count cannot quietly turn a unanimous pool into
+        // a mixed one.
+        let capable_workers = match pool_support {
+            PoolSupport::Unanimous => workers.len(),
+            PoolSupport::AllButOne => workers.len() - 1,
+            PoolSupport::None => 0,
+        };
+        let runtime_configs = workers
+            .iter()
+            .enumerate()
+            .map(|(index, worker_id)| {
+                let mut config = ModelRuntimeConfig::default();
+                if index < capable_workers {
+                    config
+                        .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, true)
+                        .unwrap();
+                }
+                (*worker_id, config)
+            })
+            .collect();
+        // The sender is dropped immediately: a watch receiver keeps reading the
+        // last published value, and no test republishes.
+        let (_, prefill_runtime_configs) = tokio::sync::watch::channel(runtime_configs);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
@@ -355,6 +392,7 @@ mod tests {
                 },
                 router: shared.clone(),
                 prefill_router_mode: mode,
+                prefill_runtime_configs,
             },
         )));
         prefill.lifecycle.store(
@@ -385,6 +423,7 @@ mod tests {
                 prefill_continue_prefill_busy_threshold: Some(0.4),
                 ..Default::default()
             }),
+            PoolSupport::Unanimous,
         )
         .await;
 
@@ -431,6 +470,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_mixed_pool_refuses_to_continue_and_hands_off_as_today() {
+        // Three of four workers declare the capability. The fourth would answer
+        // a marked request with a handoff message and pin cache, so the gate
+        // must refuse the whole pool rather than gamble on the selection.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-mixed",
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+            Some(&dynamo_kv_router::config::KvRouterConfig {
+                prefill_continue_enabled: true,
+                prefill_continue_force: true,
+                prefill_continue_prefill_busy_threshold: Some(0.4),
+                ..Default::default()
+            }),
+            PoolSupport::AllButOne,
+        )
+        .await;
+
+        let decode_calls = Arc::new(AtomicUsize::new(0));
+        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
+            Arc::new(CountingDecodeHost {
+                calls: decode_calls.clone(),
+            });
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "a pool that did not unanimously declare support gets today's one-token prefill"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn rr_prefill_queries_do_not_advance_shared_dispatch_cursor() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
@@ -443,6 +527,7 @@ mod tests {
             RouterMode::RoundRobin,
             dispatch.clone(),
             None,
+            PoolSupport::None,
         )
         .await;
 
@@ -489,6 +574,7 @@ mod tests {
                 mode,
                 dispatch,
                 None,
+                PoolSupport::None,
             )
             .await;
 

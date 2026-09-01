@@ -9,7 +9,7 @@ use std::{
 };
 
 use dynamo_kv_router::{
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    protocols::{TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -266,6 +266,16 @@ impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    /// Instance IDs this host could route to right now.
+    ///
+    /// Broader than the runtime-config watch, which only lists workers that
+    /// have both registered and had a card discovered. A capability gate must
+    /// read this set, or a worker that is already selectable but whose card has
+    /// not landed yet is invisible to it.
+    pub(crate) fn routable_instance_ids(&self) -> Vec<WorkerId> {
+        self.inner.client.instance_ids_avail()
+    }
+
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
