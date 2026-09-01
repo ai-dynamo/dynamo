@@ -253,6 +253,41 @@ def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
     return grants
 
 
+def _acknowledged_removals(
+    spec: dict, label_to_team: dict[str, str]
+) -> dict[str, set[str]]:
+    """Teams each ``ownership_transfers`` entry records as deliberately gone."""
+    acknowledged: dict[str, set[str]] = {}
+    for entry in spec.get("ownership_transfers") or []:
+        glob = entry.get("glob")
+        if glob:
+            teams = {
+                label_to_team.get(label, label) for label in entry.get("removing") or []
+            }
+            acknowledged.setdefault(glob, set()).update(teams)
+    return acknowledged
+
+
+def stale_transfers(
+    removals: list[WeakenedDeclaration], head_spec: dict, label_to_team: dict[str, str]
+) -> list[str]:
+    """Transfer entries that acknowledge a removal which is not happening.
+
+    Held to the same standard as a glob matching no file. A transfer is a
+    one-time record of a deliberate hand-off, so once it has served its
+    purpose it is dead weight, and dead weight in this file is what the
+    stale-glob gate already exists to stop. Failing on an inert entry keeps
+    the list self-cleaning instead of letting it accumulate into a list
+    nobody reads and everyone appends to.
+    """
+    live = {(entry.glob, team) for entry in removals for team in entry.lost}
+    return sorted(
+        f"{glob} ({', '.join(sorted(teams))})"
+        for glob, teams in _acknowledged_removals(head_spec, label_to_team).items()
+        if not any((glob, team) in live for team in teams)
+    )
+
+
 def weakened_declarations(
     base_spec: dict | None, head_spec: dict, tree: list[str]
 ) -> list[WeakenedDeclaration]:
@@ -305,6 +340,27 @@ def weakened_declarations(
                 WeakenedDeclaration(kind=kind, glob=glob, lost=tuple(sorted(lost)))
             )
     return weakened
+
+
+def unacknowledged(
+    removals: list[WeakenedDeclaration], acknowledged: dict[str, set[str]]
+) -> list[WeakenedDeclaration]:
+    """Removals with no matching ``ownership_transfers`` entry to explain them.
+
+    A deliberate hand-off is legitimate and has to be expressible, or the gate
+    blocks real work with no way through except abandoning the intent. What it
+    must not be is silent, so the escape hatch is a declaration in the same
+    file, visible in the diff and subject to the same review as the removal it
+    covers.
+    """
+    remaining = []
+    for entry in removals:
+        lost = tuple(t for t in entry.lost if t not in acknowledged.get(entry.glob, ()))
+        if lost:
+            remaining.append(
+                WeakenedDeclaration(kind=entry.kind, glob=entry.glob, lost=lost)
+            )
+    return remaining
 
 
 def _rendered_rules(spec: dict) -> list[tuple[str, list[str]]]:
@@ -360,6 +416,7 @@ def strict_failure(
     newly_stale: list[str] | None,
     additivity_violations: list[SharedAdditivityViolation] | None = None,
     weakened: list[WeakenedDeclaration] | None = None,
+    inert_transfers: list[str] | None = None,
 ) -> str | None:
     """Return the fail-closed message for the active strict gate.
 
@@ -405,7 +462,13 @@ def strict_failure(
         return (
             f"!! strict: {len(weakened)} ownership declaration(s) removed "
             "while their files remain tracked -- restore them in areas.yaml, "
-            "or delete the files the declaration covered"
+            "or record the hand-off under 'ownership_transfers'"
+        )
+    if inert_transfers:
+        return (
+            f"!! strict: {len(inert_transfers)} ownership_transfers entry/"
+            "entries acknowledge a removal that is not happening -- prune "
+            "them from areas.yaml"
         )
     return None
 
@@ -631,9 +694,12 @@ def main() -> int:
         # One git call, and only when something is stale to attribute.
         base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
         newly_stale = newly_stale_patterns(dead, base_paths)
-    weakened = weakened_declarations(
+    removals = weakened_declarations(
         _merge_base_spec(args.repo, args.base, args.areas), spec, tree
     )
+    acknowledged = _acknowledged_removals(spec, model.label_to_team())
+    weakened = unacknowledged(removals, acknowledged)
+    inert = stale_transfers(removals, spec, model.label_to_team())
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
     print_shared_additivity_violations(additivity)
     print_weakened_declarations(weakened)
@@ -648,6 +714,7 @@ def main() -> int:
         newly_stale,
         additivity,
         weakened,
+        inert,
     )
     if failure:
         print(failure)

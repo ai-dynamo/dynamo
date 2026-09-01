@@ -28,12 +28,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from build_codeowners import (  # noqa: E402
     CoverageGate,
+    _acknowledged_removals,
     _dead_patterns,
     is_policy_change,
     ownership_contract_violations,
     shared_additivity_violations,
     split_coverage,
+    stale_transfers,
     strict_failure,
+    unacknowledged,
     weakened_declarations,
 )
 from codeowners_match import (  # noqa: E402
@@ -1038,6 +1041,27 @@ class TestWeakenedDeclarations:
         # No reference frame means the gate cannot judge. It must skip, so a
         # bug in it can never block the change that removes it.
         assert weakened_declarations(None, self._spec(), ["lib/a.rs"]) == []
+
+    def test_recorded_hand_off_is_not_reported(self) -> None:
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        head["ownership_transfers"] = [
+            {"glob": "lib/", "removing": ["docs"], "reason": "narrowed to runtime"}
+        ]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        model = compute_resolution(head)
+        acknowledged = _acknowledged_removals(head, model.label_to_team())
+        assert unacknowledged(removals, acknowledged) == []
+        assert stale_transfers(removals, head, model.label_to_team()) == []
+
+    def test_inert_hand_off_entry_is_reported(self) -> None:
+        # Nothing is being removed, so the entry is dead weight. Held to the
+        # same standard as a glob that matches no file.
+        head = self._spec()
+        head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
+        model = compute_resolution(head)
+        assert stale_transfers([], head, model.label_to_team()) == ["lib/ (@docs)"]
 
     def test_strict_gate_blocks_on_a_weakened_declaration(self) -> None:
         base = self._spec()
