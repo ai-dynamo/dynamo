@@ -69,7 +69,11 @@ class SnapshotConfig:
         if event == "restore":
             logger.info("Restore sentinel detected")
             logger.info("Resuming model after restore")
-            await pause_controller.resume()
+            try:
+                await pause_controller.resume()
+            except Exception:
+                logger.exception("Failed to resume model after restore")
+                raise
             pause_controller.mark_resumed()
             # The checkpoint is complete; post-restore model registration may
             # need normal Hugging Face cache/download behavior.

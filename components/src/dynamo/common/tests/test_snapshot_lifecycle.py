@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import os
 
 import pytest
@@ -29,6 +30,11 @@ class _PauseController:
 
     def mark_resumed(self) -> None:
         pass
+
+
+class _FailingResumeController(_PauseController):
+    async def resume(self) -> None:
+        raise RuntimeError("resume failed")
 
 
 async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):
@@ -83,6 +89,38 @@ async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
         assert await lifecycle is True
         assert controller.resumed is True
         assert "HF_HUB_OFFLINE" not in os.environ
+    finally:
+        if not lifecycle.done():
+            lifecycle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await lifecycle
+
+
+async def test_snapshot_lifecycle_logs_and_propagates_resume_failure(
+    monkeypatch, tmp_path, caplog
+):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    controller = _FailingResumeController()
+    config = SnapshotConfig.from_env()
+    assert config is not None
+
+    lifecycle = asyncio.create_task(config.run_lifecycle(controller))
+    try:
+        for _ in range(100):
+            if (tmp_path / READY_FOR_SNAPSHOT_FILE).exists():
+                break
+            await asyncio.sleep(0.01)
+
+        (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+
+        with caplog.at_level(
+            logging.ERROR, logger="dynamo.common.snapshot.lifecycle"
+        ):
+            with pytest.raises(RuntimeError, match="resume failed"):
+                await lifecycle
+
+        assert "Failed to resume model after restore" in caplog.text
+        assert "RuntimeError: resume failed" in caplog.text
     finally:
         if not lifecycle.done():
             lifecycle.cancel()
