@@ -53,6 +53,8 @@ kubernetes:
 deployment:
   dgd_path: runs/<EXP_ID>/inputs/user_provided_dgd.yaml
   dgd_sha256: ""                    # SHA256 of the immutable canonical DGD copy
+  origin: "user"                    # user | recipe-confirmed | agent-authored (who produced the baseline the user confirmed)
+  origin_source: ""                 # recipe path (recipe-confirmed) or inputs/baseline-evidence.md (agent-authored); "" for user
 
 traffic:
   input_tokens: null               # optional rough/median input sequence length when known
@@ -100,6 +102,9 @@ created_at: ""
   traffic-shape information for a defensible benchmark.
 - Require `deployment.dgd_path` to resolve to `<EXP_ROOT>/inputs/user_provided_dgd.yaml`, and require
   `deployment.dgd_sha256` to match that file.
+- Require `deployment.origin` to be exactly `user`, `recipe-confirmed`, or `agent-authored`. Require
+  `deployment.origin_source` to be empty for `user`, and non-empty for the other origins (the recipe path for
+  `recipe-confirmed`; `inputs/baseline-evidence.md` for `agent-authored`).
 - `kube_context` and `namespace` are required. The namespace must already exist.
 - Treat `resources.gpu_ceiling` as authorization, not entitlement: every GPU-consuming experiment still requires its
   own evidence and adversarial review. `hardware[]` describes what the workload serves on; `gpu_ceiling` bounds the

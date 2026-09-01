@@ -26,6 +26,7 @@ runs/<EXP_ID>/
 |-- reasoning_transcript.md
 |-- inputs/
 |   |-- user_provided_dgd.yaml
+|   |-- baseline-evidence.md          # ladder rungs 2-3 only
 |   `-- benchmark-plans/
 |       `-- <series-id>.json
 |-- analysis/
@@ -71,7 +72,12 @@ runs/<EXP_ID>/
 - `reasoning_transcript.md`: time-stamped long-running document capturing the agent's reasoning, key decisions, actions, rationale, and status.
   Created and maintained by the top-level loop agent (the session running `optimize-loop.md`) per
   `agent-docs/rules/execution/logging.md`; specialized roles contribute through their own artifacts.
-- `user_provided_dgd.yaml`: immutable baseline DGD supplied by the user and captured by `user-interviewer`.
+- `user_provided_dgd.yaml`: immutable baseline DGD supplied or explicitly confirmed by the user (see the
+  baseline-source ladder) and captured by `user-interviewer`; provenance in the contract's `deployment.origin`.
+- `baseline-evidence.md`: rungs 2-3 only; the proposal the user confirmed - nearest recipes considered, the
+  adaptation diff or authored draft's per-decision evidence table, and the user's confirmation. Written by
+  `user-interviewer` at capture time. `deployment.origin_source` points here for `agent-authored`; for
+  `recipe-confirmed` it holds the recipe path, and this file carries the confirmation record.
 - `benchmark-plans/<series-id>.json`: immutable performance question, workload, measurement semantics, objectives, and
   required references for one benchmark series.
 - `hypothesis-backlog.jsonl`: append-only record of generated optimization proposals and their source evidence.
@@ -81,7 +87,12 @@ runs/<EXP_ID>/
   stop-request validations (the latter bound to the submitted ledger SHA256).
 - `performance_findings.jsonl`: append-only performance findings produced from valid benchmark analyses.
 - `deployment_ledger.json`: assigned source DGD path and SHA256, manifests applied, readiness status, endpoint,
-  smoke-test result, concise diagnostics, blockers, and cleanup commands.
+  smoke-test result, concise diagnostics, blockers, cleanup commands, and the budget-accounting fields:
+  `gpus_requested` (GPUs the manifest requests), `allocated_at` (first GPU pod scheduled), `torn_down_at`
+  (null while live; the retiring role also writes it here, in the retired iteration's own ledger), and
+  `failed_attempts` (append-only list of scheduling-impossible or crashed deploy attempts within this
+  iteration, each with its scheduler-event or crash diagnosis — these count against the failed-deploy budget
+  even when a later attempt in the same iteration succeeds).
 - `smoke_test_artifact.json`: required `recipe-deployer` result containing the full smoke-test API request, full
   `api_response`, and success flag.
 - `benchmark_execution.json`: active plan path and SHA256, exact Kubernetes/AIPerf execution, status, retries, artifact
@@ -90,7 +101,10 @@ runs/<EXP_ID>/
   comparability validity checks.
 - `benchmark_summary.json`: normalized AIPerf metrics, units, benchmark inputs, and error counts without interpretation.
 - `performance_analysis.json`: target-SLO evaluation, absolute results, and applicable comparisons to the series
-  baseline, previous and best valid same-series results, and same-series history.
+  baseline, previous and best valid same-series results, and same-series history. Also carries
+  `series_noise_floor` and `minimum_detectable_effect` once a repetition pilot has produced them,
+  copied forward into every later same-series analysis; these fields are the authoritative source for
+  every MDE-gated judgment (any copy elsewhere, such as a ledger header, is a convenience mirror).
 - `performance_analysis.md`: concise human-readable findings and limitations.
 - `applied_manifests/`: one final run-scoped copy of each manifest type used. After success, these are the exact files
   that produced the successful smoke test.
@@ -125,7 +139,8 @@ runs/<EXP_ID>/
 - Keep retries and compatibility patches for the same candidate in the same `DEPLOY_ROOT`.
 - Create the next deployment directory only when the optimization loop assigns a new candidate.
 - Before iteration > 0, remove only the previous iteration's DGD. Keep its deployment directory and successful YAML
-  unchanged, and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
+  unchanged (sole exception: the retiring role writes `torn_down_at` into that iteration's
+  `deployment_ledger.json`), and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
 
 ## Final Manifest Set
 
