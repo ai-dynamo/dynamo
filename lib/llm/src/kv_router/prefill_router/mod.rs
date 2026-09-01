@@ -16,7 +16,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
-    prefill_continue::PrefillContinuePolicy,
+    prefill_continue::{PrefillContinueDecisionInput, PrefillContinuePolicy},
     protocols::{RoutingConstraints, WorkerId},
     scheduling::QueueRejection,
     selector::{DefaultWorkerSelector, WorkerSelector},
@@ -342,14 +342,17 @@ fn prefill_pool_capability(
 
 /// Read the live pool state and say whether a continuation may be asked for,
 /// logging the reason when it may not.
-fn prefill_pool_allows_continuation<Sel>(binding: &PrefillBinding<Sel>, request_id: &str) -> bool
+fn prefill_pool_allows_continuation<Sel>(
+    binding: &PrefillBinding<Sel>,
+    routable: &[WorkerId],
+    request_id: &str,
+) -> bool
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    let routable = binding.router.routable_instance_ids();
     // The watch guard lives only for this statement, so no lock is held across
     // the awaits that follow.
-    let capability = prefill_pool_capability(&routable, &binding.prefill_runtime_configs.borrow());
+    let capability = prefill_pool_capability(routable, &binding.prefill_runtime_configs.borrow());
     match capability {
         PrefillPoolCapability::Supported => true,
         PrefillPoolCapability::NoRoutableWorkers => {
@@ -382,6 +385,157 @@ fn demote_to_handoff(request: &mut PreprocessedRequest) {
         .annotations
         .retain(|annotation| annotation != PREFILL_CONTINUE_ANNOTATION);
     request.stop_conditions.max_tokens = Some(1);
+}
+
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    /// Decide, before routing, whether this request should keep generating on
+    /// its prefill worker.
+    ///
+    /// Every signal here is a property of the pool or the request, because a
+    /// worker has usually not been chosen yet — the exception is a request that
+    /// names its own, which is asked about directly. Either way the per-worker
+    /// bound and the chosen worker's capability are settled again at dispatch,
+    /// which is the authoritative check.
+    async fn wants_prefill_continuation(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        binding: &PrefillBinding<Sel>,
+        request_id: &str,
+    ) -> bool {
+        if !self.prefill_continue_policy.is_enabled() {
+            return false;
+        }
+        // One sample of the pool, read by both the capability gate and the
+        // census, so the two cannot disagree about who is routable.
+        let routable = binding.router.routable_instance_ids();
+        if !prefill_pool_allows_continuation(binding, &routable, request_id) {
+            return false;
+        }
+
+        // Cheap gates first. Each probe below costs a scheduler selection, and
+        // a request the budget or the cap already refuses must not pay for one.
+        // At a cap of zero that would be every request.
+        let budget = request.stop_conditions.max_tokens;
+        // An externally routed request already names its worker, so ask that
+        // worker rather than the pool. Otherwise the emptiest worker's count
+        // is the only honest answer available before selection.
+        let active = match request.routing.as_ref().and_then(|r| r.prefill_worker_id) {
+            Some(worker_id) => Some(self.continuations.in_flight(worker_id)),
+            None => self.continuations.min_in_flight(&routable),
+        };
+        if let Some(reason) = self.prefill_continue_policy.preflight(budget, active) {
+            tracing::debug!(
+                request_id,
+                ?reason,
+                "Prefill continuation declined before measuring load"
+            );
+            return false;
+        }
+
+        // The override continues without consulting decode load, so measuring
+        // it would buy an answer nothing reads.
+        let measured = if self.prefill_continue_policy.needs_decode_load() {
+            self.peek_decode_headroom(request, request_id).await
+        } else {
+            PrefillContinueDecisionInput::new(None, None, 0)
+        };
+        let input = measured
+            .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
+            .with_remaining_budget_tokens(budget)
+            .with_active_continuations(active);
+
+        let decision = self.prefill_continue_policy.decide(input);
+        if let Some(reason) = decision.skip_reason() {
+            tracing::debug!(
+                request_id,
+                ?reason,
+                "Prefill continuation declined before routing"
+            );
+        }
+        decision.should_continue()
+    }
+
+    /// Read the decode pool's headroom for this request.
+    ///
+    /// A preview needs a KV-routed decode set, so anything else reports nothing
+    /// and the policy refuses on `DecodeLoadUnknown`. That is the honest
+    /// answer: without the preview there is no way to tell a full decode pool
+    /// from an idle one.
+    ///
+    /// A cancelled request is reported as unknown like any other failure, which
+    /// refuses, and the ordinary handoff it falls back to then fails on the
+    /// same cancelled context. Deliberate, unlike the sibling decision, which
+    /// re-raises cancellation because it is about to dispatch on it.
+    async fn peek_decode_headroom(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        request_id: &str,
+    ) -> PrefillContinueDecisionInput {
+        let unknown = PrefillContinueDecisionInput::new(None, None, 0);
+        let Some(decode_host) = self.decode_routing_host.get() else {
+            return unknown;
+        };
+        // Ask the host, not the mode flag: `kv_router()` panics on a host with
+        // no KV plane, and the two could otherwise disagree.
+        let Some(kv_router) = decode_host.kv_router_if_enabled() else {
+            return unknown;
+        };
+        let block_size = kv_router.block_size() as usize;
+        match decode_host
+            .preview_kv_route(request, RequestPhase::Decode)
+            .await
+        {
+            Ok(preview) => {
+                let signals = preview.signals();
+                PrefillContinueDecisionInput::new(
+                    Some(signals.potential_decode_blocks as usize),
+                    signals.total_kv_blocks.map(|total| total as usize),
+                    block_size,
+                )
+            }
+            Err(error) => {
+                tracing::debug!(
+                    request_id,
+                    %error,
+                    "Decode headroom probe failed; treating decode load as unavailable"
+                );
+                PrefillContinueDecisionInput::new(None, None, block_size)
+            }
+        }
+    }
+
+    /// Read whether the prefill worker this request would land on is over its
+    /// own busy line.
+    ///
+    /// Probes the caller's binding rather than re-reading it, so the interlock
+    /// cannot end up asking a different pool than the capability gate did.
+    async fn peek_prefill_busy(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        binding: &PrefillBinding<Sel>,
+        request_id: &str,
+    ) -> Option<bool> {
+        // The policy owns the threshold, so the probe and the judgement cannot
+        // disagree about which one is in force.
+        let threshold = self.prefill_continue_policy.interlock_threshold()?;
+        match binding.router.prefill_worker_busy(request, threshold).await {
+            Ok(busy) => Some(busy),
+            Err(error) => {
+                // Cancellation lands here too, like any other failure: unknown
+                // refuses, and the handoff it falls back to fails on the same
+                // dead context a moment later.
+                tracing::debug!(
+                    request_id,
+                    %error,
+                    "Prefill-load probe failed; treating prefill load as unavailable"
+                );
+                None
+            }
+        }
+    }
 }
 
 struct PrefillBuildContext<Sel>
@@ -543,14 +697,18 @@ where
             return next.generate(context.map(|_| req)).await;
         };
 
+        // The probes below want a request context, as the conditional-disagg
+        // decision above did. Borrow one and take it back apart.
+        let continue_request = context.map(|_| req);
+        let prefill_continues = self
+            .wants_prefill_continuation(&continue_request, &binding, &request_id)
+            .await;
+        (req, context) = continue_request.into_parts();
+
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set).
         // A continuation is the whole response, so it keeps the request's own
         // budget; clamping it here would silently reduce the feature to a no-op.
         let mut prefill_req = req.clone();
-        // T6 wires the capability gate. The load-driven predicate is still to
-        // come, so the bring-up override remains the only way in.
-        let prefill_continues = self.prefill_continue_policy.force_enabled()
-            && prefill_pool_allows_continuation(&binding, &request_id);
         if prefill_continues {
             prefill_req
                 .annotations
@@ -768,6 +926,16 @@ where
         self.conditional_disagg_policy.is_enabled()
     }
 
+    /// Whether this router needs the decode set's `RoutingHost` installed.
+    ///
+    /// Both pre-routing decisions read decode load through it, and without it
+    /// they can only ever answer "unknown", which both of them treat as a
+    /// refusal. So the host has to be installed for either feature, not just
+    /// the one that first needed it.
+    pub(crate) fn needs_decode_routing_host(&self) -> bool {
+        self.conditional_disagg_enabled() || self.prefill_continue_policy.is_enabled()
+    }
+
     pub(crate) fn set_decode_routing_host(
         &self,
         routing_host: Arc<RoutingHost<Sel>>,
@@ -876,8 +1044,8 @@ where
         }
 
         // Refuse rather than run unbounded when no cap is configured. Startup
-        // validation asks for one, but it only runs when the decode set is
-        // KV-routed, so a round-robin frontend reaches here with none.
+        // validation asks for one, but it does not run on every path a router
+        // can be built from, so a config can still arrive here without one.
         let Some(cap) = self.prefill_continue_policy.max_concurrent() else {
             tracing::debug!(
                 worker_id,

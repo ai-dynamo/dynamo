@@ -102,7 +102,7 @@ pub struct PrefillContinuePolicy {
     enabled: bool,
     force: bool,
     decode_busy_threshold: Option<f64>,
-    prefill_busy_threshold_configured: bool,
+    prefill_busy_threshold: Option<f64>,
     output_reserve_tokens: usize,
     max_budget_tokens: Option<u32>,
     max_concurrent: Option<usize>,
@@ -150,10 +150,11 @@ impl PrefillContinuePolicy {
             enabled: config.prefill_continue_enabled,
             force: config.prefill_continue_force,
             decode_busy_threshold: config.prefill_continue_decode_busy_threshold,
-            prefill_busy_threshold_configured: config
+            // Resolved once, here, so a caller cannot disagree with the policy
+            // about which threshold is in force.
+            prefill_busy_threshold: config
                 .prefill_continue_prefill_busy_threshold
-                .or(config.router_queue_threshold)
-                .is_some(),
+                .or(config.router_queue_threshold),
             output_reserve_tokens: config.prefill_continue_output_reserve_tokens,
             max_budget_tokens: config.prefill_continue_max_budget_tokens,
             max_concurrent: config.prefill_continue_max_concurrent,
@@ -165,7 +166,7 @@ impl PrefillContinuePolicy {
             enabled: false,
             force: false,
             decode_busy_threshold: None,
-            prefill_busy_threshold_configured: false,
+            prefill_busy_threshold: None,
             output_reserve_tokens: 0,
             max_budget_tokens: None,
             max_concurrent: None,
@@ -176,19 +177,26 @@ impl PrefillContinuePolicy {
         self.enabled
     }
 
-    /// Whether the bring-up override is on: continue every eligible request,
-    /// whatever the decode load. Requires the feature to be enabled.
-    pub fn force_enabled(&self) -> bool {
-        self.enabled && self.force
+    /// Whether this policy evaluates the prefill-load interlock at all.
+    ///
+    /// False when no busy threshold is configured, because there is then
+    /// nothing to evaluate the signal against.
+    pub fn needs_prefill_worker_busy(&self) -> bool {
+        self.interlock_threshold().is_some()
     }
 
-    /// Whether the caller needs to probe prefill load for this policy.
+    /// The interlock threshold in force, inheriting the router-wide queue
+    /// threshold when the feature does not set its own.
     ///
-    /// False when no busy threshold is configured, because there is then nothing
-    /// to evaluate the signal against. Probing costs a routing preview, so the
-    /// caller skips it in that case.
-    pub fn needs_prefill_worker_busy(&self) -> bool {
-        self.enabled && self.prefill_busy_threshold_configured
+    /// One source of truth: the router probes with exactly the value the policy
+    /// will judge the answer against. Named apart from the field so that
+    /// dropping the parens inside this file cannot silently bypass `enabled`.
+    pub fn interlock_threshold(&self) -> Option<f64> {
+        if self.enabled {
+            self.prefill_busy_threshold
+        } else {
+            None
+        }
     }
 
     /// The per-worker ceiling on concurrent continuations, if one is set.
@@ -201,6 +209,58 @@ impl PrefillContinuePolicy {
         self.max_concurrent
     }
 
+    /// The gates that cost nothing to evaluate.
+    ///
+    /// Measuring load costs a scheduler selection apiece, so the caller runs
+    /// this first and only measures when it returns `None`. These are the same
+    /// gates, in the same order, that [`Self::decide`] applies — it is written
+    /// in terms of this so the two cannot drift apart.
+    pub fn preflight(
+        &self,
+        remaining_budget_tokens: Option<u32>,
+        active_continuations: Option<usize>,
+    ) -> Option<PrefillContinueSkip> {
+        use PrefillContinueSkip as Skip;
+
+        if !self.enabled {
+            return Some(Skip::Disabled);
+        }
+
+        // The commitment cannot be undone once made, so it is bounded here, at
+        // admission, against a budget the request already carries.
+        //
+        // A request with no budget of its own is refused whether or not a cap
+        // is configured. Nesting this inside the cap left the default
+        // configuration admitting an unbounded continuation, which then held
+        // its worker until the model chose to stop — and clients that omit
+        // `max_tokens` are the common case, not the exception.
+        let Some(budget) = remaining_budget_tokens else {
+            return Some(Skip::BudgetUnbounded);
+        };
+        if self.max_budget_tokens.is_some_and(|cap| budget > cap) {
+            return Some(Skip::BudgetAboveCap);
+        }
+
+        if let Some(max) = self.max_concurrent {
+            match active_continuations {
+                Some(active) if active >= max => return Some(Skip::ConcurrencyCapReached),
+                None => return Some(Skip::ConcurrencyUnknown),
+                Some(_) => {}
+            }
+        }
+
+        None
+    }
+
+    /// Whether the caller needs to measure decode load for this policy.
+    ///
+    /// False under the bring-up override, which continues without consulting
+    /// decode load at all, so measuring it would be a scheduler selection spent
+    /// on an answer nothing reads.
+    pub fn needs_decode_load(&self) -> bool {
+        self.enabled && !self.force
+    }
+
     /// The decision.
     ///
     /// Order matters: every safety gate runs before `force`, so the bring-up
@@ -208,30 +268,10 @@ impl PrefillContinuePolicy {
     pub fn decide(&self, input: PrefillContinueDecisionInput) -> PrefillContinueDecision {
         use PrefillContinueSkip as Skip;
 
-        if !self.enabled {
-            return PrefillContinueDecision::Skip(Skip::Disabled);
-        }
-
-        // The commitment cannot be undone once made, so it is bounded here, at
-        // admission, against a budget the request already carries.
-        if let Some(cap) = self.max_budget_tokens {
-            match input.remaining_budget_tokens {
-                Some(budget) if budget > cap => {
-                    return PrefillContinueDecision::Skip(Skip::BudgetAboveCap);
-                }
-                None => return PrefillContinueDecision::Skip(Skip::BudgetUnbounded),
-                Some(_) => {}
-            }
-        }
-
-        if let Some(max) = self.max_concurrent {
-            match input.active_continuations {
-                Some(active) if active >= max => {
-                    return PrefillContinueDecision::Skip(Skip::ConcurrencyCapReached);
-                }
-                None => return PrefillContinueDecision::Skip(Skip::ConcurrencyUnknown),
-                Some(_) => {}
-            }
+        if let Some(skip) =
+            self.preflight(input.remaining_budget_tokens, input.active_continuations)
+        {
+            return PrefillContinueDecision::Skip(skip);
         }
 
         // The interlock: the feature spends prefill capacity to relieve decode,
@@ -292,7 +332,7 @@ mod tests {
             enabled: true,
             force: false,
             decode_busy_threshold: Some(threshold),
-            prefill_busy_threshold_configured: false,
+            prefill_busy_threshold: None,
             output_reserve_tokens: 0,
             max_budget_tokens: None,
             max_concurrent: None,
@@ -300,10 +340,15 @@ mod tests {
     }
 
     /// Decode load as blocks-out-of-total, with everything else unset.
+    /// A request that is admissible on every axis except the one under test.
+    ///
+    /// Carries a budget, because an absent one is now a refusal in its own
+    /// right and would mask whichever gate the test is actually about.
     fn decode_load(potential: usize, total: usize) -> PrefillContinueDecisionInput {
         PrefillContinueDecisionInput {
             potential_decode_blocks: Some(potential),
             total_kv_blocks: Some(total),
+            remaining_budget_tokens: Some(256),
             ..Default::default()
         }
     }
@@ -354,13 +399,11 @@ mod tests {
         for input in [
             PrefillContinueDecisionInput {
                 potential_decode_blocks: None,
-                total_kv_blocks: Some(100),
-                ..Default::default()
+                ..decode_load(99, 100)
             },
             PrefillContinueDecisionInput {
-                potential_decode_blocks: Some(99),
                 total_kv_blocks: None,
-                ..Default::default()
+                ..decode_load(99, 100)
             },
             // A zero-capacity worker is not a full worker; it is an unreadable one.
             decode_load(99, 0),
@@ -422,7 +465,7 @@ mod tests {
     #[test]
     fn a_busy_prefill_worker_stops_the_continuation() {
         let mut policy = policy(0.9);
-        policy.prefill_busy_threshold_configured = true;
+        policy.prefill_busy_threshold = Some(0.8);
 
         let input = PrefillContinueDecisionInput {
             prefill_worker_busy: Some(true),
@@ -434,7 +477,7 @@ mod tests {
     #[test]
     fn unknown_prefill_load_fails_closed_when_the_interlock_is_configured() {
         let mut policy = policy(0.9);
-        policy.prefill_busy_threshold_configured = true;
+        policy.prefill_busy_threshold = Some(0.8);
 
         let input = decode_load(99, 100); // prefill_worker_busy is None
         assert_eq!(
@@ -445,7 +488,7 @@ mod tests {
 
     #[test]
     fn prefill_load_is_ignored_when_the_interlock_is_not_configured() {
-        let policy = policy(0.9); // prefill_busy_threshold_configured = false
+        let policy = policy(0.9); // no interlock threshold configured
         let input = PrefillContinueDecisionInput {
             prefill_worker_busy: None,
             ..decode_load(99, 100)
@@ -494,13 +537,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unbounded_budget_is_fine_when_no_cap_is_set() {
+    fn an_unbounded_budget_is_refused_even_with_no_cap_set() {
+        // A continuation occupies its worker until the model stops, so a
+        // request that names no ceiling cannot be admitted, cap or no cap.
+        // Clients that omit `max_tokens` are the common case.
         let policy = policy(0.9);
         let input = PrefillContinueDecisionInput {
             remaining_budget_tokens: None,
             ..decode_load(99, 100)
         };
-        assert!(policy.decide(input).should_continue());
+        assert_eq!(
+            skip(policy.decide(input)),
+            PrefillContinueSkip::BudgetUnbounded
+        );
     }
 
     // --- the concurrency cap ------------------------------------------------
@@ -570,11 +619,12 @@ mod tests {
         // An idle decode pool would normally mean "hand off"; force continues.
         assert!(policy.decide(decode_load(1, 100)).should_continue());
         // It also does not need decode load to be readable at all.
-        assert!(
-            policy
-                .decide(PrefillContinueDecisionInput::default())
-                .should_continue()
-        );
+        let unreadable = PrefillContinueDecisionInput {
+            potential_decode_blocks: None,
+            total_kv_blocks: None,
+            ..decode_load(0, 0)
+        };
+        assert!(policy.decide(unreadable).should_continue());
 
         // But the safety gates still apply.
         policy.max_budget_tokens = Some(16);
@@ -591,7 +641,7 @@ mod tests {
         policy.max_concurrent = Some(2);
         let at_cap = PrefillContinueDecisionInput {
             active_continuations: Some(2),
-            ..Default::default()
+            ..decode_load(1, 100)
         };
         assert_eq!(
             skip(policy.decide(at_cap)),
@@ -599,10 +649,10 @@ mod tests {
         );
 
         policy.max_concurrent = None;
-        policy.prefill_busy_threshold_configured = true;
+        policy.prefill_busy_threshold = Some(0.8);
         let busy = PrefillContinueDecisionInput {
             prefill_worker_busy: Some(true),
-            ..Default::default()
+            ..decode_load(1, 100)
         };
         assert_eq!(skip(policy.decide(busy)), PrefillContinueSkip::PrefillBusy);
     }
@@ -662,5 +712,62 @@ mod tests {
         assert!(!probes(true, None, None));
         // Off: there is no decision to interlock.
         assert!(!probes(false, Some(0.4), None));
+    }
+    #[test]
+    fn preflight_and_decide_agree_on_the_cheap_gates() {
+        // The router runs `preflight` first to avoid paying for a load probe a
+        // cheap gate would refuse anyway. If the two ever disagreed, the router
+        // would skip for one reason and the policy report another.
+        let mut policy = policy(0.9);
+        policy.max_budget_tokens = Some(128);
+        policy.max_concurrent = Some(2);
+
+        for budget in [None, Some(64), Some(4096)] {
+            for active in [None, Some(0), Some(2), Some(9)] {
+                let input = PrefillContinueDecisionInput::new(Some(0), Some(100), 16)
+                    .with_remaining_budget_tokens(budget)
+                    .with_active_continuations(active);
+
+                let preflight = policy.preflight(budget, active);
+                let decided = policy.decide(input).skip_reason();
+                match preflight {
+                    Some(reason) => assert_eq!(
+                        decided,
+                        Some(reason),
+                        "preflight refused {budget:?}/{active:?} but decide did not agree"
+                    ),
+                    // decide may still refuse later, on a gate preflight does
+                    // not cover; it must not refuse for a cheap-gate reason.
+                    None => assert!(
+                        !matches!(
+                            decided,
+                            Some(PrefillContinueSkip::BudgetAboveCap)
+                                | Some(PrefillContinueSkip::BudgetUnbounded)
+                                | Some(PrefillContinueSkip::ConcurrencyCapReached)
+                                | Some(PrefillContinueSkip::ConcurrencyUnknown)
+                        ),
+                        "preflight passed {budget:?}/{active:?} but decide refused on a cheap gate"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_override_does_not_need_decode_load() {
+        let mut policy = policy(0.9);
+        assert!(
+            policy.needs_decode_load(),
+            "without force, decode load decides"
+        );
+
+        policy.force = true;
+        assert!(
+            !policy.needs_decode_load(),
+            "force continues without consulting decode load, so measuring it buys nothing"
+        );
+
+        policy.enabled = false;
+        assert!(!policy.needs_decode_load());
     }
 }

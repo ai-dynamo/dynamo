@@ -424,8 +424,9 @@ mod tests {
                 RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
             )
         };
-        // The harness must build the plane the test asked for. A silent fall
-        // back would make a KV test re-cover what the round-robin tests prove.
+        // The harness must build the plane the test asked for. The built-in
+        // plane cannot read the interlock at all, so a KV test that silently
+        // fell back would prove the opposite of what it claims.
         assert_eq!(
             shared.kv_router_if_enabled().is_some(),
             mode.is_kv_routing(),
@@ -459,76 +460,6 @@ mod tests {
         (shared, prefill, worker_runtimes, workers)
     }
 
-    #[tokio::test]
-    async fn a_continuation_is_forwarded_whole_and_dispatches_no_decode_leg() {
-        // The whole of T5 in one test: a marked request is served by the prefill
-        // worker, its stream reaches the client untouched, no decode worker is
-        // asked for anything, and the request keeps its own token budget.
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation",
-            RouterMode::RoundRobin,
-            dispatch.clone(),
-            Some(&continue_config(Some(2))),
-            PoolSupport::Unanimous,
-        )
-        .await;
-
-        let (decode_calls, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
-            .await
-            .expect("a continuation should be served by the prefill worker");
-
-        let worker_id = dispatch.worker_ids.lock().unwrap()[0];
-        assert_eq!(
-            prefill_router.continuations.in_flight(worker_id),
-            1,
-            "the continuation must hold its place for as long as the stream lives"
-        );
-
-        let mut chunks = 0;
-        while response.next().await.is_some() {
-            chunks += 1;
-        }
-
-        // Still holding the stream, and the place is already back: it is
-        // returned when the worker finishes, not when the client lets go.
-        assert_eq!(
-            prefill_router.continuations.in_flight(worker_id),
-            0,
-            "the place must come back at the end of the stream"
-        );
-
-        // the prefill worker's stream reached the client
-        assert_eq!(
-            chunks, 1,
-            "the prefill stream must be forwarded, not drained"
-        );
-        // no decode leg was dispatched
-        assert_eq!(
-            decode_calls.load(Ordering::Relaxed),
-            0,
-            "a continuation must not dispatch a decode leg"
-        );
-        // and the worker was asked for the whole response, not one token
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(256)],
-            "a continuation keeps the request's own budget"
-        );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
-    }
-
     /// The continuation config every continuation test shares: force-on, so
     /// the decode-load condition cannot mask what is actually under test, plus
     /// a per-test cap. `None` means the cap is deliberately absent.
@@ -547,11 +478,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_continuation_is_forwarded_whole_on_the_kv_plane() {
+    async fn round_robin_has_no_interlock_signal_so_nothing_continues() {
+        // The interlock reads a KV route preview, so on the built-in plane it
+        // cannot be read at all. An unread safety check is not a passed one:
+        // the feature refuses rather than continue unchecked.
+        //
+        // This is the whole reason the continuation tests below are KV-routed,
+        // and it is what a benchmark arm has to get right — a round-robin arm
+        // with the flag set is a control arm, not a treatment arm.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
-        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-no-interlock",
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+            Some(&continue_config(Some(2))),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        let (_, next) = counting_decode_host();
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "with no readable interlock the request must take today's handoff"
+        );
+        assert_eq!(
+            *dispatch.dispatched_annotations.lock().unwrap(),
+            vec![Vec::<String>::new()],
+            "and the marker must never reach the worker"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn without_a_readable_decode_pool_nothing_continues() {
+        // The other continuation tests set `force`, which waives the
+        // decode-load test and nothing else. Drop it and the decision has to
+        // stand on a real decode signal — which this harness has no decode
+        // routing host to provide. Unknown decode load is not an empty decode
+        // pool, so the request hands off.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-no-decode-signal",
+            RouterMode::KV,
+            dispatch.clone(),
+            Some(&dynamo_kv_router::config::KvRouterConfig {
+                prefill_continue_force: false,
+                prefill_continue_decode_busy_threshold: Some(0.9),
+                ..continue_config(Some(2))
+            }),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        let (_, next) = counting_decode_host();
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "an unreadable decode pool must not read as a full one"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_continuation_is_forwarded_whole() {
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
             &runtime,
             discovery_root.path(),
             "prefill-continuation-kv",
@@ -561,12 +577,6 @@ mod tests {
             PoolSupport::Unanimous,
         )
         .await;
-
-        assert!(
-            shared.kv_router_if_enabled().is_some(),
-            "this test must run on the KV plane; a silent fall back to the built-in \
-             plane would just re-cover what the round-robin tests already prove"
-        );
 
         let (decode_calls, next) = counting_decode_host();
 
@@ -607,57 +617,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capped_worker_is_demoted_on_the_kv_plane() {
-        // Same demotion, selected through the KV scheduler rather than a
-        // round-robin cursor.
+    async fn a_capped_worker_is_demoted() {
+        // The dispatch-time demotion only fires when the pool looks free but
+        // the *chosen* worker is not. A cap of zero cannot reach it — that
+        // refuses before routing — and neither can a busy worker the scheduler
+        // then avoids, because the scheduler balances load.
+        //
+        // The real shape is a census the scheduler cannot see: fill three of
+        // the four workers, leave one free so the pool minimum still passes the
+        // pre-routing check, then send one request per worker. Whichever ones
+        // land on a filled worker must be demoted.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
-        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+        let (_shared, prefill_router, worker_runtimes, workers) = shared_router(
             &runtime,
             discovery_root.path(),
             "prefill-continuation-kv-capped",
             RouterMode::KV,
             dispatch.clone(),
-            Some(&continue_config(Some(0))),
+            Some(&continue_config(Some(1))),
             PoolSupport::Unanimous,
         )
         .await;
 
+        let filled: Vec<_> = workers[..workers.len() - 1]
+            .iter()
+            .map(|worker_id| {
+                prefill_router
+                    .continuations
+                    .try_admit(*worker_id, 1)
+                    .expect("a fresh worker has its place free")
+            })
+            .collect();
+        assert_eq!(
+            prefill_router.continuations.min_in_flight(&workers),
+            Some(0),
+            "one worker must stay free, or the pre-routing check refuses instead"
+        );
+
+        for _ in 0..workers.len() {
+            let mut request = request();
+            request.stop_conditions.max_tokens = Some(256);
+            let (_, next) = counting_decode_host();
+            let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+        }
+
+        // Pair each dispatch with the worker it went to. Counting demotions
+        // would assume the scheduler spreads one request per worker, and it
+        // does not.
+        let dispatched = dispatch.dispatched_max_tokens.lock().unwrap().clone();
+        let landed = dispatch.worker_ids.lock().unwrap().clone();
+        let full: std::collections::HashSet<u64> =
+            workers[..workers.len() - 1].iter().copied().collect();
+        let mut demotions = 0;
+        for (worker_id, max_tokens) in landed.iter().zip(dispatched.iter()) {
+            if full.contains(worker_id) {
+                assert_eq!(
+                    *max_tokens,
+                    Some(1),
+                    "a request on filled worker {worker_id} must be demoted"
+                );
+                demotions += 1;
+            } else {
+                assert_eq!(
+                    *max_tokens,
+                    Some(256),
+                    "a request on the free worker must continue"
+                );
+            }
+        }
         assert!(
-            shared.kv_router_if_enabled().is_some(),
-            "this test must run on the KV plane; a silent fall back to the built-in \
-             plane would just re-cover what the round-robin tests already prove"
+            demotions > 0,
+            "the scheduler never chose a filled worker, so nothing was tested: {landed:?}"
         );
 
-        let (_, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "a demoted KV-routed request must carry the one-token clamp again"
-        );
-        assert_eq!(
-            *dispatch.dispatched_annotations.lock().unwrap(),
-            vec![Vec::<String>::new()],
-            "and the marker must not reach the worker"
-        );
-
+        drop(filled);
         drop(worker_runtimes);
         runtime.shutdown();
     }
 
     #[tokio::test]
-    async fn a_mixed_pool_refuses_to_continue_on_the_kv_plane() {
+    async fn a_mixed_pool_refuses_to_continue() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
-        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
             &runtime,
             discovery_root.path(),
             "prefill-continuation-kv-mixed",
@@ -668,12 +713,6 @@ mod tests {
         )
         .await;
 
-        assert!(
-            shared.kv_router_if_enabled().is_some(),
-            "this test must run on the KV plane; a silent fall back to the built-in \
-             plane would just re-cover what the round-robin tests already prove"
-        );
-
         let (_, next) = counting_decode_host();
 
         let mut request = request();
@@ -684,7 +723,7 @@ mod tests {
         assert_eq!(
             *dispatch.dispatched_max_tokens.lock().unwrap(),
             vec![Some(1)],
-            "a pool that did not unanimously declare support hands off on the KV plane too"
+            "a pool that did not unanimously declare support must hand off"
         );
 
         drop(worker_runtimes);
@@ -693,10 +732,10 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_configured_cap_nothing_continues() {
-        // Startup validation asks for a cap, but it only runs when the decode
-        // set is KV-routed — this router is round-robin, so it reaches dispatch
-        // with none. An unbounded continuation is worse than no continuation,
-        // so the absent cap must refuse rather than waive the bound.
+        // Startup validation asks for a cap, but it does not run on every path
+        // a router can be built from, so a config can reach dispatch with none.
+        // An unbounded continuation is worse than no continuation, so the
+        // absent cap must refuse rather than waive the bound.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
@@ -704,7 +743,7 @@ mod tests {
             &runtime,
             discovery_root.path(),
             "prefill-continuation-uncapped",
-            RouterMode::RoundRobin,
+            RouterMode::KV,
             dispatch.clone(),
             // The cap is deliberately absent.
             Some(&continue_config(None)),
@@ -728,92 +767,6 @@ mod tests {
             *dispatch.dispatched_annotations.lock().unwrap(),
             vec![Vec::<String>::new()],
             "and the marker must not reach the worker"
-        );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn a_worker_at_its_continuation_cap_is_demoted_to_a_handoff() {
-        // Every worker declares support and the override is on, so the request
-        // is marked before routing. The cap is what stops it, and the cap can
-        // only be read once the worker is chosen — so this exercises the
-        // dispatch-time demotion, not the pool check.
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation-capped",
-            RouterMode::RoundRobin,
-            dispatch.clone(),
-            // No place for any continuation at all.
-            Some(&continue_config(Some(0))),
-            PoolSupport::Unanimous,
-        )
-        .await;
-
-        let (_, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "a demoted request must carry the one-token clamp again"
-        );
-        let annotations = dispatch.dispatched_annotations.lock().unwrap().clone();
-        assert_eq!(
-            annotations,
-            vec![Vec::<String>::new()],
-            "the marker must come off, or the worker generates a whole response nothing returns"
-        );
-        let worker_id = dispatch.worker_ids.lock().unwrap()[0];
-        assert_eq!(
-            prefill_router.continuations.in_flight(worker_id),
-            0,
-            "a demoted request must hold no place in the census"
-        );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn a_mixed_pool_refuses_to_continue_and_hands_off_as_today() {
-        // Three of four workers declare the capability. The fourth would answer
-        // a marked request with a handoff message and pin cache, so the gate
-        // must refuse the whole pool rather than gamble on the selection.
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation-mixed",
-            RouterMode::RoundRobin,
-            dispatch.clone(),
-            Some(&continue_config(Some(2))),
-            PoolSupport::AllButOne,
-        )
-        .await;
-
-        let (_, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "a pool that did not unanimously declare support gets today's one-token prefill"
         );
 
         drop(worker_runtimes);

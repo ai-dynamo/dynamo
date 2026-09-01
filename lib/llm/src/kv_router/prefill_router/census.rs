@@ -67,6 +67,21 @@ impl ContinuationCensus {
         self.in_flight.lock().get(&worker_id).copied().unwrap_or(0)
     }
 
+    /// The emptiest routable worker's count, or `None` when there is nothing to
+    /// route to.
+    ///
+    /// This is what the pre-routing decision can honestly ask. It cannot ask
+    /// "has *the* worker room", because the worker is not chosen yet; it can
+    /// ask "has *any* worker room", and the per-worker bound is then applied
+    /// for real at dispatch.
+    pub(super) fn min_in_flight(&self, routable: &[WorkerId]) -> Option<usize> {
+        let in_flight = self.in_flight.lock();
+        routable
+            .iter()
+            .map(|worker_id| in_flight.get(worker_id).copied().unwrap_or(0))
+            .min()
+    }
+
     fn release(&self, worker_id: WorkerId) {
         let mut in_flight = self.in_flight.lock();
         let Some(running) = in_flight.get_mut(&worker_id) else {
@@ -185,6 +200,26 @@ mod tests {
 
         assert_eq!(census.in_flight(7), 1);
         assert_eq!(census.in_flight(8), 1);
+    }
+
+    #[test]
+    fn min_in_flight_reports_the_emptiest_worker() {
+        let census = census();
+        let _seven = census.try_admit(7, 4).expect("worker 7");
+        let _also_seven = census.try_admit(7, 4).expect("worker 7 again");
+        let _eight = census.try_admit(8, 4).expect("worker 8");
+
+        // 9 has never been admitted, so it is empty and it is the minimum.
+        assert_eq!(census.min_in_flight(&[7, 8, 9]), Some(0));
+        assert_eq!(census.min_in_flight(&[7, 8]), Some(1));
+        assert_eq!(census.min_in_flight(&[7]), Some(2));
+    }
+
+    #[test]
+    fn min_in_flight_of_nothing_is_unknown() {
+        // Not zero: an empty pool has no emptiest worker, and reporting zero
+        // would read as "there is room".
+        assert_eq!(census().min_in_flight(&[]), None);
     }
 
     #[test]
