@@ -1088,7 +1088,7 @@ where
             return Ok(());
         }
         self.indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
             .await
     }
 

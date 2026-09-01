@@ -81,6 +81,7 @@ impl SideIndexer {
         &self,
         worker: WorkerWithDpRank,
         hashes: RoutingDecisionHashes,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
@@ -89,6 +90,7 @@ impl SideIndexer {
                         worker,
                         hashes.local_hashes,
                         hashes.sequence_hashes,
+                        ttl_override,
                     )
                     .await
             }
@@ -98,6 +100,7 @@ impl SideIndexer {
                         worker,
                         &hashes.local_hashes,
                         &hashes.sequence_hashes,
+                        ttl_override,
                     )
                     .await
             }

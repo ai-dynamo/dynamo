@@ -881,6 +881,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         &self,
         _tokens_with_hashes: &mut TokensWithHashes,
         _worker: WorkerWithDpRank,
+        _ttl_override: Option<std::time::Duration>,
     ) -> Result<(), KvRouterError> {
         Ok(())
     }

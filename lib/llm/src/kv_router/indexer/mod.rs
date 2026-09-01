@@ -954,7 +954,7 @@ mod tests {
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
 
         indexer
-            .record_hashed_routing_decision(worker, block_hashes.clone(), sequence_hashes)
+            .record_hashed_routing_decision(worker, block_hashes.clone(), sequence_hashes, None)
             .await
             .unwrap();
         flush_indexer(&indexer).await;
@@ -998,7 +998,7 @@ mod tests {
         let mut tokens_with_hashes = TokensWithHashes::new(tokens, 4);
 
         indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
             .await
             .unwrap();
         flush_indexer(&indexer).await;
@@ -1084,7 +1084,12 @@ mod tests {
             [11, 12, 13].iter().copied().map(LocalBlockHash).collect();
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
         indexer
-            .record_hashed_routing_decision(side_only_worker, block_hashes.clone(), sequence_hashes)
+            .record_hashed_routing_decision(
+                side_only_worker,
+                block_hashes.clone(),
+                sequence_hashes,
+                None,
+            )
             .await
             .unwrap();
 

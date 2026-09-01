@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_tokens::SequenceHash;
 use rstest::rstest;
 use rstest_reuse::{self, *};
 use tokio::time;
@@ -346,7 +347,7 @@ async fn route_approx_tokens(
 ) {
     let mut tokens_with_hashes = TokensWithHashes::new(tokens.to_vec(), 4);
     index
-        .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+        .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
         .await
         .unwrap();
     flush_and_settle(index).await;
@@ -1040,7 +1041,7 @@ mod interface_tests {
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
 
         index
-            .process_routing_decision_with_hashes(worker, block_hashes, sequence_hashes)
+            .process_routing_decision_with_hashes(worker, block_hashes, sequence_hashes, None)
             .await
             .unwrap();
         flush_and_settle(&index).await;
@@ -1063,7 +1064,7 @@ mod interface_tests {
         let sequence_hashes = [1];
 
         let result = index
-            .process_routing_decision_hash_slices(worker, &local_hashes, &sequence_hashes)
+            .process_routing_decision_hash_slices(worker, &local_hashes, &sequence_hashes, None)
             .await;
 
         assert!(matches!(result, Err(KvRouterError::IndexerDroppedRequest)));
@@ -1085,6 +1086,33 @@ mod interface_tests {
 
         let scores = request_scores(index.as_ref(), &tokens).await;
         assert!(scores.scores.is_empty());
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_approx_routing_decision_ttl_override(variant: &str) {
+        let index = make_approx_indexer(variant, Duration::from_secs(60));
+        let tokens = vec![1, 2, 3, 4];
+        let worker = WorkerWithDpRank::new(7, 0);
+        let ttl = Duration::from_millis(25);
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+
+        index
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, Some(ttl))
+            .await
+            .unwrap();
+        flush_and_settle(index.as_ref()).await;
+        assert_request_score(index.as_ref(), &tokens, worker, 1).await;
+
+        time::sleep(ttl + Duration::from_millis(125)).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert!(
+            request_scores(index.as_ref(), &tokens)
+                .await
+                .scores
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1162,6 +1190,7 @@ mod interface_tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::new(7, 0),
+                None,
             )
             .await;
 
@@ -2368,7 +2397,7 @@ async fn test_routing_decision_assigns_first_seen_worker() {
     let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
 
     index
-        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes, None)
         .await
         .unwrap();
     flush_and_settle(&index).await;
@@ -2831,6 +2860,34 @@ mod local_indexer_tests {
         assert_eq!(decoded.dp_rank, 3);
         assert_eq!(decoded.end_event_id, Some(9));
         assert!(!decoded.supports_tree_dump_failed);
+    }
+
+    #[test]
+    fn routing_decision_ttl_override_is_wire_compatible() {
+        #[derive(serde::Serialize)]
+        struct LegacyRequest {
+            model_name: String,
+            worker: WorkerWithDpRank,
+            local_hashes: Vec<LocalBlockHash>,
+            sequence_hashes: Vec<SequenceHash>,
+        }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyRequest {
+            model_name: "model".to_string(),
+            worker: WorkerWithDpRank::new(7, 0),
+            local_hashes: vec![LocalBlockHash(11)],
+            sequence_hashes: vec![12],
+        })
+        .unwrap();
+        let mut decoded: IndexerRecordRoutingDecisionRequest =
+            rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.ttl_override, None);
+
+        decoded.ttl_override = Some(Duration::from_millis(25));
+        let encoded = rmp_serde::to_vec_named(&decoded).unwrap();
+        let round_trip: IndexerRecordRoutingDecisionRequest =
+            rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(round_trip.ttl_override, decoded.ttl_override);
     }
 
     #[tokio::test]
