@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
@@ -96,6 +96,7 @@ struct TokenizeResult {
     token_ids: Vec<u32>,
     priority_jump: Option<f64>,
     strict_priority: Option<u32>,
+    do_not_queue: bool,
     cache_namespace: Option<String>,
     expected_output_tokens: Option<u32>,
 }
@@ -189,6 +190,11 @@ impl EppRouter {
             token_ids,
             priority_jump: resolved.priority_jump,
             strict_priority: resolved.strict_priority,
+            do_not_queue: hints
+                .nvext
+                .as_ref()
+                .and_then(|n| n.do_not_queue)
+                .unwrap_or(false),
             expected_output_tokens,
             cache_namespace,
         })
@@ -247,6 +253,8 @@ struct RoutingHints {
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    #[serde(default)]
+    do_not_queue: Option<bool>,
     /// Dynamo-style `nvext.cache_salt`.
     #[serde(default, rename = "cache_salt")]
     cache_namespace: Option<String>,
@@ -343,6 +351,7 @@ impl EndpointPicker for EppRouter {
             token_ids: tokens,
             priority_jump,
             strict_priority,
+            do_not_queue,
             cache_namespace,
             expected_output_tokens,
         } = self
@@ -374,6 +383,7 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            do_not_queue,
             expected_output_tokens,
             policy_class,
             cache_namespace: cache_namespace.clone(),
@@ -383,6 +393,9 @@ impl EndpointPicker for EppRouter {
 
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
+            Err(e) if selection_error_is_backpressure(&e) => {
+                return Err(PickError::Backpressure(e.to_string()));
+            }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
 
@@ -534,9 +547,37 @@ impl TokenizeError {
     }
 }
 
+fn selection_error_is_backpressure(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<SelectionError>()
+            .is_some_and(|error| error.status_code() == 429)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_hints_lift_do_not_queue() {
+        let enabled: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":true}}"#).unwrap();
+        assert_eq!(
+            enabled.nvext.and_then(|nvext| nvext.do_not_queue),
+            Some(true)
+        );
+
+        let omitted: RoutingHints = serde_json::from_str(r#"{"nvext":{}}"#).unwrap();
+        assert_eq!(omitted.nvext.and_then(|nvext| nvext.do_not_queue), None);
+
+        let explicit_null: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":null}}"#).unwrap();
+        assert_eq!(
+            explicit_null.nvext.and_then(|nvext| nvext.do_not_queue),
+            None
+        );
+    }
 
     #[test]
     fn requested_policy_class_uses_frontend_metadata_extraction() {

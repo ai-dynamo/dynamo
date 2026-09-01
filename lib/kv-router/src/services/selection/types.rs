@@ -378,6 +378,8 @@ pub struct SelectRequest {
     pub strict_priority: Option<u32>,
     pub session_id: Option<String>,
     pub affinity_target: Option<WorkerAffinityTarget>,
+    #[serde(default)]
+    pub do_not_queue: bool,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
@@ -399,6 +401,8 @@ pub struct SelectAndReserveRequest {
     pub strict_priority: Option<u32>,
     pub session_id: Option<String>,
     pub affinity_target: Option<WorkerAffinityTarget>,
+    #[serde(default)]
+    pub do_not_queue: bool,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]

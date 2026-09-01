@@ -7,9 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     kv_hints::KvHint,
-    protocols::{
-        BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
-    },
+    protocols::{BlockExtraInfo, WorkerAffinityTarget, WorkerId, WorkerWithDpRank},
     scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
     selector::WorkerSelector,
 };
@@ -17,7 +15,7 @@ use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
     kv_router::{
-        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
+        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome, RoutingOptions,
         routing_host::RoutingHost,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -86,17 +84,7 @@ struct BestMatchArgs<'a> {
     router_config_override: Option<&'a RouterConfigOverride>,
     update_states: bool,
     return_routing_hashes: bool,
-    lora_name: Option<String>,
-    cache_namespace: Option<String>,
-    priority_jump: f64,
-    strict_priority: u32,
-    policy_class: Option<String>,
-    session_context: Option<dynamo_kv_router::SessionContext>,
-    expected_output_tokens: Option<u32>,
-    affinity_target: Option<WorkerAffinityTarget>,
-    pinned_worker: Option<WorkerWithDpRank>,
-    allowed_worker_ids: Option<HashSet<WorkerId>>,
-    routing_constraints: RoutingConstraints,
+    routing_options: RoutingOptions,
     admission: FindBestMatchAdmission,
 }
 
@@ -114,17 +102,7 @@ where
                 args.router_config_override,
                 args.update_states,
                 args.return_routing_hashes,
-                args.lora_name,
-                args.cache_namespace,
-                args.priority_jump,
-                args.strict_priority,
-                args.policy_class,
-                args.session_context,
-                args.expected_output_tokens,
-                args.affinity_target,
-                args.pinned_worker,
-                args.allowed_worker_ids,
-                args.routing_constraints,
+                args.routing_options,
                 args.admission,
             )
             .await?;
@@ -202,6 +180,9 @@ where
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
+        let do_not_queue = routing
+            .and_then(|routing| routing.do_not_queue)
+            .unwrap_or(false);
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
@@ -301,18 +282,22 @@ where
                     router_config_override: request.router_config_override.as_ref(),
                     update_states: !is_query_only,
                     return_routing_hashes,
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    session_context,
-                    expected_output_tokens,
-                    affinity_target: affinity_target
-                        .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
-                    pinned_worker: None,
-                    allowed_worker_ids,
-                    routing_constraints: routing_constraints.clone(),
+                    routing_options: RoutingOptions {
+                        lora_name,
+                        cache_namespace,
+                        priority_jump,
+                        strict_priority,
+                        policy_class,
+                        session_context,
+                        expected_output_tokens,
+                        affinity_target: affinity_target.map(|target| {
+                            WorkerAffinityTarget::new(target.worker_id, target.dp_rank)
+                        }),
+                        pinned_worker: None,
+                        allowed_worker_ids,
+                        routing_constraints: routing_constraints.clone(),
+                        do_not_queue,
+                    },
                     admission,
                 })
                 .await?;
@@ -369,17 +354,20 @@ where
             router_config_override: request.router_config_override.as_ref(),
             update_states: !is_query_only,
             return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_context,
-            expected_output_tokens,
-            affinity_target: None,
-            pinned_worker: Some(pinned_worker),
-            allowed_worker_ids,
-            routing_constraints,
+            routing_options: RoutingOptions {
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_context,
+                expected_output_tokens,
+                affinity_target: None,
+                pinned_worker: Some(pinned_worker),
+                allowed_worker_ids,
+                routing_constraints,
+                do_not_queue,
+            },
             admission,
         })
         .await

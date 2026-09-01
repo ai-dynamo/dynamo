@@ -52,6 +52,7 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    pub do_not_queue: bool,
     pub expected_output_tokens: Option<u32>,
     pub policy_class: Option<String>,
     pub cache_namespace: Option<String>,
@@ -295,6 +296,7 @@ impl Selector {
             session_id: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
+            do_not_queue: req.do_not_queue,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
@@ -304,7 +306,7 @@ impl Selector {
             .service
             .select_and_reserve_with_policy_class(core_req, req.policy_class)
             .await
-            .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
+            .context("select_and_reserve failed")?;
         Ok(SelectResponse {
             reservation_id,
             worker_id: resp.worker_id,
@@ -509,6 +511,7 @@ models:
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
+            do_not_queue: false,
             expected_output_tokens: None,
             policy_class: None,
             cache_namespace: None,

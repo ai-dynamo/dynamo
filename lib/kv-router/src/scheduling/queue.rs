@@ -50,7 +50,7 @@ struct ClassQueueCounters {
     pending_cached_tokens: AtomicUsize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClassQueueStats {
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
@@ -973,7 +973,7 @@ impl<
 
     fn handle_enqueue(
         &mut self,
-        request: SchedulingRequest,
+        mut request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
@@ -1000,6 +1000,28 @@ impl<
         });
         if !should_queue {
             return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+        }
+
+        if request.do_not_queue {
+            let policy_class = class.name.to_owned();
+            let queue_stats = self
+                .class_counters
+                .get(class_index)
+                .map(|counters| ClassQueueStats {
+                    pending_count: counters.pending_count.load(AtomicOrdering::Relaxed),
+                    pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
+                    pending_cached_tokens: counters
+                        .pending_cached_tokens
+                        .load(AtomicOrdering::Relaxed),
+                })
+                .unwrap_or_default();
+            request.respond(Err(KvSchedulerError::DoNotQueue {
+                policy_class,
+                pending_count: queue_stats.pending_count,
+                pending_isl_tokens: queue_stats.pending_isl_tokens,
+                pending_cached_tokens: queue_stats.pending_cached_tokens,
+            }));
+            return false;
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -2239,6 +2261,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
@@ -3042,6 +3065,101 @@ policy_classes:
                 pending_cached_tokens: 0,
             })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn do_not_queue_rejects_busy_requests_without_enqueueing() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The default request still queues while the worker is busy.
+        let (queued, mut queued_response) = make_request("queued", 32);
+        assert!(!queued.do_not_queue);
+        queue.enqueue(queued).await;
+        assert!(matches!(
+            queued_response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let expected_stats = ClassQueueStats {
+            pending_count: 1,
+            pending_isl_tokens: 32,
+            pending_cached_tokens: 0,
+        };
+        assert_eq!(queue.class_queue_stats(0), Some(expected_stats));
+
+        let (mut request, response) = make_request("do-not-queue", 64);
+        request.do_not_queue = true;
+        queue.enqueue(request).await;
+
+        let error = response.await.unwrap().unwrap_err();
+        let KvSchedulerError::DoNotQueue {
+            policy_class,
+            pending_count,
+            pending_isl_tokens,
+            pending_cached_tokens,
+        } = error
+        else {
+            panic!("expected do-not-queue rejection, got {error:?}");
+        };
+        assert_eq!(policy_class, "capped");
+        assert_eq!(pending_count, 1);
+        assert_eq!(pending_isl_tokens, 32);
+        assert_eq!(pending_cached_tokens, 0);
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), 32);
+        assert_eq!(queue.class_queue_stats(0), Some(expected_stats));
+
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+        assert!(queued_response.await.unwrap().is_ok());
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
+        assert_eq!(queue.class_queue_stats(0), Some(ClassQueueStats::default()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn do_not_queue_allows_immediate_admission() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (mut request, response) = make_request("do-not-queue", 64);
+        request.do_not_queue = true;
+        queue.enqueue(request).await;
+
+        assert!(response.await.unwrap().is_ok());
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
