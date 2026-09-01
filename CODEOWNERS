@@ -360,7 +360,6 @@
 /deploy/operator/config/prometheus/                                                                     @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/discovery/                                                                    @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller/                                                                   @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/internal/workerpool/                                                                   @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/modelendpoint/                                                                @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/namespace_scope/                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller_common/                                                            @ai-dynamo/dynamo-operator-codeowners
@@ -601,13 +600,11 @@
 /recipes/**/tokenspeed/**                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
 /recipes/**/vllm/**/*xpu*                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /deploy/operator/Dockerfile                                                                             @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
-/deploy/snapshot/Dockerfile                                                                             @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/llm/src/request_trace/                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/servers/sglang/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /lib/runtime/src/logging.rs                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /benchmarks/multimodal/image/                                                                           @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/multimodal/sweep/                                                                           @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
-/deploy/helm/charts/snapshot/                                                                           @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/llm/src/fpm_publisher.rs                                                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/test_vllm_xpu.py                                                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /.github/codeowners/areas.yaml                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-process-codeowners
@@ -666,6 +663,7 @@
 /container/deps/requirements.planner.txt                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
 /container/templates/frontend.Dockerfile                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /deploy/inference-gateway/epp/Dockerfile                                                                @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/deploy/operator/internal/checkpointjob/                                                                @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/observability/                                                                @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/runtime/src/system_status_server.rs                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /recipes/nemotron-3-nano-omni/Dockerfile                                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
@@ -785,9 +783,7 @@
 /components/src/dynamo/planner/connectors/clients/kubernetes_api.py                                     @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/sglang/request_handlers/embedding/metrics.py                                     @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/tests/test_sglang_gms_memory_saver.py                                     @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
-/components/src/dynamo/trtllm/tests/test_trtllm_gms_delay_commit.py                                     @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/common/tests/multimodal/test_routing_utils.py                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
-/components/src/dynamo/trtllm/tests/test_trtllm_gms_mpi_bootstrap.py                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile                                   @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/common/backend/tests/test_multimodal_helpers.py                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/tests/test_trtllm_sleep_wake_handlers.py                                  @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners

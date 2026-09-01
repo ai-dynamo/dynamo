@@ -416,7 +416,6 @@ areas:
   - deploy/operator/internal/secret/
   - deploy/operator/internal/secrets/
   - deploy/operator/internal/webhook/
-  - deploy/operator/internal/workerpool/
   - deploy/operator/samples/
   - deploy/operator/test/
   - deploy/operator/test/e2e/
@@ -960,14 +959,6 @@ shared:
   owners:
   - backend-trtllm
   - gms
-- glob: components/src/dynamo/trtllm/tests/test_trtllm_gms_mpi_bootstrap.py
-  owners:
-  - backend-trtllm
-  - gms
-- glob: components/src/dynamo/trtllm/tests/test_trtllm_gms_delay_commit.py
-  owners:
-  - backend-trtllm
-  - gms
 - glob: components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py
   owners:
   - backend-trtllm
@@ -1138,6 +1129,10 @@ shared:
   owners:
   - gms
   - operator
+- glob: deploy/operator/internal/checkpointjob/
+  owners:
+  - gms
+  - operator
 - glob: deploy/operator/internal/gms/
   owners:
   - gms
@@ -1145,10 +1140,6 @@ shared:
 - glob: deploy/operator/internal/observability/
   owners:
   - observability
-  - operator
-- glob: deploy/helm/charts/snapshot/
-  owners:
-  - gms
   - operator
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
@@ -1196,11 +1187,6 @@ shared:
   owners:
   - operator
   - ops
-- glob: deploy/snapshot/Dockerfile
-  owners:
-  - gms
-  - ops
-  - operator
 - glob: deploy/inference-gateway/ext-proc/Dockerfile
   owners:
   - epp
