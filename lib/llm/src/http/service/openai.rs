@@ -2370,10 +2370,12 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request =
-        context_from_headers_with_input_trigger(request, request_id.clone(), &headers, |request| {
-            Some(classify_chat_request(request))
-        })?;
+    let mut request = context_from_headers_with_input_trigger(
+        request,
+        request_id.clone(),
+        &headers,
+        |request| Some(classify_chat_request(request)),
+    )?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -3571,6 +3573,7 @@ async fn chat_completions(
             }
         };
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let monitor_error_signal = error_signal.clone();
         let stream = monitor_for_disconnects_with_activity_and_error_signal(
             stream,
             ctx.clone(),
@@ -3586,7 +3589,12 @@ async fn chat_completions(
             while let Some(item) = inner.next().await {
                 yield item;
             }
-            if ctx.is_killed() {
+            if let Some(error_type) = monitor_error_signal.error_type() {
+                terminal.finish(match error_type {
+                    ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
+                    _ => TerminalOutcome::Failed,
+                });
+            } else if ctx.is_killed() {
                 terminal.finish(TerminalOutcome::Cancelled);
             } else {
                 terminal.finish(TerminalOutcome::Success);

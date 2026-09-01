@@ -111,6 +111,10 @@ impl StreamErrorSignal {
         self.0.failure.get().map(|failure| &failure.error_type)
     }
 
+    pub(super) fn error_type(&self) -> Option<ErrorType> {
+        self.get().cloned()
+    }
+
     pub(super) fn mark_terminal_event_emitted(&self) {
         self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
@@ -607,6 +611,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 None => (fallback_error_type, fallback_error_body),
                             };
                             inflight_guard.mark_error(error_type.clone());
+                            if let Some(error_signal) = &error_signal {
+                                error_signal.set(error_type.clone());
+                            }
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
@@ -701,6 +708,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                 } => {
                     inflight_guard.mark_error(ErrorType::ResponseTimeout);
+                    if let Some(error_signal) = &error_signal {
+                        error_signal.set(ErrorType::ResponseTimeout);
+                    }
                     stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),
