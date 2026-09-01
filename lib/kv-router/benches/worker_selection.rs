@@ -197,6 +197,7 @@ fn fixture_with_preferred_taints(
         strict_priority: 0,
         policy_class: None,
         session_context: None,
+        do_not_queue: false,
         overlap: OverlapSignals {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,

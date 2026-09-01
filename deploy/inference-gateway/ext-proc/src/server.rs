@@ -945,6 +945,10 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
+            PickError::Backpressure(msg) => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: msg,
+            },
             PickError::TokenizationFailed(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
@@ -975,6 +979,18 @@ impl ExtProcError {
 
     fn into_processing_response(self) -> ProcessingResponse {
         envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+
+    #[test]
+    fn backpressure_is_returned_as_http_429() {
+        let error = ExtProcError::from_pick_error(PickError::Backpressure("busy".to_string()));
+        assert_eq!(error.status_code, StatusCode::TooManyRequests);
+        assert_eq!(error.message, "busy");
     }
 }
 

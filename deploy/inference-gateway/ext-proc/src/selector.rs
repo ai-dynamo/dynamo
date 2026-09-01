@@ -52,6 +52,7 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    pub do_not_queue: bool,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -295,12 +296,13 @@ impl Selector {
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
             routing_constraints: RoutingConstraints::default(),
+            do_not_queue: req.do_not_queue,
         };
         let resp = self
             .service
             .select_and_reserve(core_req)
             .await
-            .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
+            .context("select_and_reserve failed")?;
         Ok(SelectResponse {
             reservation_id,
             worker_id: resp.worker_id,
@@ -477,6 +479,7 @@ models:
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
+            do_not_queue: false,
         }
     }
 

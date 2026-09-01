@@ -134,6 +134,8 @@ pub enum PickError {
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
+    #[error("backpressure: {0}")]
+    Backpressure(String),
     /// Malformed client input (unparseable body, or a 4xx from the tokenizer) → 400.
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),

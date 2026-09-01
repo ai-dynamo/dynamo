@@ -88,6 +88,10 @@ pub struct RoutingHints {
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
+
+    /// Do not wait in the router pending queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub do_not_queue: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

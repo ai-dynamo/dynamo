@@ -310,6 +310,7 @@ impl PendingRequest {
                 .session_id
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
+            do_not_queue: false,
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,

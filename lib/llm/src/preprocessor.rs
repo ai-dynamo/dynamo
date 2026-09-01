@@ -2573,6 +2573,7 @@ impl OpenAIPreprocessor {
                     .routing_constraints
                     .clone()
                     .map(routing_constraints_to_kv),
+                do_not_queue: nvext.do_not_queue,
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() || cache_namespace.is_some() {
