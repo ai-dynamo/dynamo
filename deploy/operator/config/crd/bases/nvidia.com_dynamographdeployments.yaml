@@ -1034,13 +1034,13 @@ spec:
                             type: boolean
                           identity:
                             description: |-
-                              Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                              Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
                               Use CheckpointRef to restore an existing PodSnapshot.
                             properties:
                               backendFramework:
                                 description: |-
-                                  BackendFramework is the runtime framework (vllm, sglang, trtllm)
-                                  Deprecated: legacy spec.identity only.
+                                  BackendFramework is the runtime framework (vllm, sglang, trtllm).
+                                  Deprecated: legacy identity only.
                                 enum:
                                   - vllm
                                   - sglang
@@ -1049,38 +1049,37 @@ spec:
                               dtype:
                                 description: |-
                                   Dtype is the data type (fp16, bf16, fp8, etc.).
-                                  Deprecated: legacy spec.identity only.
+                                  Deprecated: legacy identity only.
                                 type: string
                               dynamoVersion:
                                 description: |-
-                                  DynamoVersion is the Dynamo platform version (optional).
-                                  Deprecated: legacy spec.identity only.
+                                  DynamoVersion is the Dynamo platform version.
+                                  Deprecated: legacy identity only.
                                 type: string
                               extraParameters:
                                 additionalProperties:
                                   type: string
                                 description: |-
-                                  ExtraParameters are additional parameters that affect the checkpoint hash.
-                                  Use for any framework-specific or custom parameters not covered above.
-                                  Deprecated: legacy spec.identity only.
+                                  ExtraParameters contains additional legacy identity parameters.
+                                  Deprecated: legacy identity only.
                                 type: object
                               maxModelLen:
                                 description: |-
                                   MaxModelLen is the maximum sequence length.
-                                  Deprecated: legacy spec.identity only.
+                                  Deprecated: legacy identity only.
                                 format: int32
                                 minimum: 1
                                 type: integer
                               model:
                                 description: |-
-                                  Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
-                                  Deprecated: legacy spec.identity only.
+                                  Model is the model identifier (e.g., "meta-llama/Llama-3-70B").
+                                  Deprecated: legacy identity only.
                                 type: string
                               pipelineParallelSize:
                                 default: 1
                                 description: |-
                                   PipelineParallelSize is the pipeline parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: automatic capture derives compatibility from the worker.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1088,7 +1087,7 @@ spec:
                                 default: 1
                                 description: |-
                                   TensorParallelSize is the tensor parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: automatic capture derives compatibility from the worker.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1097,11 +1096,11 @@ spec:
                               - model
                             type: object
                           job:
-                            description: Job customizes the DGD-managed checkpoint Job.
+                            description: Job customizes the DGD-managed SnapshotJob capture Pod.
                             properties:
                               gmsClientContainers:
                                 description: |-
-                                  GMSClientContainers lists checkpoint Job containers that should receive
+                                  GMSClientContainers lists SnapshotJob capture Pod containers that should receive
                                   GMS client wiring. Requires gpuMemoryService on the service.
                                 items:
                                   maxLength: 63
@@ -1112,7 +1111,7 @@ spec:
                                 x-kubernetes-list-type: set
                               podTemplate:
                                 description: |-
-                                  PodTemplate customizes the checkpoint Job pod. The operator starts from the
+                                  PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the
                                   selected workload container and merges this template so users can add helper
                                   containers such as gms-saver.
                                 type: object
@@ -11260,9 +11259,8 @@ spec:
                             description: |-
                               ExtraClientContainers lists additional user-declared containers that should
                               be wired as GMS clients in pods rendered from the enclosing spec.
-                              DGD/DCD services apply this to service pods. Auto-created checkpoints
-                              apply checkpoint job clients before creating the SnapshotJob; manual
-                              DynamoCheckpoint users must provide an already-prepared pod template.
+                              DGD/DCD services apply this to service pods. Automatic captures apply
+                              SnapshotJob capture Pod clients before creating the SnapshotJob.
                               Every name must match a user-declared container in the enclosing pod spec.
                             items:
                               maxLength: 63
@@ -12607,7 +12605,7 @@ spec:
                                 type: boolean
                               identity:
                                 description: |-
-                                  Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                                  Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
                                   Use checkpointRef to restore an existing PodSnapshot.
                                 properties:
                                   backendFramework:
@@ -12670,11 +12668,11 @@ spec:
                                   - model
                                 type: object
                               job:
-                                description: job customizes the DGD-managed checkpoint Job.
+                                description: job customizes the DGD-managed SnapshotJob capture Pod.
                                 properties:
                                   gmsClientContainers:
                                     description: |-
-                                      gmsClientContainers lists checkpoint Job containers that should receive
+                                      gmsClientContainers lists SnapshotJob capture Pod containers that should receive
                                       GMS client wiring. Requires gpuMemoryService on the component.
                                     items:
                                       maxLength: 63
@@ -12685,7 +12683,7 @@ spec:
                                     x-kubernetes-list-type: set
                                   podTemplate:
                                     description: |-
-                                      podTemplate customizes the checkpoint Job pod. The operator starts from the
+                                      podTemplate customizes the SnapshotJob capture Pod. The operator starts from the
                                       selected workload container and merges this template so users can add helper
                                       containers such as gms-saver.
                                     type: object
@@ -12766,8 +12764,8 @@ spec:
                               extraClientContainers:
                                 description: |-
                                   extraClientContainers lists additional user-declared containers that should
-                                  be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                                  under checkpoint.job.gmsClientContainers. Every name must match a container
+                                  be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
+                                  declared under checkpoint.job.gmsClientContainers. Every name must match a container
                                   in the enclosing component's podTemplate.spec.containers.
                                 items:
                                   maxLength: 63

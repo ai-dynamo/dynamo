@@ -101,20 +101,14 @@ const (
 	// CheckpointRestoreCandidateAnnotation marks owner pod templates whose Pods
 	// should be restore-shaped by the operator's pod-create mutating webhook
 	// once the referenced checkpoint is Ready. This intentionally does not use
-	// the snapshot CheckpointIDLabel because the snapshot-agent watches that
-	// label to start a restore.
+	// Snapshot's public restore annotation because the node agent watches that
+	// annotation to start a restore.
 	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
 	// CheckpointNameAnnotation stores the candidate checkpoint resource name.
 	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
-	// CheckpointSourceKindAnnotation identifies the API kind that owns a
-	// checkpoint reference carried by an intermediate DCD.
-	CheckpointSourceKindAnnotation = "nvidia.com/dynamo-checkpoint-source-kind"
-	CheckpointSourceKindLegacy     = "DynamoCheckpoint"
-	CheckpointSourceKindSnapshot   = "PodSnapshot"
-
 	// Snapshot compatibility metadata is written by Dynamo capture producers
 	// and validated before a PodSnapshot may restore a Dynamo worker.
 	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
@@ -132,13 +126,6 @@ const (
 	// RestoreCandidateTargetContainersAnnotation carries Dynamo's rendered
 	// restore destinations from workload reconciliation to Pod admission.
 	RestoreCandidateTargetContainersAnnotation = "nvidia.com/dynamo-restore-target-containers"
-
-	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
-	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the
-	// stable lookup/search key for a checkpoint's PodSnapshot (decoupled from the object name, which
-	// may change in a future naming scheme) and lets the source-pod watch map a Job pod back to its
-	// DynamoCheckpoint. It follows the nvidia.com/snapshot-* label convention.
-	SnapshotOwnerLabel = "nvidia.com/snapshot-owner"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -268,7 +255,6 @@ const (
 	// Used consistently across controllers, webhooks, and metrics
 	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
-	ResourceTypeDynamoCheckpoint                    = "DynamoCheckpoint"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"

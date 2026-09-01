@@ -250,13 +250,11 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
-  - podsnapshots
   verbs:
   - create
   - delete
@@ -268,7 +266,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
@@ -278,7 +275,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
@@ -288,6 +284,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
 - apiGroups:
   - nvidia.com
   resources:

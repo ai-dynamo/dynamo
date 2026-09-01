@@ -293,8 +293,8 @@ type GPUMemoryServiceSpec struct {
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
 	// extraClientContainers lists additional user-declared containers that should
-	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
-	// under checkpoint.job.gmsClientContainers. Every name must match a container
+	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
+	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
 	// in the enclosing component's podTemplate.spec.containers.
 	// +optional
 	// +listType=set
@@ -370,8 +370,8 @@ const (
 type CheckpointStartupPolicy string
 
 const (
-	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
-	// job runs in the background, and only pods created after the checkpoint is
+	// CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob
+	// capture runs in the background, and only pods created after the checkpoint is
 	// Ready are restore-shaped by the pod-create mutating webhook.
 	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
 	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
@@ -434,7 +434,7 @@ type ComponentCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
+	// Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
 	// Use checkpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
@@ -447,14 +447,14 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// job customizes the DGD-managed checkpoint Job.
+	// job customizes the DGD-managed SnapshotJob capture Pod.
 	// +optional
 	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
 }
 
-// ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+// ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 type ComponentCheckpointJobConfig struct {
-	// gmsClientContainers lists checkpoint Job containers that should receive
+	// gmsClientContainers lists SnapshotJob capture Pod containers that should receive
 	// GMS client wiring. Requires gpuMemoryService on the component.
 	// +optional
 	// +listType=set
@@ -463,7 +463,7 @@ type ComponentCheckpointJobConfig struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
 
-	// podTemplate customizes the checkpoint Job pod. The operator starts from the
+	// podTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.
 	// +optional
@@ -475,7 +475,7 @@ type ComponentCheckpointJobConfig struct {
 
 // Deprecated: omit in DGD component checkpoint configs. Automatic capture
 // needs no replacement; use checkpointRef to restore a PodSnapshot.
-// Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+// Duplicated from v1alpha1 for conversion compatibility.
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.

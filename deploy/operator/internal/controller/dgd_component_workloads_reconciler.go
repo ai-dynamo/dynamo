@@ -204,15 +204,6 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	// Preserve the resolver's API-kind decision on the generated DCD so its
-	// controller never probes two resource kinds by the same reference name.
-	if dcd.Annotations == nil {
-		dcd.Annotations = map[string]string{}
-	}
-	if err := checkpoint.ApplyCheckpointSourceMetadata(dcd.Annotations, checkpointInfo); err != nil {
-		return err
-	}
-
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
 		return nil
@@ -222,16 +213,6 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		return nil
 	}
 
-	labels := dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if labels == nil {
-		if dcd.Spec.PodTemplate == nil {
-			dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
-		}
-		if dcd.Spec.PodTemplate.Labels == nil {
-			dcd.Spec.PodTemplate.Labels = map[string]string{}
-		}
-		labels = dcd.Spec.PodTemplate.Labels
-	}
 	annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if annotations == nil {
 		if dcd.Spec.PodTemplate == nil {
@@ -242,7 +223,7 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		}
 		annotations = dcd.Spec.PodTemplate.Annotations
 	}
-	return checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo)
+	return checkpoint.ApplyRestoreCandidateMetadata(annotations, checkpointInfo)
 }
 
 // preserveExistingDCDState carries forward server state that must not be
@@ -276,7 +257,6 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	if checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
 		checkpointInfo.AutomaticCapture &&
-		checkpointInfo.UsesPodSnapshot() &&
 		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!checkpointInfo.Ready {
 		if existing.Spec.Replicas == nil {

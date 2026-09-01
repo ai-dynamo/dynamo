@@ -53,8 +53,7 @@ func ResolvePodSnapshotForService(
 		return nil, fmt.Errorf("worker compatibility hash is required for native PodSnapshot restore")
 	}
 
-	// Read the referenced object without falling back to a legacy resource with
-	// the same name; the installed Dynamo release defines the API boundary.
+	// Read the referenced standalone Snapshot object directly.
 	snapshotName := strings.TrimSpace(*config.CheckpointRef)
 	snapshot := &snapshotv1alpha1.PodSnapshot{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: snapshotName}, snapshot); err != nil {
@@ -120,7 +119,6 @@ func ResolvePodSnapshotForService(
 	info := &CheckpointInfo{
 		Enabled:          true,
 		Exists:           true,
-		SourceKind:       SourceKindPodSnapshot,
 		GPUMemoryService: gmsSpec,
 		CheckpointName:   snapshot.Name,
 		Ready:            ready,

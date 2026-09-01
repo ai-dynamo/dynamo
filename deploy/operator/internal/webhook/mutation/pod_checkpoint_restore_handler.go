@@ -19,14 +19,12 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -38,20 +36,18 @@ const (
 )
 
 type PodCheckpointRestoreMutator struct {
-	client    ctrlclient.Client
 	apiReader ctrlclient.Reader
 	config    *configv1alpha1.OperatorConfiguration
 	scheme    *runtime.Scheme
 }
 
-// NewPodCheckpointRestoreMutator creates a mutator with cached legacy access
-// and direct API-server reads for native snapshot incarnation validation.
+// NewPodCheckpointRestoreMutator creates a mutator with direct API-server
+// reads for snapshot incarnation validation.
 func NewPodCheckpointRestoreMutator(
-	client ctrlclient.Client,
 	apiReader ctrlclient.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 ) *PodCheckpointRestoreMutator {
-	return &PodCheckpointRestoreMutator{client: client, apiReader: apiReader, config: config}
+	return &PodCheckpointRestoreMutator{apiReader: apiReader, config: config}
 }
 
 func (h *PodCheckpointRestoreMutator) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
@@ -75,9 +71,6 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	if excluded := internalwebhook.GetExcludedNamespaces(); excluded != nil && excluded.Contains(req.Namespace) {
 		return admission.Allowed("namespace excluded")
 	}
-	if h.client == nil {
-		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("checkpoint restore client is unavailable"))
-	}
 	if h.apiReader == nil {
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("checkpoint restore API reader is unavailable"))
 	}
@@ -98,54 +91,28 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 
 	isCandidate := pod.Annotations != nil &&
 		pod.Annotations[consts.CheckpointRestoreCandidateAnnotation] == consts.KubeLabelValueTrue
-	sourceKind := pod.Annotations[consts.CheckpointSourceKindAnnotation]
-	isLegacyShaped := pod.Labels != nil &&
-		(pod.Labels[snapshotprotocol.CheckpointIDLabel] != "" ||
-			pod.Labels[snapshotprotocol.CheckpointSourceLabel] != "")
-	if isLegacyShaped {
-		if isCandidate && sourceKind == consts.CheckpointSourceKindSnapshot {
-			return admission.Denied("native restore candidate conflicts with legacy checkpoint metadata")
-		}
-		return admission.Allowed("pod is already checkpoint-shaped")
-	}
 	if !isCandidate {
 		return admission.Allowed("pod is not a checkpoint restore candidate")
 	}
 	checkpointName := pod.Annotations[consts.CheckpointNameAnnotation]
 	if checkpointName == "" {
-		if sourceKind == consts.CheckpointSourceKindSnapshot {
-			return admission.Denied("native restore candidate has no PodSnapshot name")
-		}
-		return admission.Allowed("restore candidate has no checkpoint name")
+		return admission.Denied("restore candidate has no PodSnapshot name")
 	}
 	if pod.Labels == nil ||
 		pod.Labels[consts.KubeLabelDynamoComponent] == "" ||
 		pod.Labels[consts.KubeLabelDynamoNamespace] == "" ||
 		pod.Labels[consts.KubeLabelDynamoSelector] == "" {
-		if sourceKind == consts.CheckpointSourceKindSnapshot {
-			return admission.Denied("native restore candidate is not operator-stamped")
-		}
-		return admission.Allowed("restore candidate is not operator-stamped")
+		return admission.Denied("restore candidate is not operator-stamped")
 	}
 
-	// Native candidates are rebuilt from the public Snapshot contract and fail
-	// closed. Unmarked candidates remain legacy for in-flight automatic capture.
-	if sourceKind == consts.CheckpointSourceKindSnapshot {
-		shaped, err := h.buildNativeRestorePod(ctx, pod, podNamespace)
-		if err != nil {
-			logger.Error(err, "native restore candidate rejected",
-				"namespace", podNamespace, "pod", pod.Name, "snapshot", checkpointName)
-			return admission.Denied(err.Error())
-		}
-		pod = shaped
-	} else if sourceKind != "" && sourceKind != consts.CheckpointSourceKindLegacy {
-		return admission.Denied(fmt.Sprintf("unsupported checkpoint source kind %q", sourceKind))
-	} else {
-		response, stop := h.mutateLegacyRestoreCandidate(ctx, pod, podNamespace, checkpointName)
-		if stop {
-			return response
-		}
+	// Candidates are rebuilt from the public Snapshot contract and fail closed.
+	shaped, err := h.buildNativeRestorePod(ctx, pod, podNamespace)
+	if err != nil {
+		logger.Error(err, "restore candidate rejected",
+			"namespace", podNamespace, "pod", pod.Name, "snapshot", checkpointName)
+		return admission.Denied(err.Error())
 	}
+	pod = shaped
 
 	mutated, err := json.Marshal(pod)
 	if err != nil {
@@ -154,80 +121,6 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		return admission.Allowed("checkpoint restore mutation unavailable")
 	}
 	return admission.PatchResponseFromRaw(original, mutated)
-}
-
-func (h *PodCheckpointRestoreMutator) mutateLegacyRestoreCandidate(
-	ctx context.Context,
-	pod *corev1.Pod,
-	podNamespace string,
-	checkpointName string,
-) (admission.Response, bool) {
-	logger := log.FromContext(ctx).WithName(podCheckpointRestoreWebhookName)
-
-	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: podNamespace, Name: checkpointName}, ckpt); err != nil {
-		logger.V(1).Info("checkpoint restore candidate not mutated because checkpoint could not be read",
-			"namespace", podNamespace, "checkpoint", checkpointName, "error", err.Error())
-		return admission.Allowed("checkpoint not available"), true
-	}
-	if ckpt.Status.Phase != nvidiacomv1alpha1.DynamoCheckpointPhaseReady {
-		return admission.Allowed("checkpoint not ready"), true
-	}
-
-	checkpointID, err := checkpoint.CheckpointID(ckpt)
-	if err != nil {
-		logger.Error(err, "checkpoint restore candidate not mutated because checkpoint ID could not be resolved",
-			"namespace", podNamespace, "checkpoint", checkpointName)
-		return admission.Allowed("checkpoint ID unavailable"), true
-	}
-	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
-	if err != nil {
-		logger.Error(err, "checkpoint restore candidate not mutated because target containers annotation is invalid",
-			"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
-		return admission.Allowed("checkpoint target containers invalid"), true
-	}
-	artifactVersion := snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
-	if artifactVersion == "" {
-		artifactVersion = snapshotprotocol.DefaultCheckpointArtifactVersion
-	}
-
-	info := &checkpoint.CheckpointInfo{
-		Enabled:                 true,
-		Exists:                  true,
-		GPUMemoryService:        ckpt.Spec.GPUMemoryService,
-		Hash:                    checkpointID,
-		ArtifactVersion:         artifactVersion,
-		CheckpointName:          ckpt.Name,
-		Ready:                   true,
-		StartupPolicy:           nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
-		RestoreTargetContainers: targets,
-	}
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(pod.Labels, pod.Annotations, info, h.config.Checkpoint.Storage); err != nil {
-		logger.Error(err, "checkpoint restore candidate not mutated because restore metadata could not be applied",
-			"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
-		return admission.Allowed("checkpoint restore metadata unavailable"), true
-	}
-	if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-		ctx,
-		h.client,
-		podNamespace,
-		&pod.Spec,
-		info,
-		h.config.Checkpoint.Storage,
-		h.config.Checkpoint.EffectiveSeccompProfile(),
-	); err != nil {
-		logger.Error(err, "checkpoint restore candidate not mutated because restore pod spec injection failed",
-			"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
-		return admission.Allowed("checkpoint restore injection unavailable"), true
-	}
-
-	return admission.Response{}, false
 }
 
 func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
@@ -365,7 +258,7 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 				Value: "1",
 			})
 		}
-		snapshotprotocol.EnsureRestoreStartupProbe(container)
+		checkpoint.EnsureRestoreStartupProbe(container)
 	}
 	return nil
 }
@@ -419,11 +312,9 @@ func removeRestoreCandidateAnnotations(annotations map[string]string) {
 	delete(annotations, consts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, consts.CheckpointNameAnnotation)
 	delete(annotations, consts.CheckpointStartupPolicyAnnotation)
-	delete(annotations, consts.CheckpointSourceKindAnnotation)
 	delete(annotations, consts.SnapshotCandidateUIDAnnotation)
 	delete(annotations, consts.SnapshotCandidateContentAnnotation)
 	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
 	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
-	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 }

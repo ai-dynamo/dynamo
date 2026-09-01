@@ -60,8 +60,8 @@ type dgdCheckpointsResult struct {
 // Snapshot finishes the asynchronous deletion of managed SnapshotJobs.
 var errAutomaticSnapshotCleanupPending = errors.New("automatic snapshot cleanup pending")
 
-// dgdCheckpointsReconciler owns checkpoint discovery, automatic checkpoint
-// resources, checkpoint job rendering, and their resolved program inputs.
+// dgdCheckpointsReconciler owns checkpoint discovery, automatic SnapshotJobs,
+// capture Pod rendering, and their resolved program inputs.
 type dgdCheckpointsReconciler struct {
 	dgdResourceSyncer
 	config                *configv1alpha1.OperatorConfiguration
@@ -130,7 +130,6 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			info = &checkpoint.CheckpointInfo{
 				Enabled:          true,
 				AutomaticCapture: true,
-				SourceKind:       checkpoint.SourceKindPodSnapshot,
 				StartupPolicy:    startupPolicy,
 			}
 		} else if !hasCheckpointRef {
@@ -165,7 +164,8 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
 
-		// Apply client settings through the compatibility path for the resolved artifact kind.
+		// Apply client settings from the resolved artifact, or from the service
+		// while an automatic capture is still pending.
 		serviceGMS := dynamo.GetGPUMemoryService(component)
 		if info.NativeSnapshot != nil {
 			err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
@@ -215,14 +215,6 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 	}
-	if (backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop) &&
-		checkpointConfig.Identity != nil &&
-		checkpointConfig.Identity.BackendFramework != "" {
-		backendFramework, err = dynamo.ParseBackendFramework(checkpointConfig.Identity.BackendFramework)
-		if err != nil {
-			return nil, fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
-		}
-	}
 	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
 		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
 	}
@@ -234,7 +226,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		backendFramework,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+		return nil, fmt.Errorf("failed to build SnapshotJob pod template: %w", err)
 	}
 	if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dynamoDeployment.Annotations) &&
 		podTemplate.Spec.ServiceAccountName == "" {
@@ -540,7 +532,6 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	info := &checkpoint.CheckpointInfo{
 		Enabled:          true,
 		AutomaticCapture: true,
-		SourceKind:       checkpoint.SourceKindPodSnapshot,
 		CheckpointName:   snapshotJob.Status.PodSnapshotName,
 		StartupPolicy:    startupPolicy,
 	}
@@ -615,7 +606,7 @@ func findPodTemplateContainer(podTemplate *corev1.PodTemplateSpec, containerName
 			return &podTemplate.Spec.Containers[i], nil
 		}
 	}
-	return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", containerName)
+	return nil, fmt.Errorf("SnapshotJob pod template: pod spec has no container named %q", containerName)
 }
 
 func (r *dgdCheckpointsReconciler) syncCheckpointGMSResourceClaimTemplate(
@@ -678,9 +669,9 @@ func prepareCheckpointGMSPodTemplate(
 	switch gmsSpec.Mode {
 	case "", nvidiacomv1alpha1.GMSModeIntraPod:
 	case nvidiacomv1alpha1.GMSModeInterPod:
-		return fmt.Errorf("gpuMemoryService checkpoint jobs for mode %q are not implemented", gmsSpec.Mode)
+		return fmt.Errorf("gpuMemoryService SnapshotJobs for mode %q are not implemented", gmsSpec.Mode)
 	default:
-		return fmt.Errorf("gpuMemoryService checkpoint job has unsupported mode %q", gmsSpec.Mode)
+		return fmt.Errorf("gpuMemoryService SnapshotJob has unsupported mode %q", gmsSpec.Mode)
 	}
 
 	targetContainer, err := findPodTemplateContainer(podTemplate, targetContainerName)
@@ -742,32 +733,6 @@ func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
 		return err
 	}
 
-	// Legacy automatic checkpoints remain eligible for cleanup until their API
-	// and controller are removed in the hard-cutover change.
-	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
-	if err := r.List(
-		ctx,
-		checkpoints,
-		client.InNamespace(dgd.Namespace),
-		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
-	); err != nil {
-		return err
-	}
-	for i := range checkpoints.Items {
-		ckpt := &checkpoints.Items[i]
-		if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
-			continue
-		}
-		if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
-			if err := r.detachRetainedAutoCheckpoint(ctx, ckpt); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := r.Delete(ctx, ckpt); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
-		}
-	}
 	return nil
 }
 
@@ -886,25 +851,6 @@ func (r *dgdCheckpointsReconciler) detachRetainedAutomaticSnapshotJob(
 	return nil
 }
 
-func (r *dgdCheckpointsReconciler) detachRetainedAutoCheckpoint(
-	ctx context.Context,
-	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
-) error {
-	updated := ckpt.DeepCopy()
-	updated.OwnerReferences = nil
-	if updated.Labels != nil {
-		delete(updated.Labels, consts.KubeLabelDynamoGraphDeploymentName)
-	}
-	if equality.Semantic.DeepEqual(ckpt.OwnerReferences, updated.OwnerReferences) &&
-		equality.Semantic.DeepEqual(ckpt.Labels, updated.Labels) {
-		return nil
-	}
-	if err := r.Patch(ctx, updated, client.MergeFrom(ckpt)); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("detach retained auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
-	}
-	return nil
-}
-
 func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) (string, error) {
 	if dgd == nil {
 		return "", nil
@@ -920,7 +866,7 @@ func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	return activeWorkerHashForDCDGeneration(dgd, desired), nil
 }
 
-// buildCheckpointJobPodTemplate builds a checkpoint job template from the same
+// buildCheckpointJobPodTemplate builds a SnapshotJob capture Pod template from the same
 // component defaults used for regular DGD pods, then keeps only the target
 // container plus any checkpoint-job sidecars supplied by the user.
 //
@@ -953,7 +899,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		r.dockerSecretRetriever,
 		dynamoDeployment,
 		dynamo.RoleCheckpoint, // Use checkpoint role
-		1,                     // Single node for checkpoint job
+		1,                     // Single node for SnapshotJob capture
 		r.config,
 		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
 		componentName,
@@ -966,7 +912,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	}
 
 	if podSpec == nil {
-		return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint job pod spec is nil")
+		return corev1.PodTemplateSpec{}, fmt.Errorf("SnapshotJob pod spec is nil")
 	}
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name == targetContainerName {
@@ -981,10 +927,10 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
-	// Seed the checkpoint job pod-template metadata from the component's own
+	// Seed the SnapshotJob pod-template metadata from the component's own
 	// PodTemplate.ObjectMeta so workload-level labels/annotations (e.g. Istio
 	// sidecar opt-out or policy annotations) are not silently dropped on the
-	// auto-created checkpoint job. GeneratePodSpecForComponent only returns the
+	// auto-created SnapshotJob. GeneratePodSpecForComponent only returns the
 	// PodSpec, so the template metadata must be carried over explicitly here.
 	// Precedence: component pod-template metadata < controller-managed labels <
 	// explicit checkpoint.job.podTemplate overrides (applied below).
@@ -1034,7 +980,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 			overlay.InitContainers = nil
 			overlay.Volumes = nil
 			if err := mergo.Merge(&podTemplate.Spec, *overlay, mergo.WithOverride); err != nil {
-				return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job pod spec: %w", err)
+				return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob pod spec: %w", err)
 			}
 
 			podTemplate.Spec.Volumes = mergeNamedSlice(podTemplate.Spec.Volumes, volumes, func(v corev1.Volume) string { return v.Name })
@@ -1059,7 +1005,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				baseEnv := existing.Env
 				user := override.DeepCopy()
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
-					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job container %q: %w", override.Name, err)
+					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
 				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
 				if user.LivenessProbe != nil {

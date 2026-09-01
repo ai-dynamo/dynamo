@@ -26,7 +26,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -662,7 +661,6 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				Enabled:          true,
 				Exists:           true,
 				AutomaticCapture: true,
-				SourceKind:       checkpoint.SourceKindPodSnapshot,
 				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "",
@@ -675,7 +673,6 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:       true,
 				Exists:        true,
-				SourceKind:    checkpoint.SourceKindPodSnapshot,
 				StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "",
@@ -687,7 +684,6 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:          true,
 				AutomaticCapture: true,
-				SourceKind:       checkpoint.SourceKindPodSnapshot,
 				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "vllm",
@@ -751,34 +747,7 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 		wantReplicas      int32
 		wantStartupPolicy nvidiacomv1beta1.CheckpointStartupPolicy
 		wantCandidate     bool
-		wantSourceKind    string
 	}{
-		{
-			name:     "immediate stamps stable restore candidate metadata",
-			replicas: 2,
-			podTemplate: &corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						snapshotprotocol.CheckpointIDLabel: "stale",
-					},
-					Annotations: map[string]string{
-						snapshotprotocol.CheckpointArtifactVersionAnnotation: "stale",
-					},
-				},
-			},
-			checkpointInfo: checkpoint.CheckpointInfo{
-				Enabled:        true,
-				Exists:         true,
-				Ready:          true,
-				Hash:           "checkpoint-id",
-				CheckpointName: "checkpoint-name",
-				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
-			},
-			wantReplicas:      2,
-			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
-			wantCandidate:     true,
-			wantSourceKind:    commonconsts.CheckpointSourceKindLegacy,
-		},
 		{
 			name:     "wait for checkpoint gates replicas until ready",
 			replicas: 3,
@@ -791,16 +760,14 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			},
 			wantReplicas:      0,
 			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
-			wantSourceKind:    commonconsts.CheckpointSourceKindLegacy,
 		},
 		{
-			name:     "native reference preserves its API kind and pinned candidate metadata",
+			name:     "ready snapshot stamps pinned candidate metadata",
 			replicas: 2,
 			checkpointInfo: checkpoint.CheckpointInfo{
 				Enabled:        true,
 				Exists:         true,
 				Ready:          true,
-				SourceKind:     checkpoint.SourceKindPodSnapshot,
 				CheckpointName: "snapshot-name",
 				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
 				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
@@ -813,7 +780,6 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			wantReplicas:      2,
 			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
 			wantCandidate:     true,
-			wantSourceKind:    commonconsts.CheckpointSourceKindSnapshot,
 		},
 	}
 
@@ -841,22 +807,14 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
 			assert.Equal(t, tt.wantStartupPolicy, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
 			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
-			assert.Equal(t, tt.wantSourceKind, dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation])
 			if !tt.wantCandidate {
 				return
 			}
 
 			t.Log("Verify immediate startup publishes stable restore-candidate metadata")
-			assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
 			assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 			assert.Equal(t, tt.checkpointInfo.CheckpointName, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
-			if tt.wantSourceKind == commonconsts.CheckpointSourceKindSnapshot {
-				assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
-				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, snapshotprotocol.TargetContainersAnnotation)
-			} else {
-				assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
-				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
-			}
+			assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 		})
 	}
 }
@@ -891,7 +849,6 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 			}
 			info := &checkpoint.CheckpointInfo{
 				Enabled:       true,
-				SourceKind:    checkpoint.SourceKindPodSnapshot,
 				StartupPolicy: tt.startupPolicy,
 			}
 
@@ -899,10 +856,8 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 			reconciler := &componentWorkloadsReconciler{}
 			require.NoError(t, reconciler.applyCheckpointStartupPolicy(dcd, info))
 
-			t.Log("Verify native routing is retained without publishing a restore candidate")
+			t.Log("Verify no restore candidate is published before a PodSnapshot exists")
 			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
-			assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot,
-				dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation])
 			if dcd.Spec.Experimental != nil && dcd.Spec.Experimental.Checkpoint != nil {
 				assert.Nil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
 			}
