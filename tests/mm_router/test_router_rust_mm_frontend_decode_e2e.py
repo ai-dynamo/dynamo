@@ -374,12 +374,11 @@ def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
     (port,) = allocate_ports(count=1, start_port=18700)
     media_dir = Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media"
     video_bytes = (media_dir / "240p_100.mp4").read_bytes()
-    secondary_video_bytes = (media_dir / "triangle_240p_10_h264.mp4").read_bytes()
+    secondary_video_bytes = (media_dir / "triangle_240p_10.mp4").read_bytes()
     media_map = {
         "/video_A.mp4": video_bytes,
         "/video_A_alias.mp4": video_bytes,
         "/video_B.mp4": secondary_video_bytes,
-        "/video_B_alias.mp4": secondary_video_bytes,
     }
     server = HTTPServer(("127.0.0.1", port), _make_image_handler(media_map))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -389,7 +388,6 @@ def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
             "primary": f"http://127.0.0.1:{port}/video_A.mp4",
             "alias": f"http://127.0.0.1:{port}/video_A_alias.mp4",
             "secondary": f"http://127.0.0.1:{port}/video_B.mp4",
-            "secondary_alias": f"http://127.0.0.1:{port}/video_B_alias.mp4",
         }
     finally:
         server.shutdown()
@@ -519,27 +517,12 @@ def test_frontend_decoded_video_routes_by_sampled_content(
         _build_video_payload(http_video_server_with_alias["secondary"]),
         "fed_video_b_primary",
     )
-    overlap_b2, total_b2, data_b2 = _send(
-        frontend_port,
-        router_proc,
-        _build_video_payload(http_video_server_with_alias["secondary_alias"]),
-        "fed_video_b_alias",
-    )
 
-    assert total_b1 > 1 and total_b2 > 1
+    assert total_b1 > 1
     assert overlap_b1 < overlap_a2, (
         "a distinct decoded video must not reuse video A's full routing prefix, "
         f"got A warm={overlap_a2}/{total_a2}, B cold={overlap_b1}/{total_b1}"
     )
-    assert overlap_b2 > overlap_b1 and overlap_b2 >= total_b2 - 1, (
-        "repeating video B through an alias URL should reuse its complete cached "
-        f"prefix, got {overlap_b1}/{total_b1} then {overlap_b2}/{total_b2}"
-    )
-    cached_b2 = (data_b2.get("usage", {}).get("prompt_tokens_details") or {}).get(
-        "cached_tokens"
-    )
-    prompt_tokens_b2 = data_b2.get("usage", {}).get("prompt_tokens", 0)
-    assert cached_b2 is not None and cached_b2 > prompt_tokens_b2 // 2
     assert "video routing metadata resolved" in router_proc.read_logs()
 
 

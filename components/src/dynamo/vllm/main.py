@@ -545,7 +545,6 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
 
 
 def _resolve_video_token_id(vllm_config: VllmConfig) -> Optional[int]:
-    """Model video placeholder token normalized in vLLM KV events."""
     hf_config = vllm_config.model_config.hf_config
     for field in ("video_token_id", "video_token_index"):
         token_id = getattr(hf_config, field, None)

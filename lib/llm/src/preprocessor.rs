@@ -992,9 +992,18 @@ fn apply_tracked_mm_replacements(
         routing_tokens.push(bos);
     }
 
-    let target_matches_at = |replacement: &TrackedMmRoutingReplacement, token_index: usize| {
-        token_ids.get(token_index..token_index.saturating_add(replacement.target_tokens.len()))
-            == Some(replacement.target_tokens.as_slice())
+    // Placeholder targets are model/modality contracts, so many media objects
+    // normally share the same target. Deduplicate them once to keep the prompt
+    // scan proportional to the number of modalities rather than media objects.
+    let mut distinct_targets: Vec<&[TokenIdType]> = Vec::new();
+    for replacement in replacements {
+        let target = replacement.target_tokens.as_slice();
+        if !distinct_targets.contains(&target) {
+            distinct_targets.push(target);
+        }
+    }
+    let target_matches_at = |target: &[TokenIdType], token_index: usize| {
+        token_ids.get(token_index..token_index.saturating_add(target.len())) == Some(target)
     };
 
     let mut spans = Vec::with_capacity(replacements.len());
@@ -1002,7 +1011,7 @@ fn apply_tracked_mm_replacements(
     let mut token_index = 0usize;
     while token_index < token_ids.len() {
         if let Some(replacement) = replacements.get(replacement_index)
-            && target_matches_at(replacement, token_index)
+            && target_matches_at(&replacement.target_tokens, token_index)
         {
             let start = worker_tokens.len();
             worker_tokens.extend_from_slice(&replacement.worker_tokens);
@@ -1014,9 +1023,9 @@ fn apply_tracked_mm_replacements(
         }
 
         anyhow::ensure!(
-            !replacements
+            !distinct_targets
                 .iter()
-                .any(|replacement| target_matches_at(replacement, token_index)),
+                .any(|target| target_matches_at(target, token_index)),
             "multimodal placeholders do not match request order"
         );
         worker_tokens.push(token_ids[token_index]);
@@ -3706,6 +3715,22 @@ impl OpenAIPreprocessor {
                     MmRoutingEntry::Video { .. } => unreachable!("all entries checked as images"),
                 })
                 .collect();
+            let image_token_id = image_token_id.expect("image token requirement checked above");
+            let placeholder_count = token_ids
+                .iter()
+                .filter(|&&token_id| token_id == image_token_id)
+                .count();
+            if placeholder_count != images.len() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    placeholder_count,
+                    image_count = images.len(),
+                    routing_image_token_id = image_token_id,
+                    "placeholder token count in tokenized prompt does not match image count; \
+                     skipping MM routing info (text-prefix routing only)"
+                );
+                return None;
+            }
             let n_tokens: Vec<usize> = images
                 .iter()
                 .map(|image| counter.count_tokens(image.width, image.height))
@@ -3715,7 +3740,7 @@ impl OpenAIPreprocessor {
                 self.routing_image_prompt_layout
                     .expect("image prompt layout requirement checked above"),
                 self.routing_prepend_bos,
-                image_token_id.expect("image token requirement checked above"),
+                image_token_id,
                 &images,
                 &n_tokens,
                 token_ids,
@@ -11308,6 +11333,33 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_replacements_reject_misordered_missing_and_extra_targets() {
+        let replacement = |mm_hash, target| TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![target],
+            worker_tokens: vec![target],
+            routing_tokens: vec![target],
+        };
+        let replacements = [replacement(41, 10), replacement(42, 20)];
+
+        for token_ids in [&[20, 10][..], &[10][..], &[10, 20, 20][..]] {
+            assert!(
+                apply_tracked_mm_replacements(
+                    None,
+                    &replacements,
+                    token_ids,
+                    4,
+                    Some(10),
+                    Some(20),
+                )
+                .is_err(),
+                "invalid target sequence {token_ids:?} must fail closed"
+            );
+        }
     }
 
     #[cfg(feature = "mm-routing")]
