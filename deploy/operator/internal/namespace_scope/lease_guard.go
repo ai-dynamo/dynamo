@@ -39,7 +39,7 @@ func unwindBudget(renewInterval, cleanupTimeout time.Duration) time.Duration {
 	return budget
 }
 
-// Deprecated: Guard holds the namespace scope marker lease while it runs work, releasing the
+// Guard holds the namespace scope marker lease while it runs work, releasing the
 // lease before returning. ctx and work must be non-nil.
 func (lm *LeaseManager) Guard(ctx context.Context, cleanupTimeout time.Duration, work func(context.Context) error) error {
 	if err := lm.Start(ctx); err != nil {
