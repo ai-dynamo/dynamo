@@ -263,7 +263,7 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 
 	// Dynamo chooses restore destinations from its rendered topology while the
 	// immutable PodSnapshot spec remains authoritative for the captured source.
-	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
+	targets, err := checkpoint.RestoreCandidateTargetContainers(pod.Annotations)
 	if err != nil {
 		return nil, fmt.Errorf("resolve native restore destinations: %w", err)
 	}
@@ -385,12 +385,30 @@ func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 	arguments := make([]string, 0, len(container.Command)+len(container.Args))
 	arguments = append(arguments, container.Command...)
 	arguments = append(arguments, container.Args...)
-	if len(arguments) < 3 || arguments[1] != "-m" {
+
+	// Skip only operand-free interpreter options so -m remains unambiguous.
+	moduleFlagIndex := 1
+	for moduleFlagIndex < len(arguments) && isOperandFreePythonInterpreterFlag(arguments[moduleFlagIndex]) {
+		moduleFlagIndex++
+	}
+	if moduleFlagIndex+1 >= len(arguments) || arguments[moduleFlagIndex] != "-m" {
 		return false
 	}
 
-	switch arguments[2] {
+	switch arguments[moduleFlagIndex+1] {
 	case "dynamo.vllm", "dynamo.sglang", "dynamo.trtllm":
+		return true
+	default:
+		return false
+	}
+}
+
+// isOperandFreePythonInterpreterFlag recognizes options that cannot consume
+// the following -m argument. Operand-taking and execution-selector options
+// remain fail-closed.
+func isOperandFreePythonInterpreterFlag(argument string) bool {
+	switch argument {
+	case "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-vv", "-x":
 		return true
 	default:
 		return false
@@ -406,5 +424,6 @@ func removeRestoreCandidateAnnotations(annotations map[string]string) {
 	delete(annotations, consts.SnapshotCandidateContentAnnotation)
 	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
+	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
 	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 }

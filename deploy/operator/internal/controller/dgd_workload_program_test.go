@@ -730,7 +730,13 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
 			assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 			assert.Equal(t, tt.checkpointInfo.CheckpointName, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
-			assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
+			if tt.wantSourceKind == commonconsts.CheckpointSourceKindSnapshot {
+				assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
+				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, snapshotprotocol.TargetContainersAnnotation)
+			} else {
+				assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
+				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
+			}
 		})
 	}
 }

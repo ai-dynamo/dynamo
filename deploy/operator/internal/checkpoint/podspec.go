@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -81,6 +82,7 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
 		delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
 		delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
+		delete(annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
 	}
 	if !enabled {
 		return nil
@@ -118,6 +120,7 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
+	delete(annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
 	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
 		return nil
@@ -131,25 +134,52 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
 	if checkpointInfo.NativeSnapshot == nil {
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
+		annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	} else {
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
 		annotations[commonconsts.SnapshotCandidateUIDAnnotation] = string(checkpointInfo.NativeSnapshot.UID)
 		annotations[commonconsts.SnapshotCandidateContentAnnotation] = checkpointInfo.NativeSnapshot.BoundContentName
 		annotations[commonconsts.SnapshotCandidateGMSModeAnnotation] = checkpointInfo.NativeSnapshot.GMSMode
 		annotations[commonconsts.SnapshotCandidateVersionAnnotation] = checkpointInfo.NativeSnapshot.CompatibilityVersion
+		annotations[commonconsts.RestoreCandidateTargetContainersAnnotation] = strings.Join(targets, ",")
 	}
 	startupPolicy := checkpointInfo.StartupPolicy
 	if startupPolicy == "" {
 		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 	}
 	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
-	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	return nil
+}
+
+// RestoreCandidateTargetContainers reads Dynamo's candidate-only restore destinations.
+func RestoreCandidateTargetContainers(annotations map[string]string) ([]string, error) {
+	raw, ok := annotations[commonconsts.RestoreCandidateTargetContainersAnnotation]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("missing required %s annotation", commonconsts.RestoreCandidateTargetContainersAnnotation)
+	}
+
+	// Normalize the comma-separated list while rejecting ambiguous destinations.
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	targets := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("empty container name in %s=%q", commonconsts.RestoreCandidateTargetContainersAnnotation, raw)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("duplicate container name %q in %s=%q", name, commonconsts.RestoreCandidateTargetContainersAnnotation, raw)
+		}
+		seen[name] = struct{}{}
+		targets = append(targets, name)
+	}
+	return targets, nil
 }
 
 // ApplyCheckpointSourceMetadata records the resolved checkpoint API kind on
 // intermediate DCD metadata. This avoids name-based probing while native
-// explicit restore and legacy automatic capture coexist during the MR train.
+// explicit restore and legacy automatic capture coexist. A nil checkpointInfo
+// clears source-kind metadata.
 func ApplyCheckpointSourceMetadata(annotations map[string]string, checkpointInfo *CheckpointInfo) error {
 	if annotations == nil {
 		return fmt.Errorf("checkpoint source annotations map is required")

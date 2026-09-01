@@ -315,14 +315,14 @@ type ScalingAdapter struct {
 
 // Deprecated: use checkpoint.enabled instead.
 // enabled=true without checkpointRef creates a DGD-managed automatic
-// checkpoint; checkpointRef restores the named checkpoint.
+// checkpoint; checkpointRef restores the named PodSnapshot.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
 	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// Deprecated: use checkpointRef to restore an existing checkpoint.
+	// Deprecated: use checkpointRef to restore an existing PodSnapshot.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
@@ -350,22 +350,24 @@ const (
 	// CRs and artifacts when the owning DGD is deleted.
 	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
 	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
-	// and artifacts after the owning DGD is deleted. Users can reference the
-	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	// and artifacts after the owning DGD is deleted. Retained automatic
+	// checkpoints are not valid checkpointRef targets.
 	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
 )
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 type ServiceCheckpointConfig struct {
-	// Enabled indicates whether checkpointing is enabled for this service
+	// Enabled indicates whether checkpointing is enabled for this service. When
+	// true, omit CheckpointRef for a DGD-managed automatic checkpoint or set
+	// CheckpointRef to restore a PodSnapshot in the same namespace.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
 	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
-	// named checkpoint.
+	// named PodSnapshot.
 	// +optional
 	Mode CheckpointMode `json:"mode,omitempty"`
 
@@ -381,18 +383,19 @@ type ServiceCheckpointConfig struct {
 
 	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
 	// artifact are deleted or retained when the owning DGD is deleted.
-	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
-	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+	// CheckpointRef references an existing PodSnapshot in the same namespace by
+	// metadata.name. If specified, this service's Identity is ignored and the
+	// referenced PodSnapshot is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
 	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
-	// Use CheckpointRef to restore an existing checkpoint.
+	// Use CheckpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 

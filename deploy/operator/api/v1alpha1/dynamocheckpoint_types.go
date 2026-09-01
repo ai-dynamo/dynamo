@@ -43,9 +43,8 @@ const (
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
-// Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-// requires spec.identity; omit DGD-managed identity and use checkpointRef for
-// explicit restores.
+// Deprecated: legacy identity metadata. The DynamoCheckpoint API still
+// requires spec.identity; DGD-managed automatic capture synthesizes it.
 type DynamoCheckpointIdentity struct {
 	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
 	// Deprecated: legacy spec.identity only.
@@ -138,8 +137,8 @@ type DynamoCheckpointJobConfig struct {
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 type DynamoCheckpointSpec struct {
-	// Deprecated: required by v1alpha1 for standalone checkpoints. Auto
-	// checkpoints synthesize it; checkpointRef restores use the referenced CR.
+	// Deprecated: required by the legacy DynamoCheckpoint API. DGD-managed
+	// automatic capture synthesizes it; native explicit restore uses PodSnapshot.
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
 

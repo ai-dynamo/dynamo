@@ -1889,6 +1889,8 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot, podTemplateSpec.Annotations[commonconsts.CheckpointSourceKindAnnotation])
 		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
 		assert.Equal(t, "content-a", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateContentAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
+		assert.NotContains(t, podTemplateSpec.Annotations, snapshotprotocol.TargetContainersAnnotation)
 		assert.Empty(t, podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel])
 	})
 
@@ -1913,6 +1915,8 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		assert.Equal(t, commonconsts.KubeLabelValueTrue, podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot, podTemplateSpec.Annotations[commonconsts.CheckpointSourceKindAnnotation])
 		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
+		assert.NotContains(t, podTemplateSpec.Annotations, snapshotprotocol.TargetContainersAnnotation)
 		assert.Empty(t, podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel])
 	})
 

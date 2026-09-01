@@ -41,6 +41,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName:       "graph",
 				consts.KubeLabelDynamoComponent:                 "prefill",
+				consts.KubeLabelDynamoNamespace:                 "inference-graph",
 				consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
 				consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
 				consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
@@ -110,7 +111,13 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	})
 
 	t.Run("restore Pod replacement", func(t *testing.T) {
-		assert.True(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
+		t.Log("Build a projected Dynamo Pod carrying standalone Snapshot restore state")
+		nativeRestorePod := pod.DeepCopy()
+		delete(nativeRestorePod.Labels, snapshotprotocol.RestoreTargetLabel)
+		nativeRestorePod.Annotations[podcontract.RestoreFromAnnotation] = "snapshot-a"
+
+		t.Log("Verify restore replacement observes the projected terminal outcome")
+		assert.True(t, restorePodReplacementPredicate().Create(event.CreateEvent{Object: nativeRestorePod}))
 	})
 
 	t.Run("checkpoint and snapshot", func(t *testing.T) {

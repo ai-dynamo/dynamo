@@ -757,8 +757,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	})
 }
 
-// --- ResolveLegacyCheckpointForService tests ---
-
 func TestResolveLegacyCheckpointForService(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
@@ -973,7 +971,7 @@ func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
 }
 
 func TestApplyRestoreCandidateMetadata(t *testing.T) {
-	t.Run("ready checkpoint stamps candidate metadata without restore labels", func(t *testing.T) {
+	t.Run("legacy checkpoint stamps legacy target metadata", func(t *testing.T) {
 		labels := map[string]string{
 			snapshotprotocol.CheckpointIDLabel: "stale",
 		}
@@ -998,6 +996,29 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
 		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])
 		assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
+		assert.NotContains(t, annotations, consts.RestoreCandidateTargetContainersAnnotation)
+	})
+
+	t.Run("native snapshot stamps Dynamo-owned target metadata", func(t *testing.T) {
+		t.Log("Given a standalone PodSnapshot restore resolved to two destinations")
+		labels := map[string]string{}
+		annotations := map[string]string{
+			snapshotprotocol.TargetContainersAnnotation: "stale-legacy-target",
+		}
+
+		t.Log("When native restore candidate metadata is rendered")
+		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
+			Enabled:                 true,
+			Exists:                  true,
+			CheckpointName:          "worker-snapshot",
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+			NativeSnapshot:          &ResolvedPodSnapshot{},
+		})
+		require.NoError(t, err)
+
+		t.Log("Then only Dynamo's candidate target annotation carries the destinations")
+		assert.Equal(t, "engine-0,engine-1", annotations[consts.RestoreCandidateTargetContainersAnnotation])
+		assert.NotContains(t, annotations, snapshotprotocol.TargetContainersAnnotation)
 	})
 
 	t.Run("disabled clears stale candidate metadata", func(t *testing.T) {
@@ -1005,10 +1026,11 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 			snapshotprotocol.CheckpointIDLabel: "stale",
 		}
 		annotations := map[string]string{
-			consts.CheckpointRestoreCandidateAnnotation: consts.KubeLabelValueTrue,
-			consts.CheckpointNameAnnotation:             "stale",
-			consts.CheckpointStartupPolicyAnnotation:    string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate),
-			snapshotprotocol.TargetContainersAnnotation: consts.MainContainerName,
+			consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,
+			consts.CheckpointNameAnnotation:                   "stale",
+			consts.CheckpointStartupPolicyAnnotation:          string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate),
+			consts.RestoreCandidateTargetContainersAnnotation: consts.MainContainerName,
+			snapshotprotocol.TargetContainersAnnotation:       consts.MainContainerName,
 		}
 
 		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
@@ -1018,8 +1040,56 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 		assert.NotContains(t, annotations, consts.CheckpointRestoreCandidateAnnotation)
 		assert.NotContains(t, annotations, consts.CheckpointNameAnnotation)
 		assert.NotContains(t, annotations, consts.CheckpointStartupPolicyAnnotation)
+		assert.NotContains(t, annotations, consts.RestoreCandidateTargetContainersAnnotation)
 		assert.NotContains(t, annotations, snapshotprotocol.TargetContainersAnnotation)
 	})
+}
+
+func TestRestoreCandidateTargetContainers(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        []string
+		wantErr     string
+	}{
+		{
+			name: "normalizes destinations",
+			annotations: map[string]string{
+				consts.RestoreCandidateTargetContainersAnnotation: " engine-0,engine-1 ",
+			},
+			want: []string{"engine-0", "engine-1"},
+		},
+		{name: "requires candidate annotation", annotations: map[string]string{}, wantErr: "missing required"},
+		{
+			name: "rejects empty destination",
+			annotations: map[string]string{
+				consts.RestoreCandidateTargetContainersAnnotation: "engine-0,,engine-1",
+			},
+			wantErr: "empty container name",
+		},
+		{
+			name: "rejects duplicate destination",
+			annotations: map[string]string{
+				consts.RestoreCandidateTargetContainersAnnotation: "engine-0,engine-0",
+			},
+			wantErr: "duplicate container name",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Parse the Dynamo-owned native restore destination handoff")
+			got, err := RestoreCandidateTargetContainers(test.annotations)
+
+			t.Log("Verify the destination list or its validation failure")
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
 }
 
 // findContainer is a test helper that locates a container by name across both

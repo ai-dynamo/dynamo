@@ -300,8 +300,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 	sourceKind := dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation]
 
-	// Direct checkpointRef values are native. The explicit legacy marker is
-	// reserved for automatic DGD capture until the SnapshotJob MR replaces it.
+	// Direct references are native; the explicit legacy marker is reserved for automatic DGD capture.
 	var (
 		info *checkpoint.CheckpointInfo
 		err  error
