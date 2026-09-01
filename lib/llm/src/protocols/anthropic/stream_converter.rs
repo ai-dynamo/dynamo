@@ -386,7 +386,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
@@ -693,7 +693,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse

@@ -681,6 +681,13 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
 /// bare literals are ambiguous by construction and fall through to the comma scan.
 fn ends_on_a_finished_value(trimmed: &str) -> bool {
     let tail = trimmed.trim_end();
+    // Whitespace cannot occur inside a JSON number or literal. Let the normal
+    // parser decide whether the value before it is valid; this also covers
+    // complete `true`, `false`, and `null` values.
+    if tail.len() != trimmed.len() {
+        return true;
+    }
+
     // A closing quote must not itself be escaped, or the string is still open.
     if let Some(before_quote) = tail.strip_suffix('"') {
         let backslashes = before_quote
@@ -690,7 +697,11 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
             .count();
         return backslashes % 2 == 0;
     }
-    tail.ends_with('}') || tail.ends_with(']')
+    tail.ends_with('}')
+        || tail.ends_with(']')
+        || tail.ends_with("true")
+        || tail.ends_with("false")
+        || tail.ends_with("null")
 }
 
 /// Convert a completed chat completion response into an Anthropic Messages response.
@@ -719,7 +730,7 @@ pub fn chat_completion_to_anthropic_response(
             dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
             dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
             dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
             dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
@@ -2478,6 +2489,21 @@ mod truncated_tool_call_tests {
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &str,
     ) -> serde_json::Value {
+        converted_tool_use_response(finish_reason, arguments)
+            .content
+            .into_iter()
+            .find_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .expect("expected a tool_use block")
+    }
+
+    #[allow(deprecated)]
+    fn converted_tool_use_response(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &str,
+    ) -> AnthropicMessageResponse {
         let chat_resp = NvCreateChatCompletionResponse {
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
@@ -2514,15 +2540,7 @@ mod truncated_tool_call_tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
-        match response
-            .content
-            .into_iter()
-            .find(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. }))
-        {
-            Some(AnthropicResponseContentBlock::ToolUse { input, .. }) => input,
-            other => panic!("expected a tool_use block, got: {other:?}"),
-        }
+        chat_completion_to_anthropic_response(chat_resp, "test-model", None)
     }
 
     /// Pins the WIRING, not the helper. The eight helper tests below all call
@@ -2557,6 +2575,15 @@ mod truncated_tool_call_tests {
                 "{reason:?} claims the call completed, so partial arguments must not be emitted"
             );
         }
+    }
+
+    #[test]
+    fn the_conversion_maps_content_filter_to_refusal() {
+        let response = converted_tool_use_response(
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            r#"{"label": "blocked"}"#,
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
     }
 
     /// Valid arguments are untouched no matter which reason ended generation.
@@ -2660,6 +2687,27 @@ mod truncated_tool_call_tests {
         // An escaped quote at the very end leaves the string open; it is not a finished
         // value and must not be closed either.
         assert_eq!(recover_completed_members(r#"{"a": "he said \""#), None);
+    }
+
+    #[test]
+    fn scalar_values_followed_by_whitespace_are_recovered() {
+        for (key, value, expected) in [
+            ("count", r#"2 "#, serde_json::json!(2)),
+            ("enabled", "true ", serde_json::json!(true)),
+            ("enabled", "false ", serde_json::json!(false)),
+            ("value", "null ", serde_json::Value::Null),
+        ] {
+            let input = format!(r#"{{"{key}": {value}"#);
+            let recovered = recover_completed_members(&input).expect("scalar value completed");
+            assert_eq!(recovered.get(key), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn an_undelimited_scalar_is_not_recovered() {
+        assert_eq!(recover_completed_members(r#"{"count": 2"#), None);
+        assert_eq!(recover_completed_members(r#"{"enabled": tru"#), None);
+        assert_eq!(recover_completed_members(r#"{"value": nul"#), None);
     }
 
     #[test]
