@@ -63,7 +63,6 @@ def http_json(
         except Exception:
             return e.code, {}
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        # DNS, connection, TLS, timeout, or response-decoding failure.
         # Status 0 flows through the api_ok=False paths so the reference is
         # reported as unverified rather than failing the workflow.
         return 0, {}
