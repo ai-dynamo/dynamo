@@ -27,16 +27,6 @@ const (
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;delete
 
-// Manager handles dynamic RBAC creation for cluster-wide operator installations.
-type Manager struct {
-	client client.Client
-}
-
-// NewManager creates a new RBAC manager.
-func NewManager(client client.Client) *Manager {
-	return &Manager{client: client}
-}
-
 // needsRoleRefRecreate checks if the RoleRef has changed, which requires
 // deleting and recreating the RoleBinding since RoleRef is immutable.
 func needsRoleRefRecreate(existing *rbacv1.RoleBinding, clusterRoleName string) bool {
@@ -65,11 +55,13 @@ func needsSubjectUpdate(existing *rbacv1.RoleBinding, serviceAccountName, target
 //
 // Parameters:
 //   - ctx: context
+//   - kubeClient: Kubernetes client used to read and write RBAC resources
 //   - targetNamespace: namespace to create RBAC resources in
 //   - serviceAccountName: name of the ServiceAccount to create
 //   - clusterRoleName: name of the ClusterRole to bind to (must exist)
-func (m *Manager) EnsureServiceAccountWithRBAC(
+func EnsureServiceAccountWithRBAC(
 	ctx context.Context,
+	kubeClient client.Client,
 	targetNamespace string,
 	serviceAccountName string,
 	clusterRoleName string,
@@ -88,7 +80,7 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 
 	// Verify ClusterRole exists before creating RoleBinding
 	clusterRole := &rbacv1.ClusterRole{}
-	if err := m.client.Get(ctx, client.ObjectKey{Name: clusterRoleName}, clusterRole); err != nil {
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: clusterRoleName}, clusterRole); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("cluster role %q does not exist: ensure it is created by Helm before deploying components", clusterRoleName)
 		}
@@ -109,12 +101,12 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 		},
 	}
 
-	if err := m.client.Get(ctx, client.ObjectKeyFromObject(sa), sa); err != nil {
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(sa), sa); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to get service account: %w", err)
 		}
 		// ServiceAccount doesn't exist, create it
-		if err := m.client.Create(ctx, sa); err != nil {
+		if err := kubeClient.Create(ctx, sa); err != nil {
 			return fmt.Errorf("failed to create service account: %w", err)
 		}
 		logger.V(1).Info("ServiceAccount created",
@@ -149,12 +141,12 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 	}
 
 	existingRB := &rbacv1.RoleBinding{}
-	if err := m.client.Get(ctx, client.ObjectKeyFromObject(rb), existingRB); err != nil {
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(rb), existingRB); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to get role binding: %w", err)
 		}
 		// RoleBinding doesn't exist, create it
-		if err := m.client.Create(ctx, rb); err != nil {
+		if err := kubeClient.Create(ctx, rb); err != nil {
 			return fmt.Errorf("failed to create role binding: %w", err)
 		}
 		logger.V(1).Info("RoleBinding created",
@@ -168,7 +160,7 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 
 		if needsRecreate {
 			// RoleRef is immutable, so delete and recreate the RoleBinding
-			if err := m.client.Delete(ctx, existingRB); err != nil {
+			if err := kubeClient.Delete(ctx, existingRB); err != nil {
 				return fmt.Errorf("failed to delete role binding for recreation: %w", err)
 			}
 			logger.V(1).Info("RoleBinding deleted for recreation due to RoleRef change",
@@ -178,7 +170,7 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 				"namespace", targetNamespace)
 
 			// Recreate with new RoleRef
-			if err := m.client.Create(ctx, rb); err != nil {
+			if err := kubeClient.Create(ctx, rb); err != nil {
 				return fmt.Errorf("failed to recreate role binding: %w", err)
 			}
 			logger.V(1).Info("RoleBinding recreated",
@@ -188,7 +180,7 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 		} else if needsUpdate {
 			// Only Subjects changed, can update in-place
 			existingRB.Subjects = rb.Subjects
-			if err := m.client.Update(ctx, existingRB); err != nil {
+			if err := kubeClient.Update(ctx, existingRB); err != nil {
 				return fmt.Errorf("failed to update role binding: %w", err)
 			}
 			logger.V(1).Info("RoleBinding subjects updated",
