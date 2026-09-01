@@ -7,6 +7,12 @@ venv. The dynamo runtime + kvbm wheels ship these via cargo-cyclonedx (run
 through maturin); NIXL ships its own once we wire cargo-cyclonedx into the
 NIXL block in wheel_builder.
 
+Rust binaries that ship in an image without going through a wheel are invisible
+to that wheel scan, so their SBOMs are passed in explicitly via `extra_sboms`
+(the `--rust-sbom` flag). The frontend image's `/epp` is the case this exists
+for: it is built from the ext-proc crate in a separate image and copied in, so
+nothing under site-packages describes it.
+
 First-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`, `nvidia-*`) are KEPT in
 the output — auditors and customers should see every crate that's actually
 in the binary, including ours.
@@ -144,15 +150,27 @@ def _find_wheel_sboms(search_paths: list[Path]) -> list[Path]:
 
 
 def collect_components(
-    search_paths: list[Path], licenses_dir: Path | None = None
+    search_paths: list[Path],
+    licenses_dir: Path | None = None,
+    extra_sboms: list[Path] | None = None,
 ) -> list[Component]:
     """Read every wheel SBOM under each search path and return deduped Components.
 
     SBOMs that are not Rust-flavored (e.g. NIXL's auditwheel.cdx.json which
     enumerates RPM libs, not Rust crates) are skipped: we only consume
     components whose purl starts with `pkg:cargo/`.
+
+    `extra_sboms` are read in addition to the discovered wheel SBOMs, for
+    binaries that ship outside any wheel. A missing path is fatal rather than
+    skipped: it was named explicitly, so its absence means the build wiring
+    broke and the alternative is silently under-attributing a shipped binary.
     """
     sboms = _find_wheel_sboms(search_paths)
+    for extra in extra_sboms or []:
+        if not extra.is_file():
+            raise FileNotFoundError(f"--rust-sbom path does not exist: {extra}")
+        if extra not in sboms:
+            sboms.append(extra)
     if not sboms:
         logger.warning("No wheel SBOMs found under %s", search_paths)
         return []
@@ -197,6 +215,7 @@ def generate(
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
     licenses_dir: Path | None = None,
+    extra_sboms: list[Path] | None = None,
 ) -> list[Component]:
     """Read SBOMs from each search path, write NOTICES-Rust.txt + rust-deps.csv.
 
@@ -204,10 +223,12 @@ def generate(
     filtered before writing — used to drop baseline-owned components.
     When `licenses_dir` is provided, each crate's real LICENSE text is read
     from it in preference to the canonical SPDX text.
+    When `extra_sboms` is provided, those SBOMs are read alongside the ones
+    discovered under `search_paths`.
     """
     from . import common
 
-    components = collect_components(search_paths, licenses_dir)
+    components = collect_components(search_paths, licenses_dir, extra_sboms)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

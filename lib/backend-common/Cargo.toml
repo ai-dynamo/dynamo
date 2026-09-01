@@ -25,6 +25,7 @@ integration = ["dynamo-runtime/integration"]
 dynamo-runtime = { workspace = true }
 dynamo-llm = { path = "../llm", version = "1.5.0", default-features = false }
 dynamo-protocols = { workspace = true }
+dynamo-rl = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

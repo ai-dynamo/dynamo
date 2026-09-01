@@ -132,16 +132,20 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         async def wait_for_restore(self):
             lifecycle_calls.append("pause")
             assert await self.pause_controller.pause(self.engine) is True
-            lifecycle_calls.append("resume")
-            assert await self.pause_controller.resume() is True
-            self.pause_controller.mark_resumed()
             return True
 
     def fake_create_runtime(discovery_backend, request_plane, event_plane):
         assert discovery_backend == "kubernetes"
         assert request_plane == "nats"
         assert event_plane is None
+        assert "resume" not in lifecycle_calls
         return created_runtime, object()
+
+    original_resume = snapshot_mod._NoOpSnapshotPauseController.resume
+
+    async def tracking_resume(self):
+        lifecycle_calls.append("resume")
+        return await original_resume(self)
 
     async def fake_refresh_restore_runtime_config(config, argv):
         assert config.namespace == "checkpoint-ns"
@@ -161,6 +165,9 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         fake_refresh_restore_runtime_config,
     )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", fake_create_runtime)
+    monkeypatch.setattr(
+        snapshot_mod._NoOpSnapshotPauseController, "resume", tracking_resume
+    )
 
     proxy = _SnapshotRuntimeProxy(
         snapshot_config=object(),
