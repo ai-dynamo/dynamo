@@ -1616,7 +1616,7 @@ spec:
 			Expect(k8sClient.Delete(ctx, originalDGDR)).Should(Succeed())
 			Eventually(func() bool {
 				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}))
-			}).Should(BeTrue())
+			}, timeout, interval).Should(BeTrue())
 
 			recreatedDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{

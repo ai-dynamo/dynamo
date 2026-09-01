@@ -1124,7 +1124,8 @@ func resolveGeneratedDGDIdentity(
 		liveDGD.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
 		return false, "it does not carry this request's tracking labels", nil
 	}
-	if liveDGD.Annotations[AnnotationDGDRUID] != string(dgdr.UID) {
+	// DGDs created before UID binding rely on the existing labels-and-spec contract.
+	if dgdUID, bound := liveDGD.Annotations[AnnotationDGDRUID]; bound && dgdUID != string(dgdr.UID) {
 		return false, "it is not bound to this request's UID", nil
 	}
 
