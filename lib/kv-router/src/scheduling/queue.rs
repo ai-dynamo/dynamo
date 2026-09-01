@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
@@ -58,6 +58,7 @@ pub struct ClassQueueStats {
 struct QueuedRequest {
     request: SchedulingRequest,
     attempt_tx: Option<oneshot::Sender<AttemptId>>,
+    lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
@@ -162,11 +163,86 @@ pub struct SchedulerBookingDescriptor {
     pub attempt_id: AttemptId,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum SchedulerCleanupTarget {
-    Admission { request_id: String },
+    AdmissionLifecycle(Arc<AdmissionLifecycleTransfer>),
     Booking(SchedulerBookingDescriptor),
     ExpiredBooking(SchedulerBookingDescriptor),
+}
+
+#[derive(Debug)]
+enum AdmissionLifecycleState {
+    Unarmed { request_id: String },
+    Pending { request_id: String },
+    Booking(SchedulerBookingDescriptor),
+    Disarmed,
+}
+
+#[derive(Debug)]
+struct AdmissionLifecycleTransfer {
+    state: Mutex<AdmissionLifecycleState>,
+}
+
+enum AdmissionLifecycleCleanup {
+    Pending { request_id: String },
+    Booking(SchedulerBookingDescriptor),
+}
+
+impl AdmissionLifecycleTransfer {
+    fn new(request_id: String) -> Self {
+        Self {
+            state: Mutex::new(AdmissionLifecycleState::Unarmed { request_id }),
+        }
+    }
+
+    fn arm_pending(&self) {
+        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        let AdmissionLifecycleState::Unarmed { request_id } = &*state else {
+            return;
+        };
+        *state = AdmissionLifecycleState::Pending {
+            request_id: request_id.clone(),
+        };
+    }
+
+    fn arm_booking(&self, booking: SchedulerBookingDescriptor) {
+        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        if matches!(
+            *state,
+            AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Pending { .. }
+        ) {
+            *state = AdmissionLifecycleState::Booking(booking);
+        }
+    }
+
+    fn disarm(&self) {
+        *self.state.lock().expect("admission lifecycle poisoned") =
+            AdmissionLifecycleState::Disarmed;
+    }
+
+    fn cleanup_target(&self) -> Option<AdmissionLifecycleCleanup> {
+        let mut state = self.state.lock().expect("admission lifecycle poisoned");
+        let cleanup = match &*state {
+            AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Disarmed => None,
+            AdmissionLifecycleState::Pending { request_id } => {
+                Some(AdmissionLifecycleCleanup::Pending {
+                    request_id: request_id.clone(),
+                })
+            }
+            AdmissionLifecycleState::Booking(booking) => {
+                Some(AdmissionLifecycleCleanup::Booking(booking.clone()))
+            }
+        };
+        *state = AdmissionLifecycleState::Disarmed;
+        cleanup
+    }
+
+    fn is_armed(&self) -> bool {
+        matches!(
+            *self.state.lock().expect("admission lifecycle poisoned"),
+            AdmissionLifecycleState::Pending { .. } | AdmissionLifecycleState::Booking(_)
+        )
+    }
 }
 
 struct AdmissionCleanupEntry {
@@ -289,34 +365,39 @@ impl SchedulerBookingCleanup {
 pub(crate) struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
-    request_id: Option<String>,
+    transfer: Option<Arc<AdmissionLifecycleTransfer>>,
 }
 
 impl std::fmt::Debug for RequestLifecycleLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RequestLifecycleLease")
-            .field("request_id", &self.request_id)
+            .field("transfer", &self.transfer)
             .finish_non_exhaustive()
     }
 }
 
 impl RequestLifecycleLease {
     pub(crate) fn disarm(&mut self) {
-        self.request_id = None;
+        if let Some(transfer) = self.transfer.take() {
+            transfer.disarm();
+        }
     }
 }
 
 impl Drop for RequestLifecycleLease {
     fn drop(&mut self) {
-        let Some(request_id) = self.request_id.take() else {
+        let Some(transfer) = self.transfer.take() else {
             return;
         };
+        if !transfer.is_armed() {
+            return;
+        }
         enqueue_cleanup_entry(
             &self.cleanup,
             &self.actor_tx,
             AdmissionCleanupEntry {
-                target: SchedulerCleanupTarget::Admission { request_id },
+                target: SchedulerCleanupTarget::AdmissionLifecycle(transfer),
                 response: None,
             },
         );
@@ -711,11 +792,13 @@ impl<
         if !self.queueing_enabled {
             return None;
         }
-        request_id?;
+        let request_id = request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
             actor_tx: self.admission_tx.clone(),
-            request_id: None,
+            transfer: Some(Arc::new(AdmissionLifecycleTransfer::new(
+                request_id.to_string(),
+            ))),
         }))
     }
 
@@ -883,19 +966,14 @@ impl<
                     request,
                     attempt_tx,
                     block_hashes,
-                    mut lease,
+                    lease,
                     ack_tx,
                 } => {
-                    let request_id = lease
+                    let lifecycle_transfer = lease
                         .as_ref()
-                        .and_then(|_| request.mode.tracked_request_id().map(str::to_owned));
-                    let (enqueue_ready, owns_lifecycle) =
-                        self.handle_enqueue(request, attempt_tx, block_hashes);
-                    if let Some(lease) = lease.as_mut()
-                        && owns_lifecycle
-                    {
-                        lease.request_id = request_id;
-                    }
+                        .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
+                    let enqueue_ready =
+                        self.handle_enqueue(request, attempt_tx, lifecycle_transfer, block_hashes);
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
                     let made_ready = enqueue_ready || cleanup_ready;
                     if made_ready {
@@ -905,6 +983,9 @@ impl<
                 }
                 AdmissionCommand::SelectWithoutAdmission { request, resp_tx } => {
                     let result = self.select_without_admission_inner(request, Instant::now());
+                    if drain_cleanup && self.drain_cleanup() {
+                        self.handle_update(None).await;
+                    }
                     let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
@@ -980,8 +1061,9 @@ impl<
         &mut self,
         request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
-    ) -> (bool, bool) {
+    ) -> bool {
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
@@ -1003,7 +1085,7 @@ impl<
             self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
         });
         if !should_queue {
-            return (false, self.admit_one(request, attempt_tx, decay_now));
+            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -1017,6 +1099,7 @@ impl<
         let queued = QueuedRequest {
             request,
             attempt_tx,
+            lifecycle_transfer: lifecycle_transfer.clone(),
             enqueue_at: decay_now,
             block_hashes,
         };
@@ -1033,13 +1116,16 @@ impl<
         ) {
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return (false, false);
+            return false;
+        }
+        if let Some(transfer) = lifecycle_transfer {
+            transfer.arm_pending();
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
-        (false, true)
+        false
     }
 
     fn should_queue(
@@ -1079,16 +1165,29 @@ impl<
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
             match cleanup.target {
-                SchedulerCleanupTarget::Admission { request_id } => {
-                    if self.slots.request_worker(&request_id).is_some() {
-                        if let Err(error) = self.slots.free(&request_id, Instant::now()) {
-                            tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
+                SchedulerCleanupTarget::AdmissionLifecycle(transfer) => {
+                    let result = match transfer.cleanup_target() {
+                        Some(AdmissionLifecycleCleanup::Pending { request_id }) => {
+                            unmanaged_request_ids.insert(request_id);
+                            Ok(())
                         }
-                        made_ready = true;
-                    }
-                    unmanaged_request_ids.insert(request_id);
+                        Some(AdmissionLifecycleCleanup::Booking(booking)) => self
+                            .slots
+                            .free_if_booking(
+                                &booking.request_id,
+                                booking.worker,
+                                booking.attempt_id,
+                                Instant::now(),
+                            )
+                            .map(|outcome| {
+                                made_ready |= outcome.is_applied();
+                            }),
+                        None => Ok(()),
+                    };
                     if let Some(response) = cleanup.response {
-                        let _ = response.send(Ok(()));
+                        let _ = response.send(result);
+                    } else if let Err(error) = result {
+                        tracing::error!(%error, "Failed to release scheduler admission lifecycle");
                     }
                 }
                 SchedulerCleanupTarget::Booking(booking) => {
@@ -1269,7 +1368,12 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, queued.attempt_tx, admit_now);
+            self.admit_one(
+                request,
+                queued.attempt_tx,
+                queued.lifecycle_transfer,
+                admit_now,
+            );
         }
     }
 
@@ -1370,6 +1474,7 @@ impl<
         &mut self,
         mut request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
     ) -> bool {
         let selected = match self.select_worker_for_request(&mut request, decay_now) {
@@ -1423,6 +1528,7 @@ impl<
         self.book_and_respond(
             request,
             attempt_tx,
+            lifecycle_transfer,
             sequence_request,
             response,
             non_max_overlap_selection,
@@ -1438,6 +1544,7 @@ impl<
         &self,
         mut request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         sequence_request: SequenceRequest,
         response: SchedulingResponse,
         non_max_overlap_selection: Option<NonMaxOverlapSelection>,
@@ -1463,6 +1570,13 @@ impl<
                 return false;
             }
         };
+        if let Some(transfer) = lifecycle_transfer {
+            transfer.arm_booking(SchedulerBookingDescriptor {
+                request_id: request_id.clone(),
+                worker,
+                attempt_id,
+            });
+        }
         if let Some(attempt_tx) = attempt_tx {
             let _ = attempt_tx.send(attempt_id);
         }
@@ -1649,6 +1763,23 @@ mod tests {
 
     type SchedulingResponseReceiver =
         tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
+
+    #[test]
+    fn admission_lifecycle_cleanup_upgrades_to_the_exact_booking() {
+        let transfer = AdmissionLifecycleTransfer::new("retryable-request".to_string());
+        transfer.arm_pending();
+        let booking = SchedulerBookingDescriptor {
+            request_id: "retryable-request".to_string(),
+            worker: WorkerWithDpRank::new(7, 3),
+            attempt_id: AttemptId::new(41),
+        };
+        transfer.arm_booking(booking.clone());
+
+        let Some(AdmissionLifecycleCleanup::Booking(cleanup)) = transfer.cleanup_target() else {
+            panic!("admitted cleanup must carry the exact booking");
+        };
+        assert_eq!(cleanup, booking);
+    }
 
     struct DropResponseOnLoadPublisher {
         response_rx: Arc<StdMutex<Option<SchedulingResponseReceiver>>>,

@@ -28,6 +28,7 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
+use dynamo_kv_router::scheduling::AdmissionAttempt;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -2497,7 +2498,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
-            let (outcome, attempt_id) = admitted.into_parts();
+            let (outcome, attempt) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2534,7 +2535,11 @@ impl KvRouter {
             };
 
             if let Some(request_id) = request_id {
-                let attempt_id = attempt_id.expect("tracked admission must return an attempt ID");
+                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "tracked admission returned no attempt identity",
+                    ));
+                };
                 chooser
                     .enroll_public_request_attempt(
                         request_id,

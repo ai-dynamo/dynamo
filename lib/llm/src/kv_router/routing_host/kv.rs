@@ -69,9 +69,8 @@ where
             self.request_metrics.clone(),
             context_id.clone(),
             selected_worker,
-            selection.attempt_id,
+            selection.attempt,
             request,
-            !is_query_only,
         );
 
         let record_result: Result<(), Error> = async {

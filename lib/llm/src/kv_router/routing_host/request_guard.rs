@@ -26,7 +26,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AttemptId,
+    scheduling::AdmissionAttempt,
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
@@ -553,9 +553,8 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt_id: Option<AttemptId>,
+        attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
-        scheduler_tracked: bool,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -565,32 +564,33 @@ where
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
+        let attempt_id = match attempt {
+            AdmissionAttempt::Untracked => None,
+            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
+        };
         let track_output_blocks =
-            scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        if scheduler_tracked {
+            attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
+        if attempt_id.is_some() {
             request_metrics.requests_started_total().inc();
         }
-        let attempt_id = scheduler_tracked
-            .then(|| attempt_id.expect("scheduler-tracked selection must carry an attempt ID"));
-        let lru_registration = scheduler_tracked
-            .then(|| chooser.approximate_lru_rank_registration(worker))
-            .flatten();
+        let lru_registration =
+            attempt_id.and_then(|_| chooser.approximate_lru_rank_registration(worker));
         let approximate_lru = lru_registration.and_then(|registration| {
             chooser.indexer().begin_approximate_lru_request(
                 worker,
                 registration.incarnation,
-                attempt_id.expect("LRU registration requires an admitted attempt"),
+                attempt_id?,
             )
         });
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
-        let lifecycle = scheduler_tracked.then(|| {
+        let lifecycle = attempt_id.map(|attempt_id| {
             chooser.request_lease_manager().register_local(
                 SchedulerBookingDescriptor {
                     request_id: context_id.clone(),
                     worker,
-                    attempt_id: attempt_id.expect("tracked request requires an admitted attempt"),
+                    attempt_id,
                 },
                 approximate_lru.clone(),
             )

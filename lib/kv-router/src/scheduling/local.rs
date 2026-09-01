@@ -20,9 +20,9 @@ use super::queue::{
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, ScheduleMode,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
+    KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
+    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
@@ -317,7 +317,7 @@ where
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_request_admitted(request)
             .await
-            .map(|admitted| admitted.response)
+            .map(AdmittedSchedulingResponse::into_response)
     }
 
     /// Schedule a request and return the router-internal admitted-attempt identity.
@@ -347,22 +347,19 @@ where
         let response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
-        let attempt_id = if tracked {
-            Some(
+        let attempt = if tracked {
+            AdmissionAttempt::Tracked(
                 attempt_rx
                     .await
                     .map_err(|_| KvSchedulerError::SubscriberShutdown)?,
             )
         } else {
-            None
+            AdmissionAttempt::Untracked
         };
         if let Some(lease) = lifecycle_lease.as_mut() {
             lease.disarm();
         }
-        Ok(AdmittedSchedulingResponse {
-            response,
-            attempt_id,
-        })
+        Ok(AdmittedSchedulingResponse { response, attempt })
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.

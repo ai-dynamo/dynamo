@@ -24,8 +24,8 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
-        AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
+        AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
@@ -387,13 +387,13 @@ pub(super) enum FindBestMatchAdmission {
 #[doc(hidden)]
 pub struct AdmittedFindBestMatchOutcome {
     pub(super) outcome: FindBestMatchOutcome,
-    pub(super) attempt_id: Option<AttemptId>,
+    pub(super) attempt: AdmissionAttempt,
 }
 
 impl AdmittedFindBestMatchOutcome {
     #[doc(hidden)]
-    pub fn into_parts(self) -> (FindBestMatchOutcome, Option<AttemptId>) {
-        (self.outcome, self.attempt_id)
+    pub fn into_parts(self) -> (FindBestMatchOutcome, AdmissionAttempt) {
+        (self.outcome, self.attempt)
     }
 }
 
@@ -1093,6 +1093,11 @@ where
         mut tokens_with_hashes: TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
+        // This public compatibility path has no admitted attempt identity. LRU
+        // mutations require acquire/release fencing, so leave them unchanged.
+        if self.indexer.uses_approximate_lru() {
+            return Ok(());
+        }
         self.indexer
             .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
             .await
@@ -1321,8 +1326,11 @@ where
                 routing_constraints,
             )
             .await?;
-        if let (Some(request_id), FindBestMatchOutcome::Routed { worker, .. }, Some(attempt_id)) =
-            (context_id, &admitted.outcome, admitted.attempt_id)
+        if let (
+            Some(request_id),
+            FindBestMatchOutcome::Routed { worker, .. },
+            AdmissionAttempt::Tracked(attempt_id),
+        ) = (context_id, &admitted.outcome, admitted.attempt)
         {
             self.enroll_public_request_attempt(request_id.to_string(), *worker, attempt_id, None)
                 .await?;
@@ -1593,19 +1601,19 @@ where
             routing_constraints,
             shared_cache_hits,
         };
-        let (response, attempt_id, selected_worker_load) = match admission {
+        let (response, attempt, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
                 .schedule_request_admitted(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {
-                Ok(admitted) => (admitted.response, admitted.attempt_id, None),
+                Ok(admitted) => (admitted.response, admitted.attempt, None),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithAdmission(
                         AdmittedFindBestMatchOutcome {
                             outcome: FindBestMatchOutcome::QueueRejected { rejection },
-                            attempt_id: None,
+                            attempt: AdmissionAttempt::Untracked,
                         },
                     ));
                 }
@@ -1617,7 +1625,11 @@ where
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
                 .await
             {
-                Ok(advisory) => (advisory.response, None, Some(advisory.selected_worker_load)),
+                Ok(advisory) => (
+                    advisory.response,
+                    AdmissionAttempt::Untracked,
+                    Some(advisory.selected_worker_load),
+                ),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
                         FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
@@ -1687,7 +1699,7 @@ where
                         routing_hashes,
                         router_hint,
                     },
-                    attempt_id,
+                    attempt,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(

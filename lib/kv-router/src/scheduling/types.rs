@@ -145,7 +145,21 @@ pub struct SchedulingResponse {
 #[derive(Debug)]
 pub struct AdmittedSchedulingResponse {
     pub response: SchedulingResponse,
-    pub attempt_id: Option<AttemptId>,
+    pub attempt: AdmissionAttempt,
+}
+
+/// Whether an admitted scheduling response owns tracked request state.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionAttempt {
+    Untracked,
+    Tracked(AttemptId),
+}
+
+impl AdmittedSchedulingResponse {
+    pub fn into_response(self) -> SchedulingResponse {
+        self.response
+    }
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.

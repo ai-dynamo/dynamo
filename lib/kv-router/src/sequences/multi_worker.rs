@@ -1070,26 +1070,36 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         attempt_id: AttemptId,
         decay_now: Instant,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
-        {
-            return Ok(LifecycleMutationOutcome::NoChange);
-        }
-        let outcome = self.mutate_request_worker_load_state_local(
+        let expected = RequestBooking { worker, attempt_id };
+        let (load, lora_name) = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                self.request_index
+                    .remove_request_if_booking(request_id, worker, attempt_id);
+                return Ok(LifecycleMutationOutcome::NoChange);
+            };
+            let mut seq = table.slots[idx].sequences.write();
+            if self.request_index.booking_for(request_id) != Some(expected) {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            }
+            if !seq.mark_prefill_completed(request_id, decay_now) {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            }
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.replace_worker_load_state(worker, load);
+            (load, self.request_index.lora_for(request_id))
+        };
+
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
             worker,
-            request_id,
-            decay_now,
-            |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
-        )?;
-        if outcome.is_applied() {
-            self.enqueue_publish_event(ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::MarkPrefillCompleted,
-                router_id: self.router_id,
-                lora_name: self.request_index.lora_for(request_id),
-            });
-        }
-        Ok(outcome)
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(LifecycleMutationOutcome::Applied)
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
@@ -1155,12 +1165,28 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         attempt_id: AttemptId,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
-        {
-            return Ok(LifecycleMutationOutcome::NoChange);
-        }
+        let expected = RequestBooking { worker, attempt_id };
+        let load = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                self.request_index
+                    .remove_request_if_booking(request_id, worker, attempt_id);
+                return Ok(LifecycleMutationOutcome::NoChange);
+            };
+            let mut seq = table.slots[idx].sequences.write();
+            if self.request_index.booking_for(request_id) != Some(expected) {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            }
+            let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            };
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.replace_worker_load_state(worker, load);
+            load
+        };
 
-        self.add_output_block(request_id, decay_fraction)?;
+        let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
         Ok(LifecycleMutationOutcome::Applied)
     }
 

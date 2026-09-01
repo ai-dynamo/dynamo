@@ -52,10 +52,19 @@ enum DeferredReplicaLeaseEvent {
     Completed(SchedulerBookingDescriptor),
 }
 
-#[derive(Default)]
-struct DeferredReplicaLeaseState {
-    target: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
-    pending: Vec<DeferredReplicaLeaseEvent>,
+enum DeferredReplicaLeaseState {
+    Buffering(Vec<DeferredReplicaLeaseEvent>),
+    Installing {
+        target: Arc<dyn ReplicaRequestLeaseObserver>,
+        pending: Vec<DeferredReplicaLeaseEvent>,
+    },
+    Installed(Arc<dyn ReplicaRequestLeaseObserver>),
+}
+
+impl Default for DeferredReplicaLeaseState {
+    fn default() -> Self {
+        Self::Buffering(Vec::new())
+    }
 }
 
 /// Buffers the construction-time event window until `KvRouter` installs its
@@ -67,28 +76,50 @@ pub(crate) struct DeferredReplicaRequestLeaseObserver {
 
 impl DeferredReplicaRequestLeaseObserver {
     pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
-        let pending = {
+        let mut pending = {
             let mut state = self.state.lock().expect("replica lease observer poisoned");
-            if state.target.is_some() {
+            let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
                 return false;
-            }
-            state.target = Some(Arc::clone(&target));
-            std::mem::take(&mut state.pending)
+            };
+            let pending = std::mem::take(pending);
+            *state = DeferredReplicaLeaseState::Installing {
+                target: Arc::clone(&target),
+                pending: Vec::new(),
+            };
+            pending
         };
-        for event in pending {
-            Self::notify(&target, event);
+
+        loop {
+            for event in pending {
+                Self::notify(&target, event);
+            }
+            let mut state = self.state.lock().expect("replica lease observer poisoned");
+            let DeferredReplicaLeaseState::Installing {
+                target: installing_target,
+                pending: queued,
+            } = &mut *state
+            else {
+                unreachable!("observer installation state changed unexpectedly");
+            };
+            if queued.is_empty() {
+                *state = DeferredReplicaLeaseState::Installed(Arc::clone(installing_target));
+                return true;
+            }
+            pending = std::mem::take(queued);
         }
-        true
     }
 
     fn observe(&self, event: DeferredReplicaLeaseEvent) {
         let target = {
             let mut state = self.state.lock().expect("replica lease observer poisoned");
-            let Some(target) = state.target.clone() else {
-                state.pending.push(event);
-                return;
-            };
-            target
+            match &mut *state {
+                DeferredReplicaLeaseState::Buffering(pending)
+                | DeferredReplicaLeaseState::Installing { pending, .. } => {
+                    pending.push(event);
+                    return;
+                }
+                DeferredReplicaLeaseState::Installed(target) => Arc::clone(target),
+            }
         };
         Self::notify(&target, event);
     }
@@ -571,22 +602,37 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
         })
         .collect();
 
-    // KvRouter's request lease manager owns the single CLOCK reaper for scheduler
-    // and approximate-LRU cleanup. Cache-retention TTL is unrelated.
-    let multi_worker = ActiveSequencesMultiWorker::new_without_expiry(
-        publisher,
-        block_size,
-        dp_range,
-        replica_sync,
-        router_id,
-        worker_type,
-    );
+    let uses_shared_lease_manager = replica_request_lease_observer.is_some();
+    let multi_worker = if uses_shared_lease_manager {
+        // KvRouter's request lease manager owns the single CLOCK reaper for scheduler
+        // and approximate-LRU cleanup. Cache-retention TTL is unrelated.
+        ActiveSequencesMultiWorker::new_without_expiry(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+        )
+    } else {
+        ActiveSequencesMultiWorker::new(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+        )
+    };
 
     let arc = Arc::new(multi_worker);
     if let Some(observer) = replica_request_lease_observer
         && !arc.set_replica_request_lease_observer(observer)
     {
         anyhow::bail!("replica request lease observer is already installed");
+    }
+    if !uses_shared_lease_manager {
+        arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
     }
 
     // Worker-origin completion marks are consumed even when router-to-router replica sync is
