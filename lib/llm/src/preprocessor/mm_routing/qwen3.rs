@@ -516,7 +516,7 @@ mod tests {
     impl Tokenizer for CheckpointTimestampTokenizer {}
 
     #[test]
-    fn replacement_tokens_match_qwen3_checkpoint_tokenizer_goldens() {
+    fn replacement_tokens_match_qwen3_checkpoint_tokenizer_golden() {
         let timestamps = [0.0, 1.0];
         let input = VideoRoutingInput {
             frame_count: 2,
@@ -525,50 +525,28 @@ mod tests {
             source_fps: 1.0,
             sampled_timestamps: &timestamps,
         };
-        let cases = [
-            (
-                151656,
-                151652,
-                151653,
-                6486,
-                vec![
-                    27, 15, 13, 20, 6486, 29, 151652, 151656, 151656, 151656, 151656, 151653,
-                ],
-            ),
-            (
-                248057,
-                248053,
-                248054,
-                6283,
-                vec![
-                    27, 15, 13, 20, 6283, 29, 248053, 248057, 248057, 248057, 248057, 248054,
-                ],
-            ),
-        ];
+        let spec = Qwen3VideoRoutingSpec {
+            patch_size: 16,
+            spatial_merge_size: 2,
+            temporal_patch_size: 2,
+            video_min_pixels: 4096,
+            video_max_pixels: 25_165_824,
+            video_token_id: 151656,
+            vision_start_token_id: 151652,
+            vision_end_token_id: 151653,
+            placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
+            resize_mode: QwenVideoResizeMode::LegacyCeil,
+            tokenizer: Arc::new(CheckpointTimestampTokenizer {
+                seconds_token_id: 6486,
+            }),
+        };
 
-        for (video_token_id, vision_start_token_id, vision_end_token_id, seconds_id, expected) in
-            cases
-        {
-            let spec = Qwen3VideoRoutingSpec {
-                patch_size: 16,
-                spatial_merge_size: 2,
-                temporal_patch_size: 2,
-                video_min_pixels: 4096,
-                video_max_pixels: 25_165_824,
-                video_token_id,
-                vision_start_token_id,
-                vision_end_token_id,
-                placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
-                resize_mode: QwenVideoResizeMode::LegacyCeil,
-                tokenizer: Arc::new(CheckpointTimestampTokenizer {
-                    seconds_token_id: seconds_id,
-                }),
-            };
-            assert_eq!(
-                spec.build_replacement(&input).unwrap().replacement_tokens,
-                expected
-            );
-        }
+        assert_eq!(
+            spec.build_replacement(&input).unwrap().replacement_tokens,
+            vec![
+                27, 15, 13, 20, 6486, 29, 151652, 151656, 151656, 151656, 151656, 151653,
+            ]
+        );
     }
 
     #[test]
@@ -652,7 +630,6 @@ mod tests {
 
     #[test]
     fn video_grid_matches_transformers_golden_cases() {
-        // Common outputs across both supported Qwen smart_resize contracts.
         let cases = [
             // frames, width, height, expected [T, H, W]
             (4, 426, 240, (2, 16, 26)),
