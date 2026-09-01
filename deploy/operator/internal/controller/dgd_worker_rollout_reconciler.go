@@ -43,6 +43,20 @@ type workerGenerationHashes struct {
 	v2 string
 }
 
+// unsupportedWorkerHashTransition is the next DGD worker-hash state for a
+// pathway that cannot use managed rolling updates. Planning it is read-only;
+// callers commit it only after they have reconciled the workload carrying the
+// corresponding generation.
+type unsupportedWorkerHashTransition struct {
+	next                    workerGenerationHashes
+	initialize              bool
+	workerGenerationChanged bool
+}
+
+func (t unsupportedWorkerHashTransition) needsCommit() bool {
+	return t.initialize || t.workerGenerationChanged
+}
+
 // dgdWorkerRolloutReconciler owns worker-generation metadata and the managed
 // rolling-update state machine. It carries the Kubernetes read/write access
 // required by that state machine and event recording, never the complete DGD
@@ -69,42 +83,73 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 ) error {
 	logger := log.FromContext(ctx)
 
-	if r.currentWorkerHashes(dgd).empty() {
-		hashes, err := desiredWorkerHashes(dgd)
-		if err != nil {
-			logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
-		}
-		r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
-		if err := r.Update(ctx, dgd); err != nil {
+	transition, err := r.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		logger.Error(err, "Failed to plan worker hash transition for unsupported pathway")
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !transition.needsCommit() {
+		return nil
+	}
+
+	if err := r.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, isGrove); err != nil {
+		if transition.initialize {
 			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
 			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 		}
-	}
-
-	triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dgd)
-	if err != nil {
-		logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
-	}
-	if !triggerRollingUpdate {
-		return nil
-	}
-
-	hashes, err := desiredWorkerHashes(dgd)
-	if err != nil {
-		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
-	}
-	r.setCurrentWorkerHashes(dgd, r.workerHashesForUnsupportedPathway(dgd, hashes))
-	if err := r.Update(ctx, dgd); err != nil {
 		// Preserve the existing best-effort behavior: the next reconciliation
 		// retries the metadata update and may emit another warning.
 		logger.Error(err, "Failed to update worker hash for unsupported pathway")
+	}
+	return nil
+}
+
+func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (unsupportedWorkerHashTransition, error) {
+	desired, err := desiredWorkerHashes(dgd)
+	if err != nil {
+		return unsupportedWorkerHashTransition{}, err
+	}
+
+	current := r.currentWorkerHashes(dgd)
+	if current.empty() {
+		return unsupportedWorkerHashTransition{
+			next:       workerHashesForCompletedGeneration(desired.v2, desired),
+			initialize: true,
+		}, nil
+	}
+	if currentWorkerHashesMatchDesired(current, desired) {
+		return unsupportedWorkerHashTransition{}, nil
+	}
+	return unsupportedWorkerHashTransition{
+		next:                    r.workerHashesForUnsupportedPathway(dgd, desired),
+		workerGenerationChanged: true,
+	}, nil
+}
+
+// commitUnsupportedWorkerHashTransition records a transition planned from the
+// DGD observation used to render the workload. An optimistic-update conflict
+// must be retried from a fresh DGD and PCS observation.
+func (r *dgdWorkerRolloutReconciler) commitUnsupportedWorkerHashTransition(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	transition unsupportedWorkerHashTransition,
+	isGrove bool,
+) error {
+	if !transition.needsCommit() {
 		return nil
 	}
 
-	logger.Info(
+	r.setCurrentWorkerHashes(dgd, transition.next)
+	if err := r.Update(ctx, dgd); err != nil {
+		return err
+	}
+	if !transition.workerGenerationChanged {
+		return nil
+	}
+
+	log.FromContext(ctx).Info(
 		"Worker spec change detected but rolling update not supported for this pathway",
 		"isGrove", isGrove,
 		"hasMultinode", dgd.HasAnyMultinodeComponent(),

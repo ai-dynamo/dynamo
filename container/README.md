@@ -284,6 +284,8 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 # Build the frontend image (automatically builds EPP image as a dependency)
 container/render.py --framework=dynamo --target=frontend --output-short-filename
 docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/rendered.Dockerfile .
+
+# NIXL comes from PyPI; override the release with --build-arg NIXL_REF=v1.4.0
 ```
 
 The build process automatically:

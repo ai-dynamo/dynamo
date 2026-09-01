@@ -25,8 +25,8 @@ Per-ecosystem strategy (matches the plan in
            subset and tars it.
 
   go       go mod vendor per Go module. For the dynamo runtime
-           templates this is empty (no Go binaries); operator /
-           snapshot-agent / EPP have it.
+           templates this is empty (no Go binaries); operator / EPP
+           have it.
 
   native   preserve source tarballs for from-source components
            (criu, ucx, libfabric, ffmpeg, gdrcopy, NIXL, etc.).

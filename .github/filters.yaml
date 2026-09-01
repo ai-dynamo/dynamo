@@ -16,11 +16,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> classification only; source and proto files also match rust
+#   sidecar  -> unified sidecar image build, publish, and compliance checks
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   examples, ignore
 
 all:
   - '**'
@@ -53,6 +53,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Codex role configs for the optimization skill pack; agent guidance, no CI surface.
+  - '.codex/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
   # Sidecar documentation is not part of the Fern docs site.
@@ -116,6 +118,7 @@ ignore:
   - '.github/dco.yml'
   - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
+  - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
@@ -125,10 +128,15 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
+  - 'scripts/check_action_pins.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Excluded from `sidecar` (no image build) and from `docs` (not on the Fern site).
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
 
 ci: &ci
   - '.github/workflows/**'
@@ -215,8 +223,9 @@ snapshot:
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
+  # Chart.lock is gitignored (never appears in a PR diff) and so is
+  # intentionally not listed here.
   - 'deploy/helm/charts/platform/Chart.yaml'
-  - 'deploy/helm/charts/platform/Chart.lock'
   - 'deploy/helm/charts/platform/values.yaml'
 
 # Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
@@ -244,9 +253,6 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/checkpoint-placeholder/**'
-  # Nothing exists here anymore; kept so the coverage check below still
-  # classifies deletions under this now-defunct path.
-  - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
@@ -281,7 +287,14 @@ planner:
   - '!**/*.rst'
 
 sidecar:
+  # TODO: Expand this to every Dockerfile and composite-action input after the
+  # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  # Compliance policy and baseline changes can fail the sidecar image build.
+  - 'container/compliance/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'

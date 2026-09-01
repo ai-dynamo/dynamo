@@ -66,9 +66,13 @@ or multiple major components require a
   <Step title="Complete automated review and CI">
     Respond to actionable automated review comments and fix failing checks.
 
-    For external contributions, a maintainer might need to authorize CI for the latest commit. If
-    requested, wait for a maintainer to trigger the tests rather than repeatedly pushing unchanged
-    commits.
+    For a fork pull request, automatic trusted-CI approval requires the contributor or latest
+    branch update to meet repository approval criteria and every PR commit to have a cryptographic
+    signature that GitHub reports as `Verified`.
+    `git commit -s` adds a DCO sign-off but does not add a cryptographic signature. Signing does
+    not itself qualify a pull request for automatic approval. When automatic approval is
+    unavailable, a maintainer can review the current head and comment `/ok to test <sha>` to start
+    CI. Wait for that action rather than repeatedly pushing unchanged commits.
 
     <Info>
     You are responsible for understanding and validating all submitted code, including code

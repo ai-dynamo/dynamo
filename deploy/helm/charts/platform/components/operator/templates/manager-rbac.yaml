@@ -136,7 +136,6 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
-  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -148,7 +147,6 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
-  - podsnapshots/status
   verbs:
   - get
   - patch
@@ -337,57 +335,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-deviceclass-reader
-subjects:
-- kind: ServiceAccount
-  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
-  namespace: '{{ .Release.Namespace }}'
----
-# Helm keeps PodSnapshotContent access separate because a namespace-restricted Role cannot grant it.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
-  labels:
-    app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: dynamo-operator
-    app.kubernetes.io/part-of: dynamo-operator
-  {{- include "dynamo-operator.labels" . | nindent 4 }}
-rules:
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshotcontents
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshotcontents/status
-  verbs:
-  - get
-  - patch
-  - update
----
-# Helm binds the separate cluster-scoped PodSnapshotContent grant to the controller ServiceAccount.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents-binding
-  labels:
-    app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: dynamo-operator
-    app.kubernetes.io/part-of: dynamo-operator
-  {{- include "dynamo-operator.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'

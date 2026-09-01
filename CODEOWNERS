@@ -230,6 +230,7 @@
 /lib/runtime/src/component/                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/discovery/                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/protocols/                                                                             @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/dynamo-sidecar                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/transports/                                                                            @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/examples/                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
@@ -409,7 +410,6 @@
 /recipes/deepseek-r1/                                                                                   @ai-dynamo/dynamo-performance-codeowners
 /recipes/deepseek-v4/                                                                                   @ai-dynamo/dynamo-performance-codeowners
 /recipes/glm-5-nvfp4/                                                                                   @ai-dynamo/dynamo-performance-codeowners
-/recipes/llama-3-70b/                                                                                   @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3.6-35b/                                                                                   @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/incluster/                                                                                  @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/nat_trace/                                                                                  @ai-dynamo/dynamo-performance-codeowners
@@ -427,7 +427,6 @@
 /benchmarks/pyproject.toml                                                                              @ai-dynamo/dynamo-performance-codeowners
 /examples/backends/mocker/                                                                              @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/scheduler/                                                                              @ai-dynamo/dynamo-performance-codeowners
-/recipes/deepseek-v32-fp4/                                                                              @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/README.md                                                                            @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/burstgpt_loadgen/                                                                           @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                                           @ai-dynamo/dynamo-performance-codeowners
@@ -456,6 +455,7 @@
 # === Path overrides: a subsystem nested inside another area's tree.
 # More specific, so they win via last-match over area and file-type rules. ===
 /tests/rl/                                                                                              @ai-dynamo/dynamo-rl-codeowners
+/tests/docs/                                                                                            @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-operator-codeowners
 /tests/router/                                                                                          @ai-dynamo/dynamo-router-codeowners
 /tests/lmcache/                                                                                         @ai-dynamo/dynamo-kv-memory-codeowners
@@ -501,6 +501,7 @@
 /lib/llm/src/block_manager.rs                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/benchmarks/multimodal/                                                                           @ai-dynamo/dynamo-multimodal-codeowners
 /tests/serve/test_vllm_xpu.py                                                                           @ai-dynamo/dynamo-xpu-codeowners
+/.github/codeowners/areas.yaml                                                                          @ai-dynamo/dynamo-process-codeowners
 /.github/workflows/pr-xpu.yaml                                                                          @ai-dynamo/dynamo-xpu-codeowners
 /.github/workflows/xpu-ci.yaml                                                                          @ai-dynamo/dynamo-xpu-codeowners
 /deploy/operator/internal/gms/                                                                          @ai-dynamo/dynamo-gms-codeowners
@@ -564,6 +565,7 @@
 /components/src/dynamo/vllm/multimodal_utils/                                                           @ai-dynamo/dynamo-multimodal-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                                           @ai-dynamo/dynamo-frontend-codeowners
+/.github/codeowners/external_contributors.yaml                                                          @ai-dynamo/dynamo-process-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                                                          @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                                                        @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot*                                                      @ai-dynamo/dynamo-gms-codeowners
@@ -573,8 +575,11 @@
 /components/src/dynamo/sglang/request_handlers/image_diffusion/                                         @ai-dynamo/dynamo-diffusion-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
+/.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agents/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /CODEOWNERS                                                                                             @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-rl-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/agent-docs/                                                                                            @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners

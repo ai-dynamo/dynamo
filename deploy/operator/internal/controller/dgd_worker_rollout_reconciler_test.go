@@ -23,6 +23,7 @@ import (
 	"sort"
 	"testing"
 
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +86,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	scheme := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(scheme)
 	_ = nvidiacomv1beta1.AddToScheme(scheme)
+	_ = grovev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	builder := fake.NewClientBuilder().
@@ -121,6 +123,132 @@ func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+}
+
+func TestGroveWorkerHashSuffixMigration(t *testing.T) {
+	tests := []struct {
+		name                    string
+		existing                bool
+		existingHash            string
+		workerGenerationChanged bool
+		wantSuffix              bool
+	}{
+		{name: "new PCS renders a suffix without a worker generation change", wantSuffix: true},
+		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
+		{name: "legacy PCS renders a suffix after a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true},
+		{name: "suffixed PCS continues rendering the suffix", existing: true, existingHash: "active", wantSuffix: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the existing worker PCS and worker-generation transition")
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+			var existing *grovev1alpha1.PodCliqueSet
+			if tt.existing {
+				existing = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{consts.KubeLabelDynamoComponent: "worker"}}},
+				}}}
+				if tt.existingHash != "" {
+					existing.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.existingHash
+				}
+			}
+
+			t.Log("Verify suffix rendering from the worker generation")
+			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.workerGenerationChanged); got != tt.wantSuffix {
+				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestPlanUnsupportedWorkerHashTransitionIgnoresScaling(t *testing.T) {
+	t.Log("Build an active worker generation and apply a replica-only change")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
+	})
+	activeHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: activeHash}
+	dgd.GetComponentByName("worker").Replicas = ptr.To(int32(2))
+	reconciler := createTestReconcilerWithStatus(dgd)
+
+	t.Log("Plan the unsupported pathway transition")
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify scaling does not arm a worker generation migration")
+	assert.False(t, transition.workerGenerationChanged)
+	assert.False(t, transition.needsCommit())
+}
+
+func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
+	t.Log("Build a DGD with a persisted worker hash and a changed worker spec")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "old"}},
+		},
+	})
+	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
+	worker := dgd.GetComponentByName("worker")
+	require.NotNil(t, worker)
+	require.NotNil(t, worker.PodTemplate)
+	require.NotEmpty(t, worker.PodTemplate.Spec.Containers)
+	worker.PodTemplate.Spec.Containers[0].Env[0].Value = "new"
+	reconciler := createTestReconcilerWithStatus(dgd)
+
+	t.Log("Plan the unsupported worker hash transition")
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify planning detects the transition without mutating the DGD")
+	require.True(t, transition.workerGenerationChanged)
+	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
+}
+
+func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
+	tests := []struct {
+		name             string
+		workerHashSuffix bool
+	}{
+		{
+			name:             "enabled",
+			workerHashSuffix: true,
+		},
+		{
+			name: "disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with the requested Grove worker suffix state")
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+
+			t.Log("Render the Grove deployment")
+			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
+			require.NoError(t, err)
+			worker := rendered.GetComponentByName("worker")
+			require.NotNil(t, worker)
+
+			t.Log("Verify the rendered suffix and source DGD immutability")
+			if tt.workerHashSuffix {
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+				require.NoError(t, err)
+				require.NotNil(t, worker.PodTemplate)
+				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+			} else {
+				assert.Nil(t, worker.PodTemplate)
+			}
+			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+		})
+	}
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {

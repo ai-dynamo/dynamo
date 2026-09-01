@@ -34,13 +34,9 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -111,34 +107,6 @@ func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfigu
 	}
 
 	return cfg, nil
-}
-
-func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
-	config := mgr.GetConfig()
-
-	// Create kubernetes client for discovery
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create cached discovery client
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-
-	// Create REST mapper
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-
-	scalesGetter, err := scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return scalesGetter, nil
 }
 
 func initCRDSchemes() {
@@ -635,17 +603,11 @@ func registerControllers(
 		return err
 	}
 
-	scaleClient, err := createScalesGetter(mgr)
-	if err != nil {
-		return fmt.Errorf("unable to create scale client: %w", err)
-	}
-
 	rbacManager := rbac.NewManager(mgr.GetClient())
 
 	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
 		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-		ScaleClient:           scaleClient,
 		RBACManager:           rbacManager,
 		SSHKeyManager:         sshKeyManager,
 	}); err != nil {

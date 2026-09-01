@@ -1,7 +1,7 @@
 {
   "name": "docs-events",
   "version": "1.0.0",
-  "description": "Pinned deps for .github/scripts/generate-events.js",
+  "description": "Pinned deps for .github/scripts/generate-events.js and update-events.js",
   "type": "commonjs",
   "dependencies": {
     "node-ical": "0.20.0"
