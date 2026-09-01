@@ -575,7 +575,9 @@ async fn terminal_item_does_not_skip_transport_eof() {
                 prompt_tokens: 1,
                 previously_computed_tokens: 0,
                 best_router_tokens: 0,
+                best_eligible_router_tokens: 0,
                 selected_router_tokens: 0,
+                routing_choice_valid: false,
             },
             Arc::new(parking_lot::Mutex::new(CacheHistory::new(1, 1))),
             CacheHistoryRequest::new(vec![1], None, None, None, 1, false),
@@ -826,12 +828,21 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .await
         .unwrap();
     let previewed_worker = preview.signals().worker;
+    let previewed_routing_choice = preview.routing_choice;
 
     let plan = router
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
     assert_eq!(plan.signals().worker, previewed_worker);
+    assert_eq!(
+        plan.selection.max_cached_tokens,
+        previewed_routing_choice.max_cached_tokens
+    );
+    assert_eq!(
+        plan.selection.best_eligible_cached_tokens,
+        previewed_routing_choice.best_eligible_cached_tokens
+    );
     let loads = router
         .kv_router()
         .get_potential_loads(&[], None, None, None, None)

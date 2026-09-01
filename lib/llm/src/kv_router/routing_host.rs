@@ -27,8 +27,9 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, minimal_cache_loss::CacheHistory,
-        scheduler::DefaultWorkerSelector, to_worker_selection_session_context,
+        KvRouter, RoutingChoiceTelemetry, metrics::RouterRequestMetrics,
+        minimal_cache_loss::CacheHistory, scheduler::DefaultWorkerSelector,
+        to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
@@ -220,6 +221,7 @@ pub(crate) struct RoutePreview {
     request_id: String,
     phase: RequestPhase,
     signals: RoutePlanSignals,
+    routing_choice: RoutingChoiceTelemetry,
 }
 
 #[derive(Clone, Copy, Debug)]

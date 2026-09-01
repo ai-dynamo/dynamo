@@ -940,9 +940,9 @@ where
             .gpu_hit_tokens
             .saturating_add(outcome.cpu_hit_tokens)
             .min(f4);
-        self.observability
-            .request_metrics()
-            .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
+        let request_metrics = self.observability.request_metrics();
+        request_metrics.observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
+        request_metrics.observe_cache_loss_routing_choice(route.routing_choice_attribution(f2, f3));
         if let Some(history_request) = self.cache_history_request.as_mut() {
             let mut history = self.cache_history.lock();
             history_request.record_prompt(&mut history);

@@ -89,7 +89,6 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
         required_blocks: 0,
         effective_overlap_blocks: 0.0,
         cached_tokens: 0,
-        max_cached_tokens: 0,
         potential_decode_blocks: 0,
     }
 }

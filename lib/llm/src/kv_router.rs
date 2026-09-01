@@ -390,8 +390,14 @@ pub(super) enum FindBestMatchAdmission {
 }
 
 pub(super) enum FindBestMatchInnerOutcome {
-    WithAdmission(FindBestMatchOutcome),
-    WithoutAdmission(FindBestMatchAdvisoryOutcome),
+    WithAdmission(FindBestMatchOutcome, RoutingChoiceTelemetry),
+    WithoutAdmission(FindBestMatchAdvisoryOutcome, RoutingChoiceTelemetry),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct RoutingChoiceTelemetry {
+    pub(super) max_cached_tokens: usize,
+    pub(super) best_eligible_cached_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1241,8 +1247,8 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
-            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+            FindBestMatchInnerOutcome::WithAdmission(outcome, _) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithoutAdmission(_, _) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
         }
@@ -1289,8 +1295,8 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithoutAdmission(outcome) => Ok(outcome),
-            FindBestMatchInnerOutcome::WithAdmission(_) => {
+            FindBestMatchInnerOutcome::WithoutAdmission(outcome, _) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithAdmission(_, _) => {
                 unreachable!("without-admission routing returned admitted outcome")
             }
         }
@@ -1467,6 +1473,7 @@ where
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithAdmission(
                         FindBestMatchOutcome::QueueRejected { rejection },
+                        RoutingChoiceTelemetry::default(),
                     ));
                 }
                 Err(error) => return Err(map_scheduler_error(error)),
@@ -1481,6 +1488,7 @@ where
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
                         FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
+                        RoutingChoiceTelemetry::default(),
                     ));
                 }
                 Err(error) => return Err(map_scheduler_error(error)),
@@ -1536,30 +1544,42 @@ where
         );
 
         match admission {
-            FindBestMatchAdmission::WithAdmission { .. } => Ok(
-                FindBestMatchInnerOutcome::WithAdmission(FindBestMatchOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    max_cached_tokens: response.max_cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    routing_hashes,
-                    router_hint,
-                }),
-            ),
-            FindBestMatchAdmission::WithoutAdmission => Ok(
-                FindBestMatchInnerOutcome::WithoutAdmission(FindBestMatchAdvisoryOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    selected_worker_load: selected_worker_load
-                        .expect("without-admission selection returns advisory load"),
-                    routing_hashes,
-                }),
-            ),
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                Ok(FindBestMatchInnerOutcome::WithAdmission(
+                    FindBestMatchOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        max_cached_tokens: response.max_cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        routing_hashes,
+                        router_hint,
+                    },
+                    RoutingChoiceTelemetry {
+                        max_cached_tokens: response.max_cached_tokens,
+                        best_eligible_cached_tokens: response.best_eligible_cached_tokens,
+                    },
+                ))
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                Ok(FindBestMatchInnerOutcome::WithoutAdmission(
+                    FindBestMatchAdvisoryOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        selected_worker_load: selected_worker_load
+                            .expect("without-admission selection returns advisory load"),
+                        routing_hashes,
+                    },
+                    RoutingChoiceTelemetry {
+                        max_cached_tokens: response.max_cached_tokens,
+                        best_eligible_cached_tokens: response.best_eligible_cached_tokens,
+                    },
+                ))
+            }
         }
     }
 
@@ -2354,7 +2374,6 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
-                max_cached_tokens: 0,
                 potential_decode_blocks: request
                     .worker_load_for(self.selected_worker)
                     .potential_decode_blocks()

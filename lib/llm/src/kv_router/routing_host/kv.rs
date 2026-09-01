@@ -128,11 +128,16 @@ where
             .await?;
         let selection = outcome.into_result()?;
         let signals = self.route_signals(&selection);
+        let routing_choice = RoutingChoiceTelemetry {
+            max_cached_tokens: selection.max_cached_tokens,
+            best_eligible_cached_tokens: selection.best_eligible_cached_tokens,
+        };
         drop(route_guard);
         Ok(RoutePreview {
             request_id: request.context().id().to_string(),
             phase,
             signals,
+            routing_choice,
         })
     }
 
@@ -153,10 +158,11 @@ where
         }
 
         let phase = preview.phase;
+        let preview_routing_choice = preview.routing_choice;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
-        let (selection, affinity) = self
+        let (mut selection, affinity) = self
             .select_with_session_affinity(request, phase, false, |target| async move {
                 self.select_request_outcome(
                     request,
@@ -172,6 +178,8 @@ where
                 .into_result()
             })
             .await?;
+        selection.max_cached_tokens = preview_routing_choice.max_cached_tokens;
+        selection.best_eligible_cached_tokens = preview_routing_choice.best_eligible_cached_tokens;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
@@ -308,7 +316,9 @@ where
             previously_computed_tokens: cache_history_request
                 .previously_computed_tokens(&cache_history.lock()),
             best_router_tokens: selection.max_cached_tokens as u64,
+            best_eligible_router_tokens: selection.best_eligible_cached_tokens as u64,
             selected_router_tokens: selection.cached_tokens as u64,
+            routing_choice_valid: false,
         }
         .bounded();
         let mut guard = match cleanup {

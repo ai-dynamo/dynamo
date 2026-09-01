@@ -846,6 +846,8 @@ pub struct RouterRequestMetrics {
     pub cache_loss_observation_input_tokens_total: prometheus::IntCounter,
     pub cache_loss_funnel_tokens_total: IntCounterVec,
     pub cache_loss_observations_total: IntCounterVec,
+    pub cache_loss_routing_choice_loss_tokens_total: IntCounterVec,
+    pub cache_loss_routing_choice_observations_total: IntCounterVec,
     pub cache_loss_history_block_records: IntGauge,
     pub cache_loss_history_unique_hashes: IntGauge,
     pub cache_loss_history_represented_tokens: IntGauge,
@@ -1016,6 +1018,34 @@ impl RouterRequestMetrics {
                 for result in ["complete", "incomplete"] {
                     cache_loss_observations_total.with_label_values(&[result]);
                 }
+                let cache_loss_routing_choice_loss_tokens_total = metrics
+                    .create_intcountervec(
+                        &router_metric("cache_loss_routing_choice_loss_tokens_total"),
+                        "Completed-request F2-to-F3 token loss by exact routing boundary",
+                        &["cause"],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_cache_loss_routing_choice_loss_tokens_total");
+                for cause in ["final_eligibility", "selection_policy", "unattributed"] {
+                    cache_loss_routing_choice_loss_tokens_total.with_label_values(&[cause]);
+                }
+                let cache_loss_routing_choice_observations_total = metrics
+                    .create_intcountervec(
+                        &router_metric("cache_loss_routing_choice_observations_total"),
+                        "Completed cache-loss observations by F2-to-F3 routing result",
+                        &["result"],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_cache_loss_routing_choice_observations_total");
+                for result in [
+                    "no_loss",
+                    "eligibility_only",
+                    "policy_only",
+                    "mixed",
+                    "unattributed",
+                ] {
+                    cache_loss_routing_choice_observations_total.with_label_values(&[result]);
+                }
                 let cache_loss_history_block_records = metrics
                     .create_intgauge(
                         &router_metric("cache_loss_history_block_records"),
@@ -1073,6 +1103,8 @@ impl RouterRequestMetrics {
                     cache_loss_observation_input_tokens_total,
                     cache_loss_funnel_tokens_total,
                     cache_loss_observations_total,
+                    cache_loss_routing_choice_loss_tokens_total,
+                    cache_loss_routing_choice_observations_total,
                     cache_loss_history_block_records,
                     cache_loss_history_unique_hashes,
                     cache_loss_history_represented_tokens,
@@ -1114,6 +1146,24 @@ impl RouterRequestMetrics {
     pub fn observe_cache_loss_incomplete(&self) {
         self.cache_loss_observations_total
             .with_label_values(&["incomplete"])
+            .inc();
+    }
+
+    pub fn observe_cache_loss_routing_choice(
+        &self,
+        attribution: super::minimal_cache_loss::RoutingChoiceAttribution,
+    ) {
+        for (cause, tokens) in [
+            ("final_eligibility", attribution.final_eligibility),
+            ("selection_policy", attribution.selection_policy),
+            ("unattributed", attribution.unattributed),
+        ] {
+            self.cache_loss_routing_choice_loss_tokens_total
+                .with_label_values(&[cause])
+                .inc_by(tokens);
+        }
+        self.cache_loss_routing_choice_observations_total
+            .with_label_values(&[attribution.result])
             .inc();
     }
 

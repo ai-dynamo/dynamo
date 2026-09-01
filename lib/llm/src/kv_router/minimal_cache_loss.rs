@@ -251,24 +251,85 @@ pub struct RouteObservation {
     pub prompt_tokens: u64,
     pub previously_computed_tokens: u64,
     pub best_router_tokens: u64,
+    pub best_eligible_router_tokens: u64,
     pub selected_router_tokens: u64,
+    pub(super) routing_choice_valid: bool,
 }
 
 impl RouteObservation {
-    pub fn bounded(self) -> Self {
+    pub fn bounded(mut self) -> Self {
+        self.routing_choice_valid = self.best_router_tokens >= self.best_eligible_router_tokens
+            && self.best_eligible_router_tokens >= self.selected_router_tokens;
         let prompt_tokens = self.prompt_tokens;
         Self {
             prompt_tokens,
             previously_computed_tokens: self.previously_computed_tokens.min(prompt_tokens),
             best_router_tokens: self.best_router_tokens.min(prompt_tokens),
+            best_eligible_router_tokens: self.best_eligible_router_tokens.min(prompt_tokens),
             selected_router_tokens: self.selected_router_tokens.min(prompt_tokens),
+            routing_choice_valid: self.routing_choice_valid,
+        }
+    }
+
+    pub fn routing_choice_attribution(self, f2: u64, f3: u64) -> RoutingChoiceAttribution {
+        let total_loss = f2.saturating_sub(f3);
+        if !self.routing_choice_valid {
+            return RoutingChoiceAttribution {
+                final_eligibility: 0,
+                selection_policy: 0,
+                unattributed: total_loss,
+                result: "unattributed",
+            };
+        }
+        let eligible = self.best_eligible_router_tokens.min(f2);
+        if eligible < f3 {
+            return RoutingChoiceAttribution {
+                final_eligibility: 0,
+                selection_policy: 0,
+                unattributed: total_loss,
+                result: "unattributed",
+            };
+        }
+        let final_eligibility = f2 - eligible;
+        let selection_policy = eligible - f3;
+        let result = match (final_eligibility > 0, selection_policy > 0) {
+            (false, false) => "no_loss",
+            (true, false) => "eligibility_only",
+            (false, true) => "policy_only",
+            (true, true) => "mixed",
+        };
+        RoutingChoiceAttribution {
+            final_eligibility,
+            selection_policy,
+            unattributed: 0,
+            result,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RoutingChoiceAttribution {
+    pub final_eligibility: u64,
+    pub selection_policy: u64,
+    pub unattributed: u64,
+    pub result: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CacheHistory;
+    use super::{CacheHistory, RouteObservation};
+
+    fn route(a: u64, e: u64, s: u64) -> RouteObservation {
+        RouteObservation {
+            prompt_tokens: 100,
+            previously_computed_tokens: 100,
+            best_router_tokens: a,
+            best_eligible_router_tokens: e,
+            selected_router_tokens: s,
+            routing_choice_valid: false,
+        }
+        .bounded()
+    }
 
     #[test]
     fn retains_recent_records_and_expires_the_oldest() {
@@ -311,5 +372,41 @@ mod tests {
         let capacity_from_default_budget =
             super::DEFAULT_HISTORY_BYTES / super::ESTIMATED_BYTES_PER_HISTORY_RECORD;
         assert!(capacity_from_default_budget >= super::DEFAULT_HISTORY_BLOCK_CAPACITY);
+    }
+
+    #[test]
+    fn routing_choice_attribution_conserves_f2_to_f3_loss() {
+        for (a, e, s, expected_result) in [
+            (100, 100, 100, "no_loss"),
+            (100, 70, 70, "eligibility_only"),
+            (100, 100, 60, "policy_only"),
+            (100, 80, 60, "mixed"),
+        ] {
+            let attribution = route(a, e, s).routing_choice_attribution(a, s);
+            assert_eq!(
+                attribution.final_eligibility
+                    + attribution.selection_policy
+                    + attribution.unattributed,
+                a - s
+            );
+            assert_eq!(attribution.result, expected_result);
+        }
+    }
+
+    #[test]
+    fn invalid_routing_choice_is_fully_unattributed() {
+        let attribution = route(100, 50, 60).routing_choice_attribution(100, 60);
+        assert_eq!(attribution.final_eligibility, 0);
+        assert_eq!(attribution.selection_policy, 0);
+        assert_eq!(attribution.unattributed, 40);
+        assert_eq!(attribution.result, "unattributed");
+    }
+
+    #[test]
+    fn f1_bound_preserves_conservation() {
+        let attribution = route(100, 80, 60).routing_choice_attribution(70, 60);
+        assert_eq!(attribution.final_eligibility, 0);
+        assert_eq!(attribution.selection_policy, 10);
+        assert_eq!(attribution.unattributed, 0);
     }
 }

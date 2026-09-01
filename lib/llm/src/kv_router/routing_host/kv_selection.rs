@@ -32,11 +32,10 @@ pub(super) struct WorkerSelection {
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
-    /// Greatest router-visible cached prefix among eligible workers.
-    ///
-    /// Advisory previews do not expose the full candidate set, so they use the
-    /// selected worker's prefix as a conservative lower bound.
+    /// Greatest router-visible cached prefix before dynamic eligibility filters.
     pub(super) max_cached_tokens: usize,
+    /// Greatest router-visible cached prefix after final eligibility filters.
+    pub(super) best_eligible_cached_tokens: usize,
     pub(super) potential_decode_blocks: u64,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
@@ -128,32 +127,36 @@ where
             )
             .await?;
         match outcome {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => match outcome {
+            FindBestMatchInnerOutcome::WithAdmission(outcome, routing_choice) => match outcome {
                 FindBestMatchOutcome::Routed {
                     worker,
                     overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,
-                    max_cached_tokens,
+                    max_cached_tokens: outcome_max_cached_tokens,
                     potential_decode_blocks,
                     routing_hashes,
                     router_hint,
-                } => Ok(SelectionOutcome::Routed(WorkerSelection {
-                    worker,
-                    overlap_amount: overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    max_cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load: None,
-                    routing_hashes,
-                    router_hint,
-                })),
+                } => {
+                    debug_assert_eq!(routing_choice.max_cached_tokens, outcome_max_cached_tokens);
+                    Ok(SelectionOutcome::Routed(WorkerSelection {
+                        worker,
+                        overlap_amount: overlap_blocks,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                        max_cached_tokens: routing_choice.max_cached_tokens,
+                        best_eligible_cached_tokens: routing_choice.best_eligible_cached_tokens,
+                        potential_decode_blocks,
+                        selected_worker_load: None,
+                        routing_hashes,
+                        router_hint,
+                    }))
+                }
                 FindBestMatchOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
                 }
             },
-            FindBestMatchInnerOutcome::WithoutAdmission(outcome) => match outcome {
+            FindBestMatchInnerOutcome::WithoutAdmission(outcome, routing_choice) => match outcome {
                 crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
                     worker,
                     overlap_blocks,
@@ -167,7 +170,8 @@ where
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,
-                    max_cached_tokens: cached_tokens,
+                    max_cached_tokens: routing_choice.max_cached_tokens,
+                    best_eligible_cached_tokens: routing_choice.best_eligible_cached_tokens,
                     potential_decode_blocks,
                     selected_worker_load: Some(selected_worker_load),
                     routing_hashes,
