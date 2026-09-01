@@ -3976,7 +3976,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block",
+													`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`,
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -5052,7 +5052,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleWorker,
 			numberOfNodes:     3,
 			expectError:       false,
-			expectContains:    []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
+			expectContains:    []string{`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`},
 			expectNotContains: []string{"python3 -m dynamo.vllm"},
 		},
 		{

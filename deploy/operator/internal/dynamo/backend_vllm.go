@@ -419,9 +419,17 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)
 		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
-		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
-		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-		container.Args = []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)}
+		// Wait for the Ray head's GCS port before joining. Waiting for vLLM
+		// readiness would deadlock TP/PP startup, which needs the workers.
+		leaderHostname := k8sToShellVarSyntax(multinodeDeployer.GetLeaderHostname(serviceName))
+		container.Args = []string{fmt.Sprintf(
+			`export LEADER_HOST="%s"; `+
+				`i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], %s), timeout=2); s.close()" 2>/dev/null; `+
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; `+
+				`echo "Waiting for Ray head at $LEADER_HOST:%s..."; sleep 2; done && `+
+				`ray start --address="$LEADER_HOST:%s" --block`,
+			leaderHostname, VLLMPort, VLLMPort, VLLMPort,
+		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }

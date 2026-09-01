@@ -126,7 +126,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialContainer:    &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--model", "test", tensorParallelSizeFlag, "8"}},
 			containerGPUs:       4,
-			expectedArgs:        []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
+			expectedArgs:        []string{`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`},
 			expectProbesRemoved: true,
 		},
 		{
@@ -137,7 +137,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}},
 			containerGPUs:       4,
-			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			expectedArgs:        []string{`export LEADER_HOST="${LWS_LEADER_ADDRESS}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`},
 			expectProbesRemoved: true,
 		},
 		{
@@ -806,7 +806,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
 			gpuCount:          8,
 			annotations:       nil,
-			expectedArgs:      []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
+			expectedArgs:      []string{`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`},
 		},
 		{
 			name:              "worker with data parallel launch Grove",
@@ -833,7 +833,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
 			gpuCount:          8,
 			annotations:       nil,
-			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			expectedArgs:      []string{`export LEADER_HOST="${LWS_LEADER_ADDRESS}"; i=0; until python3 -c "import os, socket; s=socket.create_connection((os.environ['LEADER_HOST'], 6379), timeout=2); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not become reachable after 150 attempts" >&2; exit 1; }; echo "Waiting for Ray head at $LEADER_HOST:6379..."; sleep 2; done && ray start --address="$LEADER_HOST:6379" --block`},
 		},
 		{
 			name:              "main role does not modify args",
