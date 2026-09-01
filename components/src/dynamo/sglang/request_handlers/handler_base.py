@@ -1343,3 +1343,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     pass
             else:
                 cancellation_task.result()
+
+            if self.shutdown_event and self.shutdown_event.is_set():
+                raise EngineShutdown("Engine was shut down during token generation")
