@@ -30,16 +30,21 @@ Signals:
 
 - model-download job exits quickly
 - logs show authentication, 401, 403, gated model, or missing token
-- manifest references `HF_TOKEN` but secret/key does not exist
+- manifest references a model-access credential but its Secret or key does not
+  exist
 
 Checks:
 
 ```bash
-kubectl get secret hf-token-secret -n "${NAMESPACE}"
+kubectl get job model-download -n "${NAMESPACE}" \
+  -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}{"\t"}{.valueFrom.secretKeyRef.name}{"\t"}{.valueFrom.secretKeyRef.key}{"\n"}{end}'
+kubectl describe pod <model-download-pod> -n "${NAMESPACE}"
 kubectl logs job/model-download -n "${NAMESPACE}" --tail=100
 ```
 
-Next action: create or fix the HF secret. Never paste the token into manifests.
+Next action: create or fix the Secret and key referenced by the model-download
+job. Never paste the credential into manifests or retrieve Secret data for a
+debug bundle.
 
 ## PVC Or Storage Class
 
