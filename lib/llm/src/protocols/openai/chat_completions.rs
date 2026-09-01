@@ -668,6 +668,16 @@ mod tests {
         serde_json::from_value(body).expect("Failed to deserialize request")
     }
 
+    /// Extracts sampling options for `extra` and returns the guided-decoding options it
+    /// produced, failing if extraction rejected the request or engaged nothing.
+    fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {
+        chat_request_with(extra)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"))
+            .guided_decoding
+            .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"))
+    }
+
     #[test]
     fn test_conflicting_guided_decoding_options_return_invalid_argument() {
         // Each pair is two constraints set at once; every one of them must be rejected.
@@ -699,48 +709,40 @@ mod tests {
     /// grammar is applied. `GuidedDecodingOptions::validate` used to count it toward the
     /// exclusivity limit, which rejected `guided_json` + `guided_whitespace_pattern` even
     /// though the error text never named `whitespace_pattern` and the Python frontend
-    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Each case
-    /// below asserts the resulting options, not merely that extraction returned `Ok`.
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Every case
+    /// asserts the resulting options, not merely that extraction returned `Ok`.
     #[test]
     fn test_guided_decoding_constraint_with_modifier_stays_valid() {
-        let cases: [(serde_json::Value, fn(&GuidedDecodingOptions)); 5] = [
-            (json!({"guided_json": {"type": "object"}}), |guided| {
-                assert!(guided.json.is_some())
-            }),
-            (json!({"guided_regex": "a+"}), |guided| {
-                assert_eq!(guided.regex.as_deref(), Some("a+"))
-            }),
-            (json!({"guided_choice": ["x", "y"]}), |guided| {
-                assert_eq!(guided.choice.as_deref(), Some(&["x".to_string(), "y".to_string()][..]))
-            }),
-            // The companion pair: whitespace_pattern modifies the JSON grammar rather
-            // than being a second grammar, so setting both is one constraint, not two.
-            (
-                json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
-                |guided| {
-                    assert!(guided.json.is_some());
-                    assert_eq!(guided.whitespace_pattern.as_deref(), Some("[\n ]?"));
-                },
-            ),
-            (
-                json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}),
-                |guided| {
-                    assert_eq!(guided.regex.as_deref(), Some("a+"));
-                    assert_eq!(guided.whitespace_pattern.as_deref(), Some("[\n ]?"));
-                },
-            ),
-        ];
+        let json_only = guided_for(&json!({"guided_json": {"type": "object"}}));
+        assert!(json_only.json.is_some());
 
-        for (extra, check) in cases {
-            let request = chat_request_with(&extra);
-            let sampling = request
-                .extract_sampling_options()
-                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
-            let guided = sampling
-                .guided_decoding
-                .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"));
-            check(&guided);
-        }
+        let regex_only = guided_for(&json!({"guided_regex": "a+"}));
+        assert_eq!(regex_only.regex.as_deref(), Some("a+"));
+
+        let choice_only = guided_for(&json!({"guided_choice": ["x", "y"]}));
+        assert_eq!(
+            choice_only.choice,
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+
+        // The companion pair: whitespace_pattern modifies the JSON grammar rather than
+        // being a second grammar, so setting both is one constraint, not two.
+        let json_with_modifier = guided_for(
+            &json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+        );
+        assert!(json_with_modifier.json.is_some());
+        assert_eq!(
+            json_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+
+        let regex_with_modifier =
+            guided_for(&json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}));
+        assert_eq!(regex_with_modifier.regex.as_deref(), Some("a+"));
+        assert_eq!(
+            regex_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
     }
 
     /// A modifier on its own describes how to apply a constraint that was never supplied.
