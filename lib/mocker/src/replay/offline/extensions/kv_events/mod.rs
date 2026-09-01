@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use aisimulate_core::engine::KvEvent;
+use aisimulate_core::engine::{KvEvent, KvEventTier};
 use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
@@ -41,31 +41,24 @@ impl ReplayEngineObservation for RouterEventObservation {
 
     const CAPTURE_ENGINE_KV_EVENTS: bool = true;
 
-    fn capture_engine_kv_events(stage: WorkerStage) -> bool {
-        !matches!(stage, WorkerStage::Decode)
-    }
-
     fn observe_engine_events(
-        stage: WorkerStage,
+        _stage: WorkerStage,
         worker_id: usize,
         _dp_rank: u32,
         events: Vec<KvEvent>,
     ) -> Self::Batch {
-        // Disaggregated decode placement is load-only: the established Dynamo
-        // composition does not feed decode-pool KV mutations back into its
-        // Router indexer. Aggregated and prefill placement still consume every
-        // native event, now at the shared pass-completion boundary.
-        if matches!(stage, WorkerStage::Decode) {
-            return RouterEventBatch::default();
-        }
         let worker_id = u64::try_from(worker_id)
             .expect("logical replay worker id must fit the Dynamo Router wire type");
         RouterEventBatch(
             events
                 .into_iter()
                 .map(|event| {
+                    let storage_tier = match event.tier {
+                        KvEventTier::Device => StorageTier::Device,
+                        KvEventTier::HostPinned => StorageTier::HostPinned,
+                    };
                     let (event, _) = dynamo_kv_event(event);
-                    RouterEvent::with_storage_tier(worker_id, event, StorageTier::Device)
+                    RouterEvent::with_storage_tier(worker_id, event, storage_tier)
                 })
                 .collect(),
         )
@@ -240,11 +233,45 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
         kv_events: artifacts
             .kv_events
             .into_iter()
-            .map(|event| ReplayTimedKvEvent {
-                storage_tier: StorageTier::Device,
-                event: dynamo_kv_event(event.event).0,
-                timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
+            .map(|event| {
+                let storage_tier = match event.event.tier {
+                    KvEventTier::Device => StorageTier::Device,
+                    KvEventTier::HostPinned => StorageTier::HostPinned,
+                };
+                ReplayTimedKvEvent {
+                    storage_tier,
+                    event: dynamo_kv_event(event.event).0,
+                    timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
+                }
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aisimulate_core::engine::KvEventData;
+
+    #[test]
+    fn host_events_preserve_their_router_storage_tier() {
+        let batch = RouterEventObservation::observe_engine_events(
+            WorkerStage::Decode,
+            2,
+            0,
+            vec![KvEvent {
+                event_id: 1,
+                dp_rank: 3,
+                tier: KvEventTier::HostPinned,
+                data: KvEventData::Removed {
+                    block_hashes: vec![17],
+                },
+            }],
+        );
+
+        assert_eq!(batch.0.len(), 1);
+        assert_eq!(batch.0[0].storage_tier, StorageTier::HostPinned);
+        assert_eq!(batch.0[0].worker_id, 2);
+        assert_eq!(batch.0[0].event.dp_rank, 3);
+    }
 }

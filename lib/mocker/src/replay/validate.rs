@@ -145,14 +145,6 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
             config.decode_args.worker_type,
         );
     }
-    if config.prefill_args.dp_size != 1 || config.decode_args.dp_size != 1 {
-        bail!(
-            "offline disaggregated replay does not support attention DP; prefill/decode dp_size \
-             must both be 1 (got prefill_dp_size={}, decode_dp_size={})",
-            config.prefill_args.dp_size,
-            config.decode_args.dp_size,
-        );
-    }
     if config.prefill_args.block_size != config.decode_args.block_size {
         bail!(
             "{mode} requires matching prefill/decode block_size, got {} and {}",
@@ -232,26 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn disagg_rejects_attention_dp_with_clear_error() {
+    fn disagg_accepts_attention_dp() {
         for (prefill_dp_size, decode_dp_size) in [(2, 1), (1, 2), (2, 4)] {
             let mut config = config(EngineType::Vllm, EngineType::Vllm);
             config.prefill_args.dp_size = prefill_dp_size;
             config.decode_args.dp_size = decode_dp_size;
-            let expected = format!(
-                "offline disaggregated replay does not support attention DP; prefill/decode \
-                 dp_size must both be 1 (got prefill_dp_size={prefill_dp_size}, \
-                 decode_dp_size={decode_dp_size})"
-            );
-
-            let trace_error =
-                validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
-                    .unwrap_err();
-            assert_eq!(trace_error.to_string(), expected);
-
-            let concurrency_error =
-                validate_offline_disagg_concurrency_args(&config, 1, ReplayRouterMode::RoundRobin)
-                    .unwrap_err();
-            assert_eq!(concurrency_error.to_string(), expected);
+            validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin).unwrap();
+            validate_offline_disagg_concurrency_args(&config, 1, ReplayRouterMode::RoundRobin)
+                .unwrap();
         }
     }
 

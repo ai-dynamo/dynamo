@@ -115,9 +115,10 @@ pub(crate) fn engine_components(
         preemption_mode,
         emit_kv_events,
         emit_kv_token_ids,
-        kv_bytes_per_token: args.kv_bytes_per_token,
+        kv_cache_bytes_per_token: args.kv_bytes_per_token,
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
+        native_host_offload: args.native_host_offload,
         timing_model,
         sglang,
         ..EngineConfig::for_backend(backend)
@@ -149,6 +150,7 @@ pub(crate) fn aggregated_replay_setup(
     let config = ReplayEngineConfig {
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        cache_domain_ids: components.args.cache_domain_ids,
         rank: components.rank,
         prefill: None,
         decode: None,
@@ -171,16 +173,19 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        cache_domain_ids: prefill.args.cache_domain_ids,
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        cache_domain_ids: decode.args.cache_domain_ids,
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        cache_domain_ids: prefill_role.cache_domain_ids.clone(),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
         decode: Some(decode_role),
