@@ -300,4 +300,5 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
+[autoscaling]: docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
