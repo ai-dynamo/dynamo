@@ -12,29 +12,30 @@ use dynamo_kv_router::indexer::cuckoo::{
 };
 use futures_util::FutureExt as _;
 use parking_lot::Mutex;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::actor::KvDcRelayHandle;
-use super::publication_codec::{self, PublicationFrame};
+use super::super::actor::KvDcRelayHandle;
+use super::codec::{self, PublicationFrame};
 
 pub(super) const DEFAULT_PUBLICATION_QUEUE_CAPACITY: usize = 16;
 pub(super) const DEFAULT_PUBLICATION_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const DEFAULT_POOL_SUBSCRIBERS: usize = 64;
 const DEFAULT_PUBLICATION_ENCODING_CONCURRENCY: usize = 2;
+const HUB_CONTROL_CAPACITY: usize = 1;
 
 #[derive(Clone)]
-pub(super) struct PublicationHubConfig {
-    pub(super) queue_capacity: usize,
-    pub(super) queue_bytes: usize,
-    pub(super) max_subscribers: usize,
-    pub(super) max_delta_images: usize,
-    pub(super) encoding_permits: Arc<Semaphore>,
+pub(in crate::kv_dc_relay) struct PublicationHubConfig {
+    pub(in crate::kv_dc_relay) queue_capacity: usize,
+    pub(in crate::kv_dc_relay) queue_bytes: usize,
+    pub(in crate::kv_dc_relay) max_subscribers: usize,
+    pub(in crate::kv_dc_relay) max_delta_images: usize,
+    pub(in crate::kv_dc_relay) encoding_permits: Arc<Semaphore>,
     #[cfg(test)]
-    pub(super) initialization_gate: Option<Arc<Semaphore>>,
+    pub(in crate::kv_dc_relay) initialization_gate: Option<Arc<Semaphore>>,
     #[cfg(test)]
-    pub(super) post_snapshot_gate: Option<Arc<Semaphore>>,
+    pub(in crate::kv_dc_relay) post_snapshot_gate: Option<Arc<Semaphore>>,
 }
 
 impl Default for PublicationHubConfig {
@@ -43,7 +44,7 @@ impl Default for PublicationHubConfig {
             queue_capacity: DEFAULT_PUBLICATION_QUEUE_CAPACITY,
             queue_bytes: DEFAULT_PUBLICATION_QUEUE_BYTES,
             max_subscribers: DEFAULT_POOL_SUBSCRIBERS,
-            max_delta_images: super::publication_format::max_delta_images(),
+            max_delta_images: super::cbi1::max_delta_images(),
             encoding_permits: Arc::new(Semaphore::new(DEFAULT_PUBLICATION_ENCODING_CONCURRENCY)),
             #[cfg(test)]
             initialization_gate: None,
@@ -61,14 +62,14 @@ impl PublicationHubConfig {
         if self.max_subscribers == 0 {
             return Err("publication subscriber limit must be nonzero".to_string());
         }
-        let maximum = super::publication_format::max_delta_images();
+        let maximum = super::cbi1::max_delta_images();
         if self.max_delta_images > maximum {
             return Err(format!(
                 "publication delta image limit {} exceeds CBI1 maximum {maximum}",
                 self.max_delta_images
             ));
         }
-        let minimum_bytes = super::publication_format::IMAGES_HEADER_LEN
+        let minimum_bytes = super::cbi1::IMAGES_HEADER_LEN
             .saturating_add(12)
             .saturating_add(self.max_delta_images.saturating_mul(12))
             .saturating_add(256);
@@ -229,12 +230,19 @@ fn reserve_bytes(
 struct HubState {
     snapshot: HubSnapshot,
     is_ready: bool,
+    is_idle_eviction_claimed: bool,
     last_error: Option<String>,
     next_subscriber_id: u64,
     subscribers: HashMap<u64, HubSubscriber>,
 }
 
-pub(super) type TerminalFailure = Arc<dyn Fn(String) + Send + Sync>;
+pub(in crate::kv_dc_relay) type TerminalFailure = Arc<dyn Fn(String) + Send + Sync>;
+
+enum HubControl {
+    EvictIdle {
+        response: oneshot::Sender<Result<(), String>>,
+    },
+}
 
 struct HubTask {
     actor: KvDcRelayHandle,
@@ -245,6 +253,7 @@ struct HubTask {
     max_delta_images: usize,
     encoding_permits: Arc<Semaphore>,
     terminal_failure: TerminalFailure,
+    control_rx: mpsc::Receiver<HubControl>,
     cancel: CancellationToken,
     stopped: CancellationToken,
 }
@@ -253,6 +262,7 @@ struct PublicationHubInner {
     pool_id: PoolId,
     config: PublicationHubConfig,
     state: Arc<Mutex<HubState>>,
+    control_tx: mpsc::Sender<HubControl>,
     cancel: CancellationToken,
     stopped: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
@@ -264,20 +274,20 @@ pub(crate) struct PublicationHub {
 }
 
 impl PublicationHub {
-    pub(super) async fn start(
+    pub(in crate::kv_dc_relay) async fn start(
         actor: KvDcRelayHandle,
         lease: LaneLease,
         config: PublicationHubConfig,
         terminal_failure: TerminalFailure,
-    ) -> Result<Self, super::host::KvDcRelayError> {
+    ) -> Result<Self, super::super::host::KvDcRelayError> {
         config
             .validate()
-            .map_err(super::host::KvDcRelayError::Publisher)?;
+            .map_err(super::super::host::KvDcRelayError::Publisher)?;
         #[cfg(test)]
         if let Some(gate) = &config.initialization_gate {
             let permit = gate.acquire().await;
             if permit.is_err() {
-                return Err(super::host::KvDcRelayError::ShuttingDown);
+                return Err(super::super::host::KvDcRelayError::ShuttingDown);
             }
         }
 
@@ -287,19 +297,21 @@ impl PublicationHub {
         if let Some(gate) = &config.post_snapshot_gate {
             let permit = gate.acquire().await;
             if permit.is_err() {
-                return Err(super::host::KvDcRelayError::ShuttingDown);
+                return Err(super::super::host::KvDcRelayError::ShuttingDown);
             }
         }
         validate_snapshot(actor.identity(), lease, &snapshot)
-            .map_err(|error| super::host::KvDcRelayError::Publisher(error.to_string()))?;
+            .map_err(|error| super::super::host::KvDcRelayError::Publisher(error.to_string()))?;
         let pool_id = snapshot.identity.pool_id();
         let state = Arc::new(Mutex::new(HubState {
             snapshot,
             is_ready: true,
+            is_idle_eviction_claimed: false,
             last_error: None,
             next_subscriber_id: 1,
             subscribers: HashMap::new(),
         }));
+        let (control_tx, control_rx) = mpsc::channel(HUB_CONTROL_CAPACITY);
         let cancel = CancellationToken::new();
         let stopped = CancellationToken::new();
         let task = tokio::spawn(run_hub(HubTask {
@@ -311,6 +323,7 @@ impl PublicationHub {
             max_delta_images: config.max_delta_images,
             encoding_permits: config.encoding_permits.clone(),
             terminal_failure,
+            control_rx,
             cancel: cancel.clone(),
             stopped: stopped.clone(),
         }));
@@ -319,6 +332,7 @@ impl PublicationHub {
                 pool_id,
                 config,
                 state,
+                control_tx,
                 cancel,
                 stopped,
                 task: Mutex::new(Some(task)),
@@ -371,20 +385,77 @@ impl PublicationHub {
         self.inner.cancel.cancel();
         let mut state = self.inner.state.lock();
         state.is_ready = false;
+        state.is_idle_eviction_claimed = false;
         close_subscribers(&mut state, SUBSCRIBER_RETIRED);
+    }
+
+    pub(crate) fn try_begin_idle_eviction(&self) -> bool {
+        let mut state = self.inner.state.lock();
+        if !state.is_ready
+            || !state.subscribers.is_empty()
+            || Arc::strong_count(&state.snapshot.buckets) != 1
+        {
+            return false;
+        }
+        state.is_ready = false;
+        state.is_idle_eviction_claimed = true;
+        true
+    }
+
+    pub(crate) async fn evict_idle(&self) -> Result<(), String> {
+        if !self.inner.state.lock().is_idle_eviction_claimed {
+            return Err("publication hub idle eviction was not claimed".to_string());
+        }
+        let (response_tx, response_rx) = oneshot::channel();
+        let send_result = self
+            .inner
+            .control_tx
+            .try_send(HubControl::EvictIdle {
+                response: response_tx,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    "publication hub control queue is full".to_string()
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    "publication hub control queue is closed".to_string()
+                }
+            });
+        if let Err(mut error) = send_result {
+            self.inner.cancel.cancel();
+            if let Err(join_error) = self.join_task().await {
+                error = format!("{error}; {join_error}");
+            }
+            return Err(error);
+        }
+        let retire_result = response_rx
+            .await
+            .map_err(|_| "publication hub stopped before acknowledging idle eviction".to_string());
+        let join_result = self.join_task().await;
+        match retire_result {
+            Ok(result) => result.and(join_result),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn shutdown(&self) {
         self.inner.cancel.cancel();
-        let task = self.inner.task.lock().take();
+        if let Err(error) = self.join_task().await {
+            tracing::warn!(pool_id = %self.inner.pool_id, %error, "KV Relay publication hub monitor failed during shutdown");
+        }
+    }
+
+    async fn join_task(&self) -> Result<(), String> {
+        let task = { self.inner.task.lock().take() };
         if let Some(task) = task {
-            if let Err(error) = task.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(pool_id = %self.inner.pool_id, %error, "KV Relay publication hub monitor failed during shutdown");
-            }
+            let result = task
+                .await
+                .map_err(|error| format!("publication hub monitor task failed: {error}"));
+            self.inner.stopped.cancel();
+            result
         } else {
             self.inner.stopped.cancelled().await;
+            Ok(())
         }
     }
 }
@@ -461,6 +532,7 @@ async fn run_hub(mut task: HubTask) {
         {
             let mut state = task.state.lock();
             state.is_ready = false;
+            state.is_idle_eviction_claimed = false;
             state.last_error = Some(reason.clone());
             close_subscribers(&mut state, SUBSCRIBER_RETIRED);
         }
@@ -469,6 +541,7 @@ async fn run_hub(mut task: HubTask) {
     } else {
         let mut state = task.state.lock();
         state.is_ready = false;
+        state.is_idle_eviction_claimed = false;
         close_subscribers(&mut state, SUBSCRIBER_RETIRED);
     }
     task.stopped.cancel();
@@ -476,8 +549,25 @@ async fn run_hub(mut task: HubTask) {
 
 async fn run_hub_loop(task: &mut HubTask) -> Option<String> {
     loop {
+        // Prioritize idle eviction so the actor lease retires while this broadcast receiver is
+        // still alive.
         let delta = tokio::select! {
             biased;
+            control = task.control_rx.recv() => {
+                let Some(HubControl::EvictIdle { response }) = control else {
+                    return None;
+                };
+                let result = task
+                    .actor
+                    .retire_publication_lease(task.lease)
+                    .await
+                    .map_err(|error| format!(
+                        "failed to retire publication lease during idle eviction: {error}"
+                    ));
+                let failure = result.as_ref().err().cloned();
+                let _ = response.send(result);
+                return failure;
+            }
             _ = task.cancel.cancelled() => return None,
             delta = task.actor_deltas.recv() => delta,
         };
@@ -493,6 +583,102 @@ async fn run_hub_loop(task: &mut HubTask) -> Option<String> {
                 }
             }
             Ok(delta) => {
+                if task.cancel.is_cancelled() {
+                    return None;
+                }
+                let idle_snapshot = {
+                    let mut state = task.state.lock();
+                    if state.subscribers.is_empty() {
+                        if Arc::strong_count(&state.snapshot.buckets) == 1 {
+                            if let Err(error) = apply_delta(&mut state.snapshot, &delta) {
+                                return Some(error.to_string());
+                            }
+                            continue;
+                        }
+                        Some(state.snapshot.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(snapshot) = idle_snapshot {
+                    let base_sequence = delta.base_sequence();
+                    let next_sequence = delta.sequence();
+                    let (snapshot, delta) = match apply_delta_off_thread(
+                        snapshot,
+                        delta,
+                        task.encoding_permits.clone(),
+                        &task.cancel,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(PublicationTaskError::Cancelled) => return None,
+                        Err(_) if task.cancel.is_cancelled() => return None,
+                        Err(error) => {
+                            return Some(format!("failed to apply publication: {error}"));
+                        }
+                    };
+                    if task.cancel.is_cancelled() {
+                        return None;
+                    }
+                    let snapshot = {
+                        let mut state = task.state.lock();
+                        if state.snapshot.sequence != base_sequence {
+                            return Some(
+                                PublicationHubError::SequenceGap {
+                                    current: state.snapshot.sequence,
+                                    base: base_sequence,
+                                    next: next_sequence,
+                                }
+                                .to_string(),
+                            );
+                        }
+                        if state.subscribers.is_empty() {
+                            state.snapshot = snapshot;
+                            None
+                        } else {
+                            Some(snapshot)
+                        }
+                    };
+                    let Some(snapshot) = snapshot else {
+                        continue;
+                    };
+
+                    // A subscriber that arrived while the mirror copy was updated received the
+                    // preceding snapshot, so publish this delta before installing the new image.
+                    let frame = match encode_delta(
+                        delta,
+                        task.encoding_permits.clone(),
+                        &task.cancel,
+                    )
+                    .await
+                    {
+                        Ok((_, frame)) => Arc::new(frame),
+                        Err(PublicationTaskError::Cancelled) => return None,
+                        Err(_) if task.cancel.is_cancelled() => return None,
+                        Err(error) => {
+                            return Some(format!("failed to encode publication: {error}"));
+                        }
+                    };
+                    if task.cancel.is_cancelled() {
+                        return None;
+                    }
+                    let mut state = task.state.lock();
+                    if state.snapshot.sequence != base_sequence {
+                        return Some(
+                            PublicationHubError::SequenceGap {
+                                current: state.snapshot.sequence,
+                                base: base_sequence,
+                                next: next_sequence,
+                            }
+                            .to_string(),
+                        );
+                    }
+                    state.snapshot = snapshot;
+                    fan_out(&mut state, frame);
+                    continue;
+                }
+
                 let (delta, frame) =
                     match encode_delta(delta, task.encoding_permits.clone(), &task.cancel).await {
                         Ok((delta, frame)) => (delta, Arc::new(frame)),
@@ -522,7 +708,7 @@ async fn run_hub_loop(task: &mut HubTask) -> Option<String> {
                 };
                 let base_sequence = delta.base_sequence();
                 let next_sequence = delta.sequence();
-                let snapshot = match apply_delta_off_thread(
+                let (snapshot, _) = match apply_delta_off_thread(
                     snapshot,
                     delta,
                     task.encoding_permits.clone(),
@@ -608,7 +794,7 @@ async fn encode_delta(
     cancel: &CancellationToken,
 ) -> Result<(DcCkfDelta, PublicationFrame), PublicationTaskError> {
     run_blocking_publication_work(permits, cancel, move || {
-        publication_codec::encode_delta(&delta)
+        codec::encode_delta(&delta)
             .map(|frame| (delta, frame))
             .map_err(|error| error.to_string())
     })
@@ -621,10 +807,10 @@ async fn apply_delta_off_thread(
     delta: DcCkfDelta,
     permits: Arc<Semaphore>,
     cancel: &CancellationToken,
-) -> Result<HubSnapshot, PublicationTaskError> {
+) -> Result<(HubSnapshot, DcCkfDelta), PublicationTaskError> {
     run_blocking_publication_work(permits, cancel, move || {
         apply_delta(&mut snapshot, &delta)
-            .map(|()| snapshot)
+            .map(|()| (snapshot, delta))
             .map_err(|error| error.to_string())
     })
     .await?
@@ -737,7 +923,7 @@ fn close_subscribers(state: &mut HubState, reason: u8) {
     state.subscribers.clear();
 }
 
-pub(super) fn publication_lease(identity: ProducerIdentity) -> LaneLease {
+pub(in crate::kv_dc_relay) fn publication_lease(identity: ProducerIdentity) -> LaneLease {
     LaneLease::new(
         ConsumerInstanceId::new(identity.producer_incarnation()),
         0,
@@ -761,8 +947,8 @@ mod tests {
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     };
 
-    use super::super::actor::StreamScope;
-    use super::super::publication_codec::PublicationFrameKind;
+    use super::super::super::actor::StreamScope;
+    use super::super::codec::PublicationFrameKind;
     use super::*;
 
     fn identity() -> ProducerIdentity {
@@ -880,27 +1066,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscriber_queue_is_bounded_by_messages_and_bytes() {
-        let (sender, mut receiver) = mpsc::channel(1);
-        let pending_bytes = Arc::new(AtomicUsize::new(0));
-        let subscriber = HubSubscriber {
-            sender,
-            pending_bytes: pending_bytes.clone(),
-            byte_limit: 300,
-            close_reason: Arc::new(AtomicU8::new(SUBSCRIBER_ACTIVE)),
-        };
+    async fn subscriber_queue_enforces_byte_limit_before_message_capacity() {
         let frame = Arc::new(PublicationFrame::test_frame(
             identity(),
             1,
             2,
             PublicationFrameKind::Delta,
         ));
+        let frame_bytes = frame.queued_bytes();
+        let byte_limit = frame_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_sub(1))
+            .expect("fixture byte limit");
+        let (sender, mut receiver) = mpsc::channel(2);
+        let pending_bytes = Arc::new(AtomicUsize::new(0));
+        let subscriber = HubSubscriber {
+            sender,
+            pending_bytes: pending_bytes.clone(),
+            byte_limit,
+            close_reason: Arc::new(AtomicU8::new(SUBSCRIBER_ACTIVE)),
+        };
         assert!(subscriber.try_send(frame.clone()).is_ok());
         assert!(matches!(
             subscriber.try_send(frame),
             Err(SubscriberSendError::Full)
         ));
-        assert!(pending_bytes.load(Ordering::Acquire) <= 300);
+        assert_eq!(pending_bytes.load(Ordering::Acquire), frame_bytes);
         drop(receiver.recv().await);
         assert_eq!(pending_bytes.load(Ordering::Acquire), 0);
     }
@@ -1027,6 +1218,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_eviction_requires_an_unsubscribed_unpinned_hub() {
+        let failures = Arc::new(AtomicUsize::new(0));
+        let (actor, hub) = actor_and_hub(PublicationHubConfig::default(), failures.clone()).await;
+
+        let subscription = hub.subscribe().unwrap();
+        assert!(!hub.try_begin_idle_eviction());
+        drop(subscription);
+
+        let pinned_snapshot = hub.inner.state.lock().snapshot.clone();
+        assert!(!hub.try_begin_idle_eviction());
+        drop(pinned_snapshot);
+
+        assert!(hub.try_begin_idle_eviction());
+        assert!(hub.subscribe().is_err());
+        hub.evict_idle().await.unwrap();
+        actor.shutdown().await.unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_retires_the_actor_lease_before_restart() {
+        let failures = Arc::new(AtomicUsize::new(0));
+        let config = PublicationHubConfig::default();
+        let (actor, hub) = actor_and_hub(config.clone(), failures.clone()).await;
+
+        assert!(hub.try_begin_idle_eviction());
+        hub.evict_idle().await.unwrap();
+
+        actor.admit_event(1, stored(1, 99)).await.unwrap();
+        actor.flush().await.unwrap();
+        let replacement = PublicationHub::start(
+            actor.clone(),
+            publication_lease(actor.identity()),
+            config,
+            Arc::new({
+                let failures = failures.clone();
+                move |_| {
+                    failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }),
+        )
+        .await
+        .expect("replacement hub");
+        let subscription = replacement.subscribe().unwrap();
+        assert_eq!(subscription.snapshot().unwrap().sequence(), 0);
+
+        drop(subscription);
+        replacement.shutdown().await;
+        actor.shutdown().await.unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn bootstrap_snapshot_is_released_after_ownership_transfer() {
         let failures = Arc::new(AtomicUsize::new(0));
         let (actor, hub) = actor_and_hub(PublicationHubConfig::default(), failures.clone()).await;
@@ -1075,6 +1319,83 @@ mod tests {
             let state = hub.inner.state.lock();
             assert_eq!(state.snapshot.buckets.as_ptr() as usize, before_ptr);
         }
+        hub.shutdown().await;
+        actor.shutdown().await.unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn idle_hub_advances_its_mirror_without_an_encoder_permit() {
+        let failures = Arc::new(AtomicUsize::new(0));
+        let config = PublicationHubConfig {
+            encoding_permits: Arc::new(Semaphore::new(0)),
+            ..PublicationHubConfig::default()
+        };
+        let (actor, hub) = actor_and_hub(config, failures.clone()).await;
+
+        actor.admit_event(1, stored(1, 99)).await.unwrap();
+        actor.flush().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if hub.inner.state.lock().snapshot.sequence() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle hub must apply the actor delta without encoding it");
+
+        let subscription = hub.subscribe().unwrap();
+        assert_eq!(subscription.snapshot().unwrap().sequence(), 1);
+        drop(subscription);
+        hub.shutdown().await;
+        actor.shutdown().await.unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn subscriber_arriving_during_idle_cow_receives_the_pending_delta() {
+        let failures = Arc::new(AtomicUsize::new(0));
+        let encoding_permits = Arc::new(Semaphore::new(0));
+        let config = PublicationHubConfig {
+            encoding_permits: encoding_permits.clone(),
+            ..PublicationHubConfig::default()
+        };
+        let (actor, hub) = actor_and_hub(config, failures.clone()).await;
+        let pinned_snapshot = hub.inner.state.lock().snapshot.clone();
+
+        actor.admit_event(1, stored(1, 99)).await.unwrap();
+        actor.flush().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let bucket_references = Arc::strong_count(&hub.inner.state.lock().snapshot.buckets);
+                if bucket_references >= 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle hub must start copy-on-write before publication encoding");
+
+        let mut subscription = hub.subscribe().unwrap();
+        let snapshot = subscription.take_snapshot().unwrap();
+        assert_eq!(snapshot.sequence(), 0);
+        encoding_permits.add_permits(1);
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), subscription.recv())
+            .await
+            .expect("subscriber must receive the pending delta")
+            .unwrap();
+        assert_eq!(frame.kind(), PublicationFrameKind::Delta);
+        assert_eq!(frame.base_sequence(), 0);
+        assert_eq!(frame.sequence(), 1);
+        assert_eq!(hub.inner.state.lock().snapshot.sequence(), 1);
+
+        drop(subscription);
+        drop(snapshot);
+        drop(pinned_snapshot);
         hub.shutdown().await;
         actor.shutdown().await.unwrap();
         assert_eq!(failures.load(Ordering::Relaxed), 0);

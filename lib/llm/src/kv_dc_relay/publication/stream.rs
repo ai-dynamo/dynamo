@@ -17,9 +17,9 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use super::publication_codec::{PublicationFrame, PublicationFrameKind, encode_snapshot};
-use super::publication_hub::PublicationHubSubscription;
-use super::publication_source::PublicationError;
+use super::codec::{PublicationFrame, PublicationFrameKind, encode_snapshot};
+use super::hub::PublicationHubSubscription;
+use super::source::PublicationError;
 
 const SNAPSHOT_BOOTSTRAP_QUEUE_CAPACITY: usize = 1;
 const SNAPSHOT_SEND_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -477,7 +477,7 @@ mod tests {
         let (terminal_failure, failures) = counting_terminal_failures();
         assert_eq!(
             error.into_publication_error(&terminal_failure).kind(),
-            super::super::publication_source::PublicationErrorKind::ResourceExhausted
+            super::super::source::PublicationErrorKind::ResourceExhausted
         );
         assert_eq!(failures.load(Ordering::Relaxed), 0);
     }
@@ -493,7 +493,7 @@ mod tests {
         let error = bootstrap.recv().await.expect_err("encoder must panic");
         assert_eq!(
             error.into_publication_error(&terminal_failure).kind(),
-            super::super::publication_source::PublicationErrorKind::Internal
+            super::super::source::PublicationErrorKind::Internal
         );
         assert_eq!(failures.load(Ordering::Relaxed), 1);
 
@@ -504,7 +504,7 @@ mod tests {
             SnapshotBootstrapError::EncoderTaskFailed(cancelled)
                 .into_publication_error(&terminal_failure)
                 .kind(),
-            super::super::publication_source::PublicationErrorKind::Unavailable
+            super::super::source::PublicationErrorKind::Unavailable
         );
         assert_eq!(failures.load(Ordering::Relaxed), 1);
     }
@@ -547,7 +547,7 @@ mod tests {
             )
             .expect_err("identity drift must fail")
             .kind(),
-            super::super::publication_source::PublicationErrorKind::InvalidPublication
+            super::super::source::PublicationErrorKind::InvalidPublication
         );
 
         assert!(
@@ -566,7 +566,7 @@ mod tests {
             )
             .expect_err("sequence gap must fail")
             .kind(),
-            super::super::publication_source::PublicationErrorKind::InvalidPublication
+            super::super::source::PublicationErrorKind::InvalidPublication
         );
 
         let (terminal_failure, failures) = counting_terminal_failures();

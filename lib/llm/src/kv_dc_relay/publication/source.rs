@@ -12,16 +12,17 @@ use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::identity::{DcPoolCatalog, DcRelayIdentity};
-use super::load::PoolLoadSnapshot;
-use super::pool_registry::PoolRegistry;
-use super::publication_hub::PublicationHubError;
-use super::publication_stream::{self, PoolPublicationStream, TerminalPublicationFailure};
-use super::topology::{TopologyPublisher, TopologySnapshot};
+use super::super::identity::{DcPoolCatalog, DcRelayIdentity};
+use super::super::load::PoolLoadSnapshot;
+use super::super::pool_registry::PoolRegistry;
+use super::super::topology::{TopologyPublisher, TopologySnapshot};
+use super::hub::PublicationHubError;
+use super::stream::{self, PoolPublicationStream, TerminalPublicationFailure};
 
-pub(super) const DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
-pub(super) const DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY: usize = 2;
-pub(super) const DEFAULT_ACTIVE_POOL_STREAMS: usize = 64;
+pub(in crate::kv_dc_relay) const DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT: Duration =
+    Duration::from_secs(60);
+pub(in crate::kv_dc_relay) const DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY: usize = 2;
+pub(in crate::kv_dc_relay) const DEFAULT_ACTIVE_POOL_STREAMS: usize = 64;
 
 mod private {
     pub trait Sealed {}
@@ -177,6 +178,7 @@ impl RegistryPublicationSource {
 
     async fn acquire_stream_permits(
         &self,
+        generation_cancel: &CancellationToken,
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), PublicationError> {
         if self.lifecycle.is_cancelled() {
             return Err(PublicationError::unavailable(
@@ -200,6 +202,11 @@ impl RegistryPublicationSource {
             _ = self.lifecycle.cancelled() => {
                 return Err(PublicationError::unavailable(
                     "publication source is shutting down",
+                ));
+            }
+            _ = generation_cancel.cancelled() => {
+                return Err(PublicationError::unavailable(
+                    "pool generation retired while waiting for publication admission",
                 ));
             }
             permit = self.snapshot_encoding_permits.clone().acquire_owned() => permit
@@ -256,11 +263,11 @@ impl RelayPublicationSource for RegistryPublicationSource {
                 "publication source is shutting down",
             ));
         }
-        self.pools.validate_active_producer(expected)?;
+        let generation_cancel = self.pools.validate_active_producer(expected)?;
         // Acquire encoding capacity first so permit waiters cannot pin a generation snapshot and
         // force full-lane COW while publication advances.
         let (active_stream_permit, snapshot_encoding_permit) =
-            self.acquire_stream_permits().await?;
+            self.acquire_stream_permits(&generation_cancel).await?;
         let subscription = tokio::select! {
             biased;
             _ = self.lifecycle.cancelled() => {
@@ -275,7 +282,7 @@ impl RelayPublicationSource for RegistryPublicationSource {
                 "publication source is shutting down",
             ));
         }
-        publication_stream::open(
+        stream::open(
             subscription,
             expected,
             active_stream_permit,
@@ -352,8 +359,13 @@ mod tests {
     async fn lifecycle_cancels_snapshot_permit_wait_without_cancel_authority() {
         let lifecycle = CancellationToken::new();
         let source = source(lifecycle.clone(), Arc::new(Semaphore::new(0)), 1);
+        let generation_cancel = CancellationToken::new();
         let waiting_source = source.clone();
-        let subscribe = tokio::spawn(async move { waiting_source.acquire_stream_permits().await });
+        let subscribe = tokio::spawn(async move {
+            waiting_source
+                .acquire_stream_permits(&generation_cancel)
+                .await
+        });
         tokio::time::timeout(Duration::from_secs(1), async {
             while source.active_stream_permits.available_permits() != 0 {
                 tokio::task::yield_now().await;
@@ -385,6 +397,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_retirement_cancels_snapshot_permit_wait() {
+        let lifecycle = CancellationToken::new();
+        let source = source(lifecycle.clone(), Arc::new(Semaphore::new(0)), 1);
+        let generation_cancel = CancellationToken::new();
+        let waiting_cancel = generation_cancel.clone();
+        let waiting_source = source.clone();
+        let subscribe =
+            tokio::spawn(
+                async move { waiting_source.acquire_stream_permits(&waiting_cancel).await },
+            );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while source.active_stream_permits.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("permit waiter must hold the active stream permit");
+
+        generation_cancel.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), subscribe)
+            .await
+            .expect("generation retirement must cancel the permit wait")
+            .expect("subscribe task");
+        let error = match result {
+            Ok(_) => panic!("retired generation acquired publication admission"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), PublicationErrorKind::Unavailable);
+        assert!(!lifecycle.is_cancelled());
+        assert_eq!(source.active_stream_permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
     async fn unknown_generation_is_rejected_before_permit_wait() {
         let source = source(CancellationToken::new(), Arc::new(Semaphore::new(0)), 1);
 
@@ -405,8 +451,13 @@ mod tests {
     async fn active_pool_stream_limit_is_global_and_fail_fast() {
         let lifecycle = CancellationToken::new();
         let source = source(lifecycle.clone(), Arc::new(Semaphore::new(0)), 1);
+        let generation_cancel = CancellationToken::new();
+        let waiting_cancel = generation_cancel.clone();
         let waiting_source = source.clone();
-        let first = tokio::spawn(async move { waiting_source.acquire_stream_permits().await });
+        let first =
+            tokio::spawn(
+                async move { waiting_source.acquire_stream_permits(&waiting_cancel).await },
+            );
         tokio::time::timeout(Duration::from_secs(1), async {
             while source.active_stream_permits.available_permits() != 0 {
                 tokio::task::yield_now().await;
@@ -415,7 +466,7 @@ mod tests {
         .await
         .expect("first stream must hold the global permit");
 
-        let error = match source.acquire_stream_permits().await {
+        let error = match source.acquire_stream_permits(&generation_cancel).await {
             Ok(_) => panic!("second stream exceeded the global limit"),
             Err(error) => error,
         };

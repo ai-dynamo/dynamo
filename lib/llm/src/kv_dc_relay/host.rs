@@ -50,10 +50,10 @@ use super::pool_registry::{
     drain_faults_while,
 };
 use super::pool_registry::{PoolPublicationConfig, PoolServingFacts};
-use super::publication_format::MAX_BUCKET_COUNT;
-use super::publication_source::{
+use super::publication::{
     DEFAULT_ACTIVE_POOL_STREAMS, DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY,
-    DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT, RegistryPublicationSource, RelayPublicationSource,
+    DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT, MAX_BUCKET_COUNT, RegistryPublicationSource,
+    RelayPublicationSource,
 };
 use super::resolution::stable_dc_id;
 use super::topology::{TopologyPublisher, TopologySnapshot};

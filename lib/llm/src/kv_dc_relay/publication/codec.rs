@@ -4,8 +4,8 @@
 use bytes::Bytes;
 use dynamo_kv_router::indexer::cuckoo::{DcCkfDelta, DcCkfFormatIdentity, ProducerIdentity};
 
-use super::publication_format as images;
-use super::publication_hub::HubSnapshot;
+use super::cbi1 as images;
+use super::hub::HubSnapshot;
 
 /// Lets drivers distinguish snapshot bootstrap from live deltas without decoding CBI1.
 #[non_exhaustive]
