@@ -182,7 +182,6 @@ impl Router {
             Some(prefill_config),
             None,
             None,
-            None,
             model_name.clone(),
             actual_namespace.to_string(),
             decode_router.load_context().load_thresholds(),

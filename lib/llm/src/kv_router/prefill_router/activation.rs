@@ -24,9 +24,7 @@ use dynamo_runtime::{
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager},
-    kv_router::{
-        KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory,
-    },
+    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -124,7 +122,6 @@ impl PrefillRouter<DefaultWorkerSelector> {
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
@@ -138,7 +135,6 @@ impl PrefillRouter<DefaultWorkerSelector> {
             decode_router_mode,
             kv_cache_block_size,
             kv_router_config,
-            decode_router,
             Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(
                     Some(config.clone()),
@@ -169,9 +165,8 @@ where
             binding: arc_swap::ArcSwapOption::empty(),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
-            decode_router: None,
+            decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: None,
-            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
@@ -196,7 +191,6 @@ where
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_router: Option<Arc<KvRouter<Sel>>>,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
@@ -221,9 +215,8 @@ where
             binding: arc_swap::ArcSwapOption::empty(),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
-            decode_router,
+            decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: Some(worker_selector_factory),
-            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,

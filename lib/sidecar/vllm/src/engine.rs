@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
@@ -94,6 +94,17 @@ impl VllmSidecarEngine {
         }
 
         let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_http_url = args
+            .vllm_http_endpoint
+            .map(|endpoint| {
+                RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
+                    client::invalid_argument(format!(
+                        "invalid RL admin endpoint derived from --vllm-http-endpoint: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(
@@ -102,6 +113,9 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        let rl_metadata = enable_rl
+            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
@@ -127,7 +141,8 @@ impl VllmSidecarEngine {
             enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
-            enable_rl: args.sidecar.common.enable_rl,
+            enable_rl,
+            rl_metadata,
             ..Default::default()
         };
         Ok((engine, config))

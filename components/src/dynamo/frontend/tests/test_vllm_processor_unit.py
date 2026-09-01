@@ -26,6 +26,7 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
     StreamingPostProcessor,
@@ -1486,8 +1487,8 @@ class TestRoutedEnginePath:
     async def test_genuine_internal_failure_is_still_internal(
         self, vllm_processor_module
     ):
-        # The mapping is narrow on purpose: anything without the discriminator
-        # keeps the existing internal-error behaviour.
+        """A real engine fault stays internal, and is sent as a tagged frame."""
+
         class _BrokenEngine(_FakeRoutedEngine):
             async def generate(self, preprocessed, **kwargs):
                 raise RuntimeError("CUDA out of memory")
@@ -1496,7 +1497,62 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        assert chunks[-1]["error"]["type"] == "internal_error"
+        # Yielded, not raised: an error without the discriminator is not a 4xx.
+        last = chunks[-1]
+        # It must also be tagged. An untagged dict fails to parse and becomes a 500.
+        assert last["_dynamo_annotated"] is True
+        assert last["event"] == "error"
+        assert "CUDA out of memory" in last["comment"][0]
+
+    @pytest.mark.asyncio
+    async def test_unregistered_choice_index_ends_the_stream(
+        self, vllm_processor_module
+    ):
+        """An unknown choice index ends the stream instead of reading on."""
+
+        class _WrongIndexOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                # Index 1 is never registered below, so the lookup misses.
+                return SimpleNamespace(
+                    reqs_to_abort=[],
+                    request_outputs=[
+                        SimpleNamespace(outputs=[SimpleNamespace(index=1)])
+                    ],
+                )
+
+        # Two frames: with `continue` the second one yields a second error.
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _WrongIndexOutputProcessor()
+        preproc = _base_preproc()
+        vllm_preproc = SimpleNamespace(
+            sampling_params=SimpleNamespace(n=1),
+            request_id="vllm-request",
+            external_req_id=None,
+        )
+
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                {"model": MODEL},
+                preproc,
+                preproc["token_ids"],
+                vllm_preproc,
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        assert len(chunks) == 1, f"stream continued after the error: {chunks}"
+        assert chunks[0]["event"] == "error"
+        assert "Invalid postprocessor choice index 1" in chunks[0]["comment"][0]
 
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
@@ -2160,6 +2216,49 @@ class TestToolCallGuidedDecoding:
         assert set(guided) == {"json"}
         assert parser.requests == []
 
+    def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._request(
+                tokenizer,
+                tool_choice={"type": "function", "function": {"name": "get_weather"}},
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+            ),
+            tool_parser=None,
+        )
+
+        assert guided == {"regex": r"\{\}"}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"minProperties": 0},
+            {"maxProperties": 1},
+            {"examples": [{}]},
+        ],
+    )
+    def test_zero_arg_schema_allows_neutral_bounds_and_annotations(self, extra):
+        assert admits_only_empty_object(
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+                **extra,
+            }
+        )
+
     def test_required_choice_disables_parallel_calls_in_json_guidance(self, tokenizer):
         guided = build_tool_call_guided_decoding(
             self._request(
@@ -2296,6 +2395,63 @@ class TestToolCallGuidedDecoding:
         assert choice["delta"]["tool_calls"][0]["function"] == {
             "name": "get_weather",
             "arguments": '{"city":"Paris"}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_named_closed_zero_arg_regex_becomes_a_tool_call(self, tokenizer):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        request["tools"][0]["function"]["parameters"] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=None,
+            structural_tag_mode="off",
+        )
+
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=result.request_for_sampling,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=result.prompt_token_ids,
+            tool_parser=result.tool_parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs=result.chat_template_kwargs,
+            stream_response=False,
+            uses_dynamo_json_tool_call_fallback=(
+                result.uses_dynamo_json_tool_call_fallback
+            ),
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text="{}",
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": "{}",
         }
 
     # Explicit assistant constraints must override automatic tool-call guidance.

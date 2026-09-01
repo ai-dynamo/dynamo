@@ -65,10 +65,10 @@ export interface Release {
   partial?: boolean;
 }
 
-export const CURRENT_VERSION = "v1.4.1";
-export const CURRENT_DATE = "Aug 21, 2026";
-export const CURRENT_TAG = "1.4.1";
-export const CURRENT_WHEEL = "1.4.1";
+export const CURRENT_VERSION = "v1.4.2";
+export const CURRENT_DATE = "Aug 28, 2026";
+export const CURRENT_TAG = "1.4.2";
+export const CURRENT_WHEEL = "1.4.2";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.18",
@@ -82,6 +82,18 @@ export const MAIN_TOT: BackendPins = {
 const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 
 export const RELEASES: Release[] = [
+  {
+    version: "v1.4.2",
+    notesHref: "/dynamo/dev/reference/releases/v1-4-0#v142",
+    date: "Aug 28, 2026",
+    kind: "patch",
+    github: `${GH}v1.4.2`,
+    docs: "https://docs.nvidia.com/dynamo",
+    pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
+    ucx: "1.21.x",
+    delta:
+      "Patch release and the first Dynamo Enterprise release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for NVIDIA Enterprise Support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
+  },
   {
     version: "v1.4.1",
     notesHref: "/dynamo/dev/reference/releases/v1-4-0#v141",
@@ -372,6 +384,9 @@ export interface CudaRow {
 }
 
 export const CUDA_HISTORY: CudaRow[] = [
+  { version: "1.4.2", backend: "SGLang", toolkit: "13.0", minDriver: "580.xx+" },
+  { version: "1.4.2", backend: "TensorRT-LLM", toolkit: "13.1", minDriver: "580.xx+" },
+  { version: "1.4.2", backend: "vLLM", toolkit: "13.0", minDriver: "580.xx+" },
   { version: "1.4.1", backend: "SGLang", toolkit: "13.0", minDriver: "580.xx+" },
   { version: "1.4.1", backend: "TensorRT-LLM", toolkit: "13.1", minDriver: "580.xx+" },
   { version: "1.4.1", backend: "vLLM", toolkit: "13.0", minDriver: "580.xx+" },
@@ -613,8 +628,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "vLLM v0.26.0 · CUDA 13.0 · AMD64/ARM64",
     href: `${NGC_C}/vllm-runtime/tags`,
     tags: [
-      { label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1" },
-      { label: "1.4.1-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-efa", variant: "experimental" },
+      { label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2" },
+      { label: "1.4.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -625,8 +640,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "SGLang v0.5.16 · CUDA 13.0 · AMD64/ARM64",
     href: `${NGC_C}/sglang-runtime/tags`,
     tags: [
-      { label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1" },
-      { label: "1.4.1-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1-efa", variant: "experimental" },
+      { label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.2" },
+      { label: "1.4.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -637,8 +652,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "TRT-LLM v1.3.0rc22 · CUDA 13.1 · AMD64/ARM64",
     href: `${NGC_C}/tensorrtllm-runtime/tags`,
     tags: [
-      { label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.1" },
-      { label: "1.4.1-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.1-efa", variant: "experimental" },
+      { label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.2" },
+      { label: "1.4.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -648,7 +663,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP)",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-frontend/tags`,
-    tags: [{ label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1" }],
+    tags: [{ label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2" }],
   },
   {
     category: "container",
@@ -657,7 +672,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "Standalone Planner used by Profiler jobs and Planner pods",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-planner/tags`,
-    tags: [{ label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.1" }],
+    tags: [{ label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.2" }],
   },
   {
     category: "container",
@@ -666,7 +681,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "Operator that manages Dynamo deployments and CRDs",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/kubernetes-operator/tags`,
-    tags: [{ label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.4.1" }],
+    tags: [{ label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.4.2" }],
   },
   {
     category: "container",
@@ -676,24 +691,24 @@ export const ARTIFACTS: Artifact[] = [
     meta: "AMD64",
     href: `${NGC_C}/snapshot-agent/tags`,
     badge: "Preview",
-    tags: [{ label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.4.1" }],
+    tags: [{ label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.4.2" }],
   },
   {
     category: "wheel",
     name: "ai-dynamo",
     description: "Main package with backend integrations (vLLM, SGLang, TRT-LLM)",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/ai-dynamo/1.4.1/",
-    tags: [{ label: "uv pip install ai-dynamo==1.4.1", clipboard: "uv pip install ai-dynamo==1.4.1" }],
+    href: "https://pypi.org/project/ai-dynamo/1.4.2/",
+    tags: [{ label: "uv pip install ai-dynamo==1.4.2", clipboard: "uv pip install ai-dynamo==1.4.2" }],
   },
   {
     category: "wheel",
     name: "ai-dynamo-runtime",
     description: "Core Python bindings for the Dynamo runtime",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/ai-dynamo-runtime/1.4.1/",
+    href: "https://pypi.org/project/ai-dynamo-runtime/1.4.2/",
     tags: [
-      { label: "uv pip install ai-dynamo-runtime==1.4.1", clipboard: "uv pip install ai-dynamo-runtime==1.4.1" },
+      { label: "uv pip install ai-dynamo-runtime==1.4.2", clipboard: "uv pip install ai-dynamo-runtime==1.4.2" },
     ],
   },
   {
@@ -701,19 +716,19 @@ export const ARTIFACTS: Artifact[] = [
     name: "kvbm",
     description: "KV Block Manager for disaggregated KV cache",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/kvbm/1.4.1/",
-    tags: [{ label: "uv pip install kvbm==1.4.1", clipboard: "uv pip install kvbm==1.4.1" }],
+    href: "https://pypi.org/project/kvbm/1.4.2/",
+    tags: [{ label: "uv pip install kvbm==1.4.2", clipboard: "uv pip install kvbm==1.4.2" }],
   },
   {
     category: "helm",
     name: "dynamo-platform",
     description: "Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster",
-    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.1.tgz",
+    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.2.tgz",
     tags: [
       {
-        label: "helm install · dynamo-platform 1.4.1",
+        label: "helm install · dynamo-platform 1.4.2",
         clipboard:
-          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.1.tgz",
+          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.2.tgz",
       },
     ],
   },
@@ -721,11 +736,11 @@ export const ARTIFACTS: Artifact[] = [
     category: "helm",
     name: "snapshot",
     description: "Snapshot DaemonSet for fast GPU worker recovery",
-    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.1.tgz",
+    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.2.tgz",
     tags: [
       {
-        label: "helm install · snapshot 1.4.1",
-        clipboard: "helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.1.tgz",
+        label: "helm install · snapshot 1.4.2",
+        clipboard: "helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.2.tgz",
       },
     ],
   },
@@ -734,16 +749,16 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-runtime",
     description: "Core distributed runtime library",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-runtime/1.4.1",
-    tags: [{ label: "cargo add dynamo-runtime@1.4.1", clipboard: "cargo add dynamo-runtime@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-runtime/1.4.2",
+    tags: [{ label: "cargo add dynamo-runtime@1.4.2", clipboard: "cargo add dynamo-runtime@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-llm",
     description: "LLM inference engine",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-llm/1.4.1",
-    tags: [{ label: "cargo add dynamo-llm@1.4.1", clipboard: "cargo add dynamo-llm@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-llm/1.4.2",
+    tags: [{ label: "cargo add dynamo-llm@1.4.2", clipboard: "cargo add dynamo-llm@1.4.2" }],
   },
   {
     category: "crate",
@@ -777,8 +792,8 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-memory",
     description: "Memory management utilities",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-memory/1.4.1",
-    tags: [{ label: "cargo add dynamo-memory@1.4.1", clipboard: "cargo add dynamo-memory@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-memory/1.4.2",
+    tags: [{ label: "cargo add dynamo-memory@1.4.2", clipboard: "cargo add dynamo-memory@1.4.2" }],
   },
   {
     category: "crate",
@@ -794,8 +809,8 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-tokens",
     description: "Tokenizer bindings for LLM inference",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-tokens/1.4.1",
-    tags: [{ label: "cargo add dynamo-tokens@1.4.1", clipboard: "cargo add dynamo-tokens@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-tokens/1.4.2",
+    tags: [{ label: "cargo add dynamo-tokens@1.4.2", clipboard: "cargo add dynamo-tokens@1.4.2" }],
   },
   {
     category: "crate",
@@ -811,104 +826,104 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-mocker",
     description: "Inference engine simulator for benchmarking",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-mocker/1.4.1",
-    tags: [{ label: "cargo add dynamo-mocker@1.4.1", clipboard: "cargo add dynamo-mocker@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-mocker/1.4.2",
+    tags: [{ label: "cargo add dynamo-mocker@1.4.2", clipboard: "cargo add dynamo-mocker@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-kv-router",
     description: "KV-aware request routing library",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-kv-router/1.4.1",
-    tags: [{ label: "cargo add dynamo-kv-router@1.4.1", clipboard: "cargo add dynamo-kv-router@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-kv-router/1.4.2",
+    tags: [{ label: "cargo add dynamo-kv-router@1.4.2", clipboard: "cargo add dynamo-kv-router@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-logical",
     description: "Logical layer for the KV Block Manager",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-logical/1.4.1",
-    tags: [{ label: "cargo add kvbm-logical@1.4.1", clipboard: "cargo add kvbm-logical@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-logical/1.4.2",
+    tags: [{ label: "cargo add kvbm-logical@1.4.2", clipboard: "cargo add kvbm-logical@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-kv-hashing",
     description: "Request-to-lineage-hash contract for KV cache identity",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-kv-hashing/1.4.1",
-    tags: [{ label: "cargo add dynamo-kv-hashing@1.4.1", clipboard: "cargo add dynamo-kv-hashing@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-kv-hashing/1.4.2",
+    tags: [{ label: "cargo add dynamo-kv-hashing@1.4.2", clipboard: "cargo add dynamo-kv-hashing@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-data-gen",
     description: "Schemas and primitives for Dynamo data generation and replay traces",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-data-gen/1.4.1",
-    tags: [{ label: "cargo add dynamo-data-gen@1.4.1", clipboard: "cargo add dynamo-data-gen@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-data-gen/1.4.2",
+    tags: [{ label: "cargo add dynamo-data-gen@1.4.2", clipboard: "cargo add dynamo-data-gen@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-rl",
     description: "Dynamo RL worker discovery API",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-rl/1.4.1",
-    tags: [{ label: "cargo add dynamo-rl@1.4.1", clipboard: "cargo add dynamo-rl@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-rl/1.4.2",
+    tags: [{ label: "cargo add dynamo-rl@1.4.2", clipboard: "cargo add dynamo-rl@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-bench",
     description: "Lightweight HTTP benchmarks for Dynamo endpoints",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-bench/1.4.1",
-    tags: [{ label: "cargo add dynamo-bench@1.4.1", clipboard: "cargo add dynamo-bench@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-bench/1.4.2",
+    tags: [{ label: "cargo add dynamo-bench@1.4.2", clipboard: "cargo add dynamo-bench@1.4.2" }],
   },
   {
     category: "crate",
     name: "dynamo-truthy",
     description: "Canonical truthy/falsy boolean flag parsing",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-truthy/1.4.1",
-    tags: [{ label: "cargo add dynamo-truthy@1.4.1", clipboard: "cargo add dynamo-truthy@1.4.1" }],
+    href: "https://crates.io/crates/dynamo-truthy/1.4.2",
+    tags: [{ label: "cargo add dynamo-truthy@1.4.2", clipboard: "cargo add dynamo-truthy@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-common",
     description: "Shared types for the KV Block Manager",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-common/1.4.1",
-    tags: [{ label: "cargo add kvbm-common@1.4.1", clipboard: "cargo add kvbm-common@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-common/1.4.2",
+    tags: [{ label: "cargo add kvbm-common@1.4.2", clipboard: "cargo add kvbm-common@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-config",
     description: "KVBM configuration for Tokio, Rayon, and Messenger runtimes",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-config/1.4.1",
-    tags: [{ label: "cargo add kvbm-config@1.4.1", clipboard: "cargo add kvbm-config@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-config/1.4.2",
+    tags: [{ label: "cargo add kvbm-config@1.4.2", clipboard: "cargo add kvbm-config@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-kernels",
     description: "CUDA kernels for the KV Block Manager",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-kernels/1.4.1",
-    tags: [{ label: "cargo add kvbm-kernels@1.4.1", clipboard: "cargo add kvbm-kernels@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-kernels/1.4.2",
+    tags: [{ label: "cargo add kvbm-kernels@1.4.2", clipboard: "cargo add kvbm-kernels@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-physical",
     description: "Physical block layer for the KV Block Manager",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-physical/1.4.1",
-    tags: [{ label: "cargo add kvbm-physical@1.4.1", clipboard: "cargo add kvbm-physical@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-physical/1.4.2",
+    tags: [{ label: "cargo add kvbm-physical@1.4.2", clipboard: "cargo add kvbm-physical@1.4.2" }],
   },
   {
     category: "crate",
     name: "kvbm-engine",
     description: "Distributed coordination primitives for KVBM",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/kvbm-engine/1.4.1",
-    tags: [{ label: "cargo add kvbm-engine@1.4.1", clipboard: "cargo add kvbm-engine@1.4.1" }],
+    href: "https://crates.io/crates/kvbm-engine/1.4.2",
+    tags: [{ label: "cargo add kvbm-engine@1.4.2", clipboard: "cargo add kvbm-engine@1.4.2" }],
   },
   {
     category: "crate",
