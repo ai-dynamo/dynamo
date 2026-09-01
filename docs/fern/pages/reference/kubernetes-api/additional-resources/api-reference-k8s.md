@@ -1509,6 +1509,8 @@ _Appears in:_
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | RuntimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | GPUsPerEngine is the number of GPUs assigned to one inference engine in a<br />service replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult GPUsPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | GPUsPerReplica is the unique GPU allocation added when this service scales<br />by one replica, across all nodes, application and initialization phases,<br />and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod<br />scheduling footprint; shared DRA claims are counted once. A present zero<br />records a successful non-GPU resolution; omission means no current shape<br />is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1819,6 +1821,8 @@ _Appears in:_
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | gpusPerEngine is the number of GPUs assigned to one inference engine in a<br />component replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult gpusPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the unique GPU allocation added when this component<br />scales by one replica, across all nodes, application and initialization<br />phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective<br />Pod scheduling footprint; shared DRA claims are counted once. A present<br />zero records a successful non-GPU resolution; omission means no current<br />shape is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -3343,6 +3347,16 @@ _Appears in:_
 | `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
 | `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
 | `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
+| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  |  |
+| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  |  |
+| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  |  |
+| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  |  |
+| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  |  |
+| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  |  |
+| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  |  |
+| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  |  |
+| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  |  |
+| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  |  |
 
 
 #### IngressConfiguration

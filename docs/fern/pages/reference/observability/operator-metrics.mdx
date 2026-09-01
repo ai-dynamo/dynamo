@@ -88,7 +88,7 @@ These labels are specific to operator metrics and are distinct from the applicat
 Metrics collection on Kubernetes is controlled by CRD annotations and Helm values — **not** environment variables. These knobs govern whether application and operator metrics are scraped at all.
 
 <Note>
-  These fields also appear in the CRD and Helm references. They are reproduced here so the observability enablement path is documented in one place. For the operator's full Helm value set, see the [Dynamo Operator guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md).
+  These fields also appear in the CRD and Helm references. They are reproduced here so the observability enablement path is documented in one place. For platform installation and Helm configuration, see [Install Dynamo](../../kubernetes/installation/install-dynamo.md).
 </Note>
 
 <ParamField path="nvidia.com/metrics-enabled" type="boolean (pod label)" default="true">

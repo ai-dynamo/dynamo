@@ -15,6 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -30,6 +31,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
@@ -121,6 +123,24 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+# Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
+# that endpoint, so an unbounded wait on a degraded GCS would pile up control
+# requests; a capacity read is advisory and stale-or-absent beats slow.
+_EP_CAPACITY_RAY_TIMEOUT_S = 5.0
+
+
+def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
+    """Retrieve a timed-out snapshot's outcome so asyncio stays quiet about it.
+
+    When ``get_ep_capacity`` times out, its waiter goes away but the future keeps
+    running. If that future then fails, nothing ever retrieves the exception and
+    asyncio logs a spurious "exception was never retrieved" at GC time. Reading it
+    here clears that flag; a later caller awaiting the same future still sees it.
+    """
+    if not fut.cancelled():
+        fut.exception()
+
+
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
@@ -1109,6 +1129,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
+    # get_ep_capacity single-flight state; see the comment at its call site.
+    # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
+    _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
+    _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -1202,6 +1226,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # can mutate _coord_store at a time.
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
+        # Created on first Ray-backed get_ep_capacity call so workers that never
+        # serve elastic EP do not carry an idle thread.
+        self._ep_capacity_inflight = None
+        self._ep_capacity_executor = None
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -1288,9 +1316,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if encode_worker_client is None:
             return None
         logger.warning(
-            "Separate multimodal encode-worker routing only applies to image_url "
-            "inputs. video_url inputs are not sent to the encode worker and will "
-            "be processed on the prefill/PD worker instead."
+            "Separate multimodal encode-worker routing only applies to image "
+            "inputs, including URL-backed and frontend-decoded images. Video "
+            "inputs are processed on the prefill/PD worker instead."
         )
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
@@ -1539,6 +1567,166 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         finally:
             async with self._scale_ep_lock:
                 self._scale_ep_in_progress = False
+
+    async def get_ep_capacity(self, body: dict) -> dict:
+        """Read-only elastic-EP capacity: current dp/tp and the idle GPUs to grow into.
+
+        The reconciler that drives ``scale_elastic_ep`` calls this to decide whether a
+        scale-up can actually place another rank. That decision is *per node*, not
+        cluster-wide: vLLM's add_dp_placement_groups (v1/engine/utils.py) creates one
+        STRICT_PACK placement group per new data-parallel rank, so a rank's
+        ``tensor_parallel_size`` GPUs must all be idle on a single node. Each entry of
+        ``nodes`` therefore carries its own ``available_gpus``, and a caller should
+        grow only while some node satisfies ``available_gpus >= tensor_parallel_size``
+        (elastic EP forbids pipeline parallelism and scale_elastic_ep above rejects
+        prefill-context parallelism, so tensor_parallel_size is the full rank world
+        size here). Top-level ``available_gpus`` is the cluster-wide total and can be
+        fragmented across nodes -- it is reported for observability, not as a
+        placement predicate. The per-node entries are deliberately anonymous: how many
+        GPUs are free where is a capacity question, but *which* host they sit on is a
+        cluster-topology detail this endpoint has no reason to publish.
+
+        ``data_parallel_size`` is the live size, not the launch-time one: vLLM's
+        AsyncLLM.scale_elastic_ep writes the new size back onto this same
+        ``parallel_config`` object once a scale completes, so a caller polling this
+        endpoint observes the post-scale value.
+
+        The Ray reads are single-flight: callers that arrive while a snapshot is
+        already in progress join that one rather than starting another, so
+        overlapping polls observe the same GPU numbers and cost one GCS query.
+
+        The response shape is backend-agnostic: ``data_parallel_size``,
+        ``tensor_parallel_size``, ``data_parallel_backend`` and
+        ``data_parallel_external_lb`` always come from the engine config. The GPU
+        totals are Ray-specific -- the ``mp`` DP backend runs the ranks as local
+        subprocesses with no Ray cluster to query, so its GPU fields are ``None`` and a
+        caller must source capacity another way. Same for the external-LB seam, whose
+        one-pod-per-rank capacity lives outside the engine.
+        """
+        parallel_config = self.engine_client.vllm_config.parallel_config
+        # ParallelConfig.data_parallel_backend is "mp" (default) or "ray"; external LB
+        # is an orthogonal flag, so report both rather than collapsing them into one.
+        backend = parallel_config.data_parallel_backend
+
+        result: dict = {
+            "status": "ok",
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "data_parallel_backend": backend,
+            "data_parallel_external_lb": parallel_config.data_parallel_external_lb,
+            "total_gpus": None,
+            "available_gpus": None,
+            "used_gpus": None,
+            "nodes": None,
+        }
+
+        # GPU capacity is backend-specific. Only the Ray DP backend has a cluster to
+        # query -- report dp/tp only for anything else and leave the GPU fields null.
+        if backend != "ray":
+            return result
+
+        # Ray DP backend: per-node GPU totals from ray.nodes(), per-node idle counts
+        # from available_resources_per_node(), and the cluster-wide idle count from
+        # ray.available_resources(). available_resources_per_node lives under
+        # ray._private.state because Ray exposes no public per-node availability API;
+        # vLLM's own add_dp_placement_groups imports it from exactly there. Imported
+        # lazily so ray is not required at module load in non-elastic-EP deployments.
+        try:
+            import ray
+            from ray._private.state import available_resources_per_node
+            from ray.exceptions import RayError
+        except ImportError as e:
+            logger.warning("[ElasticEP] ray is not importable: %s", e)
+            result["status"] = "error"
+            result["message"] = f"GPU capacity query failed: {e}"
+            return result
+
+        def _snapshot() -> dict:
+            """Take all three GCS readings. Runs off the event loop -- see below."""
+            idle_by_node_id = available_resources_per_node()
+            total_gpus = 0.0
+            nodes = []
+            for node in ray.nodes():
+                if not node.get("Alive", False):
+                    continue
+                node_gpus = float(node.get("Resources", {}).get("GPU", 0.0))
+                total_gpus += node_gpus
+                # Ray drops a resource from the availability map once it is fully
+                # consumed, so a missing GPU key means zero idle GPUs on that node.
+                node_idle = idle_by_node_id.get(node.get("NodeID"), {})
+                nodes.append(
+                    {
+                        "total_gpus": node_gpus,
+                        "available_gpus": float(node_idle.get("GPU", 0.0)),
+                    }
+                )
+            available_gpus = float(ray.available_resources().get("GPU", 0.0))
+            return {
+                "total_gpus": total_gpus,
+                "available_gpus": available_gpus,
+                "used_gpus": total_gpus - available_gpus,
+                "nodes": nodes,
+            }
+
+        # ray.nodes(), available_resources_per_node() and ray.available_resources()
+        # are blocking gRPC round-trips to the Ray GCS. Running them inline would
+        # park this worker's event loop for the duration, stalling token generation
+        # and every other control route -- and the reconciler polls this endpoint, so
+        # a degraded GCS would do it repeatedly. Off-load to a thread and bound the
+        # wait.
+        #
+        # The timeout frees the caller, not the thread: asyncio cannot interrupt a
+        # blocking C call, so a timed-out snapshot keeps running. Two things keep
+        # that from turning into unbounded thread growth under a degraded GCS, where
+        # every poll would otherwise strand another thread:
+        #
+        #   1. Single-flight -- a poll that finds a snapshot already in flight waits
+        #      on that one instead of starting another, capping outstanding GCS work
+        #      at one query no matter how often the endpoint is polled.
+        #   2. A dedicated single-worker executor -- stuck queries can never occupy
+        #      asyncio's shared default executor, so they cannot starve unrelated
+        #      to_thread work elsewhere in this process.
+        #
+        # Check-and-set below needs no lock: there is no await between the read and
+        # the assignment, and handlers run on one event loop thread.
+        inflight = self._ep_capacity_inflight
+        if inflight is None or inflight.done():
+            if self._ep_capacity_executor is None:
+                self._ep_capacity_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="ep-capacity"
+                )
+            inflight = asyncio.get_running_loop().run_in_executor(
+                self._ep_capacity_executor, _snapshot
+            )
+            inflight.add_done_callback(_discard_orphan_result)
+            self._ep_capacity_inflight = inflight
+
+        try:
+            # shield: this caller timing out must not cancel the shared snapshot out
+            # from under any other caller awaiting the same one.
+            snapshot: dict = await asyncio.wait_for(
+                asyncio.shield(inflight), timeout=_EP_CAPACITY_RAY_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ElasticEP] capacity query timed out after %ss",
+                _EP_CAPACITY_RAY_TIMEOUT_S,
+            )
+            msg = f"GPU capacity query timed out after {_EP_CAPACITY_RAY_TIMEOUT_S}s"
+            result["status"] = "error"
+            result["message"] = msg
+            return result
+        except RayError as e:
+            # A degraded Ray cluster is the one failure this endpoint can report in
+            # band -- dp/tp are already populated and still useful to the caller.
+            # Anything else (schema or programming errors) propagates.
+            logger.warning("[ElasticEP] capacity query failed: %s", e)
+            result["status"] = "error"
+            result["message"] = f"GPU capacity query failed: {e}"
+            return result
+
+        result.update(snapshot)
+        return result
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
@@ -2731,6 +2919,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        if self._ep_capacity_executor is not None:
+            # wait=False on purpose: a snapshot stuck on an unresponsive GCS must
+            # not hold up worker shutdown, and the process is going away anyway.
+            self._ep_capacity_executor.shutdown(wait=False, cancel_futures=True)
+            self._ep_capacity_executor = None
+            self._ep_capacity_inflight = None
         if self._custom_encoder is not None:
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
@@ -3958,12 +4152,21 @@ class EmbeddingWorkerHandler:
         serialized as a base64-encoded string of little-endian ``f32`` bytes
         per the OpenAI spec, so the byte count matches the (possibly reduced)
         dimensionality. Optional ``truncate_prompt_tokens`` is forwarded to
-        vLLM's tokenizer path for raw-text inputs.
+        vLLM's tokenizer path for raw-text inputs. Optional
+        ``add_special_tokens`` is also forwarded for raw text; when omitted,
+        vLLM's embedding default is retained. Rust-preprocessed and
+        caller-supplied token IDs are never modified.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        input_field = request.get("input")
+        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
+        # requests carry the same logical batch as 'token_ids'.
+        token_ids_batch = request.get("token_ids")
+        is_tokens_path = token_ids_batch is not None
+        input_field = token_ids_batch if is_tokens_path else request.get("input")
         if input_field is None:
-            raise ValueError("Embedding request missing required 'input' field")
+            raise ValueError(
+                "Embedding request missing required 'input' or 'token_ids' field"
+            )
 
         # Per OpenAI spec, `input` can be:
         #   - str           : single text prompt
@@ -3985,7 +4188,12 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
-        encoding_format = request.get("encoding_format", "float")
+        # Rust's preprocessed request represents an omitted client format as
+        # ``None``. Treat both an absent key and an explicit internal null as
+        # the OpenAI default while continuing to reject invalid non-null values.
+        encoding_format = request.get("encoding_format")
+        if encoding_format is None:
+            encoding_format = "float"
         if encoding_format not in ("float", "base64"):
             raise ValueError(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
@@ -3993,7 +4201,7 @@ class EmbeddingWorkerHandler:
             )
 
         truncate_prompt_tokens = request.get("truncate_prompt_tokens")
-        tokenization_kwargs: dict[str, Any] | None = None
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
@@ -4007,9 +4215,16 @@ class EmbeddingWorkerHandler:
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
-            tokenization_kwargs = {
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-            }
+            tokenization_kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+        add_special_tokens = request.get("add_special_tokens")
+        if add_special_tokens is not None:
+            if not isinstance(add_special_tokens, bool):
+                raise TypeError(
+                    "Invalid 'add_special_tokens' type "
+                    f"{type(add_special_tokens).__name__}; expected bool"
+                )
+            tokenization_kwargs["add_special_tokens"] = add_special_tokens
 
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
@@ -4056,7 +4271,7 @@ class EmbeddingWorkerHandler:
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
-                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
                 async for out in self.engine_client.encode(**encode_kwargs):
@@ -4088,26 +4303,34 @@ class EmbeddingWorkerHandler:
                 await asyncio.gather(*pending, return_exceptions=True)
 
         embedding_objects: list[Dict[str, Any]] = []
+        token_embeddings: list[str] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
-            # vLLM has already applied any ``dimensions`` Matryoshka reduction
-            # (truncate + re-normalize) inside the pooler, so this is the
-            # final per-input vector -- no post-hoc truncation here.
-            embedding = _pooling_output_to_list(final_output.outputs.data)
+            embedding_row = final_output.outputs.data
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
 
             # vLLM rejects an unsupported ``dimensions`` for models that
             # declare a ``matryoshka_dimensions`` list, but a model enabled
             # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
             # list) is only validated for ``dimensions >= 1`` -- the pooler
-            # then silently clamps an oversized request to the model's native
-            # size (``embeddings[..., :dimensions]``). Surface the same clear
-            # error the old post-hoc path raised instead of returning a
-            # shorter-than-requested vector.
-            if dimensions is not None and len(embedding) < dimensions:
-                raise ValueError(
-                    f"dimensions={dimensions} exceeds model embedding "
-                    f"dimension {len(embedding)}"
+            # then silently clamps an oversized request to the model's
+            # native size (``embeddings[..., :dimensions]``). Surface the
+            # same clear error the old post-hoc path raised instead of
+            # returning a shorter-than-requested vector to the client.
+            # ``.numel()`` is O(1) on a tensor; the non-tensor fallback
+            # pays a one-time list conversion, which is rare in practice.
+            if dimensions is not None:
+                actual_dim = (
+                    embedding_row.numel()
+                    if isinstance(embedding_row, torch.Tensor)
+                    else len(_pooling_output_to_list(embedding_row))
                 )
+                if actual_dim < dimensions:
+                    raise ValueError(
+                        f"dimensions={dimensions} exceeds model embedding "
+                        f"dimension {actual_dim}"
+                    )
 
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's
@@ -4116,15 +4339,26 @@ class EmbeddingWorkerHandler:
             # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
             # to (de)serialize. Client-visible wire format is preserved
             # because Rust converts at the HTTP boundary.
+            encoded = _pooling_output_to_base64(embedding_row)
+            if is_tokens_path:
+                token_embeddings.append(encoded)
+                continue
+
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": _encode_floats_to_base64(embedding),
+                    "embedding": encoded,
                     "index": idx,
                 }
             )
-            token_ids = getattr(final_output, "prompt_token_ids", None) or []
-            prompt_tokens += len(token_ids)
+
+        if is_tokens_path:
+            yield {
+                "embeddings": token_embeddings,
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            }
+            return
 
         yield {
             "object": "list",
@@ -4212,16 +4446,37 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
     )
 
 
+def _flatten_pooling_tensor(data: "torch.Tensor") -> "np.ndarray":
+    """Flatten pooling output to a 1-D little-endian float32 NumPy array.
+
+    Shared by :func:`_pooling_output_to_list` and
+    :func:`_pooling_output_to_base64` so the detach/cpu/flatten/cast step isn't
+    duplicated. Explicit little-endian ``float32`` matches the OpenAI base64
+    wire format. The endian conversion is zero-copy on little-endian hosts and
+    performs the required byte swap on a big-endian host.
+
+    vLLM's pooling pipeline can return a tensor with a singleton batch dim
+    (shape ``(1, hidden_dim)``) instead of a 1D vector; we flatten unconditionally.
+    """
+    return (
+        data.detach()
+        .cpu()
+        .flatten()
+        .to(torch.float32)
+        .contiguous()
+        .numpy()
+        .astype("<f4", copy=False)
+    )
+
+
 def _pooling_output_to_list(data: Any) -> list[float]:
     """Convert a vLLM PoolingOutput.data tensor (or list) to a flat list[float].
 
-    vLLM's pooling pipeline can return a tensor with a singleton batch dim
-    (shape ``(1, hidden_dim)``) instead of a 1D vector (shape ``(hidden_dim,)``).
     The OpenAI ``/v1/embeddings`` response expects ``data[].embedding`` to be a
-    flat array of floats, so we flatten unconditionally.
+    flat array of floats.
     """
     if isinstance(data, torch.Tensor):
-        return data.detach().cpu().flatten().tolist()
+        return _flatten_pooling_tensor(data).tolist()
     if isinstance(data, (list, tuple)):
         # Already a list — flatten one level if it's a list-of-lists.
         if data and isinstance(data[0], (list, tuple)):
@@ -4238,9 +4493,22 @@ def _encode_floats_to_base64(floats: list[float]) -> str:
     ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
     are concatenated and base64-encoded with the standard alphabet.
 
-    Mirrors the Rust ``encode_floats_to_base64`` helper in
-    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
-    produce identical bytes for the same input.
+    The Rust frontend decodes this format when the client requests JSON floats.
     """
     packed = struct.pack(f"<{len(floats)}f", *floats)
     return base64.b64encode(packed).decode("ascii")
+
+
+def _pooling_output_to_base64(data: Any) -> str:
+    """Serialize a vLLM ``PoolingOutput.data`` tensor straight to a base64
+    float32 string, skipping the intermediate Python ``list[float]`` and the
+    ``struct.pack("<{N}f", *floats)`` varargs expansion.
+
+    ``torch -> numpy.tobytes -> base64`` keeps the heavy work in C; output bytes
+    are identical to the ``struct``-based path on little-endian hosts.
+    """
+    if isinstance(data, torch.Tensor):
+        vec = _flatten_pooling_tensor(data)
+        return base64.b64encode(vec.tobytes()).decode("ascii")
+    # Fallback for non-tensor pooling outputs (rare): reuse the list path.
+    return _encode_floats_to_base64(_pooling_output_to_list(data))
