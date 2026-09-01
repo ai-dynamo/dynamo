@@ -112,6 +112,26 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     assert dgd_config["kind"] == "DynamoGraphDeployment"
 
 
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_build_dgd_config_applies_trtllm_runtime_defaults(mode: str) -> None:
+    dgd_config = CONFIG_MODIFIERS["trtllm"].build_dgd_config(
+        mode=mode,
+        model_name="test/model",
+        image="example/trtllm:test",
+    )
+
+    workers = [
+        component
+        for component in dgd_config["spec"]["components"]
+        if component.get("type") in {"worker", "prefill", "decode"}
+    ]
+    assert workers
+    for worker in workers:
+        args = _main_container(worker)["args"]
+        index = args.index("--trtllm.enable_chunked_prefill")
+        assert args[index + 1] == "true"
+
+
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_get_port_defaults_when_frontend_has_no_main_container(backend: str) -> None:
     config = {
@@ -670,7 +690,12 @@ _BASE_DGD = {
                             {
                                 "name": "main",
                                 "image": "my-image",
-                                "args": ["--model", "m"],
+                                "args": [
+                                    "--model",
+                                    "m",
+                                    "--trtllm.enable_chunked_prefill",
+                                    "true",
+                                ],
                             }
                         ]
                     }
@@ -723,6 +748,10 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     async def _fake_interpolation(dgdr_arg, ops_arg, disagg_config, *args, **kwargs):
         interpolation_kwargs["disagg_config"] = copy.deepcopy(disagg_config)
 
+    def _fake_assemble(_dgdr, _ops, dgd_config, *args, **kwargs):
+        assert kwargs["job_tolerations"] == []
+        return _fake_apply_dgd_overrides(dgd_config, _OVERRIDE_DGD)
+
     pick_result = {
         "dgd_config": base_dgd,
         "resolved_backend": "trtllm",
@@ -772,12 +801,12 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             new=_fake_interpolation,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+            "dynamo.profiler.profile_sla.apply_dgd_overrides",
             side_effect=_fake_apply_dgd_overrides,
         ),
         patch(
             "dynamo.profiler.profile_sla.assemble_final_config",
-            return_value=copy.deepcopy(base_dgd),
+            side_effect=_fake_assemble,
         ) as assemble_final,
         patch(
             "dynamo.profiler.profile_sla._write_final_output", return_value=True
@@ -1172,26 +1201,22 @@ def test_model_has_auto_map_local_dir_missing_config_returns_false(tmp_path) -> 
     assert model_has_auto_map(tmp_path) is False
 
 
-def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_injects_trust_remote_code_for_vllm() -> None:
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1205,26 +1230,22 @@ def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
     assert "--trust-remote-code" not in _main_container(components["Frontend"])["args"]
 
 
-def test_materialize_dgd_injects_trust_remote_code_for_sglang() -> None:
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_injects_trust_remote_code_for_sglang() -> None:
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("SglangDecodeWorker", "SglangPrefillWorker")
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="sglang",
             model_name_or_path="some/model",
         )
@@ -1235,20 +1256,16 @@ def test_materialize_dgd_injects_trust_remote_code_for_sglang() -> None:
         assert args.count("--trust-remote-code") == 1
 
 
-def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_skips_trust_when_no_auto_map() -> None:
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
         return_value=False,
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1257,49 +1274,41 @@ def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
     assert "--trust-remote-code" not in args
 
 
-def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_fails_closed_for_mutable_remote_ref() -> None:
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=False,
         ),
     ):
         with pytest.raises(
             RuntimeError, match="Refusing to auto-inject --trust-remote-code"
         ):
-            materialize_dgd(
+            apply_remote_code_policy(
                 cfg,
-                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
                 runtime_backend="vllm",
                 model_name_or_path="some/model",
             )
 
 
-def test_materialize_dgd_skips_trust_for_trtllm() -> None:
+def test_remote_code_policy_skips_trust_for_trtllm() -> None:
     """TRT-LLM uses a YAML field, not the CLI flag."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("TRTLLMDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
         return_value=True,
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="trtllm",
             model_name_or_path="some/model",
         )
@@ -1308,13 +1317,10 @@ def test_materialize_dgd_skips_trust_for_trtllm() -> None:
     assert "--trust-remote-code" not in args
 
 
-def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None:
+def test_remote_code_policy_remote_ref_with_explicit_override_skips_error() -> None:
     """When the user already set --trust-remote-code via overrides, the
     mutable-remote-ref error must not fire — the manual escape hatch works."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     # Simulate user override having already appended the flag.
@@ -1324,18 +1330,17 @@ def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None
 
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=False,
         ),
     ):
         # Should NOT raise RuntimeError because the flag is already present.
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/remote-model",
         )
@@ -1344,33 +1349,28 @@ def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None
     assert args.count("--trust-remote-code") == 1
 
 
-def test_materialize_dgd_trust_injection_is_idempotent() -> None:
-    """Running materialize_dgd twice must not duplicate the flag."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_trust_injection_is_idempotent() -> None:
+    """Running remote-code policy twice must not duplicate the flag."""
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
-        result2 = materialize_dgd(
+        result2 = apply_remote_code_policy(
             result,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1379,12 +1379,9 @@ def test_materialize_dgd_trust_injection_is_idempotent() -> None:
     assert args.count("--trust-remote-code") == 1
 
 
-def test_materialize_dgd_respects_existing_trust_flag() -> None:
+def test_remote_code_policy_respects_existing_trust_flag() -> None:
     """An explicit --trust-remote-code already in args must not be duplicated."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     _main_container(_components_by_name(cfg)["VllmDecodeWorker"])["args"].append(
@@ -1393,17 +1390,16 @@ def test_materialize_dgd_respects_existing_trust_flag() -> None:
 
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1412,11 +1408,8 @@ def test_materialize_dgd_respects_existing_trust_flag() -> None:
     assert args.count("--trust-remote-code") == 1
 
 
-def test_materialize_dgd_excludes_frontend_and_planner() -> None:
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+def test_remote_code_policy_excludes_frontend_and_planner() -> None:
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     cfg["spec"]["components"].append(
@@ -1424,17 +1417,16 @@ def test_materialize_dgd_excludes_frontend_and_planner() -> None:
     )
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1444,13 +1436,10 @@ def test_materialize_dgd_excludes_frontend_and_planner() -> None:
     assert "--trust-remote-code" not in _main_container(components["Planner"])["args"]
 
 
-def test_materialize_dgd_shell_form_worker() -> None:
+def test_remote_code_policy_shell_form_worker() -> None:
     """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
     have the flag appended inside the string, not as a second list element."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     cfg = {
         "apiVersion": "nvidia.com/v1beta1",
@@ -1472,17 +1461,16 @@ def test_materialize_dgd_shell_form_worker() -> None:
     }
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1494,20 +1482,19 @@ def test_materialize_dgd_shell_form_worker() -> None:
     assert isinstance(result_args, list) and len(result_args) == 1
     assert result_args[0].endswith("--trust-remote-code")
 
-    # Idempotency: materializing again must not duplicate the flag.
+    # Idempotency: applying the policy again must not duplicate the flag.
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result2 = materialize_dgd(
+        result2 = apply_remote_code_policy(
             result,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )
@@ -1519,13 +1506,10 @@ def test_materialize_dgd_shell_form_worker() -> None:
     assert result2_args[0].count("--trust-remote-code") == 1
 
 
-def test_materialize_dgd_shell_form_preserves_syntax() -> None:
+def test_remote_code_policy_shell_form_preserves_syntax() -> None:
     """Shell-form args with shell operators (&&, |, etc.) must not be
     corrupted by shlex round-tripping."""
-    from dynamo.profiler.utils.dgd_materialization import (
-        DGDMaterializationPurpose,
-        materialize_dgd,
-    )
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 
     original_cmd = (
         "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
@@ -1548,17 +1532,16 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
     }
     with (
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
             return_value=True,
         ),
         patch(
-            "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
             return_value=True,
         ),
     ):
-        result = materialize_dgd(
+        result = apply_remote_code_policy(
             cfg,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
             runtime_backend="vllm",
             model_name_or_path="some/model",
         )

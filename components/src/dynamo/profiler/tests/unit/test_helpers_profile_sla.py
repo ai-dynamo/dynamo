@@ -517,7 +517,7 @@ _DGD_GEN = "dynamo.profiler.utils.dgd_generation"
 class TestAssembleFinalConfig:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_no_planner_no_mocker_returns_dgd_config_unchanged(self, tmp_path):
+    def test_no_planner_no_mocker_preserves_input_config(self, tmp_path):
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)
         dgd_config = {"kind": "DynamoGraphDeployment"}
@@ -530,42 +530,8 @@ class TestAssembleFinalConfig:
             PickedParallelConfig(tp=1),
         )
 
-        assert result is dgd_config
-
-    @pytest.mark.pre_merge
-    @pytest.mark.gpu_0
-    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
-        dgdr = _make_dgdr()
-        ops = _make_ops(tmp_path)
-        dgd_config = {
-            "kind": "DynamoGraphDeployment",
-            "spec": {
-                "components": [
-                    {
-                        "name": "decode",
-                        "type": "decode",
-                        "podTemplate": {
-                            "spec": {"containers": [{"name": "main", "args": []}]}
-                        },
-                    }
-                ]
-            },
-        }
-
-        result = assemble_final_config(
-            dgdr,
-            ops,
-            dgd_config,
-            PickedParallelConfig(tp=1),
-            PickedParallelConfig(tp=1),
-            resolved_backend="trtllm",
-        )
-
-        args = result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
-            "args"
-        ]
-        idx = args.index("--trtllm.enable_chunked_prefill")
-        assert args[idx + 1] == "true"
+        assert result == dgd_config
+        assert result is not dgd_config
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -637,7 +603,8 @@ class TestAssembleFinalConfig:
 
         result = assemble_final_config(dgdr, ops, dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         container = result["spec"]["components"][0]["podTemplate"]["spec"][
             "containers"
         ][0]
@@ -778,7 +745,8 @@ class TestAssembleFinalConfig:
         with caplog.at_level(logging.WARNING):
             result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         assert "has no frontend component" in caplog.text
 
     @pytest.mark.pre_merge
@@ -795,7 +763,8 @@ class TestAssembleFinalConfig:
         with caplog.at_level(logging.WARNING):
             result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         assert frontend["podTemplate"]["spec"]["containers"] == [{"name": "sidecar"}]
         assert "has no main container" in caplog.text
 
@@ -813,9 +782,9 @@ class TestAssembleFinalConfig:
         ]
         dgd_config = {"spec": {"components": frontends}}
 
-        assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        for frontend in frontends:
+        for frontend in result["spec"]["components"]:
             assert frontend["podTemplate"]["spec"]["containers"][0]["env"] == [
                 {"name": "DYN_ROUTER_MODE", "value": "kv"}
             ]
@@ -851,14 +820,18 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result == [planner_cm, dgd_config]
+        assert result[0] == planner_cm
         components = {
             component["name"]: component
-            for component in dgd_config["spec"]["components"]
+            for component in result[-1]["spec"]["components"]
         }
         assert components["decode"]["scalingAdapter"] == {"enabled": True}
         assert components["prefill"]["scalingAdapter"] == {"enabled": True}
         assert "scalingAdapter" not in components["Frontend"]
+        assert all(
+            "scalingAdapter" not in component
+            for component in dgd_config["spec"]["components"]
+        )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -1512,7 +1485,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=agg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
             patch(
-                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
                 return_value=False,
             ),
             patch(
@@ -1620,7 +1593,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=disagg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
             patch(
-                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
                 return_value=False,
             ),
             patch(

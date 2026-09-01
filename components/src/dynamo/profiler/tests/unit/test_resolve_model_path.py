@@ -28,7 +28,6 @@ try:
         run_thorough,
     )
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -441,15 +440,13 @@ class TestThoroughResolvesModelPath:
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
         assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] is None
 
-    async def test_materializes_each_candidate_once_with_resolved_model_path(
-        self, tmp_path
-    ):
+    async def test_applies_remote_code_policy_to_each_candidate(self, tmp_path):
         dgdr = _make_dgdr()
         prefill = MagicMock(dgd_config={"candidate": "prefill"})
         decode = MagicMock(dgd_config={"candidate": "decode"})
 
-        def _materialize(config, **_kwargs):
-            return {"materialized": config["candidate"]}
+        def _apply_policy(config, _backend, _model):
+            return {"prepared": config["candidate"]}
 
         with (
             patch(
@@ -457,9 +454,9 @@ class TestThoroughResolvesModelPath:
                 return_value=([prefill], [decode]),
             ),
             patch(
-                "dynamo.profiler.thorough.materialize_dgd",
-                side_effect=_materialize,
-            ) as materialize,
+                "dynamo.profiler.thorough.apply_remote_code_policy",
+                side_effect=_apply_policy,
+            ) as apply_policy,
             patch(
                 "dynamo.profiler.thorough._benchmark_prefill_candidates",
                 new=AsyncMock(return_value=pd.DataFrame()),
@@ -485,24 +482,13 @@ class TestThoroughResolvesModelPath:
                 [],
             )
 
-        assert materialize.call_count == 2
-        assert [call.args[0] for call in materialize.call_args_list] == [
-            {"candidate": "prefill"},
-            {"candidate": "decode"},
+        assert apply_policy.call_count == 2
+        assert [call.args for call in apply_policy.call_args_list] == [
+            ({"candidate": "prefill"}, "trtllm", _HF_ID),
+            ({"candidate": "decode"}, "trtllm", _HF_ID),
         ]
-        assert all(
-            call.kwargs
-            == {
-                "purpose": DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
-                "override": None,
-                "tolerations": [],
-                "runtime_backend": "trtllm",
-                "model_name_or_path": _HF_ID,
-            }
-            for call in materialize.call_args_list
-        )
-        assert prefill.dgd_config == {"materialized": "prefill"}
-        assert decode.dgd_config == {"materialized": "decode"}
+        assert prefill.dgd_config == {"prepared": "prefill"}
+        assert decode.dgd_config == {"prepared": "decode"}
 
     def test_cache_only_pvc_does_not_rewrite_candidate_model(self):
         """A PVC without pvcModelPath remains an HF_HOME-style cache mount."""
@@ -595,7 +581,7 @@ class TestThoroughResolvesModelPath:
                 return_value=([prefill], [decode], True, 1),
             ),
             patch(
-                "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+                "dynamo.profiler.thorough.apply_dgd_overrides",
                 side_effect=_apply_override,
             ) as apply_override,
             patch(
