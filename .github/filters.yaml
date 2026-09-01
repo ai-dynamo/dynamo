@@ -219,7 +219,11 @@ snapshot:
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
   - 'deploy/operator/internal/checkpointjob/**'
+  - 'deploy/operator/internal/controller/*checkpoint*'
+  - 'deploy/operator/internal/controller/*snapshot*'
   - 'tests/deploy/test_dynamocheckpoint.py'
+  - '.github/actions/setup-dynamo-operator/action.yml'
+  - '.github/actions/setup-snapshot-agent/action.yml'
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
