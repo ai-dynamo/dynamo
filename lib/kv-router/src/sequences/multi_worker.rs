@@ -32,8 +32,7 @@ use super::single::{
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
-    WorkerWithDpRank,
+    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -86,6 +85,18 @@ fn active_request_expiry_duration_from_lookup(
 // Traits
 // ---------------------------------------------------------------------------
 
+/// Complete scheduler-owned load for one worker rank.
+///
+/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](crate::protocols::ActiveLoad)
+/// protocol. Scheduler publishers always own both active-load fields, while remote wire updates may
+/// contain only a subset of fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerLoadSnapshot {
+    pub worker: WorkerWithDpRank,
+    pub active_decode_blocks: u64,
+    pub active_prefill_tokens: u64,
+}
+
 /// Abstraction over event publishing and metrics observation.
 ///
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
@@ -99,13 +110,13 @@ pub trait SequencePublisher: Send + Sync {
     /// source for admission failures so callers can classify queue saturation and closure.
     fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()>;
 
-    /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
-    fn publish_load(&self, load: ActiveLoad);
+    /// Publish one complete scheduler-owned load snapshot without blocking the caller.
+    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot);
 
-    /// Fire-and-forget publish of a batch of [`ActiveLoad`] metric payloads.
-    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        for load in loads {
-            self.publish_load(load);
+    /// Publish a batch of complete scheduler-owned load snapshots without blocking the caller.
+    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        for snapshot in snapshots {
+            self.publish_scheduler_load(snapshot);
         }
     }
 
@@ -231,7 +242,7 @@ impl SequencePublisher for NoopSequencePublisher {
         Ok(())
     }
 
-    fn publish_load(&self, _load: ActiveLoad) {}
+    fn publish_scheduler_load(&self, _snapshot: SchedulerLoadSnapshot) {}
 
     fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
@@ -301,6 +312,19 @@ pub struct SequenceRequest {
     pub lora_name: Option<String>,
 }
 
+/// Whether a lifecycle operation changed the tracked request state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleMutationOutcome {
+    Applied,
+    NoChange,
+}
+
+impl LifecycleMutationOutcome {
+    pub fn is_applied(self) -> bool {
+        matches!(self, Self::Applied)
+    }
+}
+
 /// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
@@ -321,7 +345,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     remote_state_updates: watch::Sender<()>,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
-    replica_sync: bool,
+    pub(super) replica_sync: bool,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     worker_type: &'static str,
 }
@@ -512,8 +536,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         load: WorkerLoadSnapshot,
         decay_now: Instant,
     ) {
-        let active_load = self.observe_worker_load_snapshot(worker, load, decay_now);
-        self.publisher.publish_load(active_load);
+        let snapshot = self.observe_worker_load_snapshot(worker, load, decay_now);
+        self.publisher.publish_scheduler_load(snapshot);
     }
 
     pub(super) fn observe_worker_load_snapshot(
@@ -521,19 +545,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         load: WorkerLoadSnapshot,
         decay_now: Instant,
-    ) -> ActiveLoad {
+    ) -> SchedulerLoadSnapshot {
         let active_blocks = load.active_blocks;
         let active_tokens = load.active_tokens(decay_now);
 
         self.publisher
             .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
 
-        ActiveLoad {
-            worker_id: worker.worker_id,
-            dp_rank: worker.dp_rank,
-            active_decode_blocks: Some(active_blocks as u64),
-            active_prefill_tokens: Some(active_tokens as u64),
-            kv_used_blocks: None,
+        SchedulerLoadSnapshot {
+            worker,
+            active_decode_blocks: active_blocks as u64,
+            active_prefill_tokens: active_tokens as u64,
         }
     }
 
@@ -792,26 +814,50 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Free all blocks associated with a request.
     ///
     /// Note: This operation is idempotent. Calling it multiple times for the same request
-    /// will log a warning but not return an error (double free is allowed).
+    /// is a silent no-op (double free is allowed).
     ///
     /// This also performs the underlying prefill-complete cleanup via
     /// `ActiveSequences::free`, so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
-    pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
-        match self.mutate_request_worker_prompt_state(
+    pub fn free(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let Some(worker) = self.request_index.worker_for(request_id) else {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        };
+        let lora_name = self.request_index.lora_for(request_id);
+        let state_changed = match self.mutate_request_worker_prompt_state_local(
+            worker,
             request_id,
             decay_now,
-            ActiveSequenceEventData::Free,
             |seqs, rid, decay_now| seqs.free(rid, decay_now),
-            true,
         ) {
-            Ok(()) => Ok(()),
+            Ok(outcome) => outcome,
             Err(SequenceError::RequestNotFound { .. }) => {
-                tracing::debug!("Request {request_id} not found, already freed (idempotent)");
-                Ok(())
+                return Ok(LifecycleMutationOutcome::Applied);
             }
-            Err(err) => Err(err),
+            Err(error) => return Err(error),
+        };
+        let booking_removed = self
+            .request_index
+            .remove_request_if_worker(request_id, worker);
+
+        if booking_removed {
+            self.enqueue_publish_event(ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::Free,
+                router_id: self.router_id,
+                lora_name,
+            });
         }
+        Ok(if state_changed.is_applied() || booking_removed {
+            LifecycleMutationOutcome::Applied
+        } else {
+            LifecycleMutationOutcome::NoChange
+        })
     }
 
     /// Release `request_id`'s booking only if it is still on `worker`.
@@ -823,28 +869,40 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         decay_now: Instant,
-    ) -> Result<(), SequenceError> {
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if self.request_index.worker_for(request_id) != Some(worker) {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
         let lora_name = self.request_index.lora_for(request_id);
-        match self.mutate_request_worker_prompt_state_local(
+        let state_changed = match self.mutate_request_worker_prompt_state_local(
             worker,
             request_id,
             decay_now,
             |seqs, rid, decay_now| seqs.free(rid, decay_now),
-            false,
         ) {
-            Ok(()) | Err(SequenceError::RequestNotFound { .. }) => {}
-            Err(err) => return Err(err),
-        }
-        self.request_index
+            Ok(outcome) => outcome,
+            Err(SequenceError::RequestNotFound { .. }) => {
+                return Ok(LifecycleMutationOutcome::Applied);
+            }
+            Err(error) => return Err(error),
+        };
+        let booking_removed = self
+            .request_index
             .remove_request_if_worker(request_id, worker);
-        self.enqueue_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: ActiveSequenceEventData::Free,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(())
+        if booking_removed {
+            self.enqueue_publish_event(ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::Free,
+                router_id: self.router_id,
+                lora_name,
+            });
+        }
+        Ok(if state_changed.is_applied() || booking_removed {
+            LifecycleMutationOutcome::Applied
+        } else {
+            LifecycleMutationOutcome::NoChange
+        })
     }
 
     /// Mark prefill as completed for a request.
@@ -855,15 +913,31 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         request_id: &RequestId,
         decay_now: Instant,
-    ) -> Result<(), SequenceError> {
-        self.mutate_request_worker_load_state(
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let Some(worker) = self.request_index.worker_for(request_id) else {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        };
+        self.mutate_request_worker_load_state_local(
+            worker,
             request_id,
             decay_now,
-            ActiveSequenceEventData::MarkPrefillCompleted,
-            |seqs, rid, decay_now| {
-                seqs.mark_prefill_completed(rid, decay_now);
-            },
+            |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
         )
+    }
+
+    /// Publish the router's ordered completion fallback independently of the local mutation.
+    /// This is a no-op when the request no longer has a live worker booking.
+    pub(crate) fn publish_prefill_completed(&self, request_id: &RequestId) {
+        let Some(worker) = self.request_index.worker_for(request_id) else {
+            return;
+        };
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name: self.request_index.lora_for(request_id),
+        });
     }
 
     /// Add an output block with optional fractional decay weight.
@@ -1239,9 +1313,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
-        remove_mapping: bool,
-    ) -> Result<(), SequenceError> {
+        mutate_fn: impl FnOnce(
+            &mut ActiveSequences,
+            &RequestId,
+            Instant,
+        ) -> Option<PromptMembershipDelta>,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let load = {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
@@ -1250,20 +1327,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let delta = mutate_fn(&mut seq, request_id, decay_now);
+            let Some(delta) = mutate_fn(&mut seq, request_id, decay_now) else {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            };
             let load = seq.worker_load_snapshot();
             self.prompt_registry
                 .apply_membership_delta_and_load(worker, delta, load);
             load
         };
 
-        if remove_mapping {
-            self.request_index.remove_request(request_id);
-        }
-
         self.publish_worker_load_snapshot(worker, load, decay_now);
 
-        Ok(())
+        Ok(LifecycleMutationOutcome::Applied)
     }
 
     fn mutate_request_worker_load_state_local(
@@ -1271,8 +1346,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> bool,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let load = {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
@@ -1280,7 +1355,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
             };
             let mut seq = table.slots[idx].sequences.write();
-            mutate_fn(&mut seq, request_id, decay_now);
+            if !mutate_fn(&mut seq, request_id, decay_now) {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
@@ -1288,64 +1365,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
 
-        Ok(())
-    }
-
-    fn mutate_request_worker_prompt_state(
-        &self,
-        request_id: &RequestId,
-        decay_now: Instant,
-        event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
-        remove_mapping: bool,
-    ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
-        let lora_name = self.request_index.lora_for(request_id);
-        self.mutate_request_worker_prompt_state_local(
-            worker,
-            request_id,
-            decay_now,
-            mutate_fn,
-            remove_mapping,
-        )?;
-        self.enqueue_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: event_data,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(())
-    }
-
-    fn mutate_request_worker_load_state(
-        &self,
-        request_id: &RequestId,
-        decay_now: Instant,
-        event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
-        let lora_name = self.request_index.lora_for(request_id);
-        self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
-        self.enqueue_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: event_data,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(())
+        Ok(LifecycleMutationOutcome::Applied)
     }
 }
 
@@ -1593,15 +1613,15 @@ mod tests {
     #[derive(Default)]
     struct RecordingPublisherState {
         events: Mutex<Vec<ActiveSequenceEventData>>,
-        single_loads: Mutex<Vec<ActiveLoad>>,
-        load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
+        single_loads: Mutex<Vec<SchedulerLoadSnapshot>>,
+        load_batches: Mutex<Vec<Vec<SchedulerLoadSnapshot>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
     }
 
     impl RecordingPublisherState {
-        fn load_batches(&self) -> Vec<Vec<ActiveLoad>> {
+        fn load_batches(&self) -> Vec<Vec<SchedulerLoadSnapshot>> {
             self.load_batches.lock().unwrap().clone()
         }
 
@@ -1625,12 +1645,12 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, load: ActiveLoad) {
-            self.state.single_loads.lock().unwrap().push(load);
+        fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
+            self.state.single_loads.lock().unwrap().push(snapshot);
         }
 
-        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-            self.state.load_batches.lock().unwrap().push(loads);
+        fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+            self.state.load_batches.lock().unwrap().push(snapshots);
         }
 
         fn observe_load(
@@ -1667,12 +1687,12 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, _load: ActiveLoad) {}
+        fn publish_scheduler_load(&self, _snapshot: SchedulerLoadSnapshot) {}
 
-        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-            if !loads
+        fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+            if !snapshots
                 .iter()
-                .any(|load| load.worker_id == self.blocked_worker_id)
+                .any(|snapshot| snapshot.worker.worker_id == self.blocked_worker_id)
             {
                 return;
             }
@@ -1709,6 +1729,26 @@ mod tests {
             4,
             workers,
             true,
+            0,
+            "test",
+        );
+        (sequences, state)
+    }
+
+    fn make_recording_sequences_without_replica_sync(
+        workers: HashMap<u64, (u32, u32)>,
+    ) -> (
+        ActiveSequencesMultiWorker<RecordingPublisher>,
+        Arc<RecordingPublisherState>,
+    ) {
+        let state = Arc::new(RecordingPublisherState::default());
+        let sequences = ActiveSequencesMultiWorker::new(
+            RecordingPublisher {
+                state: Arc::clone(&state),
+            },
+            4,
+            workers,
+            false,
             0,
             "test",
         );
@@ -1809,6 +1849,7 @@ mod tests {
         sequences
             .mark_prefill_completed(&request_id, Instant::now())
             .unwrap();
+        sequences.publish_prefill_completed(&request_id);
         sequences.free(&request_id, Instant::now()).unwrap();
 
         assert!(matches!(
@@ -1843,9 +1884,135 @@ mod tests {
         sequences
             .mark_prefill_completed(&request_id, Instant::now())
             .unwrap();
+        sequences.publish_prefill_completed(&request_id);
         sequences.free(&request_id, Instant::now()).unwrap();
 
         assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_local_lifecycle_mutations_are_quiet_noops() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "quiet".to_string();
+        let now = Instant::now();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        assert_eq!(
+            sequences.mark_prefill_completed(&request_id, now).unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        state.clear();
+
+        assert_eq!(
+            sequences.mark_prefill_completed(&request_id, now).unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        assert!(state.observations.lock().unwrap().is_empty());
+
+        sequences.publish_prefill_completed(&request_id);
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::MarkPrefillCompleted]
+        ));
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        assert!(state.observations.lock().unwrap().is_empty());
+        state.clear();
+
+        assert_eq!(
+            sequences.free(&request_id, now).unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        state.clear();
+        assert_eq!(
+            sequences.free(&request_id, now).unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        assert!(state.observations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn free_if_worker_publishes_only_after_removing_the_booking() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let wrong_worker = WorkerWithDpRank::new(2, 0);
+        let (sequences, state) = make_recording_sequences(HashMap::from([
+            (worker.worker_id, (0, 1)),
+            (wrong_worker.worker_id, (0, 1)),
+        ]));
+        let request_id = "targeted-free".to_string();
+        let now = Instant::now();
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        state.clear();
+
+        assert_eq!(
+            sequences
+                .free_if_worker(&request_id, wrong_worker, now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(state.events.lock().unwrap().is_empty());
+
+        assert_eq!(
+            sequences.free_if_worker(&request_id, worker, now).unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::Free]
+        ));
+    }
+
+    #[test]
+    fn remote_mark_is_accepted_without_router_replica_sync() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences_without_replica_sync(HashMap::from([(1, (0, 1))]));
+        let request_id = "worker-mark".to_string();
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        publisher.clear();
+
+        let mut remote_free = replica_free(&request_id, worker);
+        remote_free.router_id = 99;
+        sequences.apply_replica_batch(vec![remote_free]);
+        assert_eq!(sequences.active_tokens(Instant::now())[&worker], 12);
+        assert_eq!(sequences.remote_state_update_count(), 0);
+
+        let mut remote_mark = replica_mark(&request_id, worker);
+        remote_mark.router_id = 99;
+        sequences.apply_replica_batch(vec![remote_mark]);
+        assert_eq!(sequences.active_tokens(Instant::now())[&worker], 0);
+        assert_eq!(sequences.remote_state_update_count(), 1);
+        assert!(publisher.load_batches().is_empty());
+    }
+
+    #[test]
+    fn local_sequence_lifecycle_publishes_concrete_scheduler_snapshots() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "scheduler-load".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        let loads = state.single_loads.lock().unwrap();
+        assert_eq!(loads.len(), 2);
+        assert_eq!(loads[0].worker, worker);
+        assert!(loads[0].active_decode_blocks > 0);
+        assert_eq!(loads[1].worker, worker);
+        assert_eq!(loads[1].active_decode_blocks, 0);
+        assert_eq!(loads[1].active_prefill_tokens, 0);
     }
 
     #[test]
@@ -2535,10 +2702,9 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].worker_id, worker.worker_id);
-        assert_eq!(batches[0][0].dp_rank, worker.dp_rank);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
-        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(batches[0][0].worker, worker);
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
+        assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
         assert_eq!(
@@ -2571,8 +2737,8 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
-        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
+        assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
         assert_eq!(
@@ -2689,8 +2855,81 @@ mod tests {
         assert_eq!(sequences.remote_state_update_count(), wake_count_before + 1);
     }
 
+    #[test]
+    fn replica_duplicate_add_preserves_first_owner_without_side_effects() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(worker_a.worker_id, (0, 1))]));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_a, vec![1, 2, 3])]);
+        publisher.clear();
+        let wake_count = sequences.remote_state_update_count();
+        let cleanup_count = sequences.prompt_registry.cleanup_attempts();
+
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            Some(worker_a)
+        );
+        assert_eq!(sequences.active_blocks()[&worker_a], 3);
+        assert!(!sequences.active_blocks().contains_key(&worker_b));
+        assert_eq!(sequences.num_workers(), 1);
+        assert!(publisher.load_batches().is_empty());
+        assert_eq!(sequences.remote_state_update_count(), wake_count);
+        assert_eq!(sequences.prompt_registry.cleanup_attempts(), cleanup_count);
+    }
+
+    #[test]
+    fn replica_mark_rejects_stale_worker_without_side_effects() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let stale_worker = WorkerWithDpRank::new(2, 0);
+        let (sequences, publisher) = make_recording_sequences(HashMap::from([
+            (worker.worker_id, (0, 1)),
+            (stale_worker.worker_id, (0, 1)),
+        ]));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker, vec![1, 2, 3])]);
+        publisher.clear();
+        let wake_count = sequences.remote_state_update_count();
+
+        sequences.apply_replica_batch(vec![replica_mark("req-1", stale_worker)]);
+
+        assert_eq!(sequences.active_tokens(Instant::now())[&worker], 12);
+        assert!(publisher.load_batches().is_empty());
+        assert_eq!(sequences.remote_state_update_count(), wake_count);
+    }
+
+    #[test]
+    fn replica_duplicate_free_applies_side_effects_once() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(worker.worker_id, (0, 1))]));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker, vec![1, 2, 3])]);
+        publisher.clear();
+        let wake_count = sequences.remote_state_update_count();
+        let cleanup_count = sequences.prompt_registry.cleanup_attempts();
+
+        sequences.apply_replica_batch(vec![
+            replica_free("req-1", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let batches = publisher.load_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(sequences.remote_state_update_count(), wake_count + 1);
+        assert_eq!(
+            sequences.prompt_registry.cleanup_attempts(),
+            cleanup_count + 1
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn replica_sync_free_uses_canonical_worker_for_collapsed_load() {
+    async fn replica_sync_free_rejects_stale_worker() {
         let worker = WorkerWithDpRank::new(1, 0);
         let wrong_payload_worker = WorkerWithDpRank::new(2, 0);
         let (sequences, publisher) = make_recording_sequences(HashMap::from([
@@ -2712,16 +2951,19 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].worker_id, worker.worker_id);
-        assert_eq!(batches[0][0].dp_rank, worker.dp_rank);
-        assert_eq!(batches[0][0].active_decode_blocks, Some(0));
-        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(batches[0][0].worker, worker);
+        assert_eq!(batches[0][0].active_decode_blocks, 3);
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
         assert_eq!(
             sequences
                 .active_blocks()
                 .get(&wrong_payload_worker)
                 .copied(),
             Some(0)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            Some(worker)
         );
     }
 

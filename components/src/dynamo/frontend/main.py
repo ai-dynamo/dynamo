@@ -317,6 +317,41 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     return config, vllm_flags, sglang_flags
 
 
+def _export_transport_tls_env(config: FrontendConfig) -> None:
+    """Propagate transport TLS/mTLS CLI flags to the env vars the Rust runtime
+    reads. Must run before ``DistributedRuntime`` is constructed: it connects to
+    NATS eagerly, so NATS settings applied afterwards are ignored. The TCP
+    request/response planes dial lazily, so they only need the vars set before
+    the first connection, but exporting everything up front keeps it consistent.
+    """
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tcp_tls_client_cert_path:
+        os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = config.tcp_tls_client_cert_path
+    if config.tcp_tls_client_key_path:
+        os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
+    if config.tcp_tls_client_ca_cert_path:
+        os.environ[
+            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+        ] = config.tcp_tls_client_ca_cert_path
+    if config.nats_tls_ca_cert_path:
+        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
+    if config.nats_tls_insecure:
+        os.environ["NATS_TLS_INSECURE"] = "1"
+    else:
+        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
+        # override it before the Rust runtime reads the env var.
+        os.environ.pop("NATS_TLS_INSECURE", None)
+    if config.nats_tls_client_cert_path:
+        os.environ["NATS_TLS_CLIENT_CERT_PATH"] = config.nats_tls_client_cert_path
+    if config.nats_tls_client_key_path:
+        os.environ["NATS_TLS_CLIENT_KEY_PATH"] = config.nats_tls_client_key_path
+
+
 async def async_main():
     """Main async entry point for the Dynamo frontend.
 
@@ -352,6 +387,10 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
+    # Export transport TLS/mTLS settings BEFORE constructing DistributedRuntime:
+    # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
+    # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
+    _export_transport_tls_env(config)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
@@ -402,20 +441,6 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
-    if config.tcp_tls_cert_path:
-        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
-    if config.tcp_tls_key_path:
-        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
-    if config.tcp_tls_ca_cert_path:
-        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
-    if config.nats_tls_ca_cert_path:
-        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
-    if config.nats_tls_insecure:
-        os.environ["NATS_TLS_INSECURE"] = "1"
-    else:
-        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
-        # override it before the Rust runtime reads the env var.
-        os.environ.pop("NATS_TLS_INSECURE", None)
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:

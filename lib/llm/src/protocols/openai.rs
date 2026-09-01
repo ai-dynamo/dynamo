@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use dynamo_parsers::tool_calling::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -176,7 +177,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 return Err(e);
             }
         };
-
         Ok(common::SamplingOptions {
             n,
             best_of,
@@ -336,20 +336,55 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+/// The tool-output grammar installed for one request.
+///
+/// Batch and streaming consumers carry this decision forward instead of deriving it
+/// again from `tool_choice`, which cannot distinguish JSON guidance from a native
+/// structural tag or a family-specific prompt constraint.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidedToolConstraint {
+    /// No tool-choice generation constraint was installed.
+    #[default]
+    None,
+    /// Generation was pinned to the model family's native tool-call markup.
+    StructuralTag,
+    /// The model emits only the named tool's argument object.
+    GuidedJsonNamed { tool_name: String },
+    /// The model emits one call object or an array of `{name, parameters}` objects.
+    GuidedJsonRequired,
+}
+
+impl GuidedToolConstraint {
+    pub(crate) fn installs_guided_json(&self) -> bool {
+        matches!(
+            self,
+            Self::GuidedJsonNamed { .. } | Self::GuidedJsonRequired
+        )
+    }
+
+    pub(crate) fn uses_structural_tag(&self) -> bool {
+        matches!(self, Self::StructuralTag)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
 
-    /// Request-side gate for routing the batch tool-call finalize through
-    /// `dynamo-parsers-v2` (see
-    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`). Defaults `false`
-    /// so any path that does not explicitly opt in stays on the v1 finalize path; the
-    /// chat HTTP handlers set it from the request's tool_choice. The env flag and family
-    /// support are checked separately in the aggregator.
+    /// Final request policy for tool output. Some model parsers (currently
+    /// Harmony) must still run during non-streaming aggregation to remove
+    /// model-internal channel markup even when the request forbids tool calls.
+    /// In that case the parser is retained for content decoding and this flag
+    /// suppresses any structured calls it discovers.
     #[serde(default)]
-    pub experimental_v2_batch_eligible: bool,
+    pub suppress_tool_calls: bool,
+
+    /// Exact tool-output grammar installed while preprocessing this request.
+    #[serde(default)]
+    pub guided_tool_constraint: GuidedToolConstraint,
 
     /// The request's `parallel_tool_calls`. When `Some(false)`, the aggregator
     /// caps each choice to a single tool call as a post-parse fallback for
@@ -367,6 +402,39 @@ pub struct ParsingOptions {
     /// generated, reasoning stays in `reasoning_content`.
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
+
+    /// The worker's operator-configured structural-tag policy. Carried through so
+    /// the HTTP-layer tool-call-gate reconstruction
+    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
+    /// same structural-tag contract the real preprocessing path uses, instead of
+    /// only recognizing intrinsically-forced model families.
+    #[serde(default)]
+    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
+
+    #[serde(default)]
+    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+
+    #[serde(
+        default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
+    )]
+    pub exclude_tools_when_tool_choice_none: bool,
+
+    /// The request's declared tool schemas. Threaded through so batch-path
+    /// argument parsing (`unified_parser::parse_complete`) can type-coerce
+    /// arguments against the same schema the streaming path already uses via
+    /// `apply_stream_with_constraint`'s `tool_definitions`. Empty for requests
+    /// that declare no tools, matching prior (correct) behavior for those.
+    /// `ToolDefinition` does not implement `Serialize`/`Deserialize`, and this
+    /// field is always populated fresh from the live request rather than
+    /// round-tripped, so it is skipped rather than wired into the wire format.
+    #[serde(skip)]
+    pub tools: Vec<ToolDefinition>,
+}
+
+impl Default for ParsingOptions {
+    fn default() -> Self {
+        Self::new(None, None)
+    }
 }
 
 impl ParsingOptions {
@@ -374,17 +442,58 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
-            experimental_v2_batch_eligible: false,
+            suppress_tool_calls: false,
+            guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
+            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
+            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            exclude_tools_when_tool_choice_none:
+                crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
+            tools: Vec::new(),
         }
     }
 
-    /// Set whether this request is eligible for the experimental v2 batch parser
-    /// (request-side tool_choice gate). See
-    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
-    pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
-        self.experimental_v2_batch_eligible = eligible;
+    pub fn with_guided_tool_constraint(mut self, constraint: GuidedToolConstraint) -> Self {
+        self.guided_tool_constraint = constraint;
+        self
+    }
+
+    /// Thread the request's declared tool schemas through for batch-path
+    /// argument type coercion. See the `tools` field doc comment.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Enforce request-level tool-call permission while preserving independent
+    /// reasoning parsing and any parser needed for whole-response decoding.
+    /// `tool_call_parser` originates in model configuration, so HTTP handlers
+    /// must narrow it to requests that actually permit tool calls. Whole-response
+    /// decoders are retained because they also remove internal channel markup from
+    /// ordinary content; `suppress_tool_calls` remains the output policy boundary.
+    pub fn with_tool_call_parsing_enabled(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.suppress_tool_calls = true;
+            let whole_response_decoder = matches!(
+                self.tool_call_parser.as_deref(),
+                Some("harmony" | "kimi_k3" | "kimi-k3")
+            )
+                || chat_completions::unified_parser::selected_batch_family(
+                    self.tool_call_parser.as_deref(),
+                    self.reasoning_parser.as_deref(),
+                )
+                .is_some()
+                || chat_completions::tool_parser_v2::unified_family(
+                    self.tool_call_parser.as_deref(),
+                    self.reasoning_parser.as_deref(),
+                )
+                .is_some();
+            if !whole_response_decoder {
+                self.tool_call_parser = None;
+            }
+            self.guided_tool_constraint = GuidedToolConstraint::None;
+        }
         self
     }
 
@@ -402,5 +511,70 @@ impl ParsingOptions {
     pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
         self.move_reasoning_to_content_when_empty = enabled;
         self
+    }
+}
+
+#[cfg(test)]
+mod parsing_options_tests {
+    use super::ParsingOptions;
+
+    #[test]
+    fn disabling_tool_parsing_preserves_reasoning_parser() {
+        let options = ParsingOptions::new(Some("hermes".to_string()), Some("qwen3".to_string()))
+            .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(options.tool_call_parser, None);
+        assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
+        assert!(options.suppress_tool_calls);
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_harmony_for_content_decoding() {
+        let options = ParsingOptions::new(Some("harmony".to_string()), Some("gpt_oss".to_string()))
+            .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(options.tool_call_parser.as_deref(), Some("harmony"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("gpt_oss"));
+        assert!(options.suppress_tool_calls);
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_kimi_k3_for_content_decoding() {
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let options =
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_tool_call_parsing_enabled(false);
+
+            assert_eq!(options.tool_call_parser.as_deref(), Some(parser));
+            assert_eq!(options.reasoning_parser.as_deref(), Some("kimi_k3"));
+            assert!(options.suppress_tool_calls);
+        }
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_muse_for_content_decoding() {
+        for parser in ["muse_glimmer", "muse"] {
+            let options = ParsingOptions::new(Some(parser.to_string()), None)
+                .with_tool_call_parsing_enabled(false);
+
+            assert_eq!(options.tool_call_parser.as_deref(), Some(parser));
+            assert_eq!(options.reasoning_parser, None);
+            assert!(options.suppress_tool_calls);
+        }
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_exact_qwen_unified_pair() {
+        let options =
+            ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+                .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(
+            options.tool_call_parser.as_deref(),
+            crate::protocols::openai::chat_completions::tool_parser_v2::enabled()
+                .then_some("qwen3_coder")
+        );
+        assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
+        assert!(options.suppress_tool_calls);
     }
 }

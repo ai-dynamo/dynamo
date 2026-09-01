@@ -183,6 +183,14 @@ pub mod nats {
         /// When set, a custom TLS config with this CA is applied to the NATS connection.
         pub const NATS_TLS_CA_CERT_PATH: &str = "NATS_TLS_CA_CERT_PATH";
 
+        /// Path to the PEM client certificate presented to the NATS server for
+        /// mutual TLS (mTLS). Must be set together with `NATS_TLS_CLIENT_KEY_PATH`.
+        pub const NATS_TLS_CLIENT_CERT_PATH: &str = "NATS_TLS_CLIENT_CERT_PATH";
+
+        /// Path to the PEM client private key for NATS mutual TLS (mTLS).
+        /// Must be set together with `NATS_TLS_CLIENT_CERT_PATH`.
+        pub const NATS_TLS_CLIENT_KEY_PATH: &str = "NATS_TLS_CLIENT_KEY_PATH";
+
         /// Disable TLS certificate verification. Set to a truthy value to skip.
         /// WARNING: Only for local development. Never use in production.
         pub const NATS_TLS_INSECURE: &str = "NATS_TLS_INSECURE";
@@ -339,11 +347,10 @@ pub mod llm {
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
-    /// the frontend to drop `request.nvext` at handler entry, ignore the
-    /// routing-override headers (`x-dynamo-worker-instance-id`,
-    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
-    /// `extra_fields` opt-in.
+    /// the frontend to drop non-salt request NvExt fields, ignore supported
+    /// routing-override headers, and silently ignore the response-side
+    /// `extra_fields` opt-in. Cache isolation is exempt: supported
+    /// `cache_salt` and `x-tenant-id` inputs remain active.
     pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
 
     /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
@@ -379,11 +386,32 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
-    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
-    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
-    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
+    /// BOTH the batch and the streaming path. Off by default.
+    ///
+    /// Which v2 shape a request gets is decided by the configured parsers, not by a
+    /// second flag:
+    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
+    ///   incremental tool-call emission and drops values truncated at EOF.
+    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
+    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
+    ///   in one ordered stream, so reasoning that followed a tool call stays after it
+    ///   instead of being hoisted to the front and fused with the first thought.
+    ///
+    /// One switch, because both are the same decision: stop using v1.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
+
+    /// Rollback lever for incremental guided-tool-call streaming.
+    ///
+    /// A forced `tool_choice` (`required` or a named tool) installs a JSON grammar,
+    /// so by default the jail releases tool-call chunks as they arrive instead of
+    /// buffering the whole response. The grammar-constrained decoding itself lives
+    /// in the published `dynamo-parsers` dependency, not in this repo, so if a
+    /// backend in production doesn't correctly honor the grammar the only other
+    /// rollback is a dependency repin and a new release. On by default; set this
+    /// to a falsy value (`0`/`false`) to fall back to the old buffer-to-completion
+    /// behavior at runtime, no redeploy required.
+    pub const DYN_ENABLE_GUIDED_TOOL_STREAMING: &str = "DYN_ENABLE_GUIDED_TOOL_STREAMING";
 
     /// Backend stream inactivity timeout in seconds.
     ///
@@ -682,6 +710,10 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
+    /// Request-plane transport selection: `"tcp"` (default) or `"nats"`. Read by the
+    /// runtime in `distributed.rs` and by the Python launch layer.
+    pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
+
     /// Preferred payload codec advertised by every request-plane endpoint in this process.
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
@@ -722,6 +754,19 @@ pub mod tcp_response_stream {
         /// address is used. Useful when connecting by IP to a server whose certificate
         /// uses a DNS SAN.
         pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// Path to the PEM client certificate presented by TCP clients to the
+        /// server for mutual TLS (mTLS). Must be set together with
+        /// `DYN_TCP_TLS_CLIENT_KEY_PATH`.
+        pub const DYN_TCP_TLS_CLIENT_CERT_PATH: &str = "DYN_TCP_TLS_CLIENT_CERT_PATH";
+
+        /// Path to the PEM private key for the TCP client certificate (mTLS).
+        pub const DYN_TCP_TLS_CLIENT_KEY_PATH: &str = "DYN_TCP_TLS_CLIENT_KEY_PATH";
+
+        /// Path to the PEM CA certificate the TCP server uses to verify client
+        /// certificates. When set, the server requires clients to present a
+        /// certificate signed by this CA (mTLS is enforced).
+        pub const DYN_TCP_TLS_CLIENT_CA_CERT_PATH: &str = "DYN_TCP_TLS_CLIENT_CA_CERT_PATH";
 
         /// TLS handshake timeout in seconds (default: 3).
         pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
@@ -879,6 +924,8 @@ mod tests {
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             nats::tls::NATS_TLS_CA_CERT_PATH,
+            nats::tls::NATS_TLS_CLIENT_CERT_PATH,
+            nats::tls::NATS_TLS_CLIENT_KEY_PATH,
             nats::tls::NATS_TLS_INSECURE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
@@ -919,6 +966,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+            llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -977,6 +1025,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
@@ -986,6 +1035,9 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
             tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_KEY_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,

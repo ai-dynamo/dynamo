@@ -871,7 +871,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if req.abort_all_requests:
             self.engine.tokenizer_manager.abort_request(abort_all=True)
 
-        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        self.engine.tokenizer_manager._update_weight_version_if_provided(
+            req.new_version
+        )
         return {
             "success": True,
             "message": f"Weight version updated to {req.new_version}",
@@ -1153,6 +1155,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             if json_schema is not None:
                 reject_nonprogressing_guided_json_ref_cycles(json_schema)
                 return {"json_schema": json.dumps(json_schema)}
+            regex = guided_decoding.get("regex")
+            if regex is not None:
+                return {"regex": regex}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}
@@ -1341,3 +1346,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     pass
             else:
                 cancellation_task.result()
+
+            if self.shutdown_event and self.shutdown_event.is_set():
+                raise EngineShutdown("Engine was shut down during token generation")

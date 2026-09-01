@@ -11546,6 +11546,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: componentType is immutable after it is set
+                  rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -11653,6 +11655,26 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpusPerEngine:
+                      description: |-
+                        GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+                        service replica, across all of its nodes. Independent auxiliary GPU
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult GPUsPerReplica for auxiliary allocations.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    gpusPerReplica:
+                      description: |-
+                        GPUsPerReplica is the unique GPU allocation added when this service scales
+                        by one replica, across all nodes, application and initialization phases,
+                        and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod
+                        scheduling footprint; shared DRA claims are counted once. A present zero
+                        records a successful non-GPU resolution; omission means no current shape
+                        is available.
+                      format: int64
+                      minimum: 0
+                      type: integer
                     readyReplicas:
                       description: |-
                         ReadyReplicas is the number of ready replicas.
@@ -20502,6 +20524,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: type is immutable after it is set
+                  rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:
@@ -20534,6 +20558,26 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpusPerEngine:
+                      description: |-
+                        gpusPerEngine is the number of GPUs assigned to one inference engine in a
+                        component replica, across all of its nodes. Independent auxiliary GPU
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult gpusPerReplica for auxiliary allocations.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    gpusPerReplica:
+                      description: |-
+                        gpusPerReplica is the unique GPU allocation added when this component
+                        scales by one replica, across all nodes, application and initialization
+                        phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+                        Pod scheduling footprint; shared DRA claims are counted once. A present
+                        zero records a successful non-GPU resolution; omission means no current
+                        shape is available.
+                      format: int64
+                      minimum: 0
+                      type: integer
                     readyReplicas:
                       description: |-
                         readyReplicas is the number of ready replicas. Populated for
@@ -20550,9 +20594,9 @@ spec:
                     runtimeNamespace:
                       description: |-
                         runtimeNamespace is the effective Dynamo runtime namespace for this
-                        component. Worker components may include a generation suffix; non-workers and
-                        Grove-backed workers use the base namespace. During rolling updates, worker
-                        status keeps the old active revision namespace until cutover completes.
+                        component. Worker components may include a generation suffix; non-workers
+                        use the base namespace. During rolling updates, worker status keeps the old
+                        active revision namespace until cutover completes.
                       type: string
                     scheduledReplicas:
                       description: |-

@@ -235,7 +235,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
@@ -383,6 +383,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-x86asm \
         --disable-network \
         --disable-bsfs \
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
@@ -432,9 +433,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&  \
-    git checkout $NIXL_UCX_REF &&	 \
+    : "${NIXL_UCX_REF:?}" && \
+    git init -q ucx && cd ucx && \
+    git remote add origin https://github.com/openucx/ucx.git && \
+    git fetch --depth 1 origin "${NIXL_UCX_REF}" && \
+    git checkout -q FETCH_HEAD && \
     # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
     # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
     # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
@@ -500,9 +503,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone "${NIXL_LIBFABRIC_REPO}" && \
-    cd libfabric && \
-    git checkout $NIXL_LIBFABRIC_REF && \
+    : "${NIXL_LIBFABRIC_REF:?}" && \
+    git init -q libfabric && cd libfabric && \
+    git remote add origin "${NIXL_LIBFABRIC_REPO}" && \
+    git fetch --depth 1 origin "${NIXL_LIBFABRIC_REF}" && \
+    git checkout -q FETCH_HEAD && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
@@ -534,7 +539,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
-    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+    git clone --recurse-submodules --shallow-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION}" \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
     cd /tmp/aws-sdk-cpp/build && \
@@ -564,11 +569,11 @@ FROM wheel_builder_base AS runtime_wheel_builder
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
+ARG TARGETARCH
 {% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
 {% endif %}
@@ -590,7 +595,27 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo/lib/bindings/python && \
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
+        # Skip maturin's built-in repair: it would graft the in-tree libav* into the
+        # wheel, which the codec gate rejects. Repair with those sonames excluded so
+        # they stay external and resolve to the image's /usr/local/lib copies. This
+        # media-enabled wheel is intentionally image-only and non-self-contained.
+        case "${TARGETARCH}" in \
+            amd64) ARCH_ALT=x86_64 ;; \
+            arm64) ARCH_ALT=aarch64 ;; \
+            *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
+        esac && \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
+        auditwheel repair \
+            --exclude 'libavcodec.so.*' \
+            --exclude 'libavdevice.so.*' \
+            --exclude 'libavfilter.so.*' \
+            --exclude 'libavformat.so.*' \
+            --exclude 'libavutil.so.*' \
+            --exclude 'libswresample.so.*' \
+            --exclude 'libswscale.so.*' \
+            --plat manylinux_2_28_${ARCH_ALT} \
+            --wheel-dir /opt/dynamo/dist \
+            target/wheels/ai_dynamo_runtime-*.whl; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
     fi && \
@@ -602,22 +627,20 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
-# AI Simulate is a separate, architecture-specific Python distribution used by
-# Planner and the framework runtime images. Build it after the Dynamo wheels so
-# Python-only changes do not invalidate the expensive Rust layers above.
-COPY aisimulate/ /opt/dynamo/aisimulate/
+COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
+
+# AI Simulate is released separately as an abi3 wheel. Stage the exact published
+# wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
+# Download only this distribution; runtime images own dependency installation
+# through their requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo/aisimulate && \
-{% if device == "cuda" %}    maturin build --release \
-        --auditwheel repair \
-        --compatibility manylinux_2_28 \
-        --out /opt/dynamo/dist
-{% else %}    maturin build --release \
-        --auditwheel repair \
-        --out /opt/dynamo/dist
-{% endif %}
+    python -m pip download \
+        --only-binary=:all: \
+        --no-deps \
+        --dest /opt/dynamo/dist \
+        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
@@ -710,12 +733,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if "nixl_ref" in context[framework] or device == "xpu" %}
+{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
 # Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
 # consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
+# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
+# not install KVBM, so nothing in that image consumes a from-source NIXL build.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -736,9 +761,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone "https://github.com/ai-dynamo/nixl.git" && \
-    cd nixl && \
-    git checkout ${NIXL_REF} && \
+    : "${NIXL_REF:?}" && \
+    git init -q nixl && cd nixl && \
+    git remote add origin https://github.com/ai-dynamo/nixl.git && \
+    git fetch --depth 1 origin "${NIXL_REF}" && \
+    git checkout -q FETCH_HEAD && \
     if [ "$DEVICE" = "cuda" ]; then \
         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
     else \
@@ -806,7 +833,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
@@ -876,9 +902,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     echo "kvbm wheel NOTICES step done"
 
 {% else %}
-# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and
-# does not build Dynamo KVBM. Keep this alias so downstream stages can still
-# COPY Dynamo wheels and build tools from a common wheel_builder stage name.
+# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and the
+# frontend installs it from PyPI; neither builds Dynamo KVBM. Keep this alias so
+# downstream stages can still COPY Dynamo wheels and build tools from a common
+# wheel_builder stage name.
 # SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
 # absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
 FROM runtime_wheel_builder AS wheel_builder

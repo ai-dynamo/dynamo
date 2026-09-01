@@ -25,11 +25,30 @@ use super::{CancellationToken, Runtime, RuntimeConfig};
 use futures::Future;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::{signal, task::JoinHandle};
 
+/// The one Tokio runtime for this process.
+///
+/// Holds the runtime itself rather than a `Handle`, because
+/// `pyo3_async_runtimes::tokio::init_with_runtime` needs a `&'static Runtime`.
+///
+/// Set once, by whichever of [`Worker::from_config`] or [`Worker::ensure_process_runtime`] runs
+/// first. Every path goes through this cell, so a process cannot end up with two runtimes.
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
-static RTHANDLE: OnceCell<tokio::runtime::Handle> = OnceCell::new();
+
+/// The config `RT` was built from, so [`Worker::runtime_from_existing`] can attach the matching
+/// compute pool without re-reading the environment.
+///
+/// Only [`Worker::ensure_process_runtime`] fills this in; [`Worker::from_config`] brings its own
+/// config and no pool.
+static RTCONFIG: OnceCell<RuntimeConfig> = OnceCell::new();
+
+/// Whether a [`Runtime`] has already taken the compute pool. One pool per process, however many
+/// wrappers get built.
+static COMPUTE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
 use crate::config::environment_names::worker as env_worker;
@@ -61,7 +80,7 @@ impl Worker {
     /// Create a new [`Worker`] instance from a provided [`RuntimeConfig`]
     pub fn from_config(config: RuntimeConfig) -> anyhow::Result<Worker> {
         // if the runtime is already initialized, return an error
-        if RT.get().is_some() || RTHANDLE.get().is_some() {
+        if RT.get().is_some() {
             return Err(anyhow::anyhow!("Worker already initialized"));
         }
 
@@ -76,31 +95,55 @@ impl Worker {
         Ok(Worker { runtime, config })
     }
 
+    /// Share the process-wide runtime, creating it on first use.
+    ///
+    /// The returned [`Runtime`] only wraps a handle to `RT`, so every caller ends up on the same
+    /// Tokio runtime. Creation goes through [`Worker::ensure_process_runtime`] rather than
+    /// happening here, so the runtime stays reachable as a `&'static` for the pyo3 bridge.
     pub fn runtime_from_existing() -> anyhow::Result<Runtime> {
-        if let Some(rt) = RT.get() {
-            Ok(Runtime::from_handle(rt.handle().clone())?)
-        } else if let Some(rt) = RTHANDLE.get() {
-            Ok(Runtime::from_handle(rt.clone())?)
-        } else {
-            // Fallback: build a fresh Runtime and publish its handle so
-            // subsequent `has_existing_runtime()` callers (e.g. the
-            // backend Python `Worker`) can tell that a runtime now
-            // exists in the process — even though we didn't go through
-            // `Worker::from_*`. Without this the cell stays empty and
-            // a later `Worker` would falsely conclude it owns the
-            // runtime and create a second one.
-            let runtime = Runtime::from_settings()?;
-            let _ = RTHANDLE.set(runtime.primary());
-            Ok(runtime)
+        let rt = Self::ensure_process_runtime()?;
+        let handle = rt.handle().clone();
+
+        // Only the first wrapper gets the compute pool and `block_in_place` permits: one Rayon
+        // pool per process, not one per `DistributedRuntime`.
+        //
+        // An atomic swap rather than "did I just build `RT`?", because callers may call
+        // `ensure_process_runtime` first — `DistributedRuntime::new` does — which would make
+        // that question always answer no. The swap also settles the race between two threads.
+        match RTCONFIG.get() {
+            Some(config) if !COMPUTE_CLAIMED.swap(true, Ordering::SeqCst) => {
+                Runtime::from_handle_with_config(handle, config)
+            }
+            _ => Runtime::from_handle(handle),
         }
     }
 
-    /// Whether a process-wide runtime has already been initialized
-    /// (`RT` populated by `Worker::from_*`, or `RTHANDLE` populated by
-    /// `runtime_from_existing`'s fallback / external callers).
-    /// Does *not* fall back to `Runtime::from_settings()`.
+    /// Create the process-wide runtime if it does not exist yet, and return it. Idempotent.
+    ///
+    /// Exists because the pyo3 bridge needs a `&'static tokio::runtime::Runtime`, which
+    /// [`Worker::from_config`] cannot provide — it errors when a runtime already exists.
+    pub fn ensure_process_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+        // Fast path — `get_or_try_init` below would also return it, just less cheaply.
+        if let Some(rt) = RT.get() {
+            return Ok(rt);
+        }
+
+        // If two threads arrive together, one builds and both observe the same runtime.
+        RT.get_or_try_init(|| -> anyhow::Result<tokio::runtime::Runtime> {
+            let config = RuntimeConfig::from_settings()?;
+            tracing::info!("dynamo runtime configuration: {config}");
+            let rt = config.create_runtime()?;
+            let _ = RTCONFIG.set(config);
+            Ok(rt)
+        })
+    }
+
+    /// Whether the process-wide runtime already exists.
+    ///
+    /// Never creates one, unlike [`Worker::runtime_from_existing`], so a caller can use this to
+    /// find out whether it would be the owner.
     pub fn has_existing_runtime() -> bool {
-        RT.get().is_some() || RTHANDLE.get().is_some()
+        RT.get().is_some()
     }
 
     pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {
@@ -213,7 +256,7 @@ impl Worker {
     }
 
     pub fn from_current() -> anyhow::Result<Worker> {
-        if RT.get().is_some() || RTHANDLE.get().is_some() {
+        if RT.get().is_some() {
             return Err(anyhow::anyhow!("Worker already initialized"));
         }
         let runtime = Runtime::from_current()?;
