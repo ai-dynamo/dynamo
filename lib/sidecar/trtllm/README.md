@@ -34,10 +34,10 @@ carries no context-phase handoff.
 
 ## Run
 
-Start TensorRT-LLM with its native gRPC listener. This example is validated with TensorRT-LLM `1.3.0rc21`, matching the deployment manifest:
+Start TensorRT-LLM with its native gRPC listener (TRT-LLM `1.3.0rc21`; rc22 has a broken `--grpc`):
 
 ```bash
-python -m tensorrt_llm.commands.serve <model> --grpc --host 127.0.0.1 --port 50051
+python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -90,7 +90,7 @@ Build and push the image to a registry your cluster can pull from:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:dev --push .
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture
@@ -150,6 +150,11 @@ ConfigMap in `deploy/agg.yaml` sets `stream_interval`, which emits one chunk per
 
 - Higher `N` → fewer, larger gRPC messages → higher throughput under load.
 - Trade-off: the client receives tokens in bursts of `N`.
+
+On a single GB200 (Qwen3-0.6B, 2000-in / 256-out) raising `stream_interval` from
+1 to 5 roughly doubled output throughput at high concurrency (~6.3k → ~12k
+tok/s) and even lowered TTFT. `5` keeps streaming smooth while capturing nearly
+all the gain.
 
 ## Packaging
 

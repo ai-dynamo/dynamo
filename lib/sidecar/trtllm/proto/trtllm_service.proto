@@ -18,7 +18,7 @@
 // and SubscribeKvEvents — that this sidecar does not use. Those RPCs and the
 // `import "common.proto"` are removed so the contract compiles standalone;
 // every message the sidecar exchanges is preserved verbatim. See
-// `proto/README.md` for the source package version and local checksum.
+// `proto/README.md` for the source revision and checksum.
 
 syntax = "proto3";
 package trtllm;

@@ -85,10 +85,10 @@ pub(crate) fn build_generate_request(
 // `token_ids.len()` is the true prompt length. `context_length` comes from
 // `--context-length` (GetModelInfo returns zero on current releases).
 //
-// Remove after a released TensorRT-LLM gRPC contract makes `max_tokens`
-// optional: drop this fallback, the `--context-length` arg, and the
-// context-length plumbing in `engine.rs`, and forward an omitted value as
-// unset.
+// Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
+// `max_tokens` made optional): drop this fallback, the `--context-length` arg,
+// and the context-length plumbing in `engine.rs`, and forward an omitted
+// `max_tokens` as unset.
 fn max_tokens(
     request: &PreprocessedRequest,
     context_length: Option<u32>,

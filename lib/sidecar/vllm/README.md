@@ -28,17 +28,22 @@ It is a standalone Rust executable and is also compiled into
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
-- Image URL and data-URI inputs, including image cache UUIDs
+- Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
+- Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
 
-The sidecar converts `video_url` and `audio_url` inputs, but vLLM `0.28.0` does not accept those gRPC modalities. Use image inputs with the current release. vLLM `0.28.0` also does not expose the engine world-size metadata required by `--enable-rl`, so RL worker discovery is unavailable with the current release. The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw image bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
+
+The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
+
+The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-compatible tokenizer and config metadata (`tokenizer.json` and a top-level `vocab_size`). Dynamo's Rust chat renderer also does not yet insert the model-native audio placeholder for `audio_url` content parts; callers can supply those prompt token IDs through `nvext.token_data`. These are model-loading and request-rendering gaps rather than sidecar media-transport limitations.
 
 ## Run
 
 ### Runtime compatibility
 
-The sidecar targets vLLM `0.28.0`. Use the Python `vllm` package and bundled `vllm-rs` binary from the same release so their EngineCore and gRPC contracts remain compatible. The vendored protocol compatibility baseline is recorded in [`proto/README.md`](proto/README.md).
+The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
 
 Start vLLM with its gRPC listener:
 
@@ -67,13 +72,45 @@ python -m dynamo.vllm.sidecar \
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
+### RL workflows
+
+Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery:
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --grpc-port 50051 \
+  --enable-sleep-mode \
+  --weight-transfer-config '{"backend":"nccl"}'
+
+DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --vllm-http-endpoint http://rollout-0.rl.svc.cluster.local:8000 \
+  --enable-rl
+```
+
+Replace `rollout-0.rl.svc.cluster.local` with a private address that the RL controller can route to. Binding vLLM to `0.0.0.0` exposes both its HTTP and gRPC listeners, so restrict both ports with host firewall rules, Kubernetes NetworkPolicy, or an equivalent trusted-network control. A colocated sidecar can continue to use loopback for `--grpc-endpoint`; the advertised HTTP URL must be routable from the controller, not merely from the worker.
+
+`--enable-rl` (or `DYN_ENABLE_RL=true`) requires the Dynamo system server (`DYN_SYSTEM_PORT=0` or a positive port) and registers `dyn://<namespace>.<component>.rl`, which lets the Dynamo frontend discover this worker and its `/engine/control/*` and `/engine/update/*` routes through `/v1/rl/workers`. The sidecar advertises pause/resume, sleep-status, and weight-version controls when the vLLM server reports the RL gRPC API; mutating sleep/wake routes require `--enable-sleep-mode`, weight-transfer routes require `--weight-transfer-config`, and draft updates require speculative decoding support. The sidecar publishes `--vllm-http-endpoint` (or `VLLM_HTTP_ENDPOINT`) only as part of this RL worker metadata.
+
+Native vLLM lifecycle and weight-update operations use the typed gRPC Control service and do not require `--vllm-http-endpoint`. Configure the HTTP base URL only when an RL framework needs a compatibility operation that is not represented by the typed service, such as a custom `worker_extension_cls` method invoked through `/collective_rpc`.
+
+The HTTP value must be a controller-routable `http://` or `https://` base URL. Path prefixes are preserved, so a reverse proxy can advertise a value such as `https://rollout.example.internal/vllm-admin`; downstream clients append the compatibility route beneath that prefix. User information, query strings, and fragments are rejected. Do not place credentials or tokens in the URL.
+
+The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_engine` requires `{"init_info": {...}}`, `update_weights` requires `{"update_info": {...}}`, `finish_weight_update` accepts `{"weight_version": "..."}`, and `update_weight_version` requires `{"new_version": "..."}`. Weight tensors remain on the configured NCCL, IPC, or sparse-NCCL transport; only backend metadata crosses gRPC.
+
+The RL endpoint, engine routes, and raw HTTP compatibility surface are administrative interfaces that can pause serving, release GPU memory, and replace model weights. The sidecar does not add HTTP authentication to the advertised URL. Enable these interfaces only on trusted request and system networks, or place the HTTP endpoint behind an authenticated private proxy without embedding credentials in the published URL.
+
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 
-The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+The sidecar opens eight gRPC connections by default. This avoided
+connection-level throttling in high-concurrency sidecar tests. Override the
+pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry
 interval, and a five-minute deadline for establishing the full connection
@@ -97,6 +134,8 @@ cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
   --grpc-endpoint 127.0.0.1:50051
 ```
 
+The mocker does not advertise RL capabilities; use a compatible vLLM server for RL route testing.
+
 See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
 for aggregated and prefill/decode examples, supported Mocker configuration,
 and fidelity limits.
@@ -112,7 +151,7 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring and use `vllm/vllm-openai:v0.28.0`.
+The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
 ### Prerequisites
 
@@ -131,7 +170,7 @@ Build and push the image to a registry your cluster can pull from:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:dev --push .
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture
@@ -185,4 +224,5 @@ must reach `2/2 Running`. Apply it the same way and call the frontend as above.
 There is no published sidecar image yet. See
 [Build the image](../README.md#build-the-image). The image contains the vLLM,
 SGLang, and TensorRT-LLM executables; each deployment sets its container
-`command` to the one it needs.
+`command` to the one it needs. Official packaging is deferred to a follow-up
+change.
