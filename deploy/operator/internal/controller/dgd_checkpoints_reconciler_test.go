@@ -1291,6 +1291,33 @@ func TestDGDCheckpointsReconciler_AutomaticRestoreWaitsForSnapshotJobCompletion(
 	assert.Equal(t, snapshot.UID, info.NativeSnapshot.UID)
 }
 
+func TestDGDCheckpointsReconciler_AutomaticCaptureReportsSnapshotJobFailure(t *testing.T) {
+	t.Log("Build a terminally failed automatic SnapshotJob")
+	job := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-worker", Namespace: "default"},
+		Status: snapshotv1alpha1.SnapshotJobStatus{Conditions: []metav1.Condition{{
+			Type:    snapshotv1alpha1.SnapshotJobConditionFailed,
+			Status:  metav1.ConditionTrue,
+			Reason:  snapshotv1alpha1.ReasonDeadlineExceeded,
+			Message: "capture exceeded its active deadline",
+		}}},
+	}
+
+	t.Log("Resolve the automatic capture")
+	_, err := (&dgdCheckpointsReconciler{}).resolveAutomaticSnapshotJob(
+		context.Background(),
+		job,
+		&v1alpha1.ServiceCheckpointConfig{},
+		"worker-hash",
+		v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+	)
+
+	t.Log("Verify the terminal reason is surfaced instead of reported as pending")
+	require.ErrorContains(t, err, "automatic SnapshotJob default/checkpoint-worker failed")
+	require.ErrorContains(t, err, snapshotv1alpha1.ReasonDeadlineExceeded)
+	require.ErrorContains(t, err, "capture exceeded its active deadline")
+}
+
 func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 	t.Log("Build a rolling-update DGD with an active worker generation")
 	rollout := &dgdWorkerRolloutReconciler{}
