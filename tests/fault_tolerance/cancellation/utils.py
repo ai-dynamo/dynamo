@@ -312,15 +312,15 @@ def read_streaming_responses(
         logger.info(
             f"Received streaming response {response_count}: {line.decode()[:100]}"
         )
-        if response_count >= expected_count:
-            logger.info(f"Successfully read {response_count} responses")
-            return
         if deadline is not None and time.monotonic() > deadline:
             cancellable_req.cancel()
             pytest.fail(
                 f"Read only {response_count} of {expected_count} streaming responses "
                 f"within {deadline_s}s"
             )
+        if response_count >= expected_count:
+            logger.info(f"Successfully read {response_count} responses")
+            return
 
     # If we get here, stream ended too early
     pytest.fail(
