@@ -287,10 +287,11 @@ def read_streaming_responses(
     Args:
         cancellable_req: The CancellableRequest object with an active stream
         expected_count: Number of responses to read before returning
-        deadline_s: Wall-clock budget for reading all expected_count chunks.
-            The `timeout` passed to requests only bounds the gap between two
-            chunks, so a slow but alive stream can run without a limit. This
-            deadline bounds the phase as a whole.
+        deadline_s: Budget for waiting on the next chunk, checked after each
+            arrival while the goal is unmet. A late chunk that completes
+            expected_count still counts, so this does not cap total read
+            time. The `timeout` passed to requests bounds a single read; this
+            bounds the sequence of them.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -314,6 +315,8 @@ def read_streaming_responses(
         if response_count >= expected_count:
             logger.info(f"Successfully read {response_count} responses")
             return
+        # Checked only while the goal is unmet. Moving this above the return
+        # would fail runs that received every chunk they needed.
         if deadline is not None and time.monotonic() > deadline:
             cancellable_req.cancel()
             pytest.fail(
