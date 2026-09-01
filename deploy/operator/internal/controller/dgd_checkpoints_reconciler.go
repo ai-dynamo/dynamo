@@ -120,7 +120,20 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		}
 
 		var info *checkpoint.CheckpointInfo
-		if !hasCheckpointRef {
+		if !hasCheckpointRef &&
+			dynamo.IsWorkerComponent(string(component.ComponentType)) &&
+			workerHash == "" {
+			// Grove records the active worker generation after synchronizing its
+			// first PodCliqueSet. Do not start a generation-less capture while
+			// that durable identity is still being initialized.
+			logger.Info("Waiting for active worker hash before automatic capture", "component", componentName)
+			info = &checkpoint.CheckpointInfo{
+				Enabled:          true,
+				AutomaticCapture: true,
+				SourceKind:       checkpoint.SourceKindPodSnapshot,
+				StartupPolicy:    startupPolicy,
+			}
+		} else if !hasCheckpointRef {
 			info, err = r.reconcileAutomaticSnapshotJob(
 				ctx,
 				dgd,

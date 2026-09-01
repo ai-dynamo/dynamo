@@ -505,6 +505,65 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 	assert.NotEqual(t, firstJobName, rotatedJobName)
 }
 
+func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *testing.T) {
+	t.Log("Build a first-generation worker before its active hash is initialized")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:latest"}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+				}},
+			}},
+		},
+	}
+
+	t.Log("Reconcile while the worker generation has no durable identity")
+	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify automatic capture remains pending without creating a generation-less SnapshotJob")
+	info := result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.True(t, info.AutomaticCapture)
+	assert.Equal(t, checkpoint.SourceKindPodSnapshot, info.SourceKind)
+	assert.False(t, info.Ready)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	assert.Empty(t, jobs.Items)
+
+	t.Log("Record the active worker hash and reconcile capture again")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: workerHash,
+	}
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify exactly one generation-bound SnapshotJob is created")
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	assert.Equal(t, workerHash, jobs.Items[0].Labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
 	t.Log("Build a checkpoint-enabled DGD while the checkpoint feature is disabled")
 	ctx := context.Background()
@@ -591,6 +650,9 @@ func TestDGDCheckpointsReconciler_PropagatesSnapshotJobReadError(t *testing.T) {
 			}},
 		},
 	}
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
 	t.Log("Reconcile the managed capture")
 	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
@@ -644,6 +706,9 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 				},
 			}},
 		},
+	}
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
 
 	t.Log("Reconcile the auto checkpoint")
@@ -1062,6 +1127,9 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureLeavesStorageToSnapshot(t *tes
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
 	t.Log("Reconcile checkpoint resources")
 	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd); err != nil {
@@ -1153,6 +1221,9 @@ func TestDGDCheckpointsReconciler_AutoModeIgnoresExistingLegacyCheckpoint(t *tes
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
 	t.Log("Reconcile the automatic checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
