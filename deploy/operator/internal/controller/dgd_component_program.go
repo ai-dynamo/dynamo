@@ -85,12 +85,12 @@ func (p *componentProgram) Reconcile(
 	)
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	currentWorkerHashChanged, err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status)
+	currentWorkerHashStatusChanged, err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status)
 	if err != nil {
 		return programResult, err
 	}
 	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
-	if currentWorkerHashChanged {
+	if currentWorkerHashStatusChanged {
 		programResult.Result.Requeue = true
 		return programResult, nil
 	}
@@ -147,23 +147,24 @@ func (p *componentProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (bool, error) {
-	previousCurrentWorkerHash := status.CurrentWorkerHash
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, status); err != nil {
+) (currentWorkerHashStatusChanged bool, err error) {
+	currentWorkerHashStatusChanged, err = p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, status)
+	if err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return false, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	if status.CurrentWorkerHash != previousCurrentWorkerHash {
-		return true, nil
+	if currentWorkerHashStatusChanged {
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	if err := p.rollout.ReconcileUnsupported(ctx, dgd, status, false); err != nil {
+	currentWorkerHashStatusChanged, err = p.rollout.ReconcileUnsupported(ctx, dgd, status, false)
+	if err != nil {
 		return false, err
 	}
-	return status.CurrentWorkerHash != previousCurrentWorkerHash, nil
+	return currentWorkerHashStatusChanged, nil
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use
@@ -179,16 +180,16 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (bool, error) {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
-	previousCurrentWorkerHash := status.CurrentWorkerHash
 
-	if err := p.rollout.initializeWorkerHashIfNeeded(ctx, dgd, status); err != nil {
+	currentWorkerHashStatusChanged, err = p.rollout.initializeWorkerHashIfNeeded(ctx, dgd, status)
+	if err != nil {
 		logger.Error(err, "Failed to initialize worker hash")
 		return false, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}
-	if status.CurrentWorkerHash != previousCurrentWorkerHash {
-		return true, nil
+	if currentWorkerHashStatusChanged {
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	rollingUpdateInProgress := isRollingUpdateInProgress(status)
@@ -202,12 +203,13 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 		}
 	}
 	if rollingUpdateInProgress || triggerRollingUpdate {
-		if err := p.rollout.reconcileRollingUpdate(ctx, dgd, status); err != nil {
+		currentWorkerHashStatusChanged, err = p.rollout.reconcileRollingUpdate(ctx, dgd, status)
+		if err != nil {
 			logger.Error(err, "Failed to reconcile rolling update")
 			return false, failWorkloadProgram(reasonRollingUpdateFailed, err)
 		}
 	}
-	return status.CurrentWorkerHash != previousCurrentWorkerHash, nil
+	return currentWorkerHashStatusChanged, nil
 }
 
 func (p *componentProgram) recordRollingUpdateTransition(

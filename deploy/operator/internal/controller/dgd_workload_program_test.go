@@ -490,7 +490,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			err := reconciler.ReconcileUnsupported(
+			_, err := reconciler.ReconcileUnsupported(
 				context.Background(),
 				dgd,
 				&dgd.Status,
@@ -554,18 +554,18 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		currentWorkerHashChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		currentWorkerHashStatusChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
 		require.NoError(t, err)
-		assert.True(t, currentWorkerHashChanged)
+		assert.True(t, currentWorkerHashStatusChanged)
 		assert.Equal(t, "old-worker-hash", status.CurrentWorkerHash)
 		assert.Nil(t, status.RollingUpdate)
 		assert.Empty(t, dgd.Status.CurrentWorkerHash)
 
 		dgd.Status = status
 		status = dgd.DeepCopy().Status
-		currentWorkerHashChanged, err = program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		currentWorkerHashStatusChanged, err = program.reconcileWorkerRollout(context.Background(), dgd, &status)
 		require.NoError(t, err)
-		assert.False(t, currentWorkerHashChanged)
+		assert.False(t, currentWorkerHashStatusChanged)
 
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
@@ -588,9 +588,9 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		currentWorkerHashChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		currentWorkerHashStatusChanged, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
 		require.NoError(t, err)
-		assert.True(t, currentWorkerHashChanged)
+		assert.True(t, currentWorkerHashStatusChanged)
 
 		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)

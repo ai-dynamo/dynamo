@@ -81,28 +81,30 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	isGrove bool,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	transition, err := r.planUnsupportedWorkerHashTransition(dgd)
 	if err != nil {
 		logger.Error(err, "Failed to plan worker hash transition for unsupported pathway")
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return false, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	if !transition.needsCommit() {
-		return nil
+		return false, nil
 	}
 
-	if err := r.commitUnsupportedWorkerHashTransition(ctx, dgd, status, transition, isGrove); err != nil {
+	currentWorkerHashStatusChanged, err = r.commitUnsupportedWorkerHashTransition(ctx, dgd, status, transition, isGrove)
+	if err != nil {
 		if transition.initialize {
 			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
-			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+			return false, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 		}
 		// Preserve the existing best-effort behavior: the next reconciliation
 		// retries the metadata update and may emit another warning.
 		logger.Error(err, "Failed to update worker hash for unsupported pathway")
+		return false, nil
 	}
-	return nil
+	return currentWorkerHashStatusChanged, nil
 }
 
 func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
@@ -138,18 +140,18 @@ func (r *dgdWorkerRolloutReconciler) commitUnsupportedWorkerHashTransition(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	transition unsupportedWorkerHashTransition,
 	isGrove bool,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	if !transition.needsCommit() {
-		return nil
+		return false, nil
 	}
 
 	r.setCurrentWorkerHashes(dgd, transition.next)
 	if err := r.Update(ctx, dgd); err != nil {
-		return err
+		return false, err
 	}
-	r.setCurrentWorkerHashStatus(status, transition.next.v2)
+	currentWorkerHashStatusChanged = r.setCurrentWorkerHashStatus(status, transition.next.v2)
 	if !transition.workerGenerationChanged {
-		return nil
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	log.FromContext(ctx).Info(
@@ -168,7 +170,7 @@ func (r *dgdWorkerRolloutReconciler) commitUnsupportedWorkerHashTransition(
 			"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
 		)
 	}
-	return nil
+	return currentWorkerHashStatusChanged, nil
 }
 
 func (h workerGenerationHashes) empty() bool {
@@ -291,7 +293,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	if !r.currentWorkerHashes(dgd).empty() {
@@ -301,7 +303,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	// Check for legacy (pre-rolling-update) worker DCDs
 	legacyDCDs, err := r.findLegacyWorkerDCDs(ctx, dgd)
 	if err != nil {
-		return fmt.Errorf("failed to check for legacy worker DCDs: %w", err)
+		return false, fmt.Errorf("failed to check for legacy worker DCDs: %w", err)
 	}
 
 	if len(legacyDCDs) > 0 {
@@ -317,7 +319,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 			}
 			dcd.Labels[consts.KubeLabelDynamoWorkerHash] = consts.LegacyWorkerHash
 			if err := r.Patch(ctx, dcd, patch); err != nil {
-				return fmt.Errorf("failed to backfill hash label on legacy DCD %s: %w", dcd.Name, err)
+				return false, fmt.Errorf("failed to backfill hash label on legacy DCD %s: %w", dcd.Name, err)
 			}
 			logger.Info("Backfilled worker hash label on legacy DCD",
 				"dcdName", dcd.Name, "hash", consts.LegacyWorkerHash)
@@ -326,31 +328,30 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 		// Set sentinel hash — next reconcile triggers a real rolling update from "legacy" -> computed hash
 		r.setLegacyWorkerHash(dgd)
 		if err := r.Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to set legacy worker hash: %w", err)
+			return false, fmt.Errorf("failed to set legacy worker hash: %w", err)
 		}
 
 		if r.recorder != nil {
 			r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "LegacyMigrationStarted", "Update",
 				"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
 		}
-		return nil
+		return false, nil
 	}
 
 	// Normal first deploy — set the canonical v2 hash.
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return err
+		return false, err
 	}
 	r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
 
 	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to initialize worker hash: %w", err)
+		return false, fmt.Errorf("failed to initialize worker hash: %w", err)
 	}
-	r.setCurrentWorkerHashStatus(status, hashes.v2)
 
 	logger.Info("Initialized current worker hashes", "v1Hash", hashes.v1, "v2Hash", hashes.v2)
 
-	return nil
+	return r.setCurrentWorkerHashStatus(status, hashes.v2), nil
 }
 
 // migrateCurrentWorkerHashIfNeeded fills in additive v2 worker-hash state while
@@ -359,14 +360,14 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	annotationV2 := currentWorkerHashV2Annotation(dgd)
 	if status.CurrentWorkerHash == "" && annotationV2 != "" {
-		r.setCurrentWorkerHashStatus(status, annotationV2)
+		currentWorkerHashStatusChanged = r.setCurrentWorkerHashStatus(status, annotationV2)
 		logger.Info("Backfilled current worker hash status from v2 annotation", "v2Hash", annotationV2)
-		return nil
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	current := r.currentWorkerHashes(dgd)
@@ -383,39 +384,38 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	if current.v1 == "" && needsCompatibilityMirror {
 		restored, err := r.restoreLegacyWorkerHashIfNeeded(ctx, dgd, current.v2)
 		if err != nil {
-			return err
+			return false, err
 		}
 		metadataChanged = metadataChanged || restored
 	}
 	if metadataChanged {
 		if err := r.Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to restore worker hash annotations: %w", err)
+			return false, fmt.Errorf("failed to restore worker hash annotations: %w", err)
 		}
 		if dgd.Status.CurrentWorkerHash == "" {
-			r.setCurrentWorkerHashStatus(status, current.v2)
+			currentWorkerHashStatusChanged = r.setCurrentWorkerHashStatus(status, current.v2)
 		}
 	}
 	if !current.v1Only() || current.v1 == consts.LegacyWorkerHash {
-		return nil
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	// Let an active v1 rollout converge on v2 before recording it as current.
 	if isRollingUpdateInProgress(&dgd.Status) {
-		return nil
+		return currentWorkerHashStatusChanged, nil
 	}
 
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Record the current desired state as v2 without changing the active v1 suffix.
 	next := workerGenerationHashes{v1: current.v1, v2: desired.v2}
 	r.setCurrentWorkerHashes(dgd, next)
 	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to migrate worker hash annotations: %w", err)
+		return false, fmt.Errorf("failed to migrate worker hash annotations: %w", err)
 	}
-	r.setCurrentWorkerHashStatus(status, next.v2)
 	logger.Info("Migrated worker hash annotations",
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
@@ -424,7 +424,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 			"Recorded v2 worker hash annotation without rolling workers")
 	}
 
-	return nil
+	return r.setCurrentWorkerHashStatus(status, next.v2), nil
 }
 
 // activeWorkerHashForDCDGeneration returns the hash used for generated worker
@@ -585,11 +585,12 @@ func currentWorkerHashV2Annotation(dgd *nvidiacomv1beta1.DynamoGraphDeployment) 
 func (r *dgdWorkerRolloutReconciler) setCurrentWorkerHashStatus(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	hash string,
-) {
+) bool {
 	if status.CurrentWorkerHash == hash {
-		return
+		return false
 	}
 	status.CurrentWorkerHash = hash
+	return true
 }
 
 // setCurrentWorkerHashes stores the active worker hashes for one generation.
@@ -656,14 +657,14 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return err
+		return false, err
 	}
 	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desired)
 	current := r.currentWorkerHashes(dgd)
@@ -685,7 +686,7 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
 			recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
 			if err != nil {
-				return fmt.Errorf("check Recreate stale-annotation barrier: %w", err)
+				return false, fmt.Errorf("check Recreate stale-annotation barrier: %w", err)
 			}
 			if recreateDrained {
 				logger.Info("Updating stale worker hash annotation",
@@ -695,10 +696,9 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 				completed := workerHashesForCompletedGeneration(newWorkerHash, desired)
 				r.setCurrentWorkerHashes(dgd, completed)
 				if err := r.Update(ctx, dgd); err != nil {
-					return err
+					return false, err
 				}
-				r.setCurrentWorkerHashStatus(status, completed.v2)
-				return nil
+				return r.setCurrentWorkerHashStatus(status, completed.v2), nil
 			}
 			logger.Info("Resuming rolling update while the old Recreate generation drains",
 				"currentV1WorkerHash", current.v1,
@@ -735,21 +735,21 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1beta1.RollingUpdatePhaseNone:
-		return r.startRollingUpdate(ctx, dgd, status, newWorkerHash)
+		return false, r.startRollingUpdate(ctx, dgd, status, newWorkerHash)
 
 	case nvidiacomv1beta1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseInProgress
-		return nil // the workload program returns this status to the outer reconciler
+		return false, nil // the workload program returns this status to the outer reconciler
 
 	case nvidiacomv1beta1.RollingUpdatePhaseInProgress:
 		return r.continueRollingUpdate(ctx, dgd, status, newWorkerHash)
 
 	case nvidiacomv1beta1.RollingUpdatePhaseCompleted:
 		logger.Info("Rolling update already completed")
-		return nil
+		return false, nil
 	}
 
-	return nil
+	return false, nil
 }
 
 // startRollingUpdate initializes a new rolling update.
@@ -783,7 +783,7 @@ func (r *dgdWorkerRolloutReconciler) continueRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	oldInfo, err := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
@@ -815,7 +815,7 @@ func (r *dgdWorkerRolloutReconciler) continueRollingUpdate(
 		return r.completeRollingUpdate(ctx, dgd, status, newWorkerHash)
 	}
 
-	return nil // the workload program returns UpdatedComponents to the outer reconciler
+	return false, nil // the workload program returns UpdatedComponents to the outer reconciler
 }
 
 func completedWorkerComponents(
@@ -875,33 +875,33 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
-) error {
+) (currentWorkerHashStatusChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
 	if err != nil {
-		return fmt.Errorf("check Recreate completion barrier: %w", err)
+		return false, fmt.Errorf("check Recreate completion barrier: %w", err)
 	}
 	if !recreateDrained {
 		logger.V(1).Info("Waiting for old Recreate pods to terminate before completing rolling update",
 			"newWorkerHash", newWorkerHash)
-		return nil
+		return false, nil
 	}
 
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Delete all non-current worker DCDs (any number of old generations)
 	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
+		return false, fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
 	completed := workerHashesForCompletedGeneration(newWorkerHash, desired)
 	r.setCurrentWorkerHashes(dgd, completed)
 	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update current worker hash: %w", err)
+		return false, fmt.Errorf("failed to update current worker hash: %w", err)
 	}
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
@@ -921,10 +921,9 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	sort.Strings(allWorkerComponents)
 	rollingUpdateStatus.UpdatedComponents = allWorkerComponents
 
-	r.setCurrentWorkerHashStatus(status, completed.v2)
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
-	return nil
+	return r.setCurrentWorkerHashStatus(status, completed.v2), nil
 }
 
 // dcdComponentState holds replica signals extracted from a DCD's Spec and Status.

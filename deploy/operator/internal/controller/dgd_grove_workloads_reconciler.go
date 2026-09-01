@@ -75,12 +75,12 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error) {
+) (ReconcileResult, bool, error) {
 	logger := log.FromContext(ctx)
 
 	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
 	if err != nil {
-		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return ReconcileResult{}, false, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
@@ -91,17 +91,18 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 	// The PCS write is the transition's write barrier. A failed DGD update
 	// leaves its hash unchanged, so the next reconcile replans from live state.
-	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, status, workerHashTransition, true); err != nil {
-		return ReconcileResult{}, failWorkloadProgram(
+	currentWorkerHashStatusChanged, err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, status, workerHashTransition, true)
+	if err != nil {
+		return ReconcileResult{}, false, failWorkloadProgram(
 			reasonRollingUpdateFailed,
 			fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err),
 		)
@@ -109,12 +110,12 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
 	if err != nil {
-		return ReconcileResult{}, err
+		return ReconcileResult{}, false, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
@@ -123,11 +124,11 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		syncedPodCliqueSet,
 	)
 	if err != nil {
-		return ReconcileResult{}, err
+		return ReconcileResult{}, false, err
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
-	return checkGroveResourcesReadiness(resources, readiness.Classification), nil
+	return checkGroveResourcesReadiness(resources, readiness.Classification), currentWorkerHashStatusChanged, nil
 }
 
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
