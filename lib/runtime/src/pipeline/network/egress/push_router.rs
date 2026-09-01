@@ -3528,8 +3528,8 @@ mod tests {
         Arc::new(SinkEntry::new(Arc::new(InertSink)))
     }
 
-    #[test]
-    fn add_sink_excludes_instances_removed_before_registration() {
+    #[tokio::test]
+    async fn add_sink_excludes_instances_removed_before_registration() {
         let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(1));
         watcher.record_added(&test_instance_id(2));
@@ -3542,8 +3542,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn retain_live_drops_instances_missing_from_a_fresh_listing() {
+    #[tokio::test]
+    async fn retain_live_drops_instances_missing_from_a_fresh_listing() {
         let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(1));
         watcher.record_added(&test_instance_id(2));
@@ -3564,8 +3564,8 @@ mod tests {
         assert_eq!(replayed, vec![1, 3]);
     }
 
-    #[test]
-    fn retain_live_keeps_everything_when_the_listing_matches() {
+    #[tokio::test]
+    async fn retain_live_keeps_everything_when_the_listing_matches() {
         let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(7));
 
