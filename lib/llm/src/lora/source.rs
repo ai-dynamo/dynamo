@@ -352,11 +352,9 @@ impl S3LoRASource {
         let Ok(value) = std::env::var(name) else {
             return Ok(None);
         };
-        match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "on" | "yes" | "y" => Ok(Some(true)),
-            "0" | "false" | "off" | "no" | "n" => Ok(Some(false)),
-            _ => anyhow::bail!("{name} must be a boolean value"),
-        }
+        dynamo_runtime::config::parse_bool(&value)
+            .map(Some)
+            .with_context(|| format!("{name} must be a boolean value"))
     }
 
     /// Builds an S3 object-store client builder from the resolved AWS configuration.
