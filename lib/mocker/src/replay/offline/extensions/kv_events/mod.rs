@@ -41,23 +41,12 @@ impl ReplayEngineObservation for RouterEventObservation {
 
     const CAPTURE_ENGINE_KV_EVENTS: bool = true;
 
-    fn capture_engine_kv_events(stage: WorkerStage) -> bool {
-        !matches!(stage, WorkerStage::Decode)
-    }
-
     fn observe_engine_events(
-        stage: WorkerStage,
+        _stage: WorkerStage,
         worker_id: usize,
         _dp_rank: u32,
         events: Vec<KvEvent>,
     ) -> Self::Batch {
-        // Disaggregated decode placement is load-only: the established Dynamo
-        // composition does not feed decode-pool KV mutations back into its
-        // Router indexer. Aggregated and prefill placement still consume every
-        // native event, now at the shared pass-completion boundary.
-        if matches!(stage, WorkerStage::Decode) {
-            return RouterEventBatch::default();
-        }
         let worker_id = u64::try_from(worker_id)
             .expect("logical replay worker id must fit the Dynamo Router wire type");
         RouterEventBatch(
@@ -267,7 +256,7 @@ mod tests {
     #[test]
     fn host_events_preserve_their_router_storage_tier() {
         let batch = RouterEventObservation::observe_engine_events(
-            WorkerStage::Aggregated,
+            WorkerStage::Decode,
             2,
             0,
             vec![KvEvent {

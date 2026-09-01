@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.12.0"
-source = "git+https://github.com/Aphoh/aisimulate.git?rev=2684089ed47e16e8bc592babc3dbbe6dc1c1679d#2684089ed47e16e8bc592babc3dbbe6dc1c1679d"
+source = "git+https://github.com/Aphoh/aisimulate.git?rev=c45cccaebcf98066bf3930935c23d8f623e736db#c45cccaebcf98066bf3930935c23d8f623e736db"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

@@ -361,8 +361,10 @@ pub(in crate::replay) fn derive_decode_router_config(
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
-    config.overlap_score_credit = 0.0;
-    config.router_assume_kv_reuse = false;
+    if !config.conditional_disagg_enabled {
+        config.overlap_score_credit = 0.0;
+        config.router_assume_kv_reuse = false;
+    }
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = RouterPrefillLoadModel::None;
     config
@@ -431,6 +433,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("expected DP size 2"));
+    }
+
+    #[test]
+    fn conditional_disagg_keeps_decode_cache_routing_enabled() {
+        let config = KvRouterConfig {
+            conditional_disagg_enabled: true,
+            overlap_score_credit: 1.0,
+            host_cache_hit_weight: 1.0,
+            ..KvRouterConfig::default()
+        };
+
+        let decode = derive_decode_router_config(&MockEngineArgs::default(), Some(config));
+
+        assert_eq!(decode.overlap_score_credit, 1.0);
+        assert_eq!(decode.host_cache_hit_weight, 1.0);
+        assert!(decode.router_assume_kv_reuse);
+        assert!(!decode.router_track_prefill_tokens);
     }
 
     #[test]

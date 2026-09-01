@@ -35,8 +35,7 @@ use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::common::protocols::DirectRequest;
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::{DirectRequest, MockEngineArgs, WorkerType};
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
@@ -578,7 +577,11 @@ impl OfflineReplayRouter {
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector_worker_type = match args.worker_type {
+            WorkerType::Decode => "decode",
+            WorkerType::Aggregated | WorkerType::Prefill => "replay",
+        };
+        let selector = replay_selector_with_seed(&config, selector_seed, selector_worker_type)?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
