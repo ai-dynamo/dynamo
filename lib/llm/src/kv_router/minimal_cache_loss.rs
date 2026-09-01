@@ -24,6 +24,7 @@ use dynamo_kv_router::protocols::{BlockExtraInfo, TokensWithHashes};
 pub const DEFAULT_HISTORY_BLOCK_CAPACITY: usize = 5_000_000;
 pub const HISTORY_BLOCK_CAPACITY_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BLOCKS";
 pub const HISTORY_BYTES_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BYTES";
+pub const CACHE_LOSS_FUNNEL_ENABLED_ENV: &str = "DYN_CACHE_LOSS_FUNNEL_ENABLED";
 pub const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 
 /// Conservative planning estimate: an 8-byte FIFO sequence hash plus the
@@ -31,6 +32,15 @@ pub const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 /// This is deliberately larger than `size_of::<u64>()`; it is a capacity model,
 /// not a promise about a particular Rust allocator build.
 pub const ESTIMATED_BYTES_PER_HISTORY_RECORD: usize = 32;
+
+/// Whether cache-loss accounting is enabled for this frontend process.
+///
+/// This is deliberately evaluated once during frontend construction. When it
+/// is false, callers must not allocate the history ledger, copy prompt tokens,
+/// hash blocks, or attach worker outcome metadata.
+pub fn enabled() -> bool {
+    dynamo_runtime::config::env_is_truthy(CACHE_LOSS_FUNNEL_ENABLED_ENV)
+}
 
 /// A bounded history of cache identities that have definitely been computed.
 ///
@@ -287,7 +297,23 @@ impl RouteObservation {
 
 #[cfg(test)]
 mod tests {
-    use super::CacheHistory;
+    use super::{CACHE_LOSS_FUNNEL_ENABLED_ENV, CacheHistory, enabled};
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_loss_funnel_is_disabled_by_default() {
+        temp_env::with_var_unset(CACHE_LOSS_FUNNEL_ENABLED_ENV, || {
+            assert!(!enabled());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_loss_funnel_accepts_truthy_enablement() {
+        temp_env::with_var(CACHE_LOSS_FUNNEL_ENABLED_ENV, Some("true"), || {
+            assert!(enabled());
+        });
+    }
 
     #[test]
     fn retains_recent_records_and_expires_the_oldest() {

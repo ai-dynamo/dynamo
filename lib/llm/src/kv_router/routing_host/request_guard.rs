@@ -615,7 +615,7 @@ where
     migration_state: Option<MigrationState>,
     cache_loss: Option<RouteObservation>,
     cache_loss_recorded: bool,
-    cache_history: Arc<Mutex<CacheHistory>>,
+    cache_history: Option<Arc<Mutex<CacheHistory>>>,
     cache_history_request: Option<CacheHistoryRequest>,
     cache_history_verified: bool,
     _lora_load: Option<LoraLoadGuard>,
@@ -633,13 +633,13 @@ where
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
-        cache_loss_tracking: CacheLossTracking,
+        cache_loss_tracking: Option<CacheLossTracking>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
-            cache_loss_tracking,
+            scheduler_tracked.then_some(cache_loss_tracking).flatten(),
         )
     }
 
@@ -647,8 +647,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
-        scheduler_tracked: bool,
-        cache_loss_tracking: CacheLossTracking,
+        cache_loss_tracking: Option<CacheLossTracking>,
     ) -> Self {
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
@@ -660,11 +659,18 @@ where
         let attempt_id = cleanup
             .lifecycle()
             .map(|lifecycle| lifecycle.booking().attempt_id);
+        let cache_loss = cache_loss_tracking.as_ref().map(|tracking| tracking.route);
+        let cache_history = cache_loss_tracking
+            .as_ref()
+            .map(|tracking| Arc::clone(&tracking.history));
+        let cache_history_request = cache_loss_tracking.map(|tracking| tracking.request);
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
             request_metrics.requests_started_total().inc();
-            request_metrics.observe_cache_loss_input(cache_loss_tracking.route.prompt_tokens);
+            if let Some(cache_loss) = cache_loss {
+                request_metrics.observe_cache_loss_input(cache_loss.prompt_tokens);
+            }
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -684,10 +690,10 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
-            cache_loss: scheduler_tracked.then_some(cache_loss_tracking.route),
+            cache_loss,
             cache_loss_recorded: false,
-            cache_history: cache_loss_tracking.history,
-            cache_history_request: scheduler_tracked.then_some(cache_loss_tracking.request),
+            cache_history,
+            cache_history_request,
             cache_history_verified: false,
             _lora_load: None,
         }
@@ -720,7 +726,7 @@ where
             migration_state: request.migration_state.clone(),
             cache_loss: None,
             cache_loss_recorded: false,
-            cache_history: Arc::new(Mutex::new(CacheHistory::new(1, 1))),
+            cache_history: None,
             cache_history_request: None,
             cache_history_verified: false,
             _lora_load: lora_load,
@@ -889,6 +895,9 @@ where
         if self.cache_loss_recorded {
             return;
         }
+        let Some(route) = self.cache_loss else {
+            return;
+        };
         let Some(value) = item
             .data
             .as_ref()
@@ -898,10 +907,6 @@ where
             return;
         };
         let Ok(outcome) = serde_json::from_value::<CacheLossWorkerOutcome>(value.clone()) else {
-            self.record_cache_loss_incomplete();
-            return;
-        };
-        let Some(route) = self.cache_loss else {
             self.record_cache_loss_incomplete();
             return;
         };
@@ -926,7 +931,11 @@ where
             .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
         if let Some(history_request) = self.cache_history_request.as_mut() {
             let prompt_hashes = history_request.prompt_hashes();
-            let mut history = self.cache_history.lock();
+            let Some(cache_history) = self.cache_history.as_ref() else {
+                self.record_cache_loss_incomplete();
+                return;
+            };
+            let mut history = cache_history.lock();
             history_request.record_prompt(&mut history, prompt_hashes);
             let stats = history.stats();
             self.observability.request_metrics().set_cache_loss_history(
@@ -961,7 +970,10 @@ where
         };
         let prompt_hashes = history_request.prompt_hashes();
         let output_hashes = history_request.output_hashes();
-        let mut history = self.cache_history.lock();
+        let Some(cache_history) = self.cache_history.as_ref() else {
+            return;
+        };
+        let mut history = cache_history.lock();
         history_request.finalize(&mut history, prompt_hashes, output_hashes);
         let stats = history.stats();
         self.observability.request_metrics().set_cache_loss_history(

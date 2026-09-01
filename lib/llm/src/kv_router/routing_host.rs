@@ -30,8 +30,11 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, minimal_cache_loss::CacheHistory,
-        scheduler::DefaultWorkerSelector, to_worker_selection_session_context,
+        KvRouter,
+        metrics::RouterRequestMetrics,
+        minimal_cache_loss::{self, CacheHistory},
+        scheduler::DefaultWorkerSelector,
+        to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
@@ -404,8 +407,9 @@ where
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
-        let cache_history = CacheHistory::from_env(kv_router.block_size());
-        {
+        let cache_history =
+            minimal_cache_loss::enabled().then(|| CacheHistory::from_env(kv_router.block_size()));
+        if let Some(cache_history) = &cache_history {
             let history = cache_history.lock();
             let stats = history.stats();
             request_metrics.set_cache_loss_history(
@@ -422,7 +426,7 @@ where
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
-            cache_history: Some(cache_history),
+            cache_history,
             affinity,
             session_affinity_mode,
             hosted_occupancy: None,

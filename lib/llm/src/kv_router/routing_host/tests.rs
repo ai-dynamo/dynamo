@@ -698,7 +698,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
         false,
-        CacheLossTracking::new(
+        Some(CacheLossTracking::new(
             RouteObservation {
                 prompt_tokens: 1,
                 previously_computed_tokens: 0,
@@ -707,7 +707,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
             },
             Arc::new(parking_lot::Mutex::new(CacheHistory::new(1, 1))),
             CacheHistoryRequest::new(vec![1], None, None, None, 1, false),
-        ),
+        )),
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
