@@ -84,7 +84,7 @@ flowchart TD
 The engine core owns scheduling, KV allocation, prefix caching, preemption, and forward-pass timing.
 The multi-engine layer adds behavior that requires coordination across engine instances.
 
-## Offline Execution
+## Execution model
 
 Offline execution drives Mocker engine cores directly. It uses a logical clock and does not require
 a frontend, worker registration, etcd, NATS, or HTTP traffic. This path is appropriate for fast,

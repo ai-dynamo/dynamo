@@ -109,10 +109,13 @@ same simulation length across the load domain.
 | `goodput_per_gpu` | Highest goodput per simulated GPU |
 | `ttft` | Lowest Time to First Token (TTFT) |
 | `e2e_latency` | Lowest end-to-end latency |
-| `pareto` | Complete nondominated front over throughput per GPU and throughput per user |
+| `pareto` | Complete nondominated front over the public CLI's fixed pair: throughput per GPU and throughput per user |
 
 `goodput` and `goodput_per_gpu` require `evaluation.sla` with either `e2e_ms` or both `ttft_ms` and
 `itl_ms`.
+
+The public recommendation schema does not expose `pareto_objectives`. Custom objective lists remain
+available only through the legacy Sweeper Python SDK.
 
 `optimization.constraints.min_candidate_gpus` and `max_candidate_gpus` bound the simulated GPU
 footprint. When `engine.hardware: auto`, set one concrete `optimization.hardware` value.

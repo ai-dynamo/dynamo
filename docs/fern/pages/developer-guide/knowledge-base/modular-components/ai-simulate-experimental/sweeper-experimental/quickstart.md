@@ -12,7 +12,7 @@ subtitle: Run a backend-neutral sweep with an injected replay runtime
 Install AISimulate:
 
 ```bash
-python -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install "aisimulate==0.1.0.dev2"
 ```
 
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:

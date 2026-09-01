@@ -50,7 +50,7 @@ For Dynamo source development, install the published AISimulate wheel, Dynamo, a
 dependencies from the Dynamo repository root:
 
 ```bash
-uv pip install "aisimulate==0.1.0.dev2"
-uv pip install --no-deps -e .
-uv pip install -r container/deps/requirements.planner.txt
+python3 -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install --no-deps -e .
+python3 -m pip install -r container/deps/requirements.planner.txt
 ```

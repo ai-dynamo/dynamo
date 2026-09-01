@@ -25,13 +25,13 @@ For Dynamo source development, install the published AISimulate wheel and build 
 Dynamo bindings:
 
 ```bash
-python -m pip install pip "maturin[patchelf]"
+python3 -m pip install pip "maturin[patchelf]"
 cd lib/bindings/python
 maturin develop --uv --release --features aic-forward-pass
 cd ../../..
-python -m pip install --no-deps -e .
-python -m pip install "aisimulate==0.1.0.dev2"
-python -m pip install -r container/deps/requirements.planner.txt
+python3 -m pip install --no-deps -e .
+python3 -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install -r container/deps/requirements.planner.txt
 ```
 
 On supported Python versions, `ai-dynamo` declares the exact AISimulate release as a base
@@ -137,6 +137,7 @@ generation.
 | Synthetic traffic | Replayer with no scaling | Replayer with the selected Planner scaling policy |
 
 The runner passes trace, fixed, or KV-load-derived closed-loop concurrency through
-`ReplaySpec.concurrency`. The public compiler maps `evaluation.sla` to the replay goodput SLA; this
-SLA is independent of the Planner's scaling SLA. A `dynamo.router:placement_policy@1` hook selects
-the Dynamo placement policy. Without that hook, the Replayer uses its built-in round-robin policy.
+`ReplaySpec.concurrency`. The public compiler maps `evaluation.sla` into `ReplaySpec.goal.sla`, and
+`DynamoReplayRunnerFactory` reads that lowered field as the replay goodput SLA. This SLA is
+independent of the Planner's scaling SLA. A `dynamo.router:placement_policy@1` hook selects the
+Dynamo placement policy. Without that hook, the Replayer uses its built-in round-robin policy.

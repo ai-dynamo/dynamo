@@ -108,7 +108,8 @@ The mocker simulates KV cache transfer time between prefill and decode workers. 
   positive integer to override it.
 - `bandwidth_gb_per_second` sets a positive transfer bandwidth. Omitting it disables modeled
   transfer delay.
-- `timing_mode` is `destination_missing` by default and can be set to `full_prompt`.
+- The public AISimulate `engine.kv_transfer.timing_mode` field defaults to `destination_missing`
+  and can be set to `full_prompt`.
 
 The delay is injected after simulated prefill compute completes, modeling the sequential flow:
 prefill computation, KV transfer, then decode.

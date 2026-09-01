@@ -71,7 +71,7 @@ Use Python 3.11 through 3.13.
 
 ```bash
 # Install the distribution that provides the compatibility command
-pip3 install aisimulate
+python3 -m pip install "aisimulate==0.1.0.dev2"
 
 # Optional: check whether the model/system/backend is covered
 aiconfigurator cli support \

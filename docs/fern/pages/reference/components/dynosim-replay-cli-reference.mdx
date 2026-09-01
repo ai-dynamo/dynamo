@@ -151,13 +151,17 @@ accept exactly one path, and their block size defaults to 512 when omitted.
 `mooncake-delta` and `agentic_mooncake` require aggregated engine mode.
 `agentic_mooncake` also requires `trace_timestamps` and rejects the virtual-time cutoff.
 `applied_compute_agentic` requires concurrency load.
+With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `mooncake-delta`,
+`agentic_mooncake`, and Dynamo traces that carry `agent_context` records.
 
 ## Engine and Adapter Rules
 
 - `engine.mode: aggregated` requires `engine.workers.aggregated`.
 - `engine.mode: disaggregated` requires `engine.workers.prefill`,
   `engine.workers.decode`, and `engine.kv_transfer`.
-- TensorRT-LLM does not support disaggregated simulation.
+- `aisimulate predict` and `aisimulate recommend` currently support TensorRT-LLM only in
+  aggregated mode. This is an offline simulation limitation; Dynamo runtime deployments support
+  TensorRT-LLM disaggregated serving.
 - Each `parallelism` mapping is concrete and contains `replicas`, `tensor`, `pipeline`,
   `attention_data`, `moe_tensor`, and `moe_expert`.
 - `engine.context_length` defaults to `max`, which AISimulate resolves from the model's Hugging Face

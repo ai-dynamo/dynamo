@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Guide
-subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
+subtitle: Runs the AIConfigurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
 ---
 
 ## Overview
@@ -353,7 +353,7 @@ spec:
   searchStrategy: thorough  # Deep exploration with real engine profiling
 ```
 
-### AI Configurator Simulation
+### AIConfigurator Simulation
 
 Uses performance simulation to rapidly estimate optimal configurations without running real deployments.
 
@@ -362,11 +362,11 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **GPU Requirements**: None
 - **Backends**: All (vLLM, SGLang, TensorRT-LLM)
 
-AI Configurator is used by default with `searchStrategy: rapid`:
+AIConfigurator is used by default with `searchStrategy: rapid`:
 
 ```yaml
 spec:
-  searchStrategy: rapid  # Fast profiling with AI Configurator simulation (default)
+  searchStrategy: rapid  # Fast profiling with AIConfigurator simulation (default)
 ```
 
 > [!NOTE]

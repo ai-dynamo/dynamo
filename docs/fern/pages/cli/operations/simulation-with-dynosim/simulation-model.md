@@ -43,6 +43,10 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
 source for each worker role with `engine.workers.<role>.timing.type`.
 
+The removed public Mocker CLI options for profile-derived interpolation and direct `--aic-*`
+configuration are not part of the unified CLI. Use only the timing types accepted by the
+AISimulate YAML schema.
+
 ### AISimulate Performance Model
 
 `timing.type: default` uses the AISimulate performance model. AISimulate selects model data from
@@ -70,10 +74,6 @@ AISimulate timing lookup but do not disable default KV-capacity estimation.
 Set `timing.type: polynomial` to use the uncalibrated synthetic baseline. Prefill latency follows a
 polynomial over the uncached tokens scheduled in the pass. Decode latency follows a polynomial over
 active KV-cache utilization.
-
-The removed public Mocker CLI options for profile-derived interpolation and direct `--aic-*`
-configuration are not part of the unified CLI. Use only the timing types accepted by the
-AISimulate YAML schema.
 
 ## Prefill/Decode Handoff
 
