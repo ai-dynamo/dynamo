@@ -2005,8 +2005,27 @@ async fn handler_chat_completions(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
-    let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    let request_id = get_or_create_request_id(&headers);
+    let lifecycle = LifecycleTrace::frontend_request_without_session(request_id.clone());
+    let lifecycle_request = lifecycle.start_request();
+    let request_lifecycle = lifecycle_request.span();
+    let terminal = lifecycle_request.terminal();
+    let body = match read_json_request_body(&headers, body).await {
+        Ok(body) => body,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
+    let mut request: NvCreateChatCompletionRequest = match parse_json_request("chat completions", &body) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2015,10 +2034,18 @@ async fn handler_chat_completions(
     // serving readiness). An aggregated request to a decode-only namespace
     // would otherwise hang/crash on the decode worker. Resolve the templated
     // model first so empty/missing `model` fields don't bypass the gate.
-    check_ready(&state)?;
+    if let Err(error) = check_ready(&state) {
+        lifecycle_request.record_session(&request_id, None);
+        terminal.finish(terminal_outcome_for_error_response(&error));
+        return Err(error);
+    }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        if let Err(error) = check_model_serving_ready(&state, resolved_model) {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
     }
 
     if !state.nvext_enabled() {
@@ -2035,7 +2062,6 @@ async fn handler_chat_completions(
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
@@ -2048,12 +2074,19 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers_with_input_trigger(
+    let mut request = match context_from_headers_with_input_trigger(
         request,
         request_id.clone(),
         &headers,
         |request| Some(classify_chat_request(request)),
-    )?;
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2067,11 +2100,8 @@ async fn handler_chat_completions(
         .ok()
         .flatten()
         .map(|context| context.session_id.clone());
-    let lifecycle = LifecycleTrace::frontend_request(request_id, session_id);
+    lifecycle_request.record_session(&request_id, session_id.as_deref());
     request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
-    let lifecycle_request = lifecycle.start_request();
-    let request_lifecycle = lifecycle_request.span();
-    let terminal = lifecycle_request.terminal();
 
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(
