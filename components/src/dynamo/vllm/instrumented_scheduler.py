@@ -86,6 +86,7 @@ import math
 import os
 import queue
 import random
+import shutil
 import threading
 import time
 import uuid
@@ -3274,10 +3275,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
         All-zero prompts are not measurement-neutral: an MoE router collapses
         constant input onto a few experts, which skews expert-parallel load
-        balance and biases measured latency (quantified on H200 TEP4/TEP8:
-        -9% on small-token decode through +15% on 8k-token prefill vs real
-        traffic; randomized prompts realign prefill across 128-8192 tokens
-        to within +/-1.6%).
+        balance and biases measured latency in both phases.
 
         Determinism contract: ``random.Random(salt)`` seeds from a stable
         hash of the string, and ``choices`` consumes the stream one draw per
@@ -3319,10 +3317,10 @@ class InstrumentedScheduler(AsyncScheduler):
 
         Fully random token ids fix the constant-input collapse (see
         ``_bench_synthetic_token_ids``) but still route MoE experts unlike
-        real text: uniform ids draw an unnaturally flat expert distribution,
-        which measured -5..-9% fast on deep-KV decode against real-traffic
-        ground truth. ``DYN_BENCH_PREFILL_CONTENT=sharegpt`` feeds prompts
-        from real conversations instead.
+        real text: uniform ids draw an unnaturally flat expert distribution
+        that does not model real-text routing on deep-KV decode.
+        ``DYN_BENCH_PREFILL_CONTENT=sharegpt`` feeds prompts from real
+        conversations instead.
 
         Invariants mirrored from the random path:
         - the window START depends only on ``seed`` (never on ``length``),
@@ -4052,8 +4050,17 @@ class InstrumentedScheduler(AsyncScheduler):
         "ShareGPT_Vicuna_unfiltered/resolve/main/"
         "ShareGPT_V3_unfiltered_cleaned_split.json"
     )
+    # Pinned digest of the default dataset. A custom DYN_BENCH_KV_WARMUP_DATASET
+    # supplies its own expectation via DYN_BENCH_KV_WARMUP_SHA256.
+    _KVWARM_DEFAULT_DATASET_SHA256 = (
+        "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
+    )
+    # Socket-level timeout: a stalled endpoint must fail the download (and
+    # with it the warm-up) instead of blocking the scheduler indefinitely.
+    _KVWARM_DOWNLOAD_TIMEOUT_S = 60
 
     def _kvwarm_flag_on(self) -> bool:
+        """KV warm-up master switch (``DYN_BENCH_KV_WARMUP``, default on)."""
         return os.environ.get("DYN_BENCH_KV_WARMUP", "on").lower() not in (
             "off",
             "0",
@@ -4061,12 +4068,15 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _kvwarm_giant_threshold(self) -> int:
+        """Total-KV threshold above which points get repeated measurement."""
         return int(os.environ.get("DYN_BENCH_GIANT_KV_THRESHOLD", "1000000"))
 
     def _kvwarm_giant_repeats(self) -> int:
+        """Steady-step repeat count for median protection on giant points."""
         return max(1, int(os.environ.get("DYN_BENCH_GIANT_KV_REPEATS", "3")))
 
     def _kvwarm_meta_init(self) -> dict:
+        """Create (once) and return the KVWARM metadata block for results."""
         meta = getattr(self, "_kvwarm_meta", None)
         if meta is None:
             meta = {
@@ -4126,12 +4136,19 @@ class InstrumentedScheduler(AsyncScheduler):
             elif not ep_enabled:
                 reason = "moe_tp_balanced_by_construction"
             elif not prefix_on:
-                # The 103 batch rungs rely on prefix-cache generational extension
-                # to deepen incrementally (~16M tokens); with prefix cache off
-                # a full chain rebuild costs ~230M tokens -- prefer skipping.
+                # The batch rungs rely on prefix-cache generational extension
+                # to deepen incrementally; with prefix cache off a full chain
+                # rebuild is prohibitively expensive -- prefer skipping.
                 reason = "prefix_caching_disabled"
             else:
-                eligible = True
+                try:
+                    # Resolve (and, on first use, download) the seeding dataset
+                    # up front: an unreachable or corrupt dataset must disable
+                    # the warm-up cleanly instead of failing mid-collection.
+                    self._kvwarm_resolve_dataset()
+                    eligible = True
+                except Exception as exc:
+                    reason = f"dataset_unavailable: {exc}"
         meta["warm_eligible"] = eligible
         meta["skip_reason"] = reason
         self._kvwarm_eligible_cache = eligible
@@ -4142,6 +4159,7 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------- Dataset: three-tier resolution + even-half pool + lazy tokenize -------
 
     def _kvwarm_resolve_dataset(self) -> str:
+        """Return a local dataset path, downloading and verifying on first use."""
         spec = os.environ.get(
             "DYN_BENCH_KV_WARMUP_DATASET", self._KVWARM_DEFAULT_DATASET_URL
         )
@@ -4158,7 +4176,11 @@ class InstrumentedScheduler(AsyncScheduler):
         os.makedirs(cache_root, exist_ok=True)
         name = os.path.basename(spec.split("?")[0]) or "kvwarm_dataset.json"
         cached = os.path.join(cache_root, name)
-        expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256")
+        expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256") or (
+            self._KVWARM_DEFAULT_DATASET_SHA256
+            if spec == self._KVWARM_DEFAULT_DATASET_URL
+            else None
+        )
         if os.path.exists(cached):
             digest = self._kvwarm_sha256(cached)
             if expected_sha and digest != expected_sha:
@@ -4170,7 +4192,10 @@ class InstrumentedScheduler(AsyncScheduler):
 
         logger.info("KVWARM: downloading dataset %s -> %s", spec, cached)
         tmp = cached + ".part"
-        urllib.request.urlretrieve(spec, tmp)
+        with urllib.request.urlopen(
+            spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
+        ) as resp, open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
         digest = self._kvwarm_sha256(tmp)
         if expected_sha and digest != expected_sha:
             os.unlink(tmp)
@@ -4183,6 +4208,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _kvwarm_sha256(path: str) -> str:
+        """Stream-hash ``path`` (sha256 hex digest)."""
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -4221,6 +4247,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return texts
 
     def _kvwarm_tokenizer(self):
+        """Lazily construct and cache the seeding-text tokenizer."""
         tok = getattr(self, "_kvwarm_tok", None)
         if tok is None:
             from transformers import AutoTokenizer
@@ -4268,7 +4295,24 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # ------- Ladder plan: derived entirely from the grid + the pool -------
 
+    @staticmethod
+    def _kvwarm_order_decode_points(decode_pts: list) -> list:
+        """Depth-descending reorder that leaves warmup replicas at the head.
+
+        Warmup replicas (e.g. eager-shape warmups tagged ``eager_warmup`` by
+        the grid builder) must execute before the first real point of their
+        shape, so they are exempt from the reorder and keep their original
+        relative order at the head of the decode segment.
+        """
+        pinned = [p for p in decode_pts if "eager_warmup" in (p.sample_reasons or [])]
+        sortable = [
+            p for p in decode_pts if "eager_warmup" not in (p.sample_reasons or [])
+        ]
+        sortable.sort(key=lambda p: (-p.batch_size, -p.total_kv_read_tokens))
+        return pinned + sortable
+
     def _kvwarm_prepare(self, mode: str) -> None:
+        """Plan warm-up stages and reorder the decode grid for chain reuse."""
         if mode not in ("decode", "agg"):
             return
         if not self._kvwarm_flag_on():
@@ -4282,7 +4326,7 @@ class InstrumentedScheduler(AsyncScheduler):
         points = list(self._bench_grid)
         decode_pts = [p for p in points if p.point_type == "decode"]
         other_pts = [p for p in points if p.point_type != "decode"]
-        decode_pts.sort(key=lambda p: (-p.batch_size, -p.total_kv_read_tokens))
+        decode_pts = self._kvwarm_order_decode_points(decode_pts)
         self._bench_grid = deque(other_pts + decode_pts)
         # Warmup depth per batch rung = max(ctx) of its deepest warmable point
         # + 1 + steady-write headroom (headroom = giant-point repeat count,
@@ -4312,7 +4356,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # Second reordering: all warmed points first, fake fallbacks last --
         # fake injection fills the whole pool and evicts the chains' cached
         # blocks; interleaved between generations it demotes incremental
-        # deepening back to full rebuilds (measured 57s per segment).
+        # deepening back to full rebuilds.
         warmed_pts = [p for p in decode_pts if self._kvwarm_plan_covers(p)]
         fake_pts = [p for p in decode_pts if not self._kvwarm_plan_covers(p)]
         self._bench_grid = deque(other_pts + warmed_pts + fake_pts)
@@ -4372,6 +4416,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return False
 
     def _kvwarm_start_stage(self, batch: int, depth: int) -> None:
+        """Launch chain prefills for one ``(batch, depth)`` warm-up stage."""
         t0 = time.monotonic()
         for i in range(batch):
             tokens = self._kvwarm_chain_token_ids(i, depth)
@@ -4396,6 +4441,7 @@ class InstrumentedScheduler(AsyncScheduler):
         logger.info("KVWARM: stage build batch=%d depth=%d", batch, depth)
 
     def _kvwarm_monitor_build(self) -> bool:
+        """Track chain prefills for the active stage; True while building."""
         pending = False
         vanished = []
         for req_id in self._kvwarm_chain_ids:
@@ -4424,11 +4470,20 @@ class InstrumentedScheduler(AsyncScheduler):
         if pending:
             return True
         self._kvwarm_building = False
+        if not self._kvwarm_chain_prompts:
+            logger.warning(
+                "KVWARM: every chain of stage batch=%s vanished during the "
+                "build; its points fall back to fake injection",
+                self._kvwarm_stage_batch,
+            )
         secs = time.monotonic() - getattr(self, "_kvwarm_stage_t0", time.monotonic())
         self._kvwarm_meta_init()["stages"].append(
             {
                 "batch": self._kvwarm_stage_batch,
-                "depth": max(len(v) for v in self._kvwarm_chain_prompts.values()),
+                "depth": max(
+                    (len(v) for v in self._kvwarm_chain_prompts.values()),
+                    default=0,
+                ),
                 "build_seconds": round(secs, 3),
             }
         )
@@ -4440,6 +4495,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return True  # idle one more step; normal point flow resumes next tick
 
     def _kvwarm_shed_chains(self) -> None:
+        """Release every parked chain and return its blocks to the pool."""
         for req_id in getattr(self, "_kvwarm_chain_ids", []):
             req = self.requests.pop(req_id, None)
             if req is not None:
@@ -4458,6 +4514,7 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------- Shadow injection: borrow chain blocks, original two-step flow -------
 
     def _kvwarm_point_need(self, point) -> int:
+        """Per-request context length this decode point needs from a chain."""
         # Non-giant points: admission writes ctx-1, steady writes ctx -> must
         # cover injected+1, i.e. chain depth >= injected+2; giant multi-step
         # points add repeats-1.
@@ -4465,6 +4522,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return 2 + (self._kvwarm_giant_repeats() - 1 if giant else 0)
 
     def _kvwarm_covers(self, point, injected_lengths) -> bool:
+        """Whether the parked chains can serve every request of ``point``."""
         if not getattr(self, "_kvwarm_plan", None):
             return False
         if self._kvwarm_building or self._kvwarm_stage_batch is None:
@@ -4490,11 +4548,9 @@ class InstrumentedScheduler(AsyncScheduler):
             chain_req = self.requests[chain_id]
             chain_tokens = self._kvwarm_chain_prompts[chain_id]
             block_ids = self.kv_cache_manager.get_block_ids(chain_id)
-            # Truncate the block table on demand: on deep chains (131k+ tokens
-            # = ~12.8k blocks per request) the full table adds ~11ms of
-            # bookkeeping to the measured step (r11: b<=9 at 131k/request
-            # measured +45~63% while ground truth stays smooth). Borrow only
-            # the prefix blocks covering the write positions.
+            # Borrow only the prefix blocks covering the write positions:
+            # on deep chains the full block table adds measurable per-step
+            # bookkeeping cost to the measured step.
             _bs = int(getattr(self.cache_config, "block_size", 16))
             _need_tokens = ctx_len + 1 + max(2, self._kvwarm_giant_repeats())
             _need_blocks = -(-_need_tokens // _bs) + 1
@@ -4505,7 +4561,9 @@ class InstrumentedScheduler(AsyncScheduler):
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
-                sampling_params=SamplingParams(max_tokens=100_000),
+                # ignore_eos: a sampled EOS would route the shadow through the
+                # normal stop path, freeing chain blocks it never owned.
+                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
                 cache_salt=req_id,
@@ -4717,10 +4775,10 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._kvwarm_flag_on() and (
             kvwarm_real or point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
         ):
-            # Warmed points allocate nothing at steady state, so extra steps are
-            # nearly free: median protection covers all of them, eliminating
-            # sporadic timer migration (r8: 1/1457 hits on non-giant points);
-            # fake points keep median protection for giants only.
+            # Warmed points allocate nothing at steady state, so extra steps
+            # are nearly free: median protection covers all of them,
+            # eliminating sporadic timer migration; fake points keep median
+            # protection for giants only.
             # Giant-KV timing guard (HANDOVER #6.1): repeat the steady step
             # and take the median. A fake-injected giant that cannot fit the
             # extra steps at the pool boundary degrades to the legacy

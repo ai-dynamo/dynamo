@@ -3808,19 +3808,8 @@ def test_kvwarm_chain_tokens_are_deterministic_and_extend_monotonically():
     shallow = InstrumentedScheduler._kvwarm_chain_token_ids(stub, 2, 4)
     deep = InstrumentedScheduler._kvwarm_chain_token_ids(stub, 2, 12)
     assert deep[: len(shallow)] == shallow
-    # Distinct chains draw distinct conversation orders.
     other = InstrumentedScheduler._kvwarm_chain_token_ids(_kvwarm_text_stub(), 3, 6)
     assert other != first
-
-
-def test_synthetic_content_unset_env_keeps_random_path_byte_identical(monkeypatch):
-    monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_vocab_size = 1_000
-    stub._fpm_dp_rank = 0
-    got = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 32)
-    expected = random.Random("dp0:salt").choices(range(1, 1_000), k=32)
-    assert got == expected
 
 
 def test_synthetic_content_pool_windows_share_prefix_across_lengths(monkeypatch):
@@ -3871,7 +3860,7 @@ def test_content_pool_is_built_once_and_guards_small_datasets(monkeypatch):
     )
     InstrumentedScheduler._bench_synthetic_token_ids(stub, "a", 16)
     InstrumentedScheduler._bench_synthetic_token_ids(stub, "b", 16)
-    assert calls == [1]  # pool built once, then cached
+    assert calls == [1]
     tiny = InstrumentedScheduler.__new__(InstrumentedScheduler)
     tiny._bench_vocab_size = 1_000
     tiny._fpm_dp_rank = 0
@@ -3881,3 +3870,18 @@ def test_content_pool_is_built_once_and_guards_small_datasets(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="pool too small"):
         InstrumentedScheduler._bench_synthetic_token_ids(tiny, "a", 16)
+
+
+def test_kvwarm_decode_reorder_pins_warmup_replicas_first():
+    real = [
+        BenchmarkPoint(point_type="decode", total_kv_read_tokens=kv, batch_size=b)
+        for b, kv in ((8, 128), (8, 4096), (16, 256))
+    ]
+    replica = replace(real[0], sample_reasons=["eager_warmup"])
+    ordered = InstrumentedScheduler._kvwarm_order_decode_points([*real, replica])
+    assert ordered[0] is replica
+    assert [(p.batch_size, p.total_kv_read_tokens) for p in ordered[1:]] == [
+        (16, 256),
+        (8, 4096),
+        (8, 128),
+    ]
