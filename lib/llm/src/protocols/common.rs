@@ -441,7 +441,9 @@ pub struct SamplingOptions {
 
 /// Guided Decoding Options
 ///
-/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+/// Only one constraint may be set: `json`, `regex`, `choice`, `grammar` or
+/// `structural_tag`. `backend` and `whitespace_pattern` are modifiers rather than
+/// constraints, so either may accompany a constraint. See [`Self::validate`].
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
