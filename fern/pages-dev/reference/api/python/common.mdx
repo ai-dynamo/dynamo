@@ -2042,22 +2042,22 @@ No summary available.
 <h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video">load_video</h4>
 
 ```python
-load_video(video_url: str) -> tuple[np.ndarray, Dict[str, Any]]
+load_video(video_url: str, media_io_kwargs: Dict[str, Any] | None = None) -> tuple[np.ndarray, Dict[str, Any]]
 ```
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L190)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L222)
 
 <h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video-batch">load_video_batch</h4>
 
 ```python
-load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]
+load_video_batch(video_mm_items: List[Dict[str, Any]], media_io_kwargs: Dict[str, Any] | None = None) -> List[tuple[np.ndarray, Dict[str, Any]]]
 ```
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L276)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L312)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
