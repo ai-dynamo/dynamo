@@ -1,16 +1,16 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: AI Simulate (Experimental)
+title: AISimulate (Experimental)
 subtitle: Backend-neutral simulation and configuration-search tools
 ---
 
 > [!WARNING]
-> **Experimental.** AI Simulate is intended for evaluation and feedback, not production capacity
+> **Experimental.** AISimulate is intended for evaluation and feedback, not production capacity
 > planning. Its Python APIs, configuration schemas, search results, and deployment output may
 > change without a standard deprecation period.
 
-AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
+AISimulate is a standalone Python distribution. It provides inference-engine forward-pass
 simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
 Use `aisimulate predict --stack engine` for an engine-only prediction. Use `aisimulate predict
@@ -29,21 +29,21 @@ the `ai-dynamo` package owns and validates the optional `router` and `planner` s
 Its core owns backend search, candidate orchestration, scoring, and the versioned `ReplaySpec`
 contract.
 
-Optional adapters extend the search without adding a Dynamo dependency to AI Simulate. The
+Optional adapters extend the search without adding a Dynamo dependency to AISimulate. The
 `ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` adapters. Selecting either
 adapter imports its Dynamo implementation and adds a versioned runtime hook to the replay
 specification.
 
-KVBM search settings are deprecated and are not supported by the AI Simulate engine and replay
+KVBM search settings are deprecated and are not supported by the AISimulate engine and replay
 path. They have no adapter migration.
 
 ## Install
 
 The `dynamo-planner` image installs the published `aisimulate==0.1.0.dev2` wheel from its local
 wheelhouse. Dynamo builds `aisimulate-core==0.1.0-dev.2` from crates.io instead of vendoring the
-AI Simulate source tree.
+AISimulate source tree.
 
-For Dynamo source development, install the published AI Simulate wheel, Dynamo, and the Planner
+For Dynamo source development, install the published AISimulate wheel, Dynamo, and the Planner
 dependencies from the Dynamo repository root:
 
 ```bash
