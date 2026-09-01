@@ -516,6 +516,23 @@ pub enum Status {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCompletion {
+    Success,
+    Cancelled,
+    Error,
+}
+
+impl RequestCompletion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Error type classification for fine-grained observability
 #[derive(PartialEq, Clone, Debug)]
 pub enum ErrorType {
@@ -1487,6 +1504,14 @@ impl InflightGuard {
         self.status = Status::Error;
         self.error_type = error_type;
     }
+
+    fn request_completion(&self) -> RequestCompletion {
+        match (&self.status, &self.error_type) {
+            (Status::Success, _) => RequestCompletion::Success,
+            (Status::Error, ErrorType::Cancelled) => RequestCompletion::Cancelled,
+            (Status::Error, _) => RequestCompletion::Error,
+        }
+    }
 }
 
 impl Drop for InflightGuard {
@@ -1506,12 +1531,14 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
+        let completion = self.request_completion();
+        self.span.record("request.outcome", completion.as_str());
+
         let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
-        match self.status {
-            Status::Error => {
+        match completion {
+            RequestCompletion::Error => {
                 let detail = match self.error_type {
-                    ErrorType::Cancelled => "cancelled before completion",
                     ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
@@ -1519,7 +1546,11 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
-                    ErrorType::None => "unknown error",
+                    // `request_completion()` routes `(Error, Cancelled)` to
+                    // `RequestCompletion::Cancelled`, so only `None` reaches
+                    // here. `Cancelled` is listed to keep the match total
+                    // without a panic in a `Drop` impl.
+                    ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
                 tracing::error!(
                     request_id = %self.request_id,
@@ -1533,7 +1564,20 @@ impl Drop for InflightGuard {
                     "request completed"
                 );
             }
-            Status::Success => {
+            RequestCompletion::Cancelled => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %completion.as_str(),
+                    error_type = %self.error_type,
+                    error_detail = "cancelled before completion",
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            RequestCompletion::Success => {
                 tracing::info!(
                     request_id = %self.request_id,
                     model = %self.model,
@@ -3181,6 +3225,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3198,10 +3277,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(
@@ -3496,6 +3576,39 @@ mod tests {
                 RequestType::Unary.as_str(),
                 Status::Error.as_str(),
                 ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_classifies_cancellation_separately_for_tracing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "cancelled-request",
+        );
+        guard.mark_error(ErrorType::Cancelled);
+
+        assert_eq!(guard.request_completion(), RequestCompletion::Cancelled);
+        drop(guard);
+
+        // Keep the existing Prometheus contract while tracing reports cancellation
+        // as an expected request outcome rather than a span error.
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Stream.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Cancelled.as_str(),
             ])
             .get();
         assert_eq!(counter_value, 1);

@@ -650,7 +650,6 @@ where
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
-                    kv_chooser.clone(),
                     self.worker_selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
@@ -959,7 +958,8 @@ where
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
             >::new();
 
-            let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
+            let preprocessor =
+                OpenAIPreprocessor::new_for_embeddings(card.clone())?.into_operator();
             let backend = Backend::from_mdc(card).into_operator();
 
             let router = PushRouter::<
