@@ -259,6 +259,14 @@ def _new_checkpoint_spec(
     container["args"] = list(backend.args)
     if backend.container_resources:
         container["resources"] = copy.deepcopy(backend.container_resources)
+
+    # vCluster adds host-side resources that make the physical Pod Burstable.
+    # Keep the virtual Pod in the same QoS class so status synchronization can
+    # propagate Snapshot's restore condition without an immutable-field error.
+    requests = container.setdefault("resources", {}).setdefault("requests", {})
+    requests.setdefault("cpu", "1")
+    requests.setdefault("memory", "2Gi")
+
     if backend.extra_volumes:
         pod_spec.setdefault("volumes", []).extend(
             copy.deepcopy(volume) for volume in backend.extra_volumes
