@@ -21,7 +21,7 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
-from dynamo.common.protocols import MEDIA_PASSTHROUGH_KEY
+from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
 
@@ -262,10 +262,9 @@ class AudioGenerationHandler:
             tts_params["non_streaming_mode"] = [True]
 
         # Frontend-forwarded passthrough knobs join the engine params;
-        # fields the handler already set win.
-        for key, value in (
-            (req.extra_args or {}).get(MEDIA_PASSTHROUGH_KEY) or {}
-        ).items():
+        # fields the handler already set win. A knob naming a path or a
+        # policy control is refused here (see sanitize_media_passthrough).
+        for key, value in sanitize_media_passthrough(req.extra_args).items():
             tts_params.setdefault(key, [value])
 
         estimated_len = self._estimate_tts_prompt_len(tts_params)

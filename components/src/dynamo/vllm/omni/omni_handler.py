@@ -26,7 +26,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
-from dynamo.common.protocols import MEDIA_PASSTHROUGH_KEY
+from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -69,33 +69,29 @@ DEFAULT_VIDEO_FPS = 16
 def _apply_media_passthrough(
     sp: OmniDiffusionSamplingParams, extra_args: Optional[Dict[str, Any]]
 ) -> None:
-    """Apply frontend-forwarded passthrough knobs to diffusion sampling params.
+    """Hand frontend-forwarded passthrough knobs to the engine.
 
     The frontend nests a request's unknown top-level fields (an OpenAI
     client's ``extra_body``) under ``extra_args["media_passthrough"]``.
-    Knobs matching a sampling-params attribute are set directly; the rest
-    land in ``sp.extra_args`` for the engine to interpret.
+    ``sanitize_media_passthrough`` drops the request if any knob names a
+    path/checkpoint or a policy control, then the rest ride ``sp.extra_args``
+    to the engine. Nothing is set on the sampling params by attribute name:
+    a caller-controlled key must not choose which attribute it writes.
     """
-    knobs = (extra_args or {}).get(MEDIA_PASSTHROUGH_KEY) or {}
-    unmatched: Dict[str, Any] = {}
-    for key, value in knobs.items():
-        if key != "extra_args" and hasattr(sp, key):
-            setattr(sp, key, value)
-        else:
-            unmatched[key] = value
-    if not unmatched:
+    knobs = sanitize_media_passthrough(extra_args)
+    if not knobs:
         return
     existing = getattr(sp, "extra_args", None)
     if isinstance(existing, dict):
-        existing.update(unmatched)
+        existing.update(knobs)
     else:
         try:
-            sp.extra_args = unmatched
+            sp.extra_args = knobs
         except (AttributeError, TypeError):
             logger.warning(
                 "Dropping media passthrough knobs %s: sampling params expose "
-                "no matching attribute and no extra_args",
-                sorted(unmatched),
+                "no extra_args",
+                sorted(knobs),
             )
 
 
