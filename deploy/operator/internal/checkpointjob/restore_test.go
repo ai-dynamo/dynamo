@@ -492,7 +492,7 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			},
 			Env: []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}},
 		}
-		ensureRestoreStartupProbe(&container)
+		EnsureRestoreStartupProbe(&container)
 		containers = append(containers, container)
 	}
 	return &corev1.PodSpec{
@@ -569,7 +569,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected missing restore startup probe error, got %v", err)
 	}
 
-	// A non-sentinel startup probe is now accepted: ensureRestoreStartupProbe
+	// A non-sentinel startup probe is now accepted: EnsureRestoreStartupProbe
 	// synthesizes the probe from the workload's existing Startup/Liveness/
 	// Readiness handler, so the validator only checks for presence, not a
 	// fixed exec-command shape. Only fully-missing probes are rejected.

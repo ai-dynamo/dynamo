@@ -281,14 +281,13 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 		Mappings:        mappings,
 	}
 	options := podcontract.Options{
-		SeccompProfile:    h.config.Checkpoint.EffectiveSeccompProfile(),
-		EnableStartupGate: true,
+		SeccompProfile: h.config.Checkpoint.EffectiveSeccompProfile(),
 	}
 	shaped, err := podcontract.Build(pod, request, options)
 	if err != nil {
 		return nil, fmt.Errorf("shape native restore Pod: %w", err)
 	}
-	if err := injectDynamoRestoreStandby(shaped, mappings); err != nil {
+	if err := applyDynamoRestorePolicy(shaped, mappings); err != nil {
 		return nil, err
 	}
 
@@ -320,7 +319,7 @@ func validateNativeSnapshotCandidate(annotations map[string]string, resolved *ch
 	return nil
 }
 
-func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.ContainerMapping) error {
+func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerMapping) error {
 	containers := make(map[string]*corev1.Container, len(pod.Spec.Containers))
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -349,8 +348,8 @@ func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.Containe
 		}
 	}
 
-	// Apply standby mode only after the complete destination set has passed
-	// validation, preserving all-or-nothing mutation semantics.
+	// Apply Dynamo's standby and startup policy only after the complete
+	// destination set has passed validation, preserving all-or-nothing mutation.
 	for _, mapping := range mappings {
 		container := containers[mapping.Destination]
 		found := false
@@ -366,6 +365,7 @@ func injectDynamoRestoreStandby(pod *corev1.Pod, mappings []podcontract.Containe
 				Value: "1",
 			})
 		}
+		snapshotprotocol.EnsureRestoreStartupProbe(container)
 	}
 	return nil
 }
