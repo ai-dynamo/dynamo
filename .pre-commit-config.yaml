@@ -154,6 +154,19 @@ repos:
       # regenerate leaves every committed generated span stale.
       files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
       pass_filenames: false
+    - id: gen-llms-tables-determinism
+      name: Check the generated docs tables are reproducible
+      entry: docs/fern/scripts/check_llms_tables_determinism.sh
+      language: system
+      # Two generator runs under deliberately hostile TZ / locale / hash-seed /
+      # SOURCE_DATE_EPOCH, asserting byte-identical output, a match against the
+      # committed bytes, and LF-only endings. Sits beside the two hooks above
+      # because all three govern the same generator; it lived in
+      # docs-link-check.yml, which has nothing to do with link checking.
+      # Measured at ~4s, against the pre-commit job's 3-minute budget.
+      files: ^docs/fern/(scripts/(gen_llms_tables|check_llms_tables_determinism)\.(py|sh)|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
+      pass_filenames: false
+
     - id: check-component-imports
       name: Check Fern components trigger no rolldown bundling
       entry: python3 docs/fern/scripts/check_component_imports.py
