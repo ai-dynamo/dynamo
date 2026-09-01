@@ -23,7 +23,7 @@
 # - shared-model-cache is the canonical default Kubernetes object name and patch
 #   anchor. The namespace-local PVC must exist unless a cluster Kustomization
 #   replaces the reference; change all coupled references together.
-# Derived from: recipes/llama-3-70b/vllm/agg/deploy.yaml.
+# Derived from: https://github.com/ai-dynamo/dynamo/blob/67203f32d2508c96c9387d263e0f02f4f3830f3f/recipes/llama-3-70b/vllm/agg/deploy.yaml.
 # Validation status: static catalog validation only; verify admission,
 # readiness, and runtime behavior on the target cluster.
 apiVersion: nvidia.com/v1alpha1

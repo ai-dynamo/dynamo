@@ -67,6 +67,17 @@ ROOT_KUSTOMIZATION_KEYS = frozenset(
 COMPONENT_KUSTOMIZATION_KEYS = frozenset(
     {"apiVersion", "kind", "components", "patches"}
 )
+CANONICAL_COMPONENT_ORDER = (
+    "cache-binding",
+    "registry-credentials",
+    "probes",
+    "scheduling",
+    "network-interface",
+    "placement",
+)
+CONTAINER_COLLECTIONS = frozenset(
+    {"containers", "initContainers", "ephemeralContainers"}
+)
 _MISSING = object()
 
 
@@ -123,12 +134,22 @@ class _Target:
 
 
 @dataclass(frozen=True)
+class _RootComponent:
+    index: int
+    reference: str
+    resolved: Path
+    concern: str
+    topology: str
+
+
+@dataclass(frozen=True)
 class _PatchLayer:
     label: str
     source: Path
     target: _Target
     operations: Tuple[Mapping[str, Any], ...]
     is_component: bool
+    root_component: Optional[_RootComponent]
 
 
 @dataclass(frozen=True)
@@ -337,7 +358,13 @@ def _parse_operations(raw: Any, *, label: str) -> Tuple[Mapping[str, Any], ...]:
 
 
 def _load_patch(
-    entry: Any, owner: Path, root: Path, *, is_component: bool, index: int
+    entry: Any,
+    owner: Path,
+    root: Path,
+    *,
+    is_component: bool,
+    root_component: Optional[_RootComponent],
+    index: int,
 ) -> _PatchLayer:
     owner_label = _relative_label(owner, root)
     provisional_label = "%s#patches[%d]" % (owner_label, index - 1)
@@ -405,6 +432,7 @@ def _load_patch(
         target=target,
         operations=_parse_operations(raw_operations, label=label),
         is_component=is_component,
+        root_component=root_component,
     )
 
 
@@ -413,6 +441,7 @@ def _component_layers(
     owner: Path,
     root: Path,
     stack: Tuple[Path, ...],
+    root_component: _RootComponent,
 ) -> List[_PatchLayer]:
     component_dir = (owner.parent / component_reference).resolve()
     component_kustomization = _find_kustomization(component_dir)
@@ -445,6 +474,7 @@ def _component_layers(
                 component_kustomization,
                 root,
                 stack + (component_kustomization,),
+                root_component,
             )
         )
     patches = document.get("patches", [])
@@ -460,13 +490,122 @@ def _component_layers(
                 component_kustomization,
                 root,
                 is_component=True,
+                root_component=root_component,
                 index=patch_index,
             )
         )
     return layers
 
 
-def _collect_layers(base: Path, kustomization: Path) -> Tuple[_PatchLayer, ...]:
+def _validate_root_contract(
+    document: Mapping[str, Any], kustomization: Path
+) -> Tuple[_RootComponent, ...]:
+    expected_sort_options = {"order": "fifo"}
+    actual_sort_options = document.get("sortOptions", _MISSING)
+    if actual_sort_options != expected_sort_options:
+        raise ValidationError(
+            "component-order",
+            "root Kustomization requires exact FIFO sort options",
+            expected=expected_sort_options,
+            actual=actual_sort_options,
+        )
+
+    rank_by_concern = {
+        concern: rank for rank, concern in enumerate(CANONICAL_COMPONENT_ORDER)
+    }
+    root_components: List[_RootComponent] = []
+    for index, reference in enumerate(document.get("components", [])):
+        segments = reference.split("/")
+        if (
+            len(segments) != 3
+            or segments[0] != "components"
+            or segments[1] not in rank_by_concern
+            or segments[2] not in ("agg", "disagg")
+        ):
+            raise ValidationError(
+                "unsupported-manifest",
+                "root Component path must be exactly "
+                "components/<canonical-concern>/<agg|disagg>",
+                actual=reference,
+            )
+        root_components.append(
+            _RootComponent(
+                index=index,
+                reference=reference,
+                resolved=(kustomization.parent / reference).resolve(),
+                concern=segments[1],
+                topology=segments[2],
+            )
+        )
+
+    for placement in root_components:
+        if placement.concern != "placement":
+            continue
+        scheduling = next(
+            (
+                component
+                for component in root_components
+                if component.concern == "scheduling"
+                and component.topology == placement.topology
+            ),
+            None,
+        )
+        if scheduling is not None and placement.index < scheduling.index:
+            raise ValidationError(
+                "component-order",
+                "placement Component %s at index %d must follow scheduling "
+                "Component %s at index %d in canonical concern order"
+                % (
+                    placement.reference,
+                    placement.index,
+                    scheduling.reference,
+                    scheduling.index,
+                ),
+            )
+
+    previous: Optional[_RootComponent] = None
+    for current in root_components:
+        if previous is not None:
+            previous_rank = rank_by_concern[previous.concern]
+            current_rank = rank_by_concern[current.concern]
+            if current_rank <= previous_rank:
+                raise ValidationError(
+                    "component-order",
+                    "root Component %s at index %d must follow %s at index %d "
+                    "in canonical concern order"
+                    % (
+                        current.reference,
+                        current.index,
+                        previous.reference,
+                        previous.index,
+                    ),
+                    expected="rank greater than %d" % previous_rank,
+                    actual=current_rank,
+                )
+        previous = current
+
+    scheduling_topologies = {
+        component.topology
+        for component in root_components
+        if component.concern == "scheduling"
+    }
+    for component in root_components:
+        if (
+            component.concern == "placement"
+            and component.topology not in scheduling_topologies
+        ):
+            scheduling_reference = "components/scheduling/%s" % component.topology
+            raise ValidationError(
+                "component-dependency",
+                "placement Component %s requires preceding scheduling Component %s"
+                % (component.reference, scheduling_reference),
+            )
+    return tuple(root_components)
+
+
+def _collect_layers(
+    base: Path, kustomization: Path
+) -> Tuple[Tuple[_PatchLayer, ...], Tuple[_RootComponent, ...]]:
     if kustomization.name not in KUSTOMIZATION_FILENAMES:
         raise ValidationError(
             "unsupported-manifest",
@@ -506,10 +645,19 @@ def _collect_layers(base: Path, kustomization: Path) -> Tuple[_PatchLayer, ...]:
             "unsupported-manifest",
             "%s components must be a list of paths" % kustomization,
         )
+    root_components = _validate_root_contract(document, kustomization)
     root = kustomization.parent.resolve()
     layers: List[_PatchLayer] = []
-    for reference in components:
-        layers.extend(_component_layers(reference, kustomization, root, ()))
+    for root_component in root_components:
+        layers.extend(
+            _component_layers(
+                root_component.reference,
+                kustomization,
+                root,
+                (),
+                root_component,
+            )
+        )
     patches = document.get("patches", [])
     if not isinstance(patches, list):
         raise ValidationError(
@@ -518,10 +666,15 @@ def _collect_layers(base: Path, kustomization: Path) -> Tuple[_PatchLayer, ...]:
     for patch_index, entry in enumerate(patches, start=1):
         layers.append(
             _load_patch(
-                entry, kustomization, root, is_component=False, index=patch_index
+                entry,
+                kustomization,
+                root,
+                is_component=False,
+                root_component=None,
+                index=patch_index,
             )
         )
-    return tuple(layers)
+    return tuple(layers), root_components
 
 
 def _api_parts(api_version: Any) -> Tuple[str, str]:
@@ -876,10 +1029,43 @@ def _validate_guards(layer: _PatchLayer) -> None:
                         op_index=index,
                         path=path,
                     )
-            if "containers" in tokens[3:]:
-                containers_position = tokens.index("containers", 3)
-                if containers_position + 1 >= len(tokens) or not re.fullmatch(
-                    r"0|[1-9][0-9]*", tokens[containers_position + 1]
+            if (
+                len(tokens) >= 6
+                and tokens[3:5] == ("podTemplate", "spec")
+                and tokens[5] in CONTAINER_COLLECTIONS
+            ):
+                collection = tokens[5]
+                collection_path = tokens[:6]
+                collection_suffix = tokens[6:]
+                if not collection_suffix:
+                    if op_name in ("replace", "remove"):
+                        raise ValidationError(
+                            "patch-guard",
+                            "mutation cannot replace a container identity collection",
+                            layer=layer.label,
+                            op_index=index,
+                            path=path,
+                        )
+                elif collection_suffix[0] == "-":
+                    value = operation.get("value", _MISSING)
+                    if (
+                        len(collection_suffix) != 1
+                        or op_name != "add"
+                        or not isinstance(value, dict)
+                        or not isinstance(value.get("name"), str)
+                        or not value["name"]
+                    ):
+                        raise ValidationError(
+                            "patch-guard",
+                            "%s/- requires an add of one complete container mapping "
+                            "with a non-empty string name"
+                            % collection,
+                            layer=layer.label,
+                            op_index=index,
+                            path=path,
+                        )
+                elif not re.fullmatch(
+                    r"0|[1-9][0-9]*", collection_suffix[0]
                 ):
                     raise ValidationError(
                         "patch-guard",
@@ -888,15 +1074,19 @@ def _validate_guards(layer: _PatchLayer) -> None:
                         op_index=index,
                         path=path,
                     )
-                container_guard = tokens[: containers_position + 2] + ("name",)
-                if container_guard not in tested:
-                    raise ValidationError(
-                        "patch-guard",
-                        "container mutation requires a preceding container name test",
-                        layer=layer.label,
-                        op_index=index,
-                        path=path,
+                else:
+                    container_guard = collection_path + (
+                        collection_suffix[0],
+                        "name",
                     )
+                    if container_guard not in tested:
+                        raise ValidationError(
+                            "patch-guard",
+                            "container mutation requires a preceding container name test",
+                            layer=layer.label,
+                            op_index=index,
+                            path=path,
+                        )
         if op_name in ("replace", "remove") and tokens not in tested:
             raise ValidationError(
                 "patch-guard",
@@ -1142,6 +1332,30 @@ def _apply_operation(
     )
 
 
+def _missing_placement_affinity_parent(
+    document: Any, layer: _PatchLayer, operation: Mapping[str, Any]
+) -> bool:
+    root_component = layer.root_component
+    path = operation["path"]
+    if (
+        root_component is None
+        or root_component.concern != "placement"
+        or operation["op"] != "add"
+        or not re.fullmatch(
+            r"/spec/components/(0|[1-9][0-9]*)/podTemplate/spec/affinity/podAffinity",
+            path,
+        )
+    ):
+        return False
+    tokens = tuple(path[1:].split("/"))
+    pod_spec, affinity_key = _try_resolve_parent(document, tokens[:-1])
+    return (
+        isinstance(pod_spec, dict)
+        and affinity_key == "affinity"
+        and affinity_key not in pod_spec
+    )
+
+
 def _replay(base_documents: Sequence[Any], layers: Sequence[_PatchLayer]) -> List[Any]:
     result = copy.deepcopy(list(base_documents))
     for layer in layers:
@@ -1159,7 +1373,33 @@ def _replay(base_documents: Sequence[Any], layers: Sequence[_PatchLayer]) -> Lis
             )
         target_document = result[matches[0]]
         for op_index, operation in enumerate(layer.operations, start=1):
-            _apply_operation(target_document, layer, op_index, operation)
+            try:
+                _apply_operation(target_document, layer, op_index, operation)
+            except ValidationError as error:
+                if error.code != "replay-path":
+                    raise
+                if not _missing_placement_affinity_parent(
+                    target_document,
+                    layer,
+                    operation,
+                ):
+                    raise
+                root_component = layer.root_component
+                if root_component is None:
+                    raise
+                scheduling_reference = "components/scheduling/%s" % (
+                    root_component.topology
+                )
+                raise ValidationError(
+                    "component-dependency",
+                    "placement Component %s requires scheduling Component %s to "
+                    "establish the accumulated affinity parent before placement "
+                    "adds podAffinity"
+                    % (root_component.reference, scheduling_reference),
+                    layer=layer.label,
+                    op_index=op_index,
+                    path=operation["path"],
+                ) from error
     return result
 
 
@@ -1333,7 +1573,7 @@ def validate_case(
         )
     dgd_index = _require_one_beta_dgd(base_documents, "base")
     _validate_canonical_components(base_documents[dgd_index])
-    layers = _collect_layers(base, kustomization)
+    layers, _root_components = _collect_layers(base, kustomization)
     for layer in layers:
         _validate_guards(layer)
     _validate_base_ownership(base_documents, dgd_index, layers)

@@ -52,7 +52,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
           imagePullPolicy: IfNotPresent
           command: [python3]
-          args: [-m, dynamo.frontend, --router-mode, kv, --no-kv-events, --http-port, "8000"]
+          args: [-m, dynamo.frontend, --router-mode, kv, --no-router-kv-events, --http-port, "8000"]
     Worker:
       componentType: worker
       replicas: 1

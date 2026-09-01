@@ -35,5 +35,3 @@
               operator: In
               values:
                 - worker
-                - prefill
-                - decode

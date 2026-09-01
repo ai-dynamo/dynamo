@@ -58,7 +58,8 @@ kustomize version
 
 Confirm that the command reports `v5.8.1` before continuing. Do not assume that
 `kubectl kustomize` or `kubectl apply -k` uses the same version: `kubectl`
-embeds its own Kustomize release.
+embeds its own Kustomize release. `kubectl apply -k` is a deployment operation,
+not an automatic substitute for the qualified standalone validation renderer.
 
 The validator requires Python 3.9 or later and PyYAML.
 
@@ -124,13 +125,23 @@ fill the local network Component according to the provider's documentation.
 Use this preflight from the copied scaffold root:
 
 ```bash
-rg -n --glob '*.yaml' 'your-[[:alnum:]./_-]+' \
-  kustomization.yaml components patches
+if grep -R -n -E --include='*.yaml' \
+  'your-[[:alnum:].~/_-]+' kustomization.yaml components patches
+then
+  echo 'ERROR: unresolved recipe placeholders remain' >&2
+  exit 1
+else
+  placeholder_scan_status=$?
+  if [ "$placeholder_scan_status" -ne 1 ]; then
+    exit "$placeholder_scan_status"
+  fi
+fi
 ```
 
-The command must produce no output. Also inspect the diff of the private copy;
-the scan cannot decide whether a syntactically real value belongs to the target
-cluster.
+The preflight fails when it finds a placeholder, succeeds only when `grep`
+returns status 1 for no matches, and propagates any execution error greater
+than 1. Also inspect the diff of the private copy; the scan cannot decide
+whether a syntactically real value belongs to the target cluster.
 
 ## Select Components in the required order
 
@@ -142,8 +153,17 @@ Each Component owns one concern:
 | `registry-credentials` | Adds `imagePullSecrets` to the canonical Pod templates. It remains independent of cache binding because a cacheless recipe may still use private images. |
 | `probes` | Optionally replaces the operator's worker startup allowance with one cluster-wide policy. It is not selected by default. |
 | `scheduling` | Adds node selection, tolerations, affinity, scheduler, runtime class, and priority to the canonical components. |
-| `network-interface` | Adds cluster-owned `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` environment variables and the site RDMA extended-resource request. Use a reviewed provider Component instead when one owns the required mechanism. |
+| `network-interface` | The checked-in generic scaffold illustrates cluster-owned `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` environment variables and the site RDMA extended-resource request. Use a qualified provider Component instead when one owns the required mechanism. |
 | `placement` | Optionally extends the worker affinity with a topology or clique constraint. It depends on `scheduling` having already created `affinity`. |
+
+Physical networking environment variables remain forbidden in portable bases.
+Qualified provider `network-interface` operations are the carrier for
+`UCX_NET_DEVICES`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME`; the checked-in
+generic scaffold illustrates only the names that its operations actually
+carry. A site that needs `NCCL_IB_HCA` must qualify a provider operation and
+extend the networking allowlist and positive and negative tests before use.
+Support also requires a documented design decision. Do not remove the
+forbidden-name validation.
 
 The RDMA placeholder appears inside a JSON Pointer. Convert the discovered
 Kubernetes resource key to RFC 6901 form in both the request and limit paths:
@@ -178,7 +198,16 @@ List Components in this exact order:
 6. `placement`, when required
 
 The order is part of the contract. In particular, never place `placement`
-before `scheduling`.
+before `scheduling`. The validator reports order violations as
+`component-order`. Placement requires earlier same-topology scheduling; a
+missing scheduling Component or missing scheduling-owned affinity parent is a
+`component-dependency` failure. Keep scheduling's affinity `add` operation
+whenever placement is selected.
+
+Aggregate placement requires Kubernetes 1.33+ with
+`MatchLabelKeysInPodAffinity` enabled. A cluster that disables this feature
+must omit the aggregate placement Component or use a separately qualified
+alternative.
 
 ### Root aggregate example
 
@@ -255,9 +284,11 @@ Component uses `your-prefill-startup-failure-threshold` and
 
 The Component adds a complete `startupProbe`. The operator does not merge an
 explicit probe field by field with its default: the complete field replaces the
-corresponding default. A base that already owns `startupProbe` must fail the
-validator's derived-absence check. Choose either a documented recipe-owned
-probe or this cluster-owned override; do not select both.
+corresponding default on the leader/main worker container.
+For multinode follower probes, backend/operator-specific behavior strips or
+replaces them. A base that already owns `startupProbe` must fail the validator's
+derived-absence check. Choose either a documented recipe-owned probe or this
+cluster-owned override; do not select both.
 
 ## Override networking hooks
 
@@ -312,8 +343,17 @@ is the copied scaffold's root Kustomization:
 ```bash
 python3 scripts/validate-recipe-kustomization.py \
   <cluster-kustomization>/your-base-recipe.yaml \
+  <cluster-kustomization>/kustomization.yaml
+```
+
+The validator uses `kustomize` from `PATH` by default. To select an explicitly
+qualified binary instead, use the override:
+
+```bash
+python3 scripts/validate-recipe-kustomization.py \
+  <cluster-kustomization>/your-base-recipe.yaml \
   <cluster-kustomization>/kustomization.yaml \
-  --kustomize-bin "$(command -v kustomize)"
+  --kustomize-bin /explicit/path/to/kustomize
 ```
 
 The validator checks that the build targets exactly one beta DGD, verifies the
@@ -338,11 +378,9 @@ This pipeline guarantees that the manifest sent to `kubectl` came from the
 standalone v5.8.1 renderer. `LoadRestrictionsNone` is required when the selected
 base or a shared Component is outside the copied directory, so use only paths
 reviewed as part of the private cluster configuration. `kubectl apply -k .` is
-acceptable only when every referenced file is within kubectl's permitted load
-roots, `kubectl version --client --output=yaml` reports an embedded Kustomize
-version of exactly v5.8.1, and the same composition has passed
-`scripts/validate-recipe-kustomization.py`. In that constrained case, apply with
-`kubectl apply -k . -n "$NAMESPACE"`.
+a deployment operation and not an automatic substitute for the qualified
+validation renderer. Validate with standalone Kustomize v5.8.1, then apply the
+validated standalone render through the pipeline above.
 
 Rendering and admission do not prove scheduling, readiness, correct responses,
 or performance. Exercise the deployment on the intended hardware and network

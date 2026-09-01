@@ -155,6 +155,8 @@ spec:
                   value: /opt/dynamo/configs/config.yaml
                 - name: HF_HOME
                   value: /shared-model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -219,6 +221,8 @@ spec:
                   value: /opt/dynamo/configs/config.yaml
                 - name: HF_HOME
                   value: /shared-model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE

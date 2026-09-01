@@ -115,6 +115,8 @@ spec:
                   value: nvidia/DeepSeek-V4-Flash-NVFP4
                 - name: HF_HOME
                   value: /shared-model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
                 - name: HF_HUB_CACHE
                   value: /shared-model-cache/hub
                 - name: HF_HUB_OFFLINE

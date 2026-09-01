@@ -92,6 +92,10 @@ examples:
   - 'scripts/validate-recipe-kustomization.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
+  - 'tests/docs/test_recipe_kustomize_validator.py'
+  - 'tests/docs/test_recipe_templates.py'
+  - '.pre-commit-config.yaml'
+  - '.github/workflows/pre-merge.yml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
@@ -99,7 +103,6 @@ ignore:
   # CI filter documentation does not affect any CI job.
   - '.github/FILTERS.md'
   - '.lycheeignore'
-  - '.pre-commit-config.yaml'
   - '.coderabbit.yaml'
   - '.clang-format'
   - 'dynamo.code-workspace'

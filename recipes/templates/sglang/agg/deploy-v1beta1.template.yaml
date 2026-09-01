@@ -27,6 +27,7 @@
 #   unless a cluster Kustomization replaces the reference; keep all Worker
 #   cache references and the /shared-model-cache path synchronized.
 # Derived from: recipes/inkling/sglang/agg-b200/deploy.yaml.
+# Source hostIPC: true was intentionally removed because host IPC is cluster/host policy.
 # Validation status: static catalog validation only; verify admission,
 # readiness, and runtime behavior on the target cluster.
 apiVersion: nvidia.com/v1beta1
