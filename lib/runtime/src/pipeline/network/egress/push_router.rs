@@ -313,48 +313,64 @@ struct DispatchSink<T, U> {
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
 }
 
+#[derive(Clone)]
+struct LiveInstance {
+    id: EndpointInstanceId,
+    // Distinguishes remove-then-add of the same identity when a slow sink sees
+    // only the newest coalesced snapshot.
+    generation: u64,
+}
+
+type LifecycleSnapshot = Arc<HashMap<u64, LiveInstance>>;
+
 struct SinkEntry {
     sink: Arc<dyn LifecycleSink>,
     delivery: Arc<tokio::sync::Mutex<()>>,
-    events: tokio::sync::mpsc::UnboundedSender<SinkEvent>,
+    delivered: Arc<std::sync::Mutex<LifecycleSnapshot>>,
+    updates: tokio::sync::watch::Sender<LifecycleSnapshot>,
     worker: tokio::task::AbortHandle,
-}
-
-enum SinkEvent {
-    Removed(EndpointInstanceId),
-    Added(EndpointInstanceId),
 }
 
 impl SinkEntry {
     fn new(sink: Arc<dyn LifecycleSink>) -> Self {
         let delivery = Arc::new(tokio::sync::Mutex::new(()));
-        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let delivered = Arc::new(std::sync::Mutex::new(Arc::new(HashMap::new())));
+        // A watch channel retains one latest snapshot instead of an event for
+        // every discovery update. A stalled hook therefore cannot accumulate
+        // an unbounded per-sink queue.
+        let (updates, mut update_rx) =
+            tokio::sync::watch::channel::<LifecycleSnapshot>(Arc::new(HashMap::new()));
         let worker_delivery = delivery.clone();
+        let worker_delivered = delivered.clone();
         let worker_sink = sink.clone();
         let worker = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
+            while update_rx.changed().await.is_ok() {
+                let desired = update_rx.borrow_and_update().clone();
                 let _delivery = worker_delivery.lock().await;
-                match event {
-                    SinkEvent::Removed(id) => worker_sink.on_instance_removed(&id).await,
-                    SinkEvent::Added(id) => worker_sink.on_instance_added(&id).await,
-                }
+                reconcile_lifecycle_snapshot(
+                    worker_sink.as_ref(),
+                    worker_delivered.as_ref(),
+                    desired,
+                )
+                .await;
             }
         });
 
         Self {
             sink,
             delivery,
-            events,
+            delivered,
+            updates,
             worker: worker.abort_handle(),
         }
     }
 
-    fn enqueue_removed(&self, id: &EndpointInstanceId) {
-        let _ = self.events.send(SinkEvent::Removed(id.clone()));
+    fn publish(&self, snapshot: LifecycleSnapshot) {
+        self.updates.send_replace(snapshot);
     }
 
-    fn enqueue_added(&self, id: &EndpointInstanceId) {
-        let _ = self.events.send(SinkEvent::Added(id.clone()));
+    fn mark_delivered(&self, snapshot: LifecycleSnapshot) {
+        *self.delivered.lock().unwrap() = snapshot;
     }
 }
 
@@ -364,16 +380,46 @@ impl Drop for SinkEntry {
     }
 }
 
-fn fan_out_removed(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
-    for sink in sinks {
-        sink.enqueue_removed(id);
-    }
-}
+async fn reconcile_lifecycle_snapshot(
+    sink: &dyn LifecycleSink,
+    delivered: &std::sync::Mutex<LifecycleSnapshot>,
+    desired: LifecycleSnapshot,
+) {
+    let previous = delivered.lock().unwrap().clone();
+    let mut removed: Vec<_> = previous
+        .iter()
+        .filter(|(instance_id, instance)| {
+            desired
+                .get(instance_id)
+                .map(|current| current.generation != instance.generation)
+                .unwrap_or(true)
+        })
+        .map(|(_, instance)| instance.id.clone())
+        .collect();
+    let mut added: Vec<_> = desired
+        .iter()
+        .filter(|(instance_id, instance)| {
+            previous
+                .get(instance_id)
+                .map(|current| current.generation != instance.generation)
+                .unwrap_or(true)
+        })
+        .map(|(_, instance)| instance.id.clone())
+        .collect();
 
-fn fan_out_added(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
-    for sink in sinks {
-        sink.enqueue_added(id);
+    removed.sort_unstable_by_key(|id| id.instance_id);
+    added.sort_unstable_by_key(|id| id.instance_id);
+
+    // A changed generation represents remove-then-add of one identity, so
+    // retire the prior generation before announcing the current one.
+    for id in removed {
+        sink.on_instance_removed(&id).await;
     }
+    for id in added {
+        sink.on_instance_added(&id).await;
+    }
+
+    *delivered.lock().unwrap() = desired;
 }
 
 #[async_trait]
@@ -394,8 +440,8 @@ where
 #[derive(Default)]
 struct WatcherState {
     sinks: HashMap<u64, Arc<SinkEntry>>,
-
-    live: HashMap<u64, EndpointInstanceId>,
+    live: HashMap<u64, LiveInstance>,
+    next_generation: u64,
 }
 
 struct EndpointWatcher {
@@ -413,11 +459,13 @@ impl EndpointWatcher {
         }
     }
 
-    fn add_sink(&self, sink: Arc<SinkEntry>) -> (u64, Vec<EndpointInstanceId>) {
+    fn add_sink(&self, sink: Arc<SinkEntry>) -> (u64, LifecycleSnapshot) {
         let sink_id = self.next_sink_id.fetch_add(1, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
+        let snapshot = Arc::new(state.live.clone());
+        sink.publish(snapshot.clone());
         state.sinks.insert(sink_id, sink);
-        (sink_id, state.live.values().cloned().collect())
+        (sink_id, snapshot)
     }
 
     fn remove_sink(&self, sink_id: u64) -> bool {
@@ -426,16 +474,40 @@ impl EndpointWatcher {
         state.sinks.is_empty()
     }
 
-    fn sinks(&self) -> Vec<Arc<SinkEntry>> {
-        self.state.lock().unwrap().sinks.values().cloned().collect()
+    fn publish_live_snapshot(&self) {
+        let (sinks, snapshot) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.sinks.values().cloned().collect::<Vec<_>>(),
+                Arc::new(state.live.clone()),
+            )
+        };
+        for sink in sinks {
+            // send_replace is synchronous and never waits for this sink's
+            // lifecycle hook, preserving delivery to the other subscribers.
+            sink.publish(snapshot.clone());
+        }
     }
 
     fn record_added(&self, id: &EndpointInstanceId) {
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        if state
             .live
-            .insert(id.instance_id, id.clone());
+            .get(&id.instance_id)
+            .map(|instance| instance.id == *id)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        state.next_generation = state.next_generation.wrapping_add(1);
+        let generation = state.next_generation;
+        state.live.insert(
+            id.instance_id,
+            LiveInstance {
+                id: id.clone(),
+                generation,
+            },
+        );
     }
 
     fn record_removed(&self, id: &EndpointInstanceId) {
@@ -452,7 +524,7 @@ impl EndpointWatcher {
             .collect();
         stale
             .into_iter()
-            .filter_map(|id| state.live.remove(&id))
+            .filter_map(|id| state.live.remove(&id).map(|instance| instance.id))
             .collect()
     }
 }
@@ -525,10 +597,10 @@ where
             }
             Entry::Vacant(entry) => {
                 let watcher = Arc::new(EndpointWatcher::new(cancel_token.child_token()));
-                let (sink_id, _) = watcher.add_sink(sink.clone());
+                let (sink_id, replay) = watcher.add_sink(sink.clone());
                 entry.insert(watcher.clone());
                 spawn_endpoint_watcher_task(endpoint, key.clone(), watcher.clone());
-                (watcher, sink_id, Vec::new())
+                (watcher, sink_id, replay)
             }
         }
     };
@@ -539,9 +611,10 @@ where
         sink_id,
     };
 
-    for id in replay {
-        sink.sink.on_instance_added(&id).await;
+    for instance in replay.values() {
+        sink.sink.on_instance_added(&instance.id).await;
     }
+    sink.mark_delivered(replay);
     drop(replay_delivery);
 
     subscription
@@ -616,13 +689,16 @@ fn spawn_endpoint_watcher_task(
                                 _ => None,
                             })
                             .collect();
-                        for eid in watcher.retain_live(&present) {
+                        let stale = watcher.retain_live(&present);
+                        for eid in &stale {
                             tracing::debug!(
                                 endpoint = %endpoint_name,
                                 instance_id = eid.instance_id,
                                 "Instance disappeared while the discovery watch was down"
                             );
-                            fan_out_removed(watcher.sinks(), &eid);
+                        }
+                        if !stale.is_empty() {
+                            watcher.publish_live_snapshot();
                         }
                     }
                     Err(e) => {
@@ -642,13 +718,13 @@ fn spawn_endpoint_watcher_task(
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
                                     watcher.record_removed(eid);
-                                    fan_out_removed(watcher.sinks(), eid);
+                                    watcher.publish_live_snapshot();
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 watcher.record_added(&eid);
-                                fan_out_added(watcher.sinks(), &eid);
+                                watcher.publish_live_snapshot();
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -3528,6 +3604,58 @@ mod tests {
         Arc::new(SinkEntry::new(Arc::new(InertSink)))
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum RecordedLifecycleEvent {
+        Removed(u64),
+        Added(u64),
+    }
+
+    struct RecordingLifecycleSink {
+        events: std::sync::Mutex<Vec<RecordedLifecycleEvent>>,
+        block_first_add: std::sync::atomic::AtomicBool,
+        first_add_started: tokio::sync::Notify,
+        release_first_add: tokio::sync::Notify,
+    }
+
+    impl RecordingLifecycleSink {
+        fn new(block_first_add: bool) -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+                block_first_add: std::sync::atomic::AtomicBool::new(block_first_add),
+                first_add_started: tokio::sync::Notify::new(),
+                release_first_add: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn events(&self) -> Vec<RecordedLifecycleEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LifecycleSink for RecordingLifecycleSink {
+        async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(RecordedLifecycleEvent::Removed(id.instance_id));
+        }
+
+        async fn on_instance_added(&self, id: &EndpointInstanceId) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(RecordedLifecycleEvent::Added(id.instance_id));
+            if self
+                .block_first_add
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.first_add_started.notify_one();
+                self.release_first_add.notified().await;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn add_sink_excludes_instances_removed_before_registration() {
         let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
@@ -3537,7 +3665,10 @@ mod tests {
 
         let (_sink_id, replay) = watcher.add_sink(inert_sink());
         assert_eq!(
-            replay.iter().map(|id| id.instance_id).collect::<Vec<_>>(),
+            replay
+                .values()
+                .map(|instance| instance.id.instance_id)
+                .collect::<Vec<_>>(),
             vec![1]
         );
     }
@@ -3559,18 +3690,79 @@ mod tests {
         assert_eq!(dropped, vec![2]);
 
         let (_sink_id, replay) = watcher.add_sink(inert_sink());
-        let mut replayed: Vec<u64> = replay.iter().map(|id| id.instance_id).collect();
+        let mut replayed: Vec<u64> = replay
+            .values()
+            .map(|instance| instance.id.instance_id)
+            .collect();
         replayed.sort_unstable();
         assert_eq!(replayed, vec![1, 3]);
     }
 
     #[tokio::test]
-    async fn retain_live_keeps_everything_when_the_listing_matches() {
+    async fn slow_sink_does_not_block_others_and_observes_readded_instance() {
         let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
-        watcher.record_added(&test_instance_id(7));
+        let slow = Arc::new(RecordingLifecycleSink::new(true));
+        let fast = Arc::new(RecordingLifecycleSink::new(false));
+        let (_slow_id, _) = watcher.add_sink(Arc::new(SinkEntry::new(slow.clone())));
+        let (_fast_id, _) = watcher.add_sink(Arc::new(SinkEntry::new(fast.clone())));
+        let instance = test_instance_id(7);
 
-        assert!(watcher.retain_live(&HashSet::from([7])).is_empty());
-        let (_sink_id, replay) = watcher.add_sink(inert_sink());
-        assert_eq!(replay[0].instance_id, 7);
+        watcher.record_added(&instance);
+        watcher.publish_live_snapshot();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            slow.first_add_started.notified(),
+        )
+        .await
+        .expect("slow sink did not enter its first add hook");
+        assert!(
+            poll_until(|| fast.events() == vec![RecordedLifecycleEvent::Added(7)]).await,
+            "the fast sink must receive the add while the slow sink is blocked"
+        );
+
+        watcher.record_removed(&instance);
+        watcher.publish_live_snapshot();
+        assert!(
+            poll_until(|| {
+                fast.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                    ]
+            })
+            .await,
+            "the fast sink must receive the removal while the slow sink is blocked"
+        );
+
+        watcher.record_added(&instance);
+        watcher.publish_live_snapshot();
+        assert!(
+            poll_until(|| {
+                fast.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                        RecordedLifecycleEvent::Added(7),
+                    ]
+            })
+            .await,
+            "the fast sink must receive the re-add while the slow sink is blocked"
+        );
+
+        slow.release_first_add.notify_one();
+        assert!(
+            poll_until(|| {
+                slow.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                        RecordedLifecycleEvent::Added(7),
+                    ]
+            })
+            .await,
+            "the slow sink must reconcile the overwritten snapshots as remove then add"
+        );
+
+        assert_eq!(slow.events(), fast.events());
     }
 }
