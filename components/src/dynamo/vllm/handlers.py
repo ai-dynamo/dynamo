@@ -3908,8 +3908,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        prefill_continues = PREFILL_CONTINUE_ANNOTATION in (
-            request.get("annotations") or []
+        # Match the bare marker and its "marker:value" form, mirroring the
+        # router-side strip. Annotation values are read off a "marker:" prefix.
+        prefill_continues = any(
+            annotation == PREFILL_CONTINUE_ANNOTATION
+            or annotation.startswith(f"{PREFILL_CONTINUE_ANNOTATION}:")
+            for annotation in (request.get("annotations") or [])
         )
 
         # A continuation is served whole here, so no handoff is set up and none is
@@ -3976,10 +3980,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
+            # A continuation streams deltas, so usage has to accumulate. A
+            # one-token handoff has a single chunk and is unaffected.
+            total_output_tokens_by_index: Dict[int, int] = {}
+            has_kv_params = False
+
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
+                for output in res.outputs or []:
+                    index = getattr(output, "index", 0) or 0
+                    total_output_tokens_by_index[index] = total_output_tokens_by_index.get(
+                        index, 0
+                    ) + len(output.token_ids or [])
 
                 # A handoff yields exactly one result, so its embedding params are
                 # built unconditionally. A continuation yields many and hands off
@@ -4006,6 +4020,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
+                        completion_token_counts=total_output_tokens_by_index,
                     ),
                 }
 
@@ -4014,20 +4029,22 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 # finish reason as "this request is already complete".
                 finish_reason = res.outputs[0].finish_reason if res.outputs else None
                 if prefill_continues and finish_reason:
-                    output["finish_reason"] = finish_reason
+                    output["finish_reason"] = normalize_finish_reason(finish_reason)
 
-                # Log prefill completion with LoRA info
-                self._log_with_lora_context(
-                    "Prefill completed for request {request_id}{lora_info}: "
-                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                    request_id,
-                    lora_request,
-                    level="info" if lora_request else "debug",
-                    token_count=len(token_ids),
-                    has_kv_params=res.kv_transfer_params is not None,
-                )
-
+                has_kv_params = res.kv_transfer_params is not None
                 yield output
+
+            # One line per request. A continuation yields many chunks, so logging
+            # inside the loop would repeat this once per token.
+            self._log_with_lora_context(
+                "Prefill completed for request {request_id}{lora_info}: "
+                "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                request_id,
+                lora_request,
+                level="info" if lora_request else "debug",
+                token_count=sum(total_output_tokens_by_index.values()),
+                has_kv_params=has_kv_params,
+            )
 
     def _build_disaggregated_params(
         self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None

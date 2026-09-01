@@ -658,14 +658,10 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     """Construct a PrefillWorkerHandler with mocked internals."""
     config = _make_config(model=model, disaggregation_mode="PREFILL")
     model_config = MagicMock(enable_prompt_embeds=True)
-    with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
-        handler = mod.PrefillWorkerHandler(
-            runtime=MagicMock(),
-            config=config,
-            engine=MagicMock(),
-            default_sampling_params={},
-            model_config=model_config,
-        )
+    # PrefillWorkerHandler.__init__ calls initialize_prefill_handoff() on the
+    # processor that BaseWorkerHandler.__init__ creates, so patching the base out
+    # is not enough. Bypass __init__ entirely and seed the attributes.
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
     handler.config = config
     handler.model_config = model_config
     handler.model_max_len = 4096
