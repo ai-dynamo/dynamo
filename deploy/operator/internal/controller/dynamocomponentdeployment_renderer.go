@@ -25,6 +25,7 @@ import (
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -218,7 +219,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
-	isNativeRestore := checkpointInfo != nil && checkpointInfo.NativeSnapshot != nil
+	isNativeRestore := checkpointInfo != nil && checkpointInfo.UsesPodSnapshot()
 	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
 		if !isNativeRestore && (checkpointInfo == nil ||
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint)) {
@@ -300,15 +301,24 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 	sourceKind := dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation]
 
-	// Direct references are native; the explicit legacy marker is reserved for automatic DGD capture.
+	// A DGD-generated native DCD may temporarily have no reference while its
+	// SnapshotJob is pending; legacy routing remains until the cleanup MR.
 	var (
 		info *checkpoint.CheckpointInfo
 		err  error
 	)
 	switch {
-	case !hasCheckpointRef:
-		info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
-	case sourceKind == commonconsts.CheckpointSourceKindLegacy:
+	case sourceKind == commonconsts.CheckpointSourceKindSnapshot && !hasCheckpointRef:
+		startupPolicy := alphaCheckpointConfig.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
+		info = &checkpoint.CheckpointInfo{
+			Enabled:       true,
+			SourceKind:    checkpoint.SourceKindPodSnapshot,
+			StartupPolicy: startupPolicy,
+		}
+	case !hasCheckpointRef || sourceKind == commonconsts.CheckpointSourceKindLegacy:
 		info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
 	case sourceKind == "" || sourceKind == commonconsts.CheckpointSourceKindSnapshot:
 		info, err = checkpoint.ResolvePodSnapshotForService(

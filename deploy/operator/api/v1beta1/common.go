@@ -258,9 +258,9 @@ type ExperimentalSpec struct {
 
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without
-	// checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
-	// CR and later restores pods in the same DGD generation from that
-	// checkpoint. With checkpointRef, the DGD restores from the named
+	// checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and
+	// later restores pods in the same DGD generation from its PodSnapshot.
+	// With checkpointRef, the DGD restores from the named
 	// PodSnapshot in the same namespace. The user-facing shape of this field is
 	// still settling, which is why it lives under `experimental` in v1beta1
 	// instead of at the top level.
@@ -741,15 +741,15 @@ type RollingUpdateStatus struct {
 
 // ComponentCheckpointStatus contains checkpoint information for a single component.
 type ComponentCheckpointStatus struct {
-	// checkpointName is the name of the associated DynamoCheckpoint CR.
+	// checkpointName is the name of the active PodSnapshot.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
-	// checkpointID is the artifact ID used by the snapshot protocol.
+	// checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+	// snapshots leave this field empty.
 	// +optional
 	CheckpointID string `json:"checkpointID,omitempty"`
-	// identityHash is the computed hash of the checkpoint identity.
-	// Deprecated: automatic checkpoints use checkpointID. This field is retained
-	// for older status consumers.
+	// identityHash is a deprecated legacy checkpoint identity hash. Native
+	// standalone snapshots leave this field empty.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 	// ready indicates the checkpoint artifact is ready for future pods to restore.

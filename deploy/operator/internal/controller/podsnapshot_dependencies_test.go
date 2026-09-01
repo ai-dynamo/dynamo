@@ -86,6 +86,41 @@ func TestMapPodSnapshotToDGDRequests(t *testing.T) {
 	}}}, requests)
 }
 
+func TestMapAutomaticPodSnapshotToDGDRequests(t *testing.T) {
+	t.Log("Given an automatic PodSnapshot whose DGD has no explicit reference")
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "automatic",
+		Namespace: "default",
+	}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(dgd).
+		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, dgdPodSnapshotRefIndex, dgdPodSnapshotRefIndexValues).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient}
+	snapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "automatic-snapshot",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		},
+		Annotations: map[string]string{
+			consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+		},
+	}}
+
+	t.Log("When the generated PodSnapshot changes")
+	requests := reconciler.mapPodSnapshotToDGDRequests(context.Background(), snapshot)
+
+	t.Log("Then lifecycle metadata maps the event back to the graph")
+	assert.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{
+		Name:      dgd.Name,
+		Namespace: dgd.Namespace,
+	}}}, requests)
+}
+
 func nativeCheckpointExperimental(name string) *nvidiacomv1beta1.ExperimentalSpec {
 	return &nvidiacomv1beta1.ExperimentalSpec{
 		Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{

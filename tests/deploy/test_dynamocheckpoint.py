@@ -37,7 +37,8 @@ TRANSIENT_K8S_EXCEPTIONS = (
 )
 
 DGD_PLURAL = "dynamographdeployments"
-CHECKPOINT_PLURAL = "dynamocheckpoints"
+POD_SNAPSHOT_PLURAL = "podsnapshots"
+SNAPSHOT_JOB_PLURAL = "snapshotjobs"
 
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
@@ -45,10 +46,12 @@ CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
 CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
 TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
 
-CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
-CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
-RESTORE_TARGET_LABEL = "nvidia.com/snapshot-is-restore-target"
-TARGET_CONTAINERS_ANNOTATION = "nvidia.com/snapshot-target-containers"
+SNAPSHOT_JOB_OWNER_LABEL = "nvidia.com/snapshot-job"
+RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
+RESTORED_CONDITION = "nvidia.com/Restored"
+RESTORE_FAILURE_REASONS = frozenset(
+    {"RestoreFailed", "RestorePartiallySucceeded"}
+)
 
 # CUDA checkpointing can OOM on 10GB MIG slices; run this test on full GPUs.
 GPU_NODE_SELECTOR = {
@@ -332,8 +335,8 @@ async def _get_dgd(deployment: ManagedDeployment) -> dict[str, Any]:
     )
 
 
-async def _get_checkpoint(
-    deployment: ManagedDeployment, checkpoint_name: str
+async def _get_snapshot_resource(
+    deployment: ManagedDeployment, plural: str, name: str
 ) -> dict[str, Any]:
     if deployment._custom_api is None:
         raise RuntimeError("Kubernetes API not initialized")
@@ -341,15 +344,15 @@ async def _get_checkpoint(
         group="nvidia.com",
         version="v1alpha1",
         namespace=deployment.namespace,
-        plural=CHECKPOINT_PLURAL,
-        name=checkpoint_name,
+        plural=plural,
+        name=name,
     )
 
 
 async def _wait_for_checkpoint_ready(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
-) -> tuple[str, str]:
+) -> str:
     async def fetch_status() -> dict[str, Any]:
         dgd = await _get_dgd(deployment)
         status = (
@@ -357,40 +360,77 @@ async def _wait_for_checkpoint_ready(
             .get("checkpoints", {})
             .get(backend.decode_component, {})
         )
-        checkpoint_name = status.get("checkpointName")
-        checkpoint = None
-        if checkpoint_name:
-            checkpoint = await _get_checkpoint(deployment, checkpoint_name)
-        return {"dgd_status": status, "checkpoint": checkpoint}
+        snapshot_name = status.get("checkpointName")
+        snapshot = None
+        snapshot_job = None
+        if snapshot_name:
+            snapshot = await _get_snapshot_resource(
+                deployment, POD_SNAPSHOT_PLURAL, snapshot_name
+            )
+            snapshot_job_name = snapshot.get("metadata", {}).get("labels", {}).get(
+                SNAPSHOT_JOB_OWNER_LABEL
+            )
+            if snapshot_job_name:
+                snapshot_job = await _get_snapshot_resource(
+                    deployment, SNAPSHOT_JOB_PLURAL, snapshot_job_name
+                )
+        return {
+            "dgd_status": status,
+            "snapshot": snapshot,
+            "snapshot_job": snapshot_job,
+        }
 
     value = await _wait_for(
         f"{backend.name} DGD auto checkpoint to become Ready",
         fetch_status,
-        _checkpoint_is_ready,
+        _automatic_snapshot_is_ready,
         timeout_s=CHECKPOINT_READY_TIMEOUT,
         interval_s=5,
     )
-    checkpoint = value["checkpoint"]
-    identity_hash = checkpoint["status"]["identityHash"]
-    checkpoint_name = checkpoint["metadata"]["name"]
-    logger.info("Checkpoint is Ready: %s (%s)", checkpoint_name, identity_hash)
-    return checkpoint_name, identity_hash
+    snapshot = value["snapshot"]
+    snapshot_name = snapshot["metadata"]["name"]
+    logger.info("Automatic PodSnapshot is Ready: %s", snapshot_name)
+    return snapshot_name
 
 
-def _checkpoint_is_ready(result: dict[str, Any]) -> bool:
-    checkpoint = result["checkpoint"]
-    if checkpoint is None:
+def _condition(resource: dict[str, Any], condition_type: str) -> dict[str, Any] | None:
+    for condition in resource.get("status", {}).get("conditions", []):
+        if condition.get("type") == condition_type:
+            return condition
+    return None
+
+
+def _condition_is_true(resource: dict[str, Any], condition_type: str) -> bool:
+    condition = _condition(resource, condition_type)
+    return condition is not None and condition.get("status") == "True"
+
+
+def _automatic_snapshot_is_ready(result: dict[str, Any]) -> bool:
+    snapshot = result["snapshot"]
+    snapshot_job = result["snapshot_job"]
+    if snapshot is None or snapshot_job is None:
         return False
 
-    status = checkpoint.get("status", {})
-    phase = status.get("phase")
-    if phase == "Failed":
+    if _condition_is_true(snapshot, "Failed") or _condition_is_true(
+        snapshot_job, "Failed"
+    ):
         raise AssertionError(
-            "checkpoint failed before becoming Ready: "
+            "automatic snapshot failed before becoming Ready: "
             f"dgd_status={result['dgd_status']!r}; "
-            f"checkpoint_status={status!r}"
+            f"snapshot_status={snapshot.get('status', {})!r}; "
+            f"snapshot_job_status={snapshot_job.get('status', {})!r}"
         )
-    return phase == "Ready" and bool(status.get("identityHash"))
+    return (
+        result["dgd_status"].get("ready") is True
+        and _condition_is_true(snapshot, "Ready")
+        and _condition_is_true(snapshot_job, "Completed")
+        and bool(snapshot.get("status", {}).get("boundSnapshotContentName"))
+    )
+
+
+def _is_snapshot_job_source(pod: Any) -> bool:
+    labels = pod.raw.get("metadata", {}).get("labels", {})
+    return SNAPSHOT_JOB_OWNER_LABEL in labels
 
 
 def _runtime_decode_pods(
@@ -402,8 +442,7 @@ def _runtime_decode_pods(
     return [
         pod
         for pod in pods
-        if pod.raw.get("metadata", {}).get("labels", {}).get(CHECKPOINT_SOURCE_LABEL)
-        != "true"
+        if not _is_snapshot_job_source(pod)
     ]
 
 
@@ -451,45 +490,39 @@ async def _wait_for_restored_decode_pod(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
     old_pod_names: set[str],
-    checkpoint_hash: str,
+    snapshot_name: str,
 ) -> Any:
-    restore_status_annotation = (
-        f"nvidia.com/snapshot-restore-status.{backend.target_container}"
-    )
-
     def find_restored() -> Any:
         pods = _runtime_decode_pods(deployment, backend)
         last_seen: list[dict[str, Any]] = []
         for pod in pods:
             metadata = pod.raw.get("metadata", {})
             name = metadata.get("name", pod.name)
-            labels = metadata.get("labels", {})
             annotations = metadata.get("annotations", {})
             last_seen.append(
                 {
                     "name": name,
-                    "checkpoint": labels.get(CHECKPOINT_ID_LABEL),
-                    "restore": annotations.get(restore_status_annotation),
+                    "snapshot": annotations.get(RESTORE_FROM_ANNOTATION),
+                    "restored": _condition(pod.raw, RESTORED_CONDITION),
                     "phase": pod.raw.get("status", {}).get("phase"),
                     "node": pod.raw.get("spec", {}).get("nodeName"),
                 }
             )
             if name in old_pod_names:
                 continue
-            if labels.get(CHECKPOINT_ID_LABEL) != checkpoint_hash:
+            if annotations.get(RESTORE_FROM_ANNOTATION) != snapshot_name:
                 continue
-            if labels.get(RESTORE_TARGET_LABEL) != "true":
+            restored = _condition(pod.raw, RESTORED_CONDITION)
+            if restored is None:
                 continue
             if (
-                annotations.get(TARGET_CONTAINERS_ANNOTATION)
-                != backend.target_container
+                restored.get("status") == "False"
+                and restored.get("reason") in RESTORE_FAILURE_REASONS
             ):
-                continue
-            if annotations.get(restore_status_annotation) == "failed":
                 raise AssertionError(
                     f"restore failed for decode pod {name}: {last_seen[-1]}"
                 )
-            if annotations.get(restore_status_annotation) != "completed":
+            if restored.get("status") != "True":
                 continue
             return pod
         return last_seen
@@ -624,7 +657,7 @@ async def test_dgd_checkpoint_restore_deploy(
         logger.info("Validating inference before restore")
         _assert_inference(base_url, deployment_spec.endpoint, backend.model)
 
-        _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment, backend)
+        snapshot_name = await _wait_for_checkpoint_ready(deployment, backend)
 
         old_decode_pods = await _wait_for_decode_runtime_pod_count(
             deployment,
@@ -648,7 +681,7 @@ async def test_dgd_checkpoint_restore_deploy(
             deployment,
             backend=backend,
             old_pod_names=old_pod_names,
-            checkpoint_hash=checkpoint_hash,
+            snapshot_name=snapshot_name,
         )
         await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 

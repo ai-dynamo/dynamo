@@ -120,6 +120,7 @@ func ResolvePodSnapshotForService(
 	info := &CheckpointInfo{
 		Enabled:          true,
 		Exists:           true,
+		SourceKind:       SourceKindPodSnapshot,
 		GPUMemoryService: gmsSpec,
 		CheckpointName:   snapshot.Name,
 		Ready:            ready,

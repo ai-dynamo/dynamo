@@ -237,7 +237,7 @@ type GPUMemoryServiceSpec struct {
 	// ExtraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in pods rendered from the enclosing spec.
 	// DGD/DCD services apply this to service pods. Auto-created checkpoints
-	// apply checkpoint job clients before creating the DynamoCheckpoint; manual
+	// apply checkpoint job clients before creating the SnapshotJob; manual
 	// DynamoCheckpoint users must provide an already-prepared pod template.
 	// Every name must match a user-declared container in the enclosing pod spec.
 	// +optional

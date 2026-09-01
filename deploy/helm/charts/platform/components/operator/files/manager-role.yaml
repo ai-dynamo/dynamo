@@ -256,6 +256,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - podsnapshots
   verbs:
   - create
   - delete
@@ -290,13 +291,13 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
+  - snapshotjobs
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

@@ -562,23 +562,60 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 	})
 }
 
-func TestComponentWorkloadsReconciler_PreserveExistingBackendFramework(t *testing.T) {
+func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 	tests := []struct {
-		name          string
-		dcdName       string
-		existing      bool
-		wantFramework string
+		name             string
+		dcdName          string
+		existingReplicas *int32
+		checkpointInfo   *checkpoint.CheckpointInfo
+		wantFramework    string
+		wantReplicas     *int32
 	}{
 		{
-			name:          "existing DCD preserves its immutable stored backend",
-			dcdName:       "vllm-disagg-planner-frontend",
-			existing:      true,
-			wantFramework: "",
+			name:             "existing DCD preserves its immutable stored backend",
+			dcdName:          "vllm-disagg-planner-frontend",
+			existingReplicas: ptr.To(int32(2)),
+			wantFramework:    "",
+			wantReplicas:     ptr.To(int32(5)),
 		},
 		{
-			name:          "new DCD keeps its inferred backend",
-			dcdName:       "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			name:             "existing running DCD stays at its current size while native capture is pending",
+			dcdName:          "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			existingReplicas: ptr.To(int32(2)),
+			checkpointInfo: &checkpoint.CheckpointInfo{
+				Enabled:          true,
+				Exists:           true,
+				AutomaticCapture: true,
+				SourceKind:       checkpoint.SourceKindPodSnapshot,
+				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			},
+			wantFramework: "",
+			wantReplicas:  ptr.To(int32(2)),
+		},
+		{
+			name:             "explicit pending snapshot still applies wait policy to an existing DCD",
+			dcdName:          "vllm-disagg-planner-vllmdecodeworker-explicit",
+			existingReplicas: ptr.To(int32(2)),
+			checkpointInfo: &checkpoint.CheckpointInfo{
+				Enabled:       true,
+				Exists:        true,
+				SourceKind:    checkpoint.SourceKindPodSnapshot,
+				StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			},
+			wantFramework: "",
+			wantReplicas:  ptr.To(int32(0)),
+		},
+		{
+			name:    "new DCD keeps its inferred backend and remains gated",
+			dcdName: "vllm-disagg-planner-vllmdecodeworker-new",
+			checkpointInfo: &checkpoint.CheckpointInfo{
+				Enabled:          true,
+				AutomaticCapture: true,
+				SourceKind:       checkpoint.SourceKindPodSnapshot,
+				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			},
 			wantFramework: "vllm",
+			wantReplicas:  ptr.To(int32(0)),
 		},
 	}
 
@@ -586,13 +623,14 @@ func TestComponentWorkloadsReconciler_PreserveExistingBackendFramework(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build the desired DCD and any existing immutable API state")
 			objects := []client.Object{}
-			if tt.existing {
+			if tt.existingReplicas != nil {
 				objects = append(objects, &nvidiacomv1beta1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
 					Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 							ComponentName: "Frontend",
 							ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+							Replicas:      ptr.To(*tt.existingReplicas),
 						},
 					},
 				})
@@ -610,14 +648,19 @@ func TestComponentWorkloadsReconciler_PreserveExistingBackendFramework(t *testin
 				ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					BackendFramework: "vllm",
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas: ptr.To(int32(5)),
+					},
 				},
 			}
 
-			t.Log("Resolve the backend value that can safely be synchronized")
-			require.NoError(t, workloads.preserveExistingBackendFramework(context.Background(), desired))
+			t.Log("Apply checkpoint gating, then preserve state from an existing DCD")
+			require.NoError(t, workloads.applyCheckpointStartupPolicy(desired, tt.checkpointInfo))
+			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), desired, tt.checkpointInfo))
 
-			t.Log("Verify updates preserve stored state while creates keep the inferred value")
+			t.Log("Verify updates preserve stored state while creates keep generated state")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
+			assert.Equal(t, tt.wantReplicas, desired.Spec.Replicas)
 		})
 	}
 }
@@ -681,6 +724,7 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 				Enabled:        true,
 				Exists:         true,
 				Ready:          true,
+				SourceKind:     checkpoint.SourceKindPodSnapshot,
 				CheckpointName: "snapshot-name",
 				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
 				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
@@ -736,6 +780,59 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			} else {
 				assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
 				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
+			}
+		})
+	}
+}
+
+func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		startupPolicy nvidiacomv1alpha1.CheckpointStartupPolicy
+		wantReplicas  int32
+	}{
+		{
+			name:          "immediate keeps cold-start replicas",
+			startupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+			wantReplicas:  2,
+		},
+		{
+			name:          "wait gates replicas",
+			startupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			wantReplicas:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a generated DCD while its automatic SnapshotJob has no artifact")
+			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas: ptr.To(int32(2)),
+					},
+				},
+			}
+			info := &checkpoint.CheckpointInfo{
+				Enabled:       true,
+				SourceKind:    checkpoint.SourceKindPodSnapshot,
+				StartupPolicy: tt.startupPolicy,
+			}
+
+			t.Log("Apply startup behavior before a PodSnapshot reference exists")
+			reconciler := &componentWorkloadsReconciler{}
+			require.NoError(t, reconciler.applyCheckpointStartupPolicy(dcd, info))
+
+			t.Log("Verify native routing is retained without publishing a restore candidate")
+			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
+			assert.Equal(t, commonconsts.CheckpointSourceKindSnapshot,
+				dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation])
+			if dcd.Spec.Experimental != nil && dcd.Spec.Experimental.Checkpoint != nil {
+				assert.Nil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+			}
+			if dcd.Spec.PodTemplate != nil {
+				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations,
+					commonconsts.CheckpointRestoreCandidateAnnotation)
 			}
 		})
 	}

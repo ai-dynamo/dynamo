@@ -132,10 +132,13 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	}
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
-	if checkpointInfo.NativeSnapshot == nil {
+	if !checkpointInfo.UsesPodSnapshot() {
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
 		annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	} else {
+		if checkpointInfo.NativeSnapshot == nil {
+			return fmt.Errorf("native restore candidate requires a resolved PodSnapshot")
+		}
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot
 		annotations[commonconsts.SnapshotCandidateUIDAnnotation] = string(checkpointInfo.NativeSnapshot.UID)
 		annotations[commonconsts.SnapshotCandidateContentAnnotation] = checkpointInfo.NativeSnapshot.BoundContentName
@@ -177,18 +180,16 @@ func RestoreCandidateTargetContainers(annotations map[string]string) ([]string, 
 }
 
 // ApplyCheckpointSourceMetadata records the resolved checkpoint API kind on
-// intermediate DCD metadata. This avoids name-based probing while native
-// explicit restore and legacy automatic capture coexist. A nil checkpointInfo
-// clears source-kind metadata.
+// intermediate DCD metadata. A nil checkpointInfo clears source-kind metadata.
 func ApplyCheckpointSourceMetadata(annotations map[string]string, checkpointInfo *CheckpointInfo) error {
 	if annotations == nil {
 		return fmt.Errorf("checkpoint source annotations map is required")
 	}
 	delete(annotations, commonconsts.CheckpointSourceKindAnnotation)
-	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
 	}
-	if checkpointInfo.NativeSnapshot == nil {
+	if !checkpointInfo.UsesPodSnapshot() {
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindLegacy
 	} else {
 		annotations[commonconsts.CheckpointSourceKindAnnotation] = commonconsts.CheckpointSourceKindSnapshot

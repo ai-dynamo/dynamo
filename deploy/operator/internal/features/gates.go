@@ -35,8 +35,8 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Configuration: checkpoint.enabled
-	// Auto-detection: nvidia.com/v1alpha1 PodSnapshot resource
-	// Requires: Snapshot operator serving nvidia.com/v1alpha1 PodSnapshot resources
+	// Auto-detection: nvidia.com/v1alpha1 PodSnapshot and SnapshotJob resources
+	// Requires: Snapshot operator serving nvidia.com/v1alpha1 PodSnapshot and SnapshotJob resources
 	// Default: false
 	Checkpoint Name = "checkpoint"
 
@@ -168,7 +168,8 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
-	// Enable Checkpoint only when explicitly configured and its external API dependency is available.
+	// Enable Checkpoint only when explicitly configured and both standalone
+	// Snapshot APIs used by capture and restore are available.
 	if config.Checkpoint.Enabled {
 		podSnapshotResource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
 		podSnapshotAvailable, detectErr := detectAPIAvailability(
@@ -181,8 +182,19 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		if detectErr != nil {
 			return Gates{}, detectErr
 		}
-		if gates.Checkpoint, err = resolve(ptr.To(true), podSnapshotAvailable,
-			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
+		snapshotJobResource := snapshotv1alpha1.GroupVersion.WithResource("snapshotjobs")
+		snapshotJobAvailable, detectErr := detectAPIAvailability(
+			ctx,
+			mgr.GetConfig(),
+			snapshotJobResource.Group,
+			snapshotJobResource.Version,
+			snapshotJobResource.Resource,
+		)
+		if detectErr != nil {
+			return Gates{}, detectErr
+		}
+		if gates.Checkpoint, err = resolve(ptr.To(true), podSnapshotAvailable && snapshotJobAvailable,
+			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot and SnapshotJob APIs were not both detected in the cluster"); err != nil {
 			return Gates{}, err
 		}
 	}

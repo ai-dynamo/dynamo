@@ -27,9 +27,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// SourceKind identifies the API that owns a checkpoint reference.
+type SourceKind string
+
+const (
+	// SourceKindLegacy identifies a DynamoCheckpoint reference retained until
+	// the legacy checkpoint implementation is removed.
+	SourceKindLegacy SourceKind = "DynamoCheckpoint"
+	// SourceKindPodSnapshot identifies a standalone Snapshot PodSnapshot.
+	SourceKindPodSnapshot SourceKind = "PodSnapshot"
+)
+
 type CheckpointInfo struct {
 	Enabled          bool
 	Exists           bool
+	AutomaticCapture bool
+	SourceKind       SourceKind
 	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	Hash             string
 	ArtifactVersion  string
@@ -43,6 +56,13 @@ type CheckpointInfo struct {
 	NativeSnapshot *ResolvedPodSnapshot
 }
 
+// UsesPodSnapshot reports whether standalone Snapshot owns the capture or
+// restore path, including an automatic capture whose PodSnapshot is pending.
+// CheckpointInfo must be non-nil.
+func (info *CheckpointInfo) UsesPodSnapshot() bool {
+	return info.SourceKind == SourceKindPodSnapshot
+}
+
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
 	hash, err := CheckpointID(ckpt)
 	if err != nil {
@@ -52,6 +72,7 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	return &CheckpointInfo{
 		Enabled:          true,
 		Exists:           true,
+		SourceKind:       SourceKindLegacy,
 		GPUMemoryService: ckpt.Spec.GPUMemoryService,
 		Hash:             hash,
 		ArtifactVersion:  checkpointArtifactVersion(ckpt),
@@ -101,6 +122,7 @@ func ResolveLegacyCheckpointForService(
 	case config.Identity == nil:
 		return &CheckpointInfo{
 			Enabled:       true,
+			SourceKind:    SourceKindLegacy,
 			StartupPolicy: startupPolicy,
 		}, nil
 	}
@@ -117,6 +139,7 @@ func ResolveLegacyCheckpointForService(
 	if existing == nil {
 		return &CheckpointInfo{
 			Enabled:       true,
+			SourceKind:    SourceKindLegacy,
 			Hash:          hash,
 			StartupPolicy: startupPolicy,
 		}, nil

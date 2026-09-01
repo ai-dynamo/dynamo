@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,12 +32,13 @@ import (
 
 func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 	tests := []struct {
-		name              string
-		checkpointEnabled bool
-		crdPaths          []string
-		wantGateEnabled   bool
-		wantGateError     bool
-		verifyFinalizer   bool
+		name               string
+		checkpointEnabled  bool
+		crdPaths           []string
+		installSnapshotJob bool
+		wantGateEnabled    bool
+		wantGateError      bool
+		verifyFinalizer    bool
 	}{
 		{
 			name:            "API absent and checkpoint disabled",
@@ -50,7 +52,8 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 				filepath.Join("..", "..", "config", "crd", "bases"),
 				filepath.Join("testing", "nvidia"),
 			},
-			wantGateEnabled: false,
+			installSnapshotJob: true,
+			wantGateEnabled:    false,
 		},
 		{
 			name:              "API present and checkpoint enabled",
@@ -59,7 +62,8 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 				filepath.Join("..", "..", "config", "crd", "bases"),
 				filepath.Join("testing", "nvidia"),
 			},
-			wantGateEnabled: true,
+			installSnapshotJob: true,
+			wantGateEnabled:    true,
 		},
 		{
 			name:              "API absent and checkpoint enabled",
@@ -67,13 +71,32 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 			crdPaths:          []string{filepath.Join("..", "..", "config", "crd", "bases")},
 			wantGateError:     true,
 		},
+		{
+			name:              "PodSnapshot present without SnapshotJob and checkpoint enabled",
+			checkpointEnabled: true,
+			crdPaths: []string{
+				filepath.Join("..", "..", "config", "crd", "bases"),
+				filepath.Join("testing", "nvidia"),
+			},
+			wantGateError: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			crdPaths := append([]string(nil), tt.crdPaths...)
+			if tt.installSnapshotJob {
+				crdDir := t.TempDir()
+				crdFile := filepath.Join(crdDir, "nvidia.com_snapshotjobs.yaml")
+				if err := os.WriteFile(crdFile, []byte(snapshotJobDiscoveryTestCRD), 0o600); err != nil {
+					t.Fatalf("write SnapshotJob discovery CRD: %v", err)
+				}
+				crdPaths = append(crdPaths, crdDir)
+			}
+
 			t.Log("Start an API server with the scenario's CRDs installed")
 			testEnv := operatorenv.New(operatorenv.Options{
-				CRDDirectoryPaths: tt.crdPaths,
+				CRDDirectoryPaths: crdPaths,
 				Config: &configv1alpha1.OperatorConfiguration{
 					Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: tt.checkpointEnabled},
 				},
@@ -185,3 +208,31 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 		})
 	}
 }
+
+// snapshotJobDiscoveryTestCRD is deliberately minimal: this test exercises
+// API discovery and conditional watch registration, not Snapshot's CRD schema.
+// Snapshot owns validation of its distributed CRD.
+const snapshotJobDiscoveryTestCRD = `
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: snapshotjobs.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: SnapshotJob
+    listKind: SnapshotJobList
+    plural: snapshotjobs
+    singular: snapshotjob
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+    subresources:
+      status: {}
+`

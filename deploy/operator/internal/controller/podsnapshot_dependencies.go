@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -72,6 +73,17 @@ func (r *DynamoGraphDeploymentReconciler) mapPodSnapshotToDGDRequests(
 	ctx context.Context,
 	obj client.Object,
 ) []ctrl.Request {
+	// Automatic captures carry their graph identity because their DGD spec has
+	// no explicit checkpointRef to index until the SnapshotJob completes.
+	requestsByKey := make(map[types.NamespacedName]struct{})
+	if obj.GetAnnotations()[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue {
+		if graphName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]; graphName != "" {
+			requestsByKey[types.NamespacedName{Namespace: obj.GetNamespace(), Name: graphName}] = struct{}{}
+		}
+	}
+
+	// Explicit references continue to use the field index so shared snapshots
+	// requeue every graph that names them.
 	graphs := &nvidiacomv1beta1.DynamoGraphDeploymentList{}
 	if err := r.List(
 		ctx,
@@ -80,17 +92,31 @@ func (r *DynamoGraphDeploymentReconciler) mapPodSnapshotToDGDRequests(
 		client.MatchingFields{dgdPodSnapshotRefIndex: obj.GetName()},
 	); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to list DynamoGraphDeployments for PodSnapshot event")
-		return nil
+		return checkpointRequests(requestsByKey)
 	}
 
-	requests := make([]ctrl.Request, 0, len(graphs.Items))
 	for i := range graphs.Items {
 		graph := &graphs.Items[i]
-		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+		requestsByKey[types.NamespacedName{
 			Namespace: graph.Namespace,
 			Name:      graph.Name,
-		}})
+		}] = struct{}{}
 	}
+	return checkpointRequests(requestsByKey)
+}
+
+func checkpointRequests(keys map[types.NamespacedName]struct{}) []ctrl.Request {
+	requests := make([]ctrl.Request, 0, len(keys))
+	for key := range keys {
+		requests = append(requests, ctrl.Request{NamespacedName: key})
+	}
+	// Stable ordering keeps combined automatic and explicit dependency events deterministic.
+	sort.Slice(requests, func(i, j int) bool {
+		if requests[i].Namespace == requests[j].Namespace {
+			return requests[i].Name < requests[j].Name
+		}
+		return requests[i].Namespace < requests[j].Namespace
+	})
 	return requests
 }
 

@@ -95,6 +95,9 @@ const (
 	// automatic checkpoint should be deleted or retained when the owning DGD is
 	// deleted.
 	CheckpointDeletionPolicyAnnotation = "nvidia.com/dynamo-checkpoint-deletion-policy"
+	// CheckpointOwnerUIDAnnotation binds DGD-managed automatic capture resources
+	// to one concrete graph incarnation.
+	CheckpointOwnerUIDAnnotation = "nvidia.com/dynamo-checkpoint-owner-uid"
 	// CheckpointRestoreCandidateAnnotation marks owner pod templates whose Pods
 	// should be restore-shaped by the operator's pod-create mutating webhook
 	// once the referenced checkpoint is Ready. This intentionally does not use
@@ -107,7 +110,7 @@ const (
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
 	// CheckpointSourceKindAnnotation identifies the API kind that owns a
-	// checkpoint reference while automatic capture remains on the legacy path.
+	// checkpoint reference carried by an intermediate DCD.
 	CheckpointSourceKindAnnotation = "nvidia.com/dynamo-checkpoint-source-kind"
 	CheckpointSourceKindLegacy     = "DynamoCheckpoint"
 	CheckpointSourceKindSnapshot   = "PodSnapshot"
