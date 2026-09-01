@@ -475,13 +475,16 @@ impl Runtime {
                     coordinator_done.recv_timeout(wait_bound),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                 );
+                // The sender is also dropped when the coordinator is discarded or panics
+                // before phase 3. Both cancellations are idempotent.
+                main_token.cancel();
+                complete.cancel();
+
                 if coordinator_timed_out {
                     tracing::error!(
                         wait_secs = wait_bound.as_secs(),
                         "Shutdown coordinator did not finish in time; tearing down the owned runtime anyway"
                     );
-                    main_token.cancel();
-                    complete.cancel();
                 }
 
                 if coordinator_timed_out {
