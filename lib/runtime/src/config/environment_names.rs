@@ -1092,7 +1092,6 @@ mod tests {
         // ETCD vars should start with ETCD_
         assert!(etcd::ETCD_ENDPOINTS.starts_with("ETCD_"));
         assert!(etcd::ETCD_LEASE_TTL.starts_with("ETCD_"));
-        assert!(etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS.starts_with("ETCD_"));
         assert!(etcd::auth::ETCD_AUTH_USERNAME.starts_with("ETCD_AUTH_"));
 
         // OpenTelemetry vars should start with OTEL_

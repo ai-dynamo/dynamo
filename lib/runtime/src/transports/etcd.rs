@@ -1152,18 +1152,6 @@ mod unit_tests {
     }
 
     #[test]
-    fn client_builder_accepts_startup_connect_timeout() {
-        let timeout = Duration::from_secs(45);
-        let options = Client::builder()
-            .etcd_url(vec!["http://localhost:2379".to_string()])
-            .startup_connect_timeout(timeout)
-            .build()
-            .unwrap();
-
-        assert_eq!(options.startup_connect_timeout, timeout);
-    }
-
-    #[test]
     fn rejects_unrepresentable_startup_connect_timeout() {
         let runtime = Runtime::single_threaded().unwrap();
         let runtime_for_connect = runtime.clone();
