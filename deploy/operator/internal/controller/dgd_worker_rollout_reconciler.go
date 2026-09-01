@@ -118,7 +118,7 @@ func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	current := r.currentWorkerHashes(dgd)
 	if current.empty() {
 		return unsupportedWorkerHashTransition{
-			next:       workerHashesForCompletedGeneration(desired.v2, desired),
+			next:       workerGenerationHashes{v2: desired.v2},
 			initialize: true,
 		}, nil
 	}
