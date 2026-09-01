@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use dynamo_truthy::env_is_truthy;
+
 mod default;
 mod policy;
 
@@ -28,16 +30,8 @@ use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, Worker
 
 /// Disabled by default: collecting the candidate table is diagnostic-only and
 /// intentionally has zero extra work or trace volume in normal serving.
-static ROUTER_DECISION_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("DYN_ROUTER_DECISION_TRACE_ENABLED")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-});
+static ROUTER_DECISION_TRACE_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy("DYN_ROUTER_DECISION_TRACE_ENABLED"));
 
 pub(crate) fn router_decision_trace_enabled() -> bool {
     *ROUTER_DECISION_TRACE_ENABLED

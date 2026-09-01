@@ -422,6 +422,7 @@ fn sampled_request(request_id: &str, sample_rate: f64) -> bool {
 /// Build the per-worker explanation only after a selection, and only when the
 /// caller explicitly enabled diagnostic tracing. The normal picker remains
 /// allocation-free beyond its existing scratch buffer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decision_trace_for_selection<C: WorkerConfigLike>(
     kv_router_config: &KvRouterConfig,
     worker_type: &'static str,
