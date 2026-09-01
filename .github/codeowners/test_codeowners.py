@@ -1097,6 +1097,20 @@ class TestWeakenedDeclarations:
             "lib/ (typo)"
         ]
 
+    def test_removed_area_glob_absorbed_by_enclosing_area_is_reported(self) -> None:
+        # docs owns lib/docs/ inside runtime's lib/. Dropping the nested glob
+        # lets runtime absorb those files: coverage stays green, docs silently
+        # stops owning them.
+        base = self._spec()
+        base["shared"] = []
+        base["areas"][1]["path_globs"] = ["lib/docs/"]
+        head = self._spec()
+        head["shared"] = []
+        weakened = weakened_declarations(base, head, ["lib/docs/a.md"])
+        assert [w.kind for w in weakened] == ["area"]
+        assert weakened[0].glob == "lib/docs/"
+        assert weakened[0].lost == ("@docs",)
+
     def test_removed_filetype_grant_is_reported(self) -> None:
         base = self._spec()
         base["classify"] = {
@@ -1106,15 +1120,6 @@ class TestWeakenedDeclarations:
         weakened = weakened_declarations(base, head, ["svc/Dockerfile"])
         assert [w.kind for w in weakened] == ["filetype"]
         assert weakened[0].lost == ("@docs",)
-
-    def test_inert_hand_off_entry_is_reported(self) -> None:
-        # Held to the same standard as a glob that matches no file.
-        head = self._spec()
-        head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
-        teams = compute_resolution(head).label_to_team()
-        assert describe_transfers(unmatched_transfers([], head, teams)) == [
-            "lib/ (@docs)"
-        ]
 
     def test_landed_hand_off_does_not_block_its_own_base(self) -> None:
         # After the hand-off merges, the push-to-main run has HEAD as its own

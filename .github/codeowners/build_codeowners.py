@@ -239,12 +239,13 @@ class WeakenedDeclaration:
 def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
     """Flatten the enforceable ownership grants of a raw areas spec.
 
-    Covers the three declaration kinds that grant ownership a head-only check
-    cannot re-derive once they are gone: ``required_owners``, ``shared``, and
-    the blocking ``classify.filetype_rules``. The file-type rules matter as
-    much as the others -- deleting the ``*Dockerfile*`` rule drops its coowner
-    from every Dockerfile while directory areas keep coverage green, so
-    nothing else would notice.
+    Covers every declaration kind that grants ownership a head-only check
+    cannot re-derive once it is gone: an area's own ``path_globs``,
+    ``required_owners``, ``shared``, and the blocking
+    ``classify.filetype_rules``. The last two matter as much as the first --
+    deleting a nested area glob lets an enclosing area absorb the files, and
+    deleting the ``*Dockerfile*`` rule drops its coowner from every
+    Dockerfile. Coverage stays green through both, so nothing else notices.
 
     Reads raw YAML rather than a ``ResolvedModel`` on purpose. The resolver
     rejects retired schema keys outright, and the base revision this gate
@@ -257,6 +258,11 @@ def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
             glob = rule.get("glob")
             if glob:
                 grants[(kind, glob)] = set(rule.get("owners") or [])
+    for area in spec.get("areas") or []:
+        label = area.get("label")
+        for glob in area.get("path_globs") or []:
+            if label and glob:
+                grants.setdefault(("area", glob), set()).add(label)
     classify = spec.get("classify") or {}
     for rule in classify.get("filetype_rules") or []:
         pattern, coowner = rule.get("pattern"), rule.get("coowner")
