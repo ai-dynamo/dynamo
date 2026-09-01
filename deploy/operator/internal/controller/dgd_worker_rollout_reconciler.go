@@ -378,17 +378,10 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		}
 		dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = current.v2
 		metadataChanged = true
-		if current.v1 == "" {
-			restored, err := r.restoreLegacyWorkerHashIfNeeded(ctx, dgd, current.v2)
-			if err != nil {
-				return false, err
-			}
-			metadataChanged = metadataChanged || restored
-		}
 	}
 	if metadataChanged {
 		if err := r.Update(ctx, dgd); err != nil {
-			return false, fmt.Errorf("failed to restore worker hash annotations: %w", err)
+			return false, fmt.Errorf("failed to repair worker hash annotations: %w", err)
 		}
 		if dgd.Status.CurrentWorkerHash == "" {
 			currentWorkerHashStatusChanged = r.setCurrentWorkerHashStatus(status, current.v2)
@@ -498,51 +491,6 @@ func (r *dgdWorkerRolloutReconciler) findLegacyWorkerDCDs(
 	}
 
 	return legacyDCDs, nil
-}
-
-// restoreLegacyWorkerHashIfNeeded restores the v1 suffix only when every
-// existing labeled worker DCD agrees on one non-v2 generation. This prevents a
-// replacement that omitted controller annotations from rendering a duplicate
-// v2 DCD for a completed legacy generation.
-func (r *dgdWorkerRolloutReconciler) restoreLegacyWorkerHashIfNeeded(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	currentV2 string,
-) (bool, error) {
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	if err := r.List(ctx, dcdList,
-		client.InNamespace(dgd.Namespace),
-		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
-	); err != nil {
-		return false, fmt.Errorf("list worker DCDs for legacy suffix recovery: %w", err)
-	}
-
-	legacyHashes := make(map[string]struct{})
-	for i := range dcdList.Items {
-		dcd := &dcdList.Items[i]
-		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
-			continue
-		}
-		hash := dcd.Labels[consts.KubeLabelDynamoWorkerHash]
-		if hash == currentV2 {
-			return false, nil
-		}
-		if hash != "" {
-			legacyHashes[hash] = struct{}{}
-		}
-	}
-	if len(legacyHashes) != 1 {
-		return false, nil
-	}
-
-	for hash := range legacyHashes {
-		if dgd.Annotations == nil {
-			dgd.Annotations = make(map[string]string)
-		}
-		dgd.Annotations[consts.AnnotationCurrentWorkerHash] = hash
-		return true, nil
-	}
-	return false, nil
 }
 
 // getCurrentWorkerHash returns the v1 worker generation stored on the DGD.

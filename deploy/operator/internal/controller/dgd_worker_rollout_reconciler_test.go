@@ -514,47 +514,6 @@ func TestWorkerHashStatusBackfillsFromV2Annotation(t *testing.T) {
 	assert.False(t, trigger)
 }
 
-func TestWorkerHashStatusRestoresStrippedLegacySuffix(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	desiredV2 := betaDGDWorkersSpecHash(t, dgd)
-	dgd.Status.CurrentWorkerHash = desiredV2
-
-	const legacySuffix = "legacy-worker-hash"
-	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-legacy-worker-hash",
-			Namespace: dgd.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoWorkerHash:          legacySuffix,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
-	require.NoError(t, currentWorkerHashStatusError(r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, &dgd.Status)))
-
-	assert.Equal(t, legacySuffix, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	assert.Equal(t, desiredV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	assert.Equal(t, desiredV2, dgd.Status.CurrentWorkerHash)
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	assert.False(t, trigger)
-
-	desired, err := desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	assert.Equal(t, legacySuffix, r.activeWorkerHashForDCDGeneration(dgd, desired))
-}
-
 func TestWorkerHashStatusRepairsMirrorDuringRollout(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
