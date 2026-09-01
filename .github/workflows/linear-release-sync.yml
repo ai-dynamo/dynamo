@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Syncs merged work into the release in Linear. On every push the action scans
+# the new commits for Linear issue identifiers and PR references and attaches
+# the referenced issues to the release, so the Release view stays a live
+# feature list without a manual step. Pushes to main sync into the release
+# currently in development on main; pushes to a release branch sync into that
+# release's own entry.
+
+name: Linear Release Sync
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+
+env:
+  # The release currently in development on main. Update at each cycle open,
+  # when the prior release branch is cut and main rolls to the next line.
+  MAIN_RELEASE_VERSION: "1.6.0"
+
+concurrency:
+  group: linear-release-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync issues to the Linear release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        run: |
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "version=${MAIN_RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/heads/release/}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Sync release
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: sync
+          version: ${{ steps.version.outputs.version }}
+          name: Dynamo v${{ steps.version.outputs.version }}
+          # Dry run for the rollout: scans and logs what it would attach
+          # without creating or modifying anything in Linear. Flip to false
+          # after one observed run confirms it targets the existing
+          # "Dynamo v1.6.0" release rather than creating a duplicate.
+          dry_run: true
