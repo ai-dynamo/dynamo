@@ -221,6 +221,7 @@ impl LifecycleStage {
             Self::RequestDispatch => common_span!("request.dispatch"),
             Self::KvTransfer => common_span!("kv.transfer"),
             Self::EngineQueue => common_span!("engine.queue"),
+            Self::WorkerOperation => common_span!("worker.operation"),
             Self::WorkerOperationPrefill => common_span!("worker.operation.prefill"),
             Self::WorkerOperationDecode => common_span!("worker.operation.decode"),
             Self::ResponseStreaming => common_span!("response.streaming"),
