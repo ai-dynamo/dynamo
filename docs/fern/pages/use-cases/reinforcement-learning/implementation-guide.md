@@ -371,6 +371,7 @@ The response describes each live worker and probes it for the routes available i
         "liveness_probe",
         "pause_generation",
         "resume_generation",
+        "set_weight_version",
         "update_weights_from_disk"
       ]
     }
@@ -436,6 +437,41 @@ Route request bodies and response fields are engine-specific. A callback can ret
 SGLang direct administration uses SGLang-specific routes and response shapes. For example, call `/engine/control/update_weights_from_disk` directly when you already know the worker URL, or call `/engine/call_tokenizer_manager` with `{"method":"update_weights_from_disk", ...}` for tokenizer-manager passthrough behavior.
 
 The `/v1/rl/workers` endpoint is read-only. It intentionally does not expose `/v1/rl/engine` or `/v1/rl/engines` proxy routes, which prevents an accidental frontend fan-out of a mutating engine operation.
+
+### Read and Declare the Weight Version
+
+A vLLM worker reports the last weight version declared to it through `get_weight_version`:
+
+```bash
+curl http://10.0.0.12:8081/engine/get_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+```json
+{"status": "ok", "version": "42", "version_declared": true}
+```
+
+A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
+
+A weight-update route that omits `weight_version` answers `"version": "unknown"` but declares nothing, so the surface stays undeclared. Pass `weight_version` on every update whose version you want the surface to report.
+
+> [!WARNING]
+> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+
+When an RL framework loads weights outside Dynamo, declare the resulting version so the surface stays correct. `set_weight_version` records the tag and loads nothing:
+
+```bash
+curl http://10.0.0.12:8081/engine/set_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{"weight_version": "43"}'
+```
+
+```json
+{"status": "ok", "version": "43"}
+```
+
+The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
 
 ## Register a Custom Engine Route
 
