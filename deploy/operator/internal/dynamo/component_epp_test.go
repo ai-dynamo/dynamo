@@ -61,26 +61,30 @@ func TestEPPCacheMountTracksHome(t *testing.T) {
 		assert.Equal(t, home+"/.cache", mountPathNamed(container, "hf-cache"))
 	})
 
-	t.Run("legacy Go EPP keeps the nonroot cache path", func(t *testing.T) {
+	t.Run("legacy Go EPP gets no cache mount", func(t *testing.T) {
 		container := eppContainerFor(t, &nvidiacomv1beta1.EPPConfig{})
 
-		assert.Equal(t, legacyGoEPPHome+"/.cache", mountPathNamed(container, "hf-cache"),
-			"legacy Go EPP images run as nonroot; moving this path would break existing DGDs")
+		assert.Empty(t, mountPathNamed(container, "hf-cache"),
+			"the legacy Go EPP downloads no model configs, and eppConfig selects the launch contract without identifying the image whose HOME a mount would have to track")
 	})
 }
 
-// The volume the mount refers to must exist, or the pod is rejected outright.
-func TestEPPCacheVolumeIsDeclaredForBothContracts(t *testing.T) {
-	for name, eppConfig := range map[string]*nvidiacomv1beta1.EPPConfig{
-		"native": nil,
-		"legacy": {},
+// The volume must exist wherever the mount does, or the pod is rejected
+// outright, and must be absent wherever nothing mounts it.
+func TestEPPCacheVolumeMatchesTheMount(t *testing.T) {
+	for name, tc := range map[string]struct {
+		eppConfig  *nvidiacomv1beta1.EPPConfig
+		wantVolume bool
+	}{
+		"native": {eppConfig: nil, wantVolume: true},
+		"legacy": {eppConfig: &nvidiacomv1beta1.EPPConfig{}, wantVolume: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			podSpec, err := NewEPPDefaults().GetBasePodSpec(ComponentContext{
 				ComponentType:                  commonconsts.ComponentTypeEPP,
 				ParentGraphDeploymentName:      "dgd",
 				ParentGraphDeploymentNamespace: "ns",
-				EPPConfig:                      eppConfig,
+				EPPConfig:                      tc.eppConfig,
 			})
 			require.NoError(t, err)
 
@@ -91,7 +95,7 @@ func TestEPPCacheVolumeIsDeclaredForBothContracts(t *testing.T) {
 					assert.NotNil(t, v.EmptyDir)
 				}
 			}
-			assert.True(t, found, "hf-cache volume must back the mount")
+			assert.Equal(t, tc.wantVolume, found, "hf-cache volume must be declared exactly where it is mounted")
 		})
 	}
 }
