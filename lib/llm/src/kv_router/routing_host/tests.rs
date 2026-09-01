@@ -64,24 +64,27 @@ async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
 
 #[test]
 fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
-    let drainable = |output: &LLMEngineOutput| {
-        matches!(
-            classify_response_item(&Annotated::from_data(output.clone())),
-            ResponseItemOutcome::DrainableTerminal
-        )
-    };
+    let outcome =
+        |output: &LLMEngineOutput| classify_response_item(&Annotated::from_data(output.clone()));
 
     let mut output = LLMEngineOutput::default();
-    assert!(!drainable(&output));
+    assert!(matches!(outcome(&output), ResponseItemOutcome::Healthy));
 
+    // Carries only a bare message, so migration has nothing to act on: drain for a typed error.
     output.finish_reason = Some(FinishReason::Error("decode failed".to_string()));
-    assert!(drainable(&output));
+    assert!(matches!(
+        outcome(&output),
+        ResponseItemOutcome::DrainableTerminal
+    ));
 
     output.finish_reason = Some(FinishReason::Cancelled);
-    assert!(drainable(&output));
+    assert!(matches!(
+        outcome(&output),
+        ResponseItemOutcome::DrainableTerminal
+    ));
 
     output.finish_reason = Some(FinishReason::Length);
-    assert!(!drainable(&output));
+    assert!(matches!(outcome(&output), ResponseItemOutcome::Healthy));
 }
 
 #[test]
@@ -894,7 +897,10 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
     let monitored = monitor_response_stream(source, cancelled_request.context().clone(), guard);
     tokio::pin!(monitored);
 
-    let item = tokio::time::timeout(Duration::from_secs(10), monitored.next())
+    // Below DRAIN_TIMEOUT so only transport EOF can satisfy these assertions: at 10s the
+    // test would also pass if the drain deadline, not EOF, had ended the stream.
+    let eof_bound = DRAIN_TIMEOUT / 2;
+    let item = tokio::time::timeout(eof_bound, monitored.next())
         .await
         .expect("the drain must end at transport EOF, not block on a trailing error")
         .expect("the cancelled frame must be yielded once EOF proves it was the last");
@@ -905,7 +911,7 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
         Some(FinishReason::Cancelled)
     ));
     assert!(
-        tokio::time::timeout(Duration::from_secs(10), monitored.next())
+        tokio::time::timeout(eof_bound, monitored.next())
             .await
             .expect("the drain must end at transport EOF, not wait for a trailing error")
             .is_none()
