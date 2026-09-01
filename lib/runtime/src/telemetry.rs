@@ -281,6 +281,15 @@ impl LifecycleTrace {
         }
     }
 
+    /// Construct a frontend trace before request parsing has made a session ID available.
+    pub fn frontend_request_without_session(request_id: impl Into<String>) -> Self {
+        Self {
+            enabled: lifecycle_tracing_enabled(),
+            identity: LifecycleIdentity::new(Some(request_id.into()), LifecycleOperationRole::Frontend),
+            session: None,
+        }
+    }
+
     fn with_role(request_id: impl Into<String>, role: LifecycleOperationRole) -> Self {
         Self {
             enabled: lifecycle_tracing_enabled(),
@@ -359,7 +368,18 @@ impl LifecycleRequest {
     pub fn terminal(&self) -> LifecycleTerminal {
         self.terminal.clone()
     }
+
+    /// Record session identity after request parsing, or the request-ID fallback on early errors.
+    pub fn record_session(&self, request_id: &str, session_id: Option<&str>) {
+        let (session_id, source) = session_id
+            .filter(|id| !id.is_empty())
+            .map(|id| (id, "agent_context"))
+            .unwrap_or((request_id, "request_id_fallback"));
+        self.span.record("dynamo.session.id", session_id);
+        self.span.record("dynamo.session.source", source);
+    }
 }
+
 
 /// A terminal recorder that is safe to clone across completion and cancellation paths.
 #[derive(Clone)]
@@ -453,14 +473,7 @@ fn worker_response_streaming_stage() -> LifecycleStage {
 }
 
 pub(crate) fn lifecycle_tracing_enabled() -> bool {
-    std::env::var(DYN_LIFECYCLE_TRACE_ENABLED)
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
+    crate::config::env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED)
 }
 
 #[cfg(test)]
