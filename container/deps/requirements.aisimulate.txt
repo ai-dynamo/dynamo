@@ -2,4 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-aisimulate==0.1.0.dev1
+# 0.1.0.dev2 vendors aiconfigurator / aiconfigurator_core; do not also pip-install those.
+aisimulate==0.1.0.dev2
