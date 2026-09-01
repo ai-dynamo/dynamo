@@ -509,19 +509,18 @@ impl RuntimeType {
     /// indefinitely. External handles have no runtime ownership to shut down.
     fn shutdown_owned_timeout(self, timeout: Duration) {
         let mut runtime_type = ManuallyDrop::new(self);
-        let RuntimeType::Shared(runtime) = &mut *runtime_type else {
-            unsafe { ManuallyDrop::drop(&mut runtime_type) };
+        let mut runtime = match unsafe { ManuallyDrop::take(&mut runtime_type) } {
+            RuntimeType::External(_) => return,
+            RuntimeType::Shared(runtime) => runtime,
+        };
+
+        let Some(manually_dropped_runtime) = Arc::get_mut(&mut runtime) else {
             return;
         };
 
-        let Some(runtime) = Arc::get_mut(runtime) else {
-            unsafe { ManuallyDrop::drop(&mut runtime_type) };
-            return;
-        };
-
-        let runtime = unsafe { ManuallyDrop::take(runtime) };
-        unsafe { ManuallyDrop::drop(runtime) };
-        runtime.shutdown_timeout(timeout);
+        let tokio_runtime = unsafe { ManuallyDrop::take(manually_dropped_runtime) };
+        drop(runtime);
+        tokio_runtime.shutdown_timeout(timeout);
     }
 }
 
