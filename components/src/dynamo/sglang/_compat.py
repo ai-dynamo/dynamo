@@ -40,6 +40,26 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Where the KV router stashes a request's hints. Mirrors the vLLM handler's
+# private copies of the same wire keys (dynamo/vllm/handlers.py); the Rust side
+# owns the canonical definitions in lib/kv-router/src/router_hint.rs.
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY = "kv_transfer_params"
+_ROUTER_HINT_EXTRA_ARGS_KEY = "router_hint"
+
+# The async_generate kwarg SGLang reads the hint from. Named for the KV-hint
+# envelope (protocol 0.1) rather than for one hint shape, since SGLang parses
+# the field as a list of independently versioned actions.
+_SGLANG_HINT_KWARG = "kv_hints"
+
+
+@lru_cache(maxsize=1)
+def _warn_router_hint_unsupported() -> None:
+    logger.warning(
+        "Dropping the router KV-reuse hint because SGLang Engine.async_generate "
+        f"does not accept {_SGLANG_HINT_KWARG}; requests will recompute prefixes a peer "
+        "already holds. Upgrade SGLang to enable hint-driven KV reuse."
+    )
+
 
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
@@ -209,9 +229,42 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+def router_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request router KV-reuse hint argument.
+
+    The KV router attaches its hint under ``extra_args.kv_transfer_params``;
+    SGLang consumes it as the ``kv_hints`` async_generate kwarg, which is
+    threaded down to the HiCache storage backends so one of them can pull the
+    prefix from the named peer. An engine without that kwarg just recomputes the
+    prefix, so a missing hint degrades rather than failing the request.
+
+    The value is forwarded untouched: SGLang reads the KV-hint envelope and
+    picks out the actions it implements, so this adapter needs no change when
+    the router starts wrapping its hint in one.
+    """
+    extra_args = request.get("extra_args")
+    if not isinstance(extra_args, Mapping):
+        return {}
+    kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    if not isinstance(kv_transfer_params, Mapping):
+        return {}
+    router_hint = kv_transfer_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
+    if not isinstance(router_hint, Mapping):
+        return {}
+
+    kwargs = filter_supported_async_generate_kwargs(
+        engine,
+        {_SGLANG_HINT_KWARG: dict(router_hint)},
+    )
+    if _SGLANG_HINT_KWARG not in kwargs:
+        _warn_router_hint_unsupported()
+    return kwargs
+
+
 __all__ = [
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "override_server_args",
     "require_reasoning_kwargs",
+    "router_hint_kwargs",
 ]
