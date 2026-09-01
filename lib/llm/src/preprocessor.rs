@@ -58,7 +58,7 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::MediaLoader;
+use crate::preprocessor::media::{MediaDecoder, MediaLoader};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -2437,6 +2437,7 @@ impl OpenAIPreprocessor {
 
     pub fn builder<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -2451,6 +2452,7 @@ impl OpenAIPreprocessor {
 
     fn builder_with_lora<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -2600,6 +2602,13 @@ impl OpenAIPreprocessor {
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
+
+        // Forward media_io_kwargs untouched only when the worker owns decoding. With a
+        // media loader the frontend consumes them itself, so re-sending would risk the
+        // worker applying them a second time.
+        if self.media_loader.is_none() {
+            builder.media_io_kwargs(request.media_io_kwargs().cloned());
+        }
 
         Ok(builder)
     }
@@ -2950,9 +2959,19 @@ impl OpenAIPreprocessor {
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let media_io_kwargs = request.media_io_kwargs();
+            // The frontend owns decoding here, so the opaque request kwargs are parsed
+            // into the decoder config -- borrowing the `Value`, no clone. Mapped to
+            // InvalidArgument so a malformed payload stays a 400 rather than a 500.
+            let media_io_kwargs = request
+                .media_io_kwargs()
+                .map(<MediaDecoder as serde::Deserialize>::deserialize)
+                .transpose()
+                .map_err(|e| invalid_argument_error(format!("invalid media_io_kwargs: {e}")))?;
             let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
-                loader.fetch_and_decode_media_part(task.content_part.as_ref(), media_io_kwargs)
+                loader.fetch_and_decode_media_part(
+                    task.content_part.as_ref(),
+                    media_io_kwargs.as_ref(),
+                )
             }))
             .await;
 

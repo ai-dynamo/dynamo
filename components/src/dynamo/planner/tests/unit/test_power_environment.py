@@ -21,6 +21,7 @@ from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
+    ComponentGPUShape,
     ComponentPowerConfig,
 )
 
@@ -92,7 +93,9 @@ def _controller(prefill_watts=700, decode_watts=1200, *, gpus_per_replica=1):
 
 def _refresh_controller(prefill_cfg, decode_cfg):
     controller = _power_controller()
-    controller.get_gpu_counts = Mock(return_value=(1, 1))
+    controller.get_gpu_shapes = Mock(
+        return_value=(ComponentGPUShape(1, 1), ComponentGPUShape(1, 1))
+    )
     controller.get_component_power_configs = Mock(
         return_value=(prefill_cfg, decode_cfg)
     )
@@ -368,17 +371,17 @@ async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
         seen["power_deployments"].append(deployment)
         return (_cfg("prefill", 300), _cfg("decode", 300))
 
-    def get_gpu_counts(*, require_prefill=True, require_decode=True, deployment=None):
+    def get_gpu_shapes(*, require_prefill=True, require_decode=True, deployment=None):
         del require_prefill, require_decode
         seen["gpu_deployments"].append(deployment)
-        return (1, 1)
+        return (ComponentGPUShape(1, 1), ComponentGPUShape(1, 1))
 
     controller = Mock()
     controller.async_init = AsyncMock()
     controller.validate_deployment = AsyncMock()
     controller.wait_for_settled_graph_deployment = AsyncMock(return_value=settled)
     controller.get_graph_deployment = Mock(return_value=lagging)
-    controller.get_gpu_counts = get_gpu_counts
+    controller.get_gpu_shapes = get_gpu_shapes
     controller.get_actual_worker_counts = AsyncMock(return_value=(1, 1, True))
     controller.get_power_aware_worker_counts = AsyncMock(return_value=(1, 1, True))
     controller.get_model_name = Mock(return_value="test-model")
@@ -424,7 +427,9 @@ async def test_initialize_power_disabled_skips_settled_backing_wait():
     controller.validate_deployment = AsyncMock()
     controller.wait_for_settled_graph_deployment = wait_settled
     controller.wait_for_deployment_ready = AsyncMock()
-    controller.get_gpu_counts = Mock(return_value=(1, 1))
+    controller.get_gpu_shapes = Mock(
+        return_value=(ComponentGPUShape(1, 1), ComponentGPUShape(1, 1))
+    )
     controller.get_actual_worker_counts = AsyncMock(return_value=(1, 1, True))
     controller.get_model_name = Mock(return_value="test-model")
     controller.get_component_power_configs = Mock(

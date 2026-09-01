@@ -1381,6 +1381,51 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert isinstance(guided, dict)
         assert "json" in guided
 
+    def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_server_time",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+            },
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+        )
+
+        assert guided == {"regex": r"\{\}"}
+
     def test_required_tool_choice_supports_older_sglang_constraint_signature(
         self, monkeypatch
     ):
@@ -1915,6 +1960,40 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             "Tool-call guided decoding will be ignored because of response_format already exists."
             in caplog.text
         )
+
+    def test_response_format_disables_named_zero_arg_tool_reconstruction(
+        self, tokenizer
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.named_zero_arg_tool is None
 
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
