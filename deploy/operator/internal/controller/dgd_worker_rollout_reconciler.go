@@ -371,20 +371,13 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	}
 
 	current := r.currentWorkerHashes(dgd)
-	metadataChanged := false
 	if current.v2 != "" && annotationV2 != current.v2 {
 		if dgd.Annotations == nil {
 			dgd.Annotations = make(map[string]string)
 		}
 		dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = current.v2
-		metadataChanged = true
-	}
-	if metadataChanged {
 		if err := r.Update(ctx, dgd); err != nil {
 			return false, fmt.Errorf("failed to repair worker hash annotations: %w", err)
-		}
-		if dgd.Status.CurrentWorkerHash == "" {
-			currentWorkerHashStatusChanged = r.setCurrentWorkerHashStatus(status, current.v2)
 		}
 	}
 	if !current.v1Only() || current.v1 == consts.LegacyWorkerHash {
