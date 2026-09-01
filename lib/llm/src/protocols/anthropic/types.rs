@@ -720,6 +720,8 @@ pub fn chat_completion_to_anthropic_response(
     if let Some(choice) = choice {
         // Only the token limit means "cut off mid-call". Every other terminal reason
         // claims the call finished, so partial arguments must not be recovered under it.
+        // This describes the choice; the call loop below narrows it to the last call,
+        // which is the only one the limit can have interrupted.
         let truncated = matches!(
             choice.finish_reason,
             Some(dynamo_protocols::types::FinishReason::Length)
@@ -736,8 +738,16 @@ pub fn chat_completion_to_anthropic_response(
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            for tc in tool_calls {
-                let input = tool_use_input(&tc.function.name, &tc.function.arguments, truncated);
+            // The token limit stops generation once, inside the call the model was
+            // writing. Every earlier call finished, so only the last one can carry a
+            // truncated tail.
+            let last_call = tool_calls.len().saturating_sub(1);
+            for (call_index, tc) in tool_calls.into_iter().enumerate() {
+                let input = tool_use_input(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    truncated && call_index == last_call,
+                );
                 let emitted_id = new_tool_use_id();
                 tracing::debug!(
                     backend_id = %tc.id,
@@ -2504,6 +2514,45 @@ mod truncated_tool_call_tests {
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &str,
     ) -> AnthropicMessageResponse {
+        converted_tool_use_response_for(finish_reason, &[arguments])
+    }
+
+    /// Every `tool_use` input in the converted response, in call order.
+    fn converted_tool_use_inputs(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> Vec<serde_json::Value> {
+        converted_tool_use_response_for(finish_reason, arguments)
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One tool call per entry in `arguments`, so a test can build a choice that
+    /// carries parallel calls.
+    #[allow(deprecated)]
+    fn converted_tool_use_response_for(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> AnthropicMessageResponse {
+        let tool_calls = arguments
+            .iter()
+            .enumerate()
+            .map(
+                |(index, args)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    id: format!("call_{}", index + 1),
+                    r#type: dynamo_protocols::types::FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
+                        name: "record_literal".into(),
+                        arguments: args.to_string(),
+                    },
+                },
+            )
+            .collect();
         let chat_resp = NvCreateChatCompletionResponse {
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
@@ -2512,16 +2561,7 @@ mod truncated_tool_call_tests {
                     message: dynamo_protocols::types::ChatCompletionResponseMessage {
                         content: None,
                         refusal: None,
-                        tool_calls: Some(vec![
-                            dynamo_protocols::types::ChatCompletionMessageToolCall {
-                                id: "call_1".into(),
-                                r#type: dynamo_protocols::types::FunctionType::Function,
-                                function: dynamo_protocols::types::FunctionCall {
-                                    name: "record_literal".into(),
-                                    arguments: arguments.to_string(),
-                                },
-                            },
-                        ]),
+                        tool_calls: Some(tool_calls),
                         role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
@@ -2584,6 +2624,33 @@ mod truncated_tool_call_tests {
             r#"{"label": "blocked"}"#,
         );
         assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
+    }
+
+    /// Malformed, but NOT cut short: the model closed the object and still emitted
+    /// arguments that do not parse. Recovery must refuse this shape.
+    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
+
+    /// `truncated` describes the CHOICE, but only the last call can be the one the
+    /// model was writing when the budget ran out. It finished every earlier call, so
+    /// malformed arguments there are a generation defect and must still yield `{}`.
+    #[test]
+    fn only_the_final_tool_call_recovers_partial_arguments() {
+        let inputs = converted_tool_use_inputs(
+            dynamo_protocols::types::FinishReason::Length,
+            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
+        );
+
+        assert_eq!(inputs.len(), 2, "both calls must reach the response");
+        assert_eq!(
+            inputs[0],
+            serde_json::json!({}),
+            "a call the model finished must not be repaired, even at the token limit"
+        );
+        assert_eq!(
+            inputs[1],
+            serde_json::json!({"label": "customer-eof"}),
+            "the final call is the only one that can have been cut off"
+        );
     }
 
     /// Valid arguments are untouched no matter which reason ended generation.
