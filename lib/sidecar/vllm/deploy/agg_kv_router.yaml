@@ -11,7 +11,8 @@
 #
 # The unauthenticated gRPC listener stays on pod loopback. The ZMQ publisher
 # binds the pod IP injected by the downward API so the frontend can subscribe
-# to the endpoint advertised by vLLM's Control service.
+# to the endpoint advertised by vLLM's Control service. KV events contain token
+# IDs and are unauthenticated; restrict the ZMQ port with NetworkPolicy.
 #
 # There is no published sidecar image yet: build the image from
 # lib/sidecar/Dockerfile and set <your-registry> below (see README).

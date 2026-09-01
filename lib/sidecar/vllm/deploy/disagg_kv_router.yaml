@@ -18,6 +18,8 @@
 #   - RDMA/NIXL: the engine needs rdma/ib devices, IPC_LOCK/SYS_RESOURCE, pinned
 #     memory (ulimit -l unlimited), and UCX tuning; adjust for your fabric.
 #   - VLLM_NIXL_SIDE_CHANNEL_HOST must be a routable pod IP (set via downward API).
+#   - KV events contain token IDs and are unauthenticated; restrict the routable
+#     ZMQ port with NetworkPolicy.
 #   - No published sidecar image yet; set <your-registry> below.
 
 apiVersion: nvidia.com/v1beta1
