@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +24,22 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+
+def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import dynamo.profiler.sweeper.renderers.base; "
+            "assert 'dynamo.profiler.utils.dgd_materialization' not in sys.modules; "
+            "assert 'dynamo.planner' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _candidate(**overrides):
@@ -287,7 +305,7 @@ def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
         calls.append((purpose, runtime_backend, model_name_or_path))
         return dgd
 
-    monkeypatch.setattr(base_module, "materialize_dgd", fake_materialize)
+    monkeypatch.setattr(base_module, "_materialize_dgd", fake_materialize)
 
     patched = base_module.patch_dgd_manifest(
         """
@@ -314,13 +332,9 @@ spec:
     args = dgd["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["args"]
     index = args.index("--trtllm.enable_chunked_prefill")
     assert args[index + 1] == "true"
-    assert calls == [
-        (
-            base_module.DGDMaterializationPurpose.FINAL_OUTPUT,
-            "trtllm",
-            "Qwen/Qwen3-32B",
-        ),
-    ]
+    assert len(calls) == 1
+    assert calls[0][0].value == "final output"
+    assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
 
 
 def test_runtime_version_override_is_only_written_when_explicit() -> None:
