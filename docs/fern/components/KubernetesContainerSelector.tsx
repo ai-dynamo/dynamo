@@ -123,7 +123,8 @@ function commandFor(
     return [
       `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export DYNAMO_RUNTIME_VERSION=${runtimeVersionFor(dynamoVersion)}`,
-      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
+      // Nightly planner images are a separate NGC repo, not a tag on dynamo-planner.
+      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest"',
     ].join("\n");
   }
 
@@ -184,12 +185,17 @@ export function KubernetesContainerSelector() {
   const [registry, setRegistry] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
 
-  const entries = INSTALL_DATA[backend][channel].filter((candidate) => candidate.commands.container);
+  const entries = INSTALL_DATA[backend][channel]
+    .filter((candidate) => candidate.commands.container)
+    // This quickstart deploys the rolling nightly. Pinning an older nightly means
+    // setting worker images by hand, which the emitted variables do not cover.
+    .filter((candidate) => channel !== "nightly" || candidate.latest);
   const entry = entries[versionIndex] ?? entries[0];
-  const command = commandFor(hardware, backend, channel, entry?.dynamo, registry);
+  const unavailable = !entry;
+  const command = unavailable ? null : commandFor(hardware, backend, channel, entry?.dynamo, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
   const registryNeeded = hardware === "intel";
-  const canCopy = !registryNeeded || registryIsValid(registry);
+  const canCopy = !unavailable && (!registryNeeded || registryIsValid(registry));
   const badge = channel === "stable" ? "Stable" : channel === "nightly" ? "Nightly" : "Source";
   const title = channel === "stable"
     ? `Dynamo ${entry?.dynamo}`
@@ -205,7 +211,7 @@ export function KubernetesContainerSelector() {
         ? "Latest nightly container"
         : "Pinned nightly build"
       : "Intel XPU Kubernetes runtime";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   function chooseHardware(next: Hardware) {
     setHardware(next);
@@ -236,7 +242,7 @@ export function KubernetesContainerSelector() {
   }
 
   async function copyCommand() {
-    if (!canCopy) return;
+    if (!canCopy || !command) return;
     if (!navigator.clipboard?.writeText) {
       setCopyLabel("Copy failed");
       resetCopyLabel();
@@ -282,7 +288,7 @@ export function KubernetesContainerSelector() {
             <span className="lqs-label">{versionRowLabel}</span>
             <div className="lqs-options" role="group" aria-label={versionRowLabel}>
               {entries.map((version, index) => {
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
                   : channel === "nightly"
@@ -336,13 +342,15 @@ export function KubernetesContainerSelector() {
 
         <div className="lqs-output">
           <div className={`lqs-rec lqs-rec--${channel}`}>
-            <div className="lqs-eyebrow">{role}</div>
+            <div className="lqs-eyebrow">{unavailable ? "Not currently available" : role}</div>
             <div className="lqs-title">
               <span className="lqs-badge">{badge}</span>
-              {title}
+              {unavailable ? "No matching build" : title}
             </div>
             <div className="lqs-support">
-              {hardwareLabel} · {INSTALL_DATA[backend].label} {entry?.backend_version}
+              {unavailable
+                ? `No ${INSTALL_DATA[backend].label} ${badge.toLowerCase()} build is currently published for this combination.`
+                : `${hardwareLabel} · ${INSTALL_DATA[backend].label} ${entry?.backend_version}`}
             </div>
           </div>
           <div className="lqs-command">
@@ -351,7 +359,11 @@ export function KubernetesContainerSelector() {
                 {copyLabel}
               </button>
             )}
-            <pre>{command}</pre>
+            {unavailable ? (
+              <p className="lqs-hint">No install command is available for this selection.</p>
+            ) : (
+              <pre>{command}</pre>
+            )}
           </div>
         </div>
       </section>

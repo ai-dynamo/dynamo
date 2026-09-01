@@ -160,17 +160,19 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly"
-        : `Nightly ${entry?.dynamo}`
+        : `Nightly ${entry?.dynamo ?? entry?.backend_version}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly build"
-        : "Pinned nightly wheel build"
+        : entry?.dynamo
+          ? "Pinned nightly wheel build"
+          : "Pinned nightly container build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   return (
     <>
@@ -215,7 +217,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
               {entries.map((version, index) => {
                 const hasContainer = Boolean(version.commands.container);
                 const hasWheel = Boolean(version.commands.wheel);
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
                   : channel === "nightly"
