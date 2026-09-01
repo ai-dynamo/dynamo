@@ -786,17 +786,26 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     )
 
 
-def test_build_sampling_params_maps_guided_decoding_to_regex():
+@pytest.mark.parametrize(
+    "guided_decoding, expected",
+    [
+        ({"regex": "a+"}, {"regex": "a+"}),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+        ({"grammar": 'root ::= "a"'}, {"ebnf": 'root ::= "a"'}),
+    ],
+)
+def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, expected):
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
         {
-            "sampling_options": {"guided_decoding": {"regex": r"\{\}"}},
+            "sampling_options": {"guided_decoding": guided_decoding},
             "stop_conditions": {"max_tokens": 8},
         }
     )
 
-    assert sampling_params["regex"] == r"\{\}"
+    for key, value in expected.items():
+        assert sampling_params[key] == value
 
 
 def test_build_sampling_params_maps_min_tokens_for_token_requests():

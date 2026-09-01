@@ -66,6 +66,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
+from dynamo.llm.exceptions import InvalidArgument
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -1848,6 +1849,57 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 
 class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
     """Test end-to-end preprocessing with a real tokenizer."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"guided_json": {"type": "object"}, "guided_regex": "a+"},
+            {"guided_regex": "a+", "guided_grammar": 'root ::= "a"'},
+        ],
+    )
+    def test_legacy_guided_constraints_reject_conflicts(self, tokenizer, payload):
+        with pytest.raises(
+            InvalidArgument,
+            match="Only one guided-decoding constraint can be set; received:",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    **payload,
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (
+                {"guided_json": {"type": "object"}},
+                {"json": {"type": "object"}},
+            ),
+            ({"guided_regex": "a+"}, {"regex": "a+"}),
+            ({"guided_grammar": 'root ::= "a"'}, {"grammar": 'root ::= "a"'}),
+            ({"guided_choice": ["a", "b"]}, {"choice": ["a", "b"]}),
+        ],
+    )
+    def test_legacy_guided_constraints_are_forwarded(
+        self, tokenizer, payload, expected
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **payload,
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == expected
 
     def test_basic_chat(self, tokenizer):
         """Simple user message preprocesses to non-empty token IDs."""

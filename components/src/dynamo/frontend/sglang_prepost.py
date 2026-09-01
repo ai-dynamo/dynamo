@@ -32,7 +32,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
-from .utils import PreprocessError, random_call_id
+from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -746,6 +746,7 @@ def preprocess_chat_request(
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
+    legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -844,9 +845,8 @@ def preprocess_chat_request(
     # message the model returns to the user, not to tool calls, so the tool
     # constraint is the one that must survive.
     #
-    # This path also never reads the legacy guided_json / guided_regex /
-    # guided_grammar / guided_choice fields at all, so those are dropped silently
-    # while both other paths honor them (and reject them against a forced choice).
+    # Explicit legacy constraints take precedence over automatic guidance, matching
+    # the vLLM processor's request precedence.
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -854,7 +854,9 @@ def preprocess_chat_request(
         logger.warning(
             "Tool-call guided decoding will be ignored because of response_format already exists."
         )
-    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
+    guided_decoding = (
+        legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
+    )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,

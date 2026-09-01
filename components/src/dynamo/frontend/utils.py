@@ -9,12 +9,48 @@ import os
 import uuid
 from typing import Any, Literal
 
-from dynamo.llm.exceptions import HttpError
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 _MASK_64_BITS = (1 << 64) - 1
 
 
 ChatProcessorBackend = Literal["vllm", "sglang"]
+
+
+def validate_legacy_guided_decoding_constraints(request: dict[str, Any]) -> None:
+    """Reject multiple legacy guided-decoding constraints before preprocessing."""
+    choice = request.get("guided_choice")
+    constraints = (
+        ("json", request.get("guided_json") is not None),
+        ("regex", request.get("guided_regex") is not None),
+        ("grammar", request.get("guided_grammar") is not None),
+        ("choice", isinstance(choice, list) and bool(choice)),
+    )
+    active_constraints = [name for name, is_set in constraints if is_set]
+    if len(active_constraints) > 1:
+        raise InvalidArgument(
+            "Only one guided-decoding constraint can be set; received: "
+            + ", ".join(active_constraints)
+        )
+
+
+def legacy_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one legacy guided-decoding constraint and its modifier to a dict."""
+    validate_legacy_guided_decoding_constraints(request)
+    choice = request.get("guided_choice")
+    for key, value in (
+        ("json", request.get("guided_json")),
+        ("regex", request.get("guided_regex")),
+        ("grammar", request.get("guided_grammar")),
+        ("choice", choice if isinstance(choice, list) and choice else None),
+    ):
+        if value is not None:
+            guidance = {key: value}
+            whitespace_pattern = request.get("guided_whitespace_pattern")
+            if whitespace_pattern is not None:
+                guidance["whitespace_pattern"] = whitespace_pattern
+            return guidance
+    return None
 
 
 def read_jinja_chat_template(

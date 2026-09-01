@@ -36,6 +36,7 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import legacy_guided_decoding
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -320,29 +321,7 @@ def _build_assistant_guided_decoding(
     request_extra = request.model_extra or {}
     # Match GuidedDecodingOptions::validate: modifiers are allowed alongside one
     # constraint, but multiple legacy constraints must not be silently discarded.
-    legacy_constraints = [
-        ("json", request_extra.get("guided_json") is not None),
-        ("regex", request_extra.get("guided_regex") is not None),
-        ("grammar", request_extra.get("guided_grammar") is not None),
-        ("choice", bool(request_extra.get("guided_choice"))),
-    ]
-    active_constraints = [name for name, is_set in legacy_constraints if is_set]
-    if len(active_constraints) > 1:
-        raise InvalidArgument(
-            "Only one guided-decoding constraint can be set; received: "
-            + ", ".join(active_constraints)
-        )
-
-    legacy_guidance: dict[str, Any] = {}
-    for key, value in (
-        ("json", request_extra.get("guided_json")),
-        ("regex", request_extra.get("guided_regex")),
-        ("grammar", request_extra.get("guided_grammar")),
-        ("choice", request_extra.get("guided_choice") or None),
-    ):
-        if value is not None:
-            legacy_guidance = {key: value}
-            break
+    legacy_guidance = legacy_guided_decoding(request_extra)
     if legacy_guidance:
         # Legacy guided_* takes precedence over structured_outputs (prior
         # behavior), but as a single constraint.

@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import random
+import re
 import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -1151,16 +1152,44 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     ) -> Dict[str, Any]:
         """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
         if isinstance(guided_decoding, dict):
+            params: Dict[str, Any] = {}
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
                 reject_nonprogressing_guided_json_ref_cycles(json_schema)
-                return {"json_schema": json.dumps(json_schema)}
-            regex = guided_decoding.get("regex")
-            if regex is not None:
-                return {"regex": regex}
-            structural_tag = guided_decoding.get("structural_tag")
-            if structural_tag is not None:
-                return {"structural_tag": serialize_structural_tag(structural_tag)}
+                params["json_schema"] = json.dumps(json_schema)
+            else:
+                regex = guided_decoding.get("regex")
+                if regex is not None:
+                    params["regex"] = regex
+                else:
+                    choice = guided_decoding.get("choice")
+                    if choice:
+                        choices = [str(value) for value in choice if value is not None]
+                        if choices:
+                            params["regex"] = (
+                                "("
+                                + "|".join(re.escape(value) for value in choices)
+                                + ")"
+                            )
+                    else:
+                        grammar = guided_decoding.get("grammar")
+                        if grammar is not None:
+                            params["ebnf"] = grammar
+                        else:
+                            structural_tag = guided_decoding.get("structural_tag")
+                            if structural_tag is not None:
+                                params["structural_tag"] = serialize_structural_tag(
+                                    structural_tag
+                                )
+
+            for source_key, target_key in (
+                ("whitespace_pattern", "whitespace_pattern"),
+                ("backend", "guided_decoding_backend"),
+            ):
+                value = guided_decoding.get(source_key)
+                if value is not None:
+                    params[target_key] = value
+            return params
         return {}
 
     @staticmethod
