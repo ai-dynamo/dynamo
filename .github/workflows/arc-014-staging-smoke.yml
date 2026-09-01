@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: ARC 0.14.2 staging smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/arc-014-staging-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: stg-tester-amd-v2
+    runs-on: stg-tester-amd-v2
+    timeout-minutes: 10
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Validate staging runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RUNNER_NAME"
+          test "$(uname -m)" = "x86_64"
+          echo "ARC staging smoke passed on $RUNNER_NAME"
