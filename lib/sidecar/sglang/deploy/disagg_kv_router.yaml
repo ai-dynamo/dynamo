@@ -10,8 +10,8 @@
 #
 # SGLang binds 0.0.0.0 so its bootstrap server is reachable across pods. The
 # native gRPC service is therefore also exposed on the pod network; restrict it
-# with NetworkPolicy. ZMQ publishers bind the downward-API pod IP so the
-# frontend can reach the event endpoints advertised by GetServerInfo.
+# with NetworkPolicy. ZMQ publishers bind all pod interfaces, and each sidecar
+# connects over its pod IP so GetServerInfo's wildcard becomes routable.
 #
 # PREREQUISITES / CAVEATS:
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
@@ -50,7 +50,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.17
+          image: lmsysorg/sglang:v0.5.18
           restartPolicy: Always
           securityContext:
             capabilities:
@@ -73,11 +73,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
-          env:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -115,7 +110,7 @@ spec:
           - --page-size
           - "64"
           - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://$(POD_IP):5557"}'
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
@@ -123,8 +118,12 @@ spec:
           - dynamo-sglang-sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:30001
+          - $(POD_IP):30001
           env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: SGLANG_DISAGGREGATION_BOOTSTRAP_HOST
             valueFrom:
               fieldRef:
@@ -145,7 +144,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.17
+          image: lmsysorg/sglang:v0.5.18
           restartPolicy: Always
           securityContext:
             capabilities:
@@ -168,11 +167,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
-          env:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -210,7 +204,7 @@ spec:
           - --page-size
           - "64"
           - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://$(POD_IP):5557"}'
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
@@ -218,7 +212,12 @@ spec:
           - dynamo-sglang-sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:30001
+          - $(POD_IP):30001
+          env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret

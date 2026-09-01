@@ -75,8 +75,9 @@ command.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there. The deployment examples use
-> `lmsysorg/sglang:v0.5.17`, matching Dynamo main's SGLang pin.
+> server (`--grpc-port`) landed there. The KV-routing examples require
+> **v0.5.18+** because the sidecar discovers their structured KV-event
+> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.18`.
 
 ### Prerequisites
 
@@ -143,8 +144,10 @@ curl -s localhost:8000/v1/chat/completions \
 ### KV routing
 
 The KV-routing manifests run multiple workers and configure each SGLang engine
-to publish ZMQ KV-cache events on its pod IP. The sidecars advertise those
-event sources to the frontend for exact KV-aware routing.
+to publish ZMQ KV-cache events on all pod interfaces. Each sidecar connects to
+the engine over its pod IP and advertises that routable address to the frontend
+for exact KV-aware routing. Restrict the unauthenticated gRPC and ZMQ ports with
+NetworkPolicy.
 
 ```bash
 # Aggregated: two workers, two GPUs.
@@ -152,6 +155,16 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg_kv_router.yaml -n <namespace>
 
 # Disaggregated: two prefill + two decode workers, four GPUs and RDMA.
 kubectl apply -f lib/sidecar/sglang/deploy/disagg_kv_router.yaml -n <namespace>
+```
+
+After deploying one of the KV-routing manifests, port-forward its frontend:
+
+```bash
+# Aggregated.
+kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-kv-router-frontend 8000:8000
+
+# Disaggregated.
+kubectl port-forward -n <namespace> svc/sglang-sidecar-disagg-kv-router-frontend 8000:8000
 ```
 
 ### Disaggregated
