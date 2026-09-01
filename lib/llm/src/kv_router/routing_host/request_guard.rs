@@ -371,10 +371,8 @@ struct OutputBlockTracker {
     expected_output_tokens: Option<u32>,
 }
 
-/// Owns the legacy scheduler cleanup after a worker is selected.
-///
-/// Approximate-LRU references are deliberately owned separately by `RequestGuard`.
-struct KvRequestCleanup<Sel>
+/// Owns scheduler cleanup for an admitted KV request.
+pub(super) struct KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -389,7 +387,7 @@ impl<Sel> KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    fn new(
+    pub(super) fn new(
         chooser: Arc<KvRouter<Sel>>,
         context_id: String,
         worker: WorkerWithDpRank,
@@ -404,7 +402,7 @@ where
         }
     }
 
-    async fn finish(&mut self) {
+    pub(super) async fn finish(&mut self) {
         if self.freed {
             return;
         }
@@ -590,14 +588,27 @@ where
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
     ) -> Self {
-        // Snapshot request-scoped inputs now so the guard can outlive the
-        // PreprocessedRequest after it is moved into backend dispatch.
+        Self::new_kv_with_cleanup(
+            request_metrics,
+            KvRequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
+            request,
+        )
+    }
+
+    pub(super) fn new_kv_with_cleanup(
+        request_metrics: Arc<RouterRequestMetrics>,
+        cleanup: KvRequestCleanup<Sel>,
+        request: &PreprocessedRequest,
+    ) -> Self {
+        let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
         let expected_output_tokens = request
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
+        let scheduler_tracked = cleanup.scheduler_tracked;
+        let worker = cleanup.worker;
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         if scheduler_tracked {
@@ -617,12 +628,7 @@ where
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         Self {
-            cleanup: RequestCleanup::Kv(KvRequestCleanup::new(
-                chooser,
-                context_id,
-                worker,
-                scheduler_tracked,
-            )),
+            cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,

@@ -131,7 +131,7 @@ Each scheduler publishes metrics about its current state, including the number o
 
 The following features are not yet supported by the mocker:
 
-- **Multi-tier memory** - No support for offloading KV cache to CPU or disk, or onboarding it back to GPU
+- **Multi-tier memory** - No support for offloading KV cache to CPU or disk, or for loading it back to GPU
 - **Multimodal support** - Currently only simulates text token processing; no vision encoder or cross-attention simulation
 
 ## See Also

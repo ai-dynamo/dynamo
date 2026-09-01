@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # vLLM sidecar
 
 > [!WARNING]
-> **Experimental.** This sidecar and its deployment examples are experimental
-> and not yet packaged for distribution. The manifests, flags, and behavior may
-> change without notice.
+> **Experimental.** This sidecar and its deployment examples are experimental.
+> The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel
+> pair, but the container image is not yet packaged for distribution. The
+> manifests, flags, and behavior may change without notice.
 
 `dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC services:
 
@@ -16,7 +17,8 @@ SPDX-License-Identifier: Apache-2.0
 - `vllm.Control` for model and server discovery
 - Standard gRPC health for startup readiness
 
-It is a standalone Rust executable.
+It is a standalone Rust executable and is also compiled into
+`ai-dynamo-runtime` for the importable `dynamo.vllm.sidecar` launcher.
 
 ## Supported
 
@@ -58,6 +60,13 @@ dynamo-vllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051
 ```
 
+After installing `ai-dynamo`, the Python module runs the same native worker:
+
+```bash
+python -m dynamo.vllm.sidecar \
+  --grpc-endpoint 127.0.0.1:50051
+```
+
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
@@ -67,21 +76,29 @@ Start vLLM with the capabilities required by the workflow, then opt the sidecar 
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B \
-  --host 127.0.0.1 \
+  --host 0.0.0.0 \
+  --port 8000 \
   --grpc-port 50051 \
   --enable-sleep-mode \
   --weight-transfer-config '{"backend":"nccl"}'
 
 DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
+  --vllm-http-endpoint http://rollout-0.rl.svc.cluster.local:8000 \
   --enable-rl
 ```
 
-`--enable-rl` (or `DYN_ENABLE_RL=true`) requires the Dynamo system server (`DYN_SYSTEM_PORT=0` or a positive port) and registers `dyn://<namespace>.<component>.rl`, which lets the Dynamo frontend discover this worker and its `/engine/control/*` and `/engine/update/*` routes through `/v1/rl/workers`. The sidecar advertises pause/resume, sleep-status, and weight-version controls when the vLLM server reports the RL gRPC API; mutating sleep/wake routes require `--enable-sleep-mode`, weight-transfer routes require `--weight-transfer-config`, and draft updates require speculative decoding support.
+Replace `rollout-0.rl.svc.cluster.local` with a private address that the RL controller can route to. Binding vLLM to `0.0.0.0` exposes both its HTTP and gRPC listeners, so restrict both ports with host firewall rules, Kubernetes NetworkPolicy, or an equivalent trusted-network control. A colocated sidecar can continue to use loopback for `--grpc-endpoint`; the advertised HTTP URL must be routable from the controller, not merely from the worker.
+
+`--enable-rl` (or `DYN_ENABLE_RL=true`) requires the Dynamo system server (`DYN_SYSTEM_PORT=0` or a positive port) and registers `dyn://<namespace>.<component>.rl`, which lets the Dynamo frontend discover this worker and its `/engine/control/*` and `/engine/update/*` routes through `/v1/rl/workers`. The sidecar advertises pause/resume, sleep-status, and weight-version controls when the vLLM server reports the RL gRPC API; mutating sleep/wake routes require `--enable-sleep-mode`, weight-transfer routes require `--weight-transfer-config`, and draft updates require speculative decoding support. The sidecar publishes `--vllm-http-endpoint` (or `VLLM_HTTP_ENDPOINT`) only as part of this RL worker metadata.
+
+Native vLLM lifecycle and weight-update operations use the typed gRPC Control service and do not require `--vllm-http-endpoint`. Configure the HTTP base URL only when an RL framework needs a compatibility operation that is not represented by the typed service, such as a custom `worker_extension_cls` method invoked through `/collective_rpc`.
+
+The HTTP value must be a controller-routable `http://` or `https://` base URL. Path prefixes are preserved, so a reverse proxy can advertise a value such as `https://rollout.example.internal/vllm-admin`; downstream clients append the compatibility route beneath that prefix. User information, query strings, and fragments are rejected. Do not place credentials or tokens in the URL.
 
 The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_engine` requires `{"init_info": {...}}`, `update_weights` requires `{"update_info": {...}}`, `finish_weight_update` accepts `{"weight_version": "..."}`, and `update_weight_version` requires `{"new_version": "..."}`. Weight tensors remain on the configured NCCL, IPC, or sparse-NCCL transport; only backend metadata crosses gRPC.
 
-The RL endpoint and engine routes are unauthenticated administrative surfaces that can pause serving, release GPU memory, and replace model weights. Enable them only on trusted request and system networks.
+The RL endpoint, engine routes, and raw HTTP compatibility surface are administrative interfaces that can pause serving, release GPU memory, and replace model weights. The sidecar does not add HTTP authentication to the advertised URL. Enable these interfaces only on trusted request and system networks, or place the HTTP endpoint behind an authenticated private proxy without embedding credentials in the published URL.
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
@@ -127,8 +144,10 @@ and fidelity limits.
 that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published vLLM sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
+There is no published sidecar image yet, so build and push the image from
+`lib/sidecar/Dockerfile`. It contains the vLLM, SGLang, and TensorRT-LLM
+sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
+command.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
@@ -144,14 +163,17 @@ The sidecar waits for both the Control and Inference services through the standa
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
+Build and push the image to a registry your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/vllm/Dockerfile \
-  -t <your-registry>/dynamo-vllm-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
+
+See [Build the image](../README.md#build-the-image) for a single-architecture
+build. These manifests set the container `command` to
+`dynamo-vllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -197,5 +219,8 @@ must reach `2/2 Running`. Apply it the same way and call the frontend as above.
 
 ## Packaging
 
-There is no published image yet; the quick start above builds one from
-`Dockerfile`. Official packaging is deferred to a follow-up change.
+There is no published sidecar image yet. See
+[Build the image](../README.md#build-the-image). The image contains the vLLM,
+SGLang, and TensorRT-LLM executables; each deployment sets its container
+`command` to the one it needs. Official packaging is deferred to a follow-up
+change.
