@@ -1,0 +1,19 @@
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+index c7a20c8ef2d72c4843c97230c2ef806b3192634d..f64237419f4eb07033eee2764072cb915cdc22a5 100644
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -1202,6 +1202,14 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+             forward_batch.forward_mode.is_target_verify()
+             and self.model_runner.spec_algorithm.is_dflash_family()
+         )
++        if (
++            publish_read_done
++            and forward_batch.forward_mode.is_target_verify()
++            and self.model_runner.spec_algorithm.supports_ragged_verify()
++        ):
++            # ReplaySSM postprocessing outlives graph replay. Leave the
++            # fast-path event unset so the scheduler waits on the whole forward.
++            publish_read_done = False
+         # Exception: breakable-graph verify replays (captured forward metadata)
+         # re-read req_to_token *during* replay, so the pre-replay snapshot is
+         # too early -- record the event after replay instead.
