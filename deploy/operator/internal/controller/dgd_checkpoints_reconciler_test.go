@@ -372,7 +372,11 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	require.NotNil(t, main)
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
-	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	server := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName)
+	require.NotNil(t, server)
+	assert.Empty(t, server.Args)
+	assert.Contains(t, server.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(

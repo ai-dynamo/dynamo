@@ -242,7 +242,7 @@ pub(crate) enum ResponsesConversionError {
     #[error("{0}")]
     InvalidArgument(String),
     #[error("{0}")]
-    NotImplemented(String),
+    UnsupportedContent(String),
 }
 
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
@@ -299,7 +299,7 @@ fn convert_input_content_to_user_content(
                         .into());
                     }
                     (Some(_), None) => {
-                        return Err(ResponsesConversionError::NotImplemented(
+                        return Err(ResponsesConversionError::UnsupportedContent(
                             "Image input by file_id is not yet supported".to_string(),
                         )
                         .into());
@@ -350,7 +350,7 @@ fn convert_input_content_to_user_content(
                     })?;
                 }
 
-                return Err(ResponsesConversionError::NotImplemented(
+                return Err(ResponsesConversionError::UnsupportedContent(
                     "File input content is not yet supported".to_string(),
                 )
                 .into());

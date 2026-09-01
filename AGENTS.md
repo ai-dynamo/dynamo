@@ -23,6 +23,16 @@ holds the operator, Helm charts, and gateway integration. Treat any change that 
 these boundaries as non-trivial. Dynamo also sits inside a wider `ai-dynamo` ecosystem of
 sibling repos (below) that it integrates with rather than vendors.
 
+## Agent Instruction Files
+
+- `AGENTS.md` is the canonical and only source of agent instructions at every
+  repository scope.
+- Every `AGENTS.md` must have a sibling `CLAUDE.md` containing exactly
+  `@AGENTS.md` so Claude loads the same instructions.
+- Do not put independent instructions in `CLAUDE.md`, and do not make
+  `AGENTS.md` a symlink to `CLAUDE.md`.
+- Add, move, or remove each `AGENTS.md` and `CLAUDE.md` pair together.
+
 ## Skills
 
 Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
@@ -43,6 +53,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
@@ -213,13 +224,25 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- For fork PRs that qualify for automatic trusted-CI approval, every commit must have a
+  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
+  satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
+  a maintainer can manually approve the current head with `/ok to test <sha>`.
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
+  `.github/codeowners/README.md`. To check who reviews your PR:
+  `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`
+  (`--people` expands teams to members for org members).
+  If the `codeowners` check fails after adding a new directory, claim it with
+  one line under the owning area in `areas.yaml`, regenerate, and commit both
+  files together. External contributors earn area-scoped co-ownership via
+  `.github/codeowners/external_contributors.yaml`. The `repo-codeowners`
+  skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. Fix failures before requesting human review.
+  triggers it. For an eligible fork PR, the automatic approval flow posts that command only
+  after every PR commit is GitHub-verified. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
