@@ -243,28 +243,39 @@ impl Router {
     /// `/v1/completions` bodies; the request kind is discriminated by a
     /// non-empty `messages` array (chat) versus a `prompt` (completions).
     pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
-        // Discriminate on a shape that materializes neither field: `IgnoredAny`
-        // skips each payload in place, and `Vec<IgnoredAny>` is a vector of ZSTs,
-        // so this pass allocates nothing. Parsing the body into
-        // `serde_json::Value` first would build the whole `messages`/tools tree
-        // just to read two keys, then throw it away -- a second full
-        // materialization of every request on the `pick()` path.
-        #[derive(serde::Deserialize)]
-        struct RequestKind {
-            #[serde(default)]
-            messages: Option<Vec<serde::de::IgnoredAny>>,
-            #[serde(default)]
-            prompt: Option<serde::de::IgnoredAny>,
-        }
-
-        let kind: RequestKind = serde_json::from_str(request_json)?;
-        let has_messages = kind.messages.is_some_and(|messages| !messages.is_empty());
-        if !has_messages && kind.prompt.is_some() {
-            let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
+        // Discriminating on a borrowed `Value` costs one scan plus the tree it
+        // allocates; `from_value` then consumes that tree rather than re-reading
+        // the body.
+        //
+        // A probe struct of `IgnoredAny` fields was tried here and reverted. It
+        // allocates nothing, but `IgnoredAny` does not skip -- serde_json still
+        // lexes every byte to find each value's end -- so the body ends up
+        // tokenized end to end twice, and on large bodies the scan dominates the
+        // allocation it saved. Measured, release build, 200 iterations, chat body
+        // with one large user message:
+        //
+        //     467 B    Value 1.9us   IgnoredAny 1.1us   (probe wins)
+        //      40 KB   Value 6.7us   IgnoredAny 8.5us
+        //     160 KB   Value 19.7us  IgnoredAny 28.4us  (probe ~44% worse)
+        //
+        // Inference bodies skew large, so the crossover lands on the wrong side.
+        // The real fix is not to read the body at all: this is
+        // `/v1/chat/completions` vs `/v1/completions`, and the `:path`
+        // pseudo-header would settle it in O(1) -- `req.headers` is already in
+        // scope at the call site. That needs confirmation that Envoy's ext_proc
+        // delivers pseudo-headers through to `ctx.request_headers` before being
+        // relied on, which is why it is not done here.
+        let value: serde_json::Value = serde_json::from_str(request_json)?;
+        let has_messages = value
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .is_some_and(|messages| !messages.is_empty());
+        if !has_messages && value.get("prompt").is_some() {
+            let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
             return self.tokenize_completion(request).await;
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(request_json)?;
+            serde_json::from_value(value)?;
         self.tokenize_chat(&request)
     }
 
