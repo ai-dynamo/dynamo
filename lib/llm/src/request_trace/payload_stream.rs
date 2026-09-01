@@ -119,11 +119,12 @@ where
 }
 
 /// Fold a non-streaming payload into one final client chunk while forwarding
-/// metric annotations as they arrive.
+/// metrics as they arrive.
 ///
 /// Metrics must bypass the fold because downstream latency metrics depend on
-/// observation time. Typed metrics are moved out of buffered chunks, while
-/// event-tagged annotations are forwarded without their payload data.
+/// observation time. Typed metrics are moved out of buffered chunks and
+/// forwarded on metric-only frames that keep them typed (no JSON round-trip),
+/// while event-tagged annotations are forwarded without their payload data.
 ///
 /// At end of stream, the remaining client data is aggregated into one chunk.
 /// The folded chunk carries no `llm_metrics` because they were already emitted
@@ -138,33 +139,23 @@ where
         let mut stream = std::pin::pin!(stream);
         let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
         let mut forwarded_frames: usize = 0;
-        let mut total_chunk_tokens: usize = 0;
 
         while let Some(mut chunk) = stream.next().await {
             // Move typed metrics out of the buffered chunk and forward them
-            // immediately as an annotation frame.
+            // immediately, still typed, so the collector's typed path observes
+            // them without a serialize/deserialize round-trip.
             if let Some(metrics) = chunk.data.as_mut().and_then(|data| data.llm_metrics.take()) {
-                total_chunk_tokens += metrics.chunk_tokens;
                 forwarded_frames += 1;
-                match metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
-                    Ok(frame) => yield frame,
-                    Err(e) => {
-                        tracing::warn!(
-                            "request payload: failed to serialize metric annotation: {e}"
-                        );
-                    }
-                }
+                yield typed_metric_frame(metrics);
             }
 
             // Forward the event annotation as a data-less shell, leaving any
-            // payload data behind for aggregation.
+            // payload data behind for aggregation. The annotation is parsed
+            // once, by the collector.
             if matches!(
                 chunk.event.as_deref(),
                 Some(ANNOTATION_LLM_METRICS) | Some(ANNOTATION_PAYLOAD_USAGE)
             ) {
-                if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&chunk) {
-                    total_chunk_tokens += metrics.chunk_tokens;
-                }
                 forwarded_frames += 1;
                 yield Annotated {
                     data: None,
@@ -180,8 +171,7 @@ where
 
         tracing::debug!(
             forwarded_frames,
-            total_chunk_tokens,
-            "request payload: metric annotations forwarded ahead of the non-streaming fold"
+            "request payload: metric frames forwarded ahead of the non-streaming fold"
         );
 
         let parsing_options = ParsingOptions::default();
@@ -228,6 +218,37 @@ where
     });
 
     (Box::pin(out), future)
+}
+
+/// Build a metric-only frame that carries `metrics` typed on `llm_metrics`.
+///
+/// The response envelope is an empty internal carrier: no choices, no usage,
+/// so the HTTP aggregator folds it as a no-op, and the folded client chunk
+/// that follows re-supplies `id`/`model`/`created`. `llm_metrics` is
+/// `#[serde(skip)]`, so nothing here reaches the client wire format.
+fn typed_metric_frame(
+    metrics: LLMMetricAnnotation,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated {
+        data: Some(NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: String::new(),
+                choices: vec![],
+                created: 0,
+                model: String::new(),
+                system_fingerprint: None,
+                object: String::new(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: Some(metrics),
+        }),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }
 }
 
 /// Build the single client chunk for a folded non-streaming response.
@@ -829,16 +850,26 @@ mod tests {
         // folded client chunk.
         assert_eq!(results.len(), 4);
 
+        // Typed metrics stay typed: carried on `llm_metrics` of an empty
+        // envelope, never re-encoded as an annotation.
         for (frame, expected_chunk_tokens) in results[..2].iter().zip([1usize, 2]) {
-            assert!(frame.data.is_none(), "metric frames must be data-less");
-            let metrics = LLMMetricAnnotation::from_annotation(frame)
-                .unwrap()
-                .expect("metric frame must parse");
+            let data = frame
+                .data
+                .as_ref()
+                .expect("typed metric frame must carry data");
+            let metrics = data
+                .llm_metrics
+                .as_ref()
+                .expect("typed metric frame must carry llm_metrics");
             assert_eq!(metrics.chunk_tokens, expected_chunk_tokens);
+            assert!(data.inner.choices.is_empty());
+            assert!(data.inner.usage.is_none());
+            assert!(frame.event.is_none());
+            assert!(frame.comment.is_none());
         }
 
-        // The annotation is forwarded without payload data; usage remains
-        // in the fold.
+        // The legacy annotation is forwarded without payload data; usage
+        // remains in the fold.
         let shell = &results[2];
         assert!(shell.data.is_none());
         let tail_metrics = LLMMetricAnnotation::from_annotation(shell)
