@@ -21,7 +21,7 @@ jobs:
   # ============================================================================
 
   guard:
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     outputs:
       has_xpu_label: ${{ steps.pr-info.outputs.has_xpu_label }}
     steps:
@@ -49,7 +49,7 @@ jobs:
   changed-files:
     needs: [guard]
     if: needs.guard.outputs.has_xpu_label == 'true'
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     outputs:
       core: ${{ steps.changes.outputs.core }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -84,7 +84,7 @@ jobs:
   # ============================================================================
 
   xpu-status-check:
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     needs: [guard, changed-files, xpu-ci-vllm]
     if: always() && needs.guard.outputs.has_xpu_label == 'true'
     steps:
