@@ -117,7 +117,6 @@ logger = logging.getLogger(__name__)
 
 
 async def _close_span_on_first_output(stream, span):
-    """End a timing span when the engine first produces a result."""
     try:
         async for value in stream:
             span.close()
