@@ -43,17 +43,13 @@ CANCELLATION_MAX_TOKENS = 2048
 PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
-# One bound for the whole test. DynamoWorkerProcess already gives each worker
-# its own 300s startup budget and reports which health endpoint timed out, so
-# this only has to stay above the sum of those: 2 x 300s of sequential worker
-# startup, plus the frontend, the bounded cancellation checks and teardown.
-# The old 150s bound sat below that sum, which is what let it kill a healthy
-# decode startup and hide the per-worker error (DYN-4129).
+# Each worker already gets a 300s startup budget from ManagedProcess and reports
+# its own health-check timeout. This only has to stay above their sum; the old
+# 150s bound did not, so it fired first and hid them (DYN-4129).
 DECODE_CANCEL_TEST_TIMEOUT_S = 720
 
-# Bounds for the streaming read, which had none. STREAM_READ is the per-read
-# socket timeout requests applies between chunks; BEHAVIORAL is the wall-clock
-# deadline read_streaming_responses applies across all of them.
+# The streaming read had no bound. STREAM_READ is the per-read socket timeout
+# between chunks; BEHAVIORAL is the wall-clock deadline across all of them.
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 
@@ -301,7 +297,6 @@ def test_request_cancellation_vllm_aggregated(
             time.sleep(0.5)
         raise TimeoutError(f"Frontend did not stabilize within {timeout_seconds}s")
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
@@ -311,14 +306,12 @@ def test_request_cancellation_vllm_aggregated(
             else CANCELLATION_MAX_TOKENS
         )
 
-        # Step 2: Start a single worker (allocates its own system_port)
         with DynamoWorkerProcess(
             request, frontend.frontend_port, timeout_s=600
         ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
             wait_for_stable_frontend(frontend.frontend_port)
 
-            # Step 3: Test request cancellation with polling approach
             frontend_log_offset, worker_log_offset = 0, 0
 
             test_scenarios = [
@@ -333,14 +326,12 @@ def test_request_cancellation_vllm_aggregated(
             for idx, (request_type, description) in enumerate(test_scenarios):
                 logger.info(f"Testing {description.lower()}...")
 
-                # Send the request (non-blocking).
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port,
                     request_type,
                     max_tokens=max_tokens,
                 )
 
-                # Poll for "Decode Request ID" pattern (vLLM v2 pattern)
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
                     pattern="Decode Request ID: ",
@@ -351,22 +342,18 @@ def test_request_cancellation_vllm_aggregated(
                     cancellable_request=cancellable_req,
                 )
 
-                # For streaming, read 5 responses before cancelling
                 if request_type == "chat_completion_stream":
                     read_streaming_responses(cancellable_req, expected_count=5)
 
-                # Now cancel the request
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" with matching ID
                 _, worker_log_offset = poll_for_pattern(
                     process=worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=worker_log_offset,
                 )
 
-                # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
@@ -375,7 +362,6 @@ def test_request_cancellation_vllm_aggregated(
 
                 logger.info(f"{description} detected successfully")
 
-                # Verify cancellation metrics after each scenario
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
                     request_type=request_type,
@@ -509,30 +495,25 @@ def test_request_cancellation_vllm_prefill_cancel(
     - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker (allocates its own system_port)
         with DynamoWorkerProcess(
             request, frontend.frontend_port, mode=WorkerMode.PREFILL
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker (allocates its own system_port)
             with DynamoWorkerProcess(
                 request, frontend.frontend_port, mode=WorkerMode.DECODE
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # Step 4: Test request cancellation during prefill phase
                 # Note: With the new architecture, prefill routing happens in the frontend,
                 # so the request goes directly to the prefill worker first
                 logger.info(
                     "Testing completion request cancellation during prefill phase..."
                 )
 
-                # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port,
                     "completion",
@@ -549,7 +530,6 @@ def test_request_cancellation_vllm_prefill_cancel(
                     cancellable_request=cancellable_req,
                 )
 
-                # Cancel during prefill phase
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id} during prefill")
 
