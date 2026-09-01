@@ -654,6 +654,134 @@ def _make_decode_handler(
     return handler
 
 
+def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler:
+    """Construct a PrefillWorkerHandler with mocked internals."""
+    config = _make_config(model=model, disaggregation_mode="PREFILL")
+    model_config = MagicMock(enable_prompt_embeds=True)
+    with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
+        handler = mod.PrefillWorkerHandler(
+            runtime=MagicMock(),
+            config=config,
+            engine=MagicMock(),
+            default_sampling_params={},
+            model_config=model_config,
+        )
+    handler.config = config
+    handler.model_config = model_config
+    handler.model_max_len = 4096
+    handler.default_sampling_params = {}
+    handler.kv_event_publisher = None
+    handler.otel_tracing_enabled = False
+    handler.input_param_manager = MagicMock()
+    handler.input_param_manager.get_extra_params.return_value = {}
+    handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=model,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
+    handler._deferred_aborts = {}
+    handler._custom_encoder = None
+    # Real BaseWorkerHandler.__init__ (patched out above) sets this;
+    # make_kv_connector_protocol reads it. No kv_transfer_config selects the
+    # NIXL protocol, whose prefill params carry do_remote_decode.
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(kv_transfer_config=None)
+    )
+    return handler
+
+
+def _prefill_request(annotations=None, max_tokens=None) -> dict:
+    stop_conditions = {}
+    if max_tokens is not None:
+        stop_conditions["max_tokens"] = max_tokens
+    return {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": stop_conditions,
+        "output_options": {},
+        "annotations": annotations or [],
+    }
+
+
+async def _prefill_sampling_params(request: dict):
+    """Run the prefill path far enough to capture the SamplingParams it builds.
+
+    ``_resolve_lora_request`` is the first call after the prefill-clamp branch,
+    so raising there stops the generator with the params final and no engine
+    touched.
+    """
+    handler = _make_prefill_handler()
+    handler._resolve_lora_request = MagicMock(side_effect=RuntimeError("test stop"))
+
+    real_build_sampling_params = mod.build_sampling_params
+    captured = {}
+
+    def spy(*args, **kwargs):
+        captured["params"] = real_build_sampling_params(*args, **kwargs)
+        return captured["params"]
+
+    with patch.object(mod, "build_sampling_params", spy):
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, MagicMock(), "req-1"):
+                pass
+
+    return captured["params"]
+
+
+@pytest.mark.asyncio(loop_scope="function")
+class TestPrefillContinueAnnotation:
+    """The prefill worker's half of prefill-continues-decode."""
+
+    async def test_without_the_marker_prefill_is_capped_at_one_token(self):
+        """Today's behaviour must be unchanged when the marker is absent."""
+        params = await _prefill_sampling_params(_prefill_request(max_tokens=256))
+
+        assert params.max_tokens == 1
+        assert params.min_tokens == 1
+        # The handoff is requested, which is what puts the engine in disagg mode.
+        assert params.extra_args["kv_transfer_params"]["do_remote_decode"] is True
+
+    async def test_with_the_marker_the_request_keeps_its_own_budget(self):
+        """A continuation is served whole, so it keeps max_tokens and asks for
+        no handoff."""
+        params = await _prefill_sampling_params(
+            _prefill_request(
+                annotations=[mod.PREFILL_CONTINUE_ANNOTATION],
+                max_tokens=256,
+            )
+        )
+
+        assert params.max_tokens == 256, "the request's own budget must survive"
+        assert params.min_tokens == 0, "the one-token floor must not be applied"
+        # No remote decode is requested: that omission is what keeps the engine
+        # out of handoff mode, and with it any architecture-specific truncation.
+        kv_params = (params.extra_args or {}).get("kv_transfer_params") or {}
+        assert not kv_params.get("do_remote_decode")
+
+    async def test_a_continuation_advertises_no_handoff(self):
+        """A continuation sets up no transfer, so it must advertise none.
+
+        Some connectors mint per-request transfer state when the protocol is
+        built, so a continuation must not build one at all.
+        """
+        handler = _make_prefill_handler()
+        with patch.object(mod, "make_kv_connector_protocol") as make_protocol:
+            handler._resolve_lora_request = MagicMock(
+                side_effect=RuntimeError("test stop")
+            )
+            with pytest.raises(RuntimeError, match="test stop"):
+                async for _ in handler._generate_token_mode(
+                    _prefill_request(annotations=[mod.PREFILL_CONTINUE_ANNOTATION]),
+                    MagicMock(),
+                    "req-1",
+                ):
+                    pass
+        make_protocol.assert_not_called()
+
+    async def test_the_two_markers_are_distinct(self):
+        assert mod.PREFILL_CONTINUE_ANNOTATION != mod.BYPASS_REMOTE_PREFILL_ANNOTATION
+
+
 @pytest.mark.asyncio(loop_scope="function")
 class TestDecodeWorkerMultimodalBranching:
     """Tests for the mode-aware multimodal branching in _generate_token_mode."""
