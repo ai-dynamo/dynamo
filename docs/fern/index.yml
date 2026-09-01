@@ -643,6 +643,27 @@ navigation:
   - tab: use-cases
     layout:
       # ==================== Features ====================
+      - section: Reinforcement Learning
+        collapsed: true
+        icon: brain
+        slug: reinforcement-learning
+        contents:
+          - page: Overview
+            path: pages/use-cases/reinforcement-learning/overview.md
+          - page: KV-Aware Load Balancing
+            path: pages/use-cases/reinforcement-learning/routing.md
+          - page: Rollout Weight Updates
+            path: pages/use-cases/reinforcement-learning/weight-updates.md
+          - page: RL Profiling and Simulation
+            path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
+          - page: verl Integration
+            path: pages/use-cases/reinforcement-learning/verl.md
+          - page: NeMo RL Integration
+            path: pages/use-cases/reinforcement-learning/nemo-rl.md
+          - page: External Trainer Integration
+            path: pages/use-cases/reinforcement-learning/implementation-guide.md
+          - page: RL Integration Reference
+            path: pages/use-cases/reinforcement-learning/integration-reference.md
       - section: Agents
         collapsed: true
         icon: users
@@ -664,15 +685,6 @@ navigation:
             path: pages/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-      - section: Reinforcement Learning
-        collapsed: true
-        icon: brain
-        slug: reinforcement-learning
-        contents:
-          - page: Overview
-            path: pages/use-cases/reinforcement-learning/overview.md
-          - page: RL Implementation Guide
-            path: pages/use-cases/reinforcement-learning/implementation-guide.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film
