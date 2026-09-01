@@ -15,8 +15,7 @@ use dynamo_kv_router::{
     TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
-        ApproximateLruIncarnation, ApproximateLruRequestId, ApproximateLruStats, KvRouterError,
-        RoutingDecisionHashes,
+        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
