@@ -1199,7 +1199,7 @@ fn checked_add_image_tokens(total: Option<usize>, next: usize) -> Option<usize> 
 }
 
 #[cfg(feature = "mm-routing")]
-fn has_image_token_processor_override(value: Option<&serde_json::Value>) -> bool {
+fn has_mm_processor_override(value: Option<&serde_json::Value>) -> bool {
     value.is_some_and(|value| match value {
         serde_json::Value::Null => false,
         serde_json::Value::Object(map) => !map.is_empty(),
@@ -3350,13 +3350,8 @@ impl OpenAIPreprocessor {
                                 self.video_routing_processor.as_ref().ok_or_else(|| {
                                     anyhow::anyhow!("model has no exact video routing processor")
                                 })?;
-                            let has_processor_overrides = request
-                                .mm_processor_kwargs()
-                                .is_some_and(|value| match value {
-                                    serde_json::Value::Null => false,
-                                    serde_json::Value::Object(values) => !values.is_empty(),
-                                    _ => true,
-                                });
+                            let has_processor_overrides =
+                                has_mm_processor_override(request.mm_processor_kwargs());
                             anyhow::ensure!(
                                 !has_processor_overrides,
                                 "request mm_processor_kwargs can change the video token layout"
@@ -3477,8 +3472,7 @@ impl OpenAIPreprocessor {
         }
 
         #[cfg(feature = "mm-routing")]
-        let has_processor_override =
-            has_image_token_processor_override(request.mm_processor_kwargs());
+        let has_processor_override = has_mm_processor_override(request.mm_processor_kwargs());
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
@@ -8299,18 +8293,12 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn image_token_processor_override_is_conservative() {
-        assert!(!has_image_token_processor_override(None));
-        assert!(!has_image_token_processor_override(Some(
-            &serde_json::Value::Null
-        )));
-        assert!(!has_image_token_processor_override(Some(
-            &serde_json::json!({})
-        )));
-        assert!(has_image_token_processor_override(Some(
-            &serde_json::json!([])
-        )));
-        assert!(has_image_token_processor_override(Some(
+    fn mm_processor_override_is_conservative() {
+        assert!(!has_mm_processor_override(None));
+        assert!(!has_mm_processor_override(Some(&serde_json::Value::Null)));
+        assert!(!has_mm_processor_override(Some(&serde_json::json!({}))));
+        assert!(has_mm_processor_override(Some(&serde_json::json!([]))));
+        assert!(has_mm_processor_override(Some(
             &serde_json::json!({"min_pixels": 64})
         )));
     }

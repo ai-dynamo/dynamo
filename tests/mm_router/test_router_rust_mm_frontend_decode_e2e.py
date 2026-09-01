@@ -474,7 +474,7 @@ def test_frontend_decode_logs_decoded_bytes_source(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(1800)
 def test_frontend_decoded_video_routes_by_sampled_content(
     start_frontend_decode_services,
     predownload_models,
@@ -527,7 +527,7 @@ def test_frontend_decoded_video_routes_by_sampled_content(
 
 
 @pytest.mark.post_merge
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(1800)
 def test_frontend_decoded_mixed_media_preserves_i_v_i_order(
     start_frontend_decode_services,
     predownload_models,

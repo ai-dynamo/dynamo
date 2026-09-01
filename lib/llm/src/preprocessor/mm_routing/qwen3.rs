@@ -290,9 +290,7 @@ impl Qwen3VideoRoutingSpec {
         let mut resized_width = (width as f64 / factor as f64).round_ties_even() as usize * factor;
         let resize_frames = match self.resize_mode {
             QwenVideoResizeMode::LegacyCeil => self.padded_frame_count(num_frames)?,
-            // Transformers 5.15 changed smart_resize to Python's
-            // `round(num_frames / temporal_factor) * temporal_factor`.
-            // Patchification still pads upward to a complete temporal group.
+            // Resize rounds to the nearest temporal group; patchification pads upward.
             QwenVideoResizeMode::RoundTiesEven => {
                 ((num_frames as f64 / self.temporal_patch_size as f64).round_ties_even() as usize)
                     .checked_mul(self.temporal_patch_size)
