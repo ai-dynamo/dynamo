@@ -165,15 +165,15 @@ def main() -> int:
             # One verified issue satisfies the check; stop spending lookups.
             break
 
+    fork_linear_ids: list[str] = []
     for identifier in sorted(linear_ids)[:MAX_CANDIDATES]:
         if verified:
             break
         if is_fork:
             # Do not turn the CI into an existence oracle for Linear IDs
-            # guessed from fork PRs; fork contributors use GitHub issues.
-            unverified.append(
-                f"Linear reference {identifier} (not verified for fork PRs)"
-            )
+            # guessed from fork PRs, and do not let an unverifiable ID pass
+            # the check; fork contributors reference GitHub issues.
+            fork_linear_ids.append(identifier)
             continue
         exists, api_ok = verify_linear_issue(identifier, linear_key)
         if exists:
@@ -219,6 +219,15 @@ def main() -> int:
             "If no issue exists yet, create one first and start the work from it.",
             f"This check is advisory today and becomes required on {blocking_date}.",
         ]
+        + (
+            [
+                "",
+                f"Linear references found ({', '.join(fork_linear_ids)}) cannot be",
+                "verified for fork PRs; reference a GitHub issue instead.",
+            ]
+            if fork_linear_ids
+            else []
+        )
     )
     return 1
 
