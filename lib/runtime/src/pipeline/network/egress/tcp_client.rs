@@ -888,7 +888,7 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Send a validated request frame via lock-free SegQueue push (~20-40ns)
+    /// Send an already-validated request frame.
     async fn send_request_frame(&self, frame: TcpRequestFrame) -> Result<Bytes> {
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
