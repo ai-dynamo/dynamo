@@ -174,6 +174,7 @@ fn select_request() -> SelectRequest {
         session_id: None,
         session_context: None,
         affinity_target: None,
+        do_not_queue: false,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
@@ -194,6 +195,7 @@ fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
         session_id: None,
         session_context: None,
         affinity_target: None,
+        do_not_queue: false,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
@@ -253,6 +255,7 @@ fn lease_operation<'a>(
         session_context: None,
         session: SessionBinding::None,
         affinity_target: None,
+        do_not_queue: false,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
@@ -1220,6 +1223,131 @@ async fn queued_selection_errors_on_shutdown() {
         err,
         SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
     ));
+}
+
+#[tokio::test]
+async fn do_not_queue_selection_succeeds_when_it_can_be_dispatched_immediately() {
+    let core = saturated_core();
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+
+    let mut request = select_request();
+    request.do_not_queue = true;
+    let response = core
+        .select(request)
+        .await
+        .expect("immediately dispatchable request should succeed");
+
+    assert_eq!(response.worker_id, 1);
+    assert_eq!(
+        core.loads(Some("model"), Some("default"))[0].pending_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn do_not_queue_rejects_busy_selection_without_changing_pending_load() {
+    let core = saturated_core();
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.select_and_reserve(reserve_request("res-a"))
+        .await
+        .expect("initial reservation");
+
+    let queued_core = core.clone();
+    let queued = tokio::spawn(async move { queued_core.select(select_request()).await });
+    wait_for_pending_selection(&core).await;
+    let before = {
+        let loads = core.loads(Some("model"), Some("default"));
+        (loads[0].pending_count, loads[0].pending_isl_tokens)
+    };
+    let key = RoutingPartitionId::new("model", "default");
+    let before_cached = core
+        .ready_entry(&key)
+        .expect("ready partition")
+        .scheduler
+        .class_queue_stats(0)
+        .expect("default class")
+        .pending_cached_tokens;
+
+    let mut request = select_request();
+    request.do_not_queue = true;
+    let error = core
+        .select(request)
+        .await
+        .expect_err("busy do_not_queue selection should be rejected");
+    let SelectionError::Scheduler(KvSchedulerError::DoNotQueue {
+        policy_class,
+        pending_count,
+        pending_isl_tokens,
+        pending_cached_tokens,
+    }) = error
+    else {
+        panic!("expected do-not-queue rejection, got {error:?}");
+    };
+
+    assert_eq!(policy_class, "default");
+    assert_eq!(pending_count, before.0);
+    assert_eq!(pending_isl_tokens, before.1);
+    assert_eq!(pending_cached_tokens, before_cached);
+    let after = core.loads(Some("model"), Some("default"));
+    assert_eq!(after[0].pending_count, before.0);
+    assert_eq!(after[0].pending_isl_tokens, before.1);
+    assert_eq!(
+        core.ready_entry(&key)
+            .expect("ready partition")
+            .scheduler
+            .class_queue_stats(0)
+            .expect("default class")
+            .pending_cached_tokens,
+        before_cached
+    );
+
+    let mut reserve = reserve_request("do-not-queue");
+    reserve.do_not_queue = true;
+    assert!(matches!(
+        core.select_and_reserve(reserve).await,
+        Err(SelectionError::Scheduler(
+            KvSchedulerError::DoNotQueue { .. }
+        ))
+    ));
+    assert_eq!(
+        core.loads(Some("model"), Some("default"))[0].pending_count,
+        before.0
+    );
+
+    core.free_reservation("res-a")
+        .await
+        .expect("free active booking");
+    queued
+        .await
+        .expect("queued selection task")
+        .expect("queued select");
+    assert_eq!(
+        core.loads(Some("model"), Some("default"))[0].pending_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn advisory_selection_ignores_do_not_queue() {
+    let core = saturated_core();
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.select_and_reserve(reserve_request("res-a"))
+        .await
+        .expect("initial reservation");
+
+    let mut request = select_request();
+    request.advisory = true;
+    request.do_not_queue = true;
+    let response = core
+        .select(request)
+        .await
+        .expect("advisory selection bypasses queue admission");
+    assert_eq!(response.worker_id, 1);
+    assert!(response.worker_load.is_some());
+    assert_eq!(
+        core.loads(Some("model"), Some("default"))[0].pending_count,
+        0
+    );
 }
 
 #[tokio::test]

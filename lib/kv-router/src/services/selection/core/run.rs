@@ -97,6 +97,7 @@ impl SelectionCore {
                 session_context,
                 session,
                 affinity_target: req.affinity_target,
+                do_not_queue: req.do_not_queue,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -139,6 +140,7 @@ impl SelectionCore {
                 session_context,
                 session,
                 affinity_target: req.affinity_target,
+                do_not_queue: req.do_not_queue,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -265,6 +267,7 @@ impl SelectionCore {
             session_context,
             session,
             affinity_target,
+            do_not_queue,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -425,6 +428,10 @@ impl SelectionCore {
             session_context,
             expected_output_tokens,
             affinity_target,
+            // Advisory selection bypasses queue admission, so the opt-in
+            // backpressure behavior has no meaning for it.
+            do_not_queue: do_not_queue
+                && !matches!(&admission, SelectionAdmission::Advisory { .. }),
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,

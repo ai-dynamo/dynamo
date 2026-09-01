@@ -88,6 +88,19 @@ fn record_queue_rejection(
     }
 }
 
+fn record_do_not_queue_rejection(
+    per_class: &[RouterQueueMetricHandles],
+    indices: &HashMap<String, usize>,
+    policy_class: &str,
+) {
+    if let Some(handles) = indices
+        .get(policy_class)
+        .and_then(|index| per_class.get(*index))
+    {
+        handles.do_not_queue_rejections.inc();
+    }
+}
+
 fn update_queue_metrics(
     per_class: &[RouterQueueMetricHandles],
     mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
@@ -398,6 +411,16 @@ impl EmbeddedSelection {
     pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.
         let run = Box::pin(self.service.core().run_selection(operation)).await;
+        if let Err(dynamo_kv_router::services::selection::SelectionError::Scheduler(
+            dynamo_kv_router::scheduling::KvSchedulerError::DoNotQueue { policy_class, .. },
+        )) = &run.result
+        {
+            record_do_not_queue_rejection(
+                &self.queue_metrics,
+                &self.queue_metric_indices,
+                policy_class,
+            );
+        }
         self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
             _ => None,
@@ -761,5 +784,17 @@ mod tests {
         assert_eq!(per_class[1].raw_isl_limit_rejections.get(), 1);
         assert_eq!(per_class[0].raw_isl_limit_rejections.get(), 0);
         assert_eq!(per_class[1].request_limit_rejections.get(), 0);
+    }
+
+    #[test]
+    fn do_not_queue_rejections_count_against_their_policy_class() {
+        let per_class = vec![
+            ROUTER_QUEUE_METRICS.handles("m-fast-fail", "decode", "interactive"),
+            ROUTER_QUEUE_METRICS.handles("m-fast-fail", "decode", "batch"),
+        ];
+        let indices = HashMap::from([("interactive".to_string(), 0), ("batch".to_string(), 1)]);
+        record_do_not_queue_rejection(&per_class, &indices, "batch");
+        assert_eq!(per_class[1].do_not_queue_rejections.get(), 1);
+        assert_eq!(per_class[0].do_not_queue_rejections.get(), 0);
     }
 }

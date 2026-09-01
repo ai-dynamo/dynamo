@@ -50,9 +50,11 @@ struct ClassQueueCounters {
     pending_cached_tokens: AtomicUsize,
     received_total: AtomicU64,
     rejected_due_time_passed_total: AtomicU64,
+    #[cfg(test)]
+    do_not_queue_rejection_scans: AtomicUsize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClassQueueStats {
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
@@ -620,6 +622,8 @@ impl<
                     pending_cached_tokens: AtomicUsize::new(0),
                     received_total: AtomicU64::new(0),
                     rejected_due_time_passed_total: AtomicU64::new(0),
+                    #[cfg(test)]
+                    do_not_queue_rejection_scans: AtomicUsize::new(0),
                 })
                 .collect(),
         );
@@ -1135,7 +1139,7 @@ impl<
                     let lifecycle_transfer = lease
                         .as_ref()
                         .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
-                    let enqueue_ready = self.handle_enqueue(
+                    let (enqueue_ready, do_not_queue_class) = self.handle_enqueue(
                         request,
                         attempt_tx,
                         lifecycle_transfer,
@@ -1147,6 +1151,9 @@ impl<
                         self.handle_update(None).await;
                     } else if enqueue_ready {
                         self.handle_enqueued().await;
+                    }
+                    if let Some(class_index) = do_not_queue_class {
+                        self.reject_do_not_queue_pending(class_index).await;
                     }
                     let _ = ack_tx.send(lease);
                 }
@@ -1233,7 +1240,7 @@ impl<
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         queue_metadata: QueueMetadata,
-    ) -> bool {
+    ) -> (bool, Option<usize>) {
         let class_index = queue_metadata.class_index;
         self.class_counters[class_index]
             .received_total
@@ -1244,7 +1251,7 @@ impl<
             .is_some_and(|due_at| due_at <= decay_now)
         {
             self.reject_due_time_passed(class_index, &mut request);
-            return false;
+            return (false, None);
         }
         let snapshot = queue_metadata.snapshot;
         let class = self.profile.class(class_index);
@@ -1252,7 +1259,10 @@ impl<
         // `queue_rejection` would reject with `limit: 0`. Admit directly instead
         // so selection reports the real condition, `NoEndpoints`.
         if self.workers_with_configs.borrow().is_empty() {
-            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+            return (
+                self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now),
+                None,
+            );
         }
         // A class with any zero per-worker limit never queues: keep the direct
         // admission semantics by admitting while a worker has prefill capacity,
@@ -1277,10 +1287,14 @@ impl<
                     )
                 });
             if !should_queue {
-                return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+                return (
+                    self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now),
+                    None,
+                );
             }
         }
         tracing::trace!(policy_class = class.name, "ordering request");
+        let do_not_queue = request.do_not_queue;
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1305,7 +1319,7 @@ impl<
         ) {
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return false;
+            return (false, None);
         }
         if let Some(transfer) = lifecycle_transfer {
             transfer.arm_pending();
@@ -1314,7 +1328,7 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
-        true
+        (true, do_not_queue.then_some(class_index))
     }
 
     fn reject_due_time_passed(&self, class_index: usize, request: &mut SchedulingRequest) {
@@ -1493,6 +1507,54 @@ impl<
             return;
         }
         self.drain_ready().await;
+    }
+
+    /// Remove an opted-out request only after its normal drain. The caller
+    /// invokes this only for a successful opted-out queue insertion.
+    async fn reject_do_not_queue_pending(&mut self, class_index: usize) {
+        #[cfg(test)]
+        self.class_counters[class_index]
+            .do_not_queue_rejection_scans
+            .fetch_add(1, AtomicOrdering::Relaxed);
+
+        self.reject_expired(Instant::now());
+        let (removed, removed_ready_head) = self
+            .pending
+            .take_if_in_class(class_index, |queued| queued.request.do_not_queue);
+        let mut rejected = Vec::with_capacity(removed.len());
+        for entry in removed {
+            self.subtract_pending_counters(class_index, entry.snapshot());
+            let QueuedRequest {
+                request,
+                lifecycle_transfer,
+                ..
+            } = entry.into_payload();
+            if let Some(transfer) = lifecycle_transfer {
+                transfer.disarm();
+            }
+            rejected.push(request);
+        }
+
+        // Read the class snapshot after every opted-out entry has been removed,
+        // so the response reports the load that remains in the queue.
+        for mut request in rejected {
+            let counters = &self.class_counters[class_index];
+            request.respond(Err(KvSchedulerError::DoNotQueue {
+                policy_class: self.profile.class(class_index).name.clone(),
+                pending_count: counters.pending_count.load(AtomicOrdering::Relaxed),
+                pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
+                pending_cached_tokens: counters.pending_cached_tokens.load(AtomicOrdering::Relaxed),
+            }));
+        }
+
+        // Removing the queued request may expose an ordinary request in the
+        // same class, so give that newly exposed head the same drain pass.
+        if removed_ready_head {
+            self.reject_expired(Instant::now());
+            if self.pending.has_ready() {
+                self.drain_ready().await;
+            }
+        }
     }
 
     async fn drain_ready(&mut self) {
@@ -2614,6 +2676,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
@@ -2787,11 +2850,12 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn expired_deadline_is_rejected_at_enqueue() {
+    async fn expired_deadline_takes_precedence_over_do_not_queue() {
         let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
         let (probe, _probe_rx) = make_request("advisory", 64);
         queue.select_without_admission(probe).await.unwrap();
-        let (request, response_rx) = make_request("expired-on-arrival", 64);
+        let (mut request, response_rx) = make_request("expired-on-arrival", 64);
+        request.do_not_queue = true;
         queue
             .enqueue_with_due_at_for_test(request, Instant::now())
             .await;
@@ -3745,6 +3809,7 @@ policy_classes:
         // drain admits the parked bulk head alongside the arrival itself.
         let (mut arrival, arrival_rx) = make_request("latency-arrival", 64);
         arrival.policy_class = Some("latency".to_string());
+        arrival.do_not_queue = true;
         queue.enqueue(arrival).await;
         assert_eq!(queue.pending_count(), 0);
         bulk_head_rx
@@ -3916,16 +3981,209 @@ policy_classes:
         assert_eq!(rejection.limit, 1);
         assert!(!error.is_overload());
 
+        let (mut opted_out, opted_out_rx) = make_request("do-not-queue-at-limit", 64);
+        opted_out.do_not_queue = true;
+        queue.enqueue(opted_out).await;
+        assert!(matches!(
+            opted_out_rx.await.unwrap().unwrap_err(),
+            KvSchedulerError::QueueRejected(_)
+        ));
+
         assert_eq!(
             queue.class_queue_stats(0),
             Some(ClassQueueStats {
-                received_total: 3,
+                received_total: 4,
                 rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
             })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn do_not_queue_rejects_only_after_the_normal_drain() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The default request still queues while the worker is busy.
+        let (queued, mut queued_response) = make_request("queued", 32);
+        assert!(!queued.do_not_queue);
+        queue.enqueue(queued).await;
+        assert!(matches!(
+            queued_response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            queue.class_counters[0]
+                .do_not_queue_rejection_scans
+                .load(Ordering::Relaxed),
+            0,
+            "ordinary enqueue must not scan the pending queue for do_not_queue"
+        );
+        queue.update().await;
+        assert_eq!(
+            queue.class_counters[0]
+                .do_not_queue_rejection_scans
+                .load(Ordering::Relaxed),
+            0,
+            "ordinary update must not scan the pending queue for do_not_queue"
+        );
+        let expected_stats = ClassQueueStats {
+            received_total: 2,
+            rejected_due_time_passed_total: 0,
+            pending_count: 1,
+            pending_isl_tokens: 32,
+            pending_cached_tokens: 0,
+        };
+        assert_eq!(queue.class_queue_stats(0), Some(expected_stats));
+
+        let (mut request, response) = make_request("do-not-queue", 64);
+        request.do_not_queue = true;
+        queue.enqueue(request).await;
+        assert_eq!(
+            queue.class_counters[0]
+                .do_not_queue_rejection_scans
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let error = response.await.unwrap().unwrap_err();
+        let KvSchedulerError::DoNotQueue {
+            policy_class,
+            pending_count,
+            pending_isl_tokens,
+            pending_cached_tokens,
+        } = error
+        else {
+            panic!("expected do-not-queue rejection, got {error:?}");
+        };
+        assert_eq!(policy_class, "capped");
+        assert_eq!(pending_count, 1);
+        assert_eq!(pending_isl_tokens, 32);
+        assert_eq!(pending_cached_tokens, 0);
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), 32);
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                received_total: 3,
+                ..expected_stats
+            })
+        );
+
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+        assert!(queued_response.await.unwrap().is_ok());
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                received_total: 3,
+                ..ClassQueueStats::default()
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn do_not_queue_allows_immediate_admission() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (mut request, response) = make_request("do-not-queue", 64);
+        request.do_not_queue = true;
+        queue.enqueue(request).await;
+
+        assert!(response.await.unwrap().is_ok());
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn do_not_queue_uses_priority_order_on_its_admission_turn() {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (low, mut low_rx) = make_request("low", 64);
+        queue.enqueue(low).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+
+        let (mut high, high_rx) = make_request("high", 64);
+        high.strict_priority = 1;
+        high.do_not_queue = true;
+        queue.enqueue(high).await;
+        high_rx.await.unwrap().unwrap();
+        assert!(
+            low_rx.try_recv().is_err(),
+            "normal priority ordering should leave the lower-priority request pending"
+        );
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn do_not_queue_rejection_disarms_pending_lifecycle_lease() {
+        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (mut request, response_rx) = make_request("rejected", 64);
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "rejected".to_string(),
+        };
+        request.do_not_queue = true;
+        let lease = queue.new_request_lifecycle_lease(Some("rejected"));
+        let returned_lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, lease)
+            .await
+            .expect("scheduler must return the lifecycle lease");
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::DoNotQueue { .. })
+        ));
+        assert!(!returned_lease.transfer.as_ref().unwrap().is_armed());
+        drop(returned_lease);
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4277,6 +4535,7 @@ policy_classes:
     async fn test_pinned_worker_conflict_with_allowed_ids_fails_early() {
         let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
         let (mut req, rx) = make_request("conflict", 256);
+        req.do_not_queue = true;
         req.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
         req.allowed_worker_ids = Some(HashSet::from([1]));
 
@@ -4293,6 +4552,7 @@ policy_classes:
     async fn test_disallowed_worker_ids_fail_without_queueing() {
         let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
         let (mut req, rx) = make_request("disallowed", 256);
+        req.do_not_queue = true;
         req.allowed_worker_ids = Some(HashSet::from([999]));
 
         queue.enqueue(req).await;
@@ -4317,6 +4577,7 @@ policy_classes:
         cfg_tx.send(configs).unwrap();
 
         let (mut req, rx) = make_request("tainted", 256);
+        req.do_not_queue = true;
         req.routing_constraints = crate::protocols::RoutingConstraints {
             required_taints: HashSet::from(["mdc-b".to_string()]),
             preferred_taints: HashMap::new(),
@@ -4327,6 +4588,45 @@ policy_classes:
         let resp = rx.await.expect("oneshot dropped");
         assert!(matches!(resp, Err(KvSchedulerError::NoEndpoints)));
         assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn do_not_queue_respects_pins_and_allowlists_when_another_worker_is_idle() {
+        let (queue, _slots) = make_queue(2, 16, 256, Some(0.0));
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        let (mut active, active_rx) = make_request("active-pinned", 256);
+        active.pinned_worker = Some(worker);
+        queue.enqueue(active).await;
+        assert_eq!(active_rx.await.unwrap().unwrap().best_worker, worker);
+
+        let (mut pinned, pinned_rx) = make_request("busy-pinned", 256);
+        pinned.pinned_worker = Some(worker);
+        pinned.do_not_queue = true;
+        queue.enqueue(pinned).await;
+        assert!(matches!(
+            pinned_rx.await.unwrap(),
+            Err(KvSchedulerError::DoNotQueue { .. })
+        ));
+
+        let (mut allowed, allowed_rx) = make_request("busy-allowed", 256);
+        allowed.allowed_worker_ids = Some(HashSet::from([1]));
+        allowed.do_not_queue = true;
+        queue.enqueue(allowed).await;
+        assert!(matches!(
+            allowed_rx.await.unwrap(),
+            Err(KvSchedulerError::DoNotQueue { .. })
+        ));
+        assert_eq!(queue.pending_count(), 0);
+
+        let (mut idle, idle_rx) = make_request("idle-pinned", 256);
+        idle.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        idle.do_not_queue = true;
+        queue.enqueue(idle).await;
+        assert_eq!(
+            idle_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
