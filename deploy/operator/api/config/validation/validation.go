@@ -40,6 +40,14 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
+	// Reject unsupported operator-level pod merge defaults.
+	if strategy := config.PodGeneration.DefaultExtraPodSpecMergeStrategy; strategy != "" && !strategy.IsValid() {
+		allErrs = append(allErrs, field.NotSupported(
+			field.NewPath("podGeneration").Child("defaultExtraPodSpecMergeStrategy"),
+			strategy,
+			[]string{"override", "strategic"},
+		))
+	}
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
 	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
 

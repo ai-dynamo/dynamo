@@ -160,6 +160,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
 	dst.MinAvailable = src.MinAvailable
+	dst.ExtraPodSpecMergeStrategy = v1beta1.ExtraPodSpecMergeStrategy(src.ExtraPodSpecMergeStrategy)
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -556,6 +557,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
+	dst.ExtraPodSpecMergeStrategy = ExtraPodSpecMergeStrategy(src.ExtraPodSpecMergeStrategy)
 
 	// sharedMemorySize -> SharedMemorySpec.
 	if src.SharedMemorySize != nil {
@@ -604,6 +606,13 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	if src.PodTemplate != nil {
 		if err := saveSharedPodTemplateHubOnlyFields(src, converted, save); err != nil {
 			return err
+		}
+		// Preserve the original cache identity as matching context for saved mount order.
+		if src.CompilationCache != nil && save.PodTemplate != nil {
+			if main, ok := findContainerByName(save.PodTemplate.Spec.Containers, mainContainerName); ok &&
+				len(main.VolumeMounts) > 1 {
+				save.CompilationCache = src.CompilationCache.DeepCopy()
+			}
 		}
 	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
@@ -1492,6 +1501,9 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 		return fmt.Errorf("merge main container: %w", err)
 	}
 	mainBase.Env = mergeEnvs(baseEnvs, main.Env)
+	if main.Ports != nil {
+		mainBase.Ports = slices.Clone(main.Ports)
+	}
 	// The v1alpha1 renderer merged extraPodSpec.mainContainer first, then
 	// appended the dedicated service-level mounts. Preserve that ordering rather
 	// than allowing mergo to replace the VolumeMounts slice.
@@ -1753,7 +1765,7 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	}
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
-	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
+	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, preserved.CompilationCache, src)
 	if podTemplateIsZero(preserved.PodTemplate) && podTemplateIsZero(out) {
 		return out, nil
 	}
@@ -1943,7 +1955,7 @@ func restoreSharedHubOnlyPodTemplateMetadata(dst *metav1.ObjectMeta, preserved m
 	dst.Annotations = annotations
 }
 
-func restoreSharedHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {
+func restoreSharedHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplateSpec, preservedCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) {
 	if src == nil || len(src.VolumeMounts) == 0 {
 		return
 	}
@@ -1965,8 +1977,52 @@ func restoreSharedHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplat
 				copyHubOnlyVolumeMountFields(mount, preservedMount)
 			}
 		}
+		if firstPreservedCompilationCacheMatches(preservedCache, src.VolumeMounts) {
+			dst.Spec.Containers[i].VolumeMounts = restoreNativeVolumeMountOrder(
+				dst.Spec.Containers[i].VolumeMounts,
+				preservedMain.VolumeMounts,
+				src,
+			)
+		}
 		return
 	}
+}
+
+func restoreNativeVolumeMountOrder(current, preserved []corev1.VolumeMount, src *DynamoComponentDeploymentSharedSpec) []corev1.VolumeMount {
+	if len(current) < 2 || len(current) != len(preserved) {
+		return current
+	}
+	if src.ExtraPodSpec != nil && src.ExtraPodSpec.MainContainer != nil &&
+		len(src.ExtraPodSpec.MainContainer.VolumeMounts) > 0 {
+		return current
+	}
+
+	// Restore hub order only while the live flat list still matches its cache-first projection.
+	projected := make([]VolumeMount, 0, len(src.VolumeMounts))
+	for _, mount := range src.VolumeMounts {
+		if mount.UseAsCompilationCache {
+			projected = append(projected, mount)
+			break
+		}
+	}
+	projected = appendMissingVolumeMounts(projected, volumeMountsFromNative(preserved))
+	if !volumeMountsEqual(src.VolumeMounts, projected) {
+		return current
+	}
+
+	remaining := slices.Clone(current)
+	ordered := make([]corev1.VolumeMount, 0, len(current))
+	for _, saved := range preserved {
+		index := slices.IndexFunc(remaining, func(mount corev1.VolumeMount) bool {
+			return mount.Name == saved.Name && mount.MountPath == saved.MountPath
+		})
+		if index < 0 {
+			return current
+		}
+		ordered = append(ordered, remaining[index])
+		remaining = slices.Delete(remaining, index, index+1)
+	}
+	return ordered
 }
 
 func sourceFlatVolumeMountMatches(mounts []VolumeMount, mount corev1.VolumeMount) bool {

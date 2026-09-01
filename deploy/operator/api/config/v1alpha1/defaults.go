@@ -85,6 +85,11 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
 
+	// Pod generation defaults
+	if obj.PodGeneration.DefaultExtraPodSpecMergeStrategy == "" {
+		obj.PodGeneration.DefaultExtraPodSpecMergeStrategy = DefaultExtraPodSpecMergeStrategy
+	}
+
 	// ServiceMesh defaults
 	if ServiceMeshProvider(obj.ServiceMesh.Provider) == ServiceMeshProviderIstio && obj.ServiceMesh.Istio == nil {
 		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}

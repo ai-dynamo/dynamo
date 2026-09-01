@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1729,6 +1730,15 @@ func GenerateBasePodSpec(
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	// Resolve the one merge policy shared by every pod-template overlay.
+	podTemplateMergeStrategy, err := v1alpha1.ResolveExtraPodSpecMergeStrategy(
+		v1alpha1.ExtraPodSpecMergeStrategy(component.ExtraPodSpecMergeStrategy),
+		v1alpha1.ExtraPodSpecMergeStrategy(operatorConfig.PodGeneration.DefaultExtraPodSpecMergeStrategy),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve podTemplate merge strategy: %w", err)
+	}
+
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
 	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
@@ -1742,7 +1752,7 @@ func GenerateBasePodSpec(
 	}
 
 	if main := GetMainContainer(component); main != nil {
-		if err := mergeContainerByName(&container, main); err != nil {
+		if err := mergeContainerByName(&container, main, podTemplateMergeStrategy); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
 	}
@@ -1786,7 +1796,7 @@ func GenerateBasePodSpec(
 	sidecars := make([]corev1.Container, 0)
 
 	if component.PodTemplate != nil {
-		podSpecOverride := component.PodTemplate.Spec.DeepCopy()
+		podSpecOverride := *component.PodTemplate.Spec.DeepCopy()
 		for _, userContainer := range podSpecOverride.Containers {
 			if userContainer.Name != commonconsts.MainContainerName {
 				sidecars = append(sidecars, userContainer)
@@ -1794,7 +1804,7 @@ func GenerateBasePodSpec(
 		}
 
 		podSpecOverride.Containers = nil
-		if err := mergo.Merge(&podSpec, podSpecOverride, mergo.WithOverride); err != nil {
+		if err := mergePodSpecOverride(&podSpec, podSpecOverride, podTemplateMergeStrategy); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate spec: %w", err)
 		}
 	}
@@ -1820,7 +1830,7 @@ func GenerateBasePodSpec(
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts, podTemplateMergeStrategy); err != nil {
 			return nil, err
 		}
 	}
@@ -1898,17 +1908,63 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
-func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
+// Strategic merge field-merges matching list items, which breaks union-style
+// objects when a user needs to replace an existing entry.
+func removeNamed[T any](items, overrides []T, nameOf func(T) string) []T {
+	if len(items) == 0 || len(overrides) == 0 {
+		return items
+	}
+
+	// Index every non-empty override name.
+	overrideNames := make(map[string]struct{}, len(overrides))
+	for _, override := range overrides {
+		if name := nameOf(override); name != "" {
+			overrideNames[name] = struct{}{}
+		}
+	}
+	if len(overrideNames) == 0 {
+		return items
+	}
+
+	// Remove every overridden base item while preserving survivor order.
+	return slices.DeleteFunc(items, func(item T) bool {
+		_, exists := overrideNames[nameOf(item)]
+		return exists
+	})
+}
+
+func mergeContainerByName(base *corev1.Container, override *corev1.Container, mergeStrategy v1alpha1.ExtraPodSpecMergeStrategy) error {
 	if override == nil {
 		return nil
 	}
 	user := override.DeepCopy()
 	user.Name = commonconsts.MainContainerName
-	baseEnv := base.Env
-	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
-		return err
+
+	switch mergeStrategy {
+	case v1alpha1.ExtraPodSpecMergeStrategyOverride:
+		baseEnv := base.Env
+		if err := mergeObjectOverride(base, *user); err != nil {
+			return err
+		}
+		base.Env = MergeEnvs(baseEnv, user.Env)
+		if user.Ports != nil {
+			base.Ports = slices.Clone(user.Ports)
+		}
+	case v1alpha1.ExtraPodSpecMergeStrategyStrategic:
+		clearPorts := user.Ports != nil && len(user.Ports) == 0
+		base.Env = removeNamed(base.Env, user.Env, func(env corev1.EnvVar) string { return env.Name })
+		if !clearPorts {
+			base.Ports = removeNamed(base.Ports, user.Ports, func(port corev1.ContainerPort) string { return port.Name })
+		}
+		if err := patchObjectStrategic(base, user); err != nil {
+			return err
+		}
+		if clearPorts {
+			base.Ports = slices.Clone(user.Ports)
+		}
+	default:
+		return fmt.Errorf("unsupported podTemplate merge strategy %q", mergeStrategy)
 	}
-	base.Env = MergeEnvs(baseEnv, user.Env)
 	if user.LivenessProbe != nil {
 		base.LivenessProbe = user.LivenessProbe.DeepCopy()
 	}
@@ -1920,6 +1976,19 @@ func mergeContainerByName(base *corev1.Container, override *corev1.Container) er
 	}
 	base.Name = commonconsts.MainContainerName
 	return nil
+}
+
+// mergePodSpecOverride applies the caller-owned override to podSpec, which must be non-nil.
+func mergePodSpecOverride(podSpec *corev1.PodSpec, podSpecOverride corev1.PodSpec, mergeStrategy v1alpha1.ExtraPodSpecMergeStrategy) error {
+	switch mergeStrategy {
+	case v1alpha1.ExtraPodSpecMergeStrategyOverride:
+		return mergeObjectOverride(podSpec, &podSpecOverride)
+	case v1alpha1.ExtraPodSpecMergeStrategyStrategic:
+		podSpec.Volumes = removeNamed(podSpec.Volumes, podSpecOverride.Volumes, func(volume corev1.Volume) string { return volume.Name })
+		return patchObjectStrategic(podSpec, &podSpecOverride)
+	default:
+		return fmt.Errorf("unsupported podTemplate merge strategy %q", mergeStrategy)
+	}
 }
 
 func applyCompilationCache(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec, backendFramework BackendFramework) error {
@@ -2049,7 +2118,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount, mergeStrategy v1alpha1.ExtraPodSpecMergeStrategy) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -2068,12 +2137,41 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to get frontend sidecar defaults: %w", err)
 		}
 		base.Name = sidecarName
-		baseEnv := base.Env
 		user := podSpec.Containers[i].DeepCopy()
-		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
-			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
+		switch mergeStrategy {
+		case v1alpha1.ExtraPodSpecMergeStrategyOverride:
+			baseEnv := base.Env
+			if err := mergeObjectOverride(&base, *user); err != nil {
+				return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
+			}
+			base.Env = MergeEnvs(baseEnv, user.Env)
+			if user.Ports != nil {
+				base.Ports = slices.Clone(user.Ports)
+			}
+		case v1alpha1.ExtraPodSpecMergeStrategyStrategic:
+			clearPorts := user.Ports != nil && len(user.Ports) == 0
+			base.Env = removeNamed(base.Env, user.Env, func(env corev1.EnvVar) string { return env.Name })
+			if !clearPorts {
+				base.Ports = removeNamed(base.Ports, user.Ports, func(port corev1.ContainerPort) string { return port.Name })
+			}
+			if err := patchObjectStrategic(&base, user); err != nil {
+				return fmt.Errorf("failed to patch frontend sidecar %q: %w", sidecarName, err)
+			}
+			if clearPorts {
+				base.Ports = slices.Clone(user.Ports)
+			}
+		default:
+			return fmt.Errorf("unsupported podTemplate merge strategy %q", mergeStrategy)
 		}
-		base.Env = MergeEnvs(baseEnv, user.Env)
+		if user.LivenessProbe != nil {
+			base.LivenessProbe = user.LivenessProbe.DeepCopy()
+		}
+		if user.ReadinessProbe != nil {
+			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+		}
+		if user.StartupProbe != nil {
+			base.StartupProbe = user.StartupProbe.DeepCopy()
+		}
 		AddStandardEnvVars(&base, operatorConfig)
 		AddTransportTLSEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)

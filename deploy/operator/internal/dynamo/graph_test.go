@@ -6227,6 +6227,296 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_ResolvesPodTemplateMergeStrategy(t *testing.T) {
+	tests := []struct {
+		name             string
+		explicitStrategy v1beta1.ExtraPodSpecMergeStrategy
+		defaultStrategy  configv1alpha1.ExtraPodSpecMergeStrategy
+		wantPorts        map[string]int32
+		wantErr          string
+	}{
+		{
+			name:      "built-in default uses override",
+			wantPorts: map[string]int32{"custom": 9000},
+		},
+		{
+			name:            "operator default selects strategic merge",
+			defaultStrategy: configv1alpha1.ExtraPodSpecMergeStrategyStrategic,
+			wantPorts:       map[string]int32{"http": 8000, "custom": 9000},
+		},
+		{
+			name:             "explicit override wins over operator default",
+			explicitStrategy: v1beta1.ExtraPodSpecMergeStrategyOverride,
+			defaultStrategy:  configv1alpha1.ExtraPodSpecMergeStrategyStrategic,
+			wantPorts:        map[string]int32{"custom": 9000},
+		},
+		{
+			name:             "explicit strategic wins over operator default",
+			explicitStrategy: v1beta1.ExtraPodSpecMergeStrategyStrategic,
+			defaultStrategy:  configv1alpha1.ExtraPodSpecMergeStrategyOverride,
+			wantPorts:        map[string]int32{"http": 8000, "custom": 9000},
+		},
+		{
+			name:             "invalid explicit strategy is rejected",
+			explicitStrategy: "replace",
+			wantErr:          `invalid extraPodSpec merge strategy "replace"`,
+		},
+		{
+			name:            "invalid operator default is rejected",
+			defaultStrategy: "replace",
+			wantErr:         `invalid extraPodSpec merge strategy "replace"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a frontend component with a user-defined container port")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:             "frontend",
+				ComponentType:             v1beta1.ComponentTypeFrontend,
+				ExtraPodSpecMergeStrategy: tt.explicitStrategy,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: commonconsts.MainContainerName,
+								Ports: []corev1.ContainerPort{
+									{Name: "custom", ContainerPort: 9000, Protocol: corev1.ProtocolTCP},
+								},
+							},
+						},
+					},
+				},
+			}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				PodGeneration: configv1alpha1.PodGenerationConfiguration{
+					DefaultExtraPodSpecMergeStrategy: tt.defaultStrategy,
+				},
+			}
+
+			t.Log("Render the pod using the component and operator strategy precedence")
+			podSpec, err := GenerateBasePodSpec(
+				component,
+				BackendFrameworkVLLM,
+				nil,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				operatorConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"frontend",
+				nil,
+				nil,
+				staticContainerGPUCount(0),
+			)
+
+			t.Log("Verify invalid strategies fail before rendering")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("GenerateBasePodSpec() error = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GenerateBasePodSpec() unexpected error = %v", err)
+			}
+
+			t.Log("Verify override replaces the port list while strategic merge preserves unmatched defaults")
+			gotPorts := make(map[string]int32, len(podSpec.Containers[0].Ports))
+			for _, port := range podSpec.Containers[0].Ports {
+				gotPorts[port.Name] = port.ContainerPort
+			}
+			if diff := cmp.Diff(tt.wantPorts, gotPorts); diff != "" {
+				t.Fatalf("rendered main-container ports mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestStrategicPodTemplateMergeReplacesNamedEntries(t *testing.T) {
+	t.Log("Build generated container defaults with union-style named entries")
+	baseContainer := &corev1.Container{
+		Name: commonconsts.MainContainerName,
+		Env: []corev1.EnvVar{
+			{
+				Name: "CONFIG",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "old-config"},
+						Key:                  "value",
+					},
+				},
+			},
+			{Name: "KEEP_ENV", Value: "keep"},
+		},
+		Ports: []corev1.ContainerPort{
+			{Name: "metrics", ContainerPort: 8000, Protocol: corev1.ProtocolTCP},
+			{Name: "keep-port", ContainerPort: 7000, Protocol: corev1.ProtocolTCP},
+		},
+	}
+	overrideContainer := &corev1.Container{
+		Env: []corev1.EnvVar{
+			{Name: "CONFIG", Value: "new-config"},
+		},
+		Ports: []corev1.ContainerPort{
+			{Name: "metrics", ContainerPort: 9000, Protocol: corev1.ProtocolTCP},
+		},
+	}
+
+	t.Log("Strategically merge the main-container override")
+	if err := mergeContainerByName(baseContainer, overrideContainer, v1alpha1.ExtraPodSpecMergeStrategyStrategic); err != nil {
+		t.Fatalf("mergeContainerByName() error = %v", err)
+	}
+
+	t.Log("Verify same-name env and port entries are replaced without unioning their fields")
+	require.Len(t, baseContainer.Env, 2)
+	assert.Contains(t, baseContainer.Env, corev1.EnvVar{Name: "CONFIG", Value: "new-config"})
+	assert.Contains(t, baseContainer.Env, corev1.EnvVar{Name: "KEEP_ENV", Value: "keep"})
+	require.Len(t, baseContainer.Ports, 2)
+	assert.ElementsMatch(t, []corev1.ContainerPort{
+		{Name: "metrics", ContainerPort: 9000, Protocol: corev1.ProtocolTCP},
+		{Name: "keep-port", ContainerPort: 7000, Protocol: corev1.ProtocolTCP},
+	}, baseContainer.Ports)
+
+	t.Log("Build generated pod defaults with a same-name volume override")
+	podSpec := &corev1.PodSpec{
+		Volumes: []corev1.Volume{
+			{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			},
+			{
+				Name: "keep-volume",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			},
+		},
+	}
+	podSpecOverride := corev1.PodSpec{
+		Volumes: []corev1.Volume{
+			{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "new-config"},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Strategically merge the pod-spec override")
+	if err := mergePodSpecOverride(podSpec, podSpecOverride, v1alpha1.ExtraPodSpecMergeStrategyStrategic); err != nil {
+		t.Fatalf("mergePodSpecOverride() error = %v", err)
+	}
+
+	t.Log("Verify the same-name volume is replaced and unmatched generated volumes survive")
+	require.Len(t, podSpec.Volumes, 2)
+	assert.ElementsMatch(t, []corev1.Volume{
+		{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "new-config"},
+				},
+			},
+		},
+		{
+			Name: "keep-volume",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	}, podSpec.Volumes)
+}
+
+func TestMergeContainerByName_StrategicPreservesExplicitEmptyPorts(t *testing.T) {
+	t.Log("Build generated ports and an explicitly empty user port list")
+	base := &corev1.Container{
+		Ports: []corev1.ContainerPort{
+			{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP},
+		},
+	}
+	override := &corev1.Container{Ports: []corev1.ContainerPort{}}
+
+	t.Log("Strategically merge the explicit empty port list")
+	if err := mergeContainerByName(base, override, v1alpha1.ExtraPodSpecMergeStrategyStrategic); err != nil {
+		t.Fatalf("mergeContainerByName() error = %v", err)
+	}
+
+	t.Log("Verify explicit emptiness clears generated ports without collapsing to nil")
+	if base.Ports == nil || len(base.Ports) != 0 {
+		t.Fatalf("mergeContainerByName() ports = %#v, want explicit empty slice", base.Ports)
+	}
+}
+
+func TestMergeFrontendSidecarDefaults_UsesPodTemplateMergeStrategy(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy v1alpha1.ExtraPodSpecMergeStrategy
+	}{
+		{name: "override", strategy: v1alpha1.ExtraPodSpecMergeStrategyOverride},
+		{name: "strategic", strategy: v1alpha1.ExtraPodSpecMergeStrategyStrategic},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a user frontend sidecar that replaces same-name generated defaults")
+			userLivenessProbe := &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"check-ready"}},
+				},
+			}
+			podSpec := &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "router",
+						Image: "frontend:latest",
+						Env: []corev1.EnvVar{
+							{Name: "DYN_HTTP_PORT", Value: "9000"},
+						},
+						Ports: []corev1.ContainerPort{
+							{Name: "http", ContainerPort: 9000, Protocol: corev1.ProtocolTCP},
+						},
+						LivenessProbe: userLivenessProbe,
+					},
+				},
+			}
+			parentContext := ComponentContext{
+				ParentGraphDeploymentName:      "test-deployment",
+				ParentGraphDeploymentNamespace: "default",
+				DynamoNamespace:                "default-test-deployment",
+			}
+
+			t.Log("Merge frontend defaults using the resolved pod-template strategy")
+			if err := mergeFrontendSidecarDefaults(
+				podSpec,
+				"router",
+				parentContext,
+				&configv1alpha1.OperatorConfiguration{},
+				nil,
+				tt.strategy,
+			); err != nil {
+				t.Fatalf("mergeFrontendSidecarDefaults() error = %v", err)
+			}
+
+			t.Log("Verify user env and port entries replace the generated values")
+			require.Len(t, podSpec.Containers, 1)
+			sidecar := podSpec.Containers[0]
+			assert.Equal(t, "9000", envVarsToMap(sidecar.Env)["DYN_HTTP_PORT"])
+			assert.Equal(t, "frontend:latest", sidecar.Image)
+			assert.Equal(t, []corev1.ContainerPort{
+				{Name: "http", ContainerPort: 9000, Protocol: corev1.ProtocolTCP},
+			}, sidecar.Ports)
+			assert.Equal(t, userLivenessProbe, sidecar.LivenessProbe)
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}

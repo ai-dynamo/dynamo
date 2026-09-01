@@ -74,6 +74,36 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	}
 }
 
+func TestBugDCD_SpokeExplicitEmptyMainContainerPortsConvertToHub(t *testing.T) {
+	t.Log("Build a spoke component whose main-container ports are explicitly empty")
+	src := &DynamoComponentDeploymentSharedSpec{
+		ExtraPodSpec: &ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Image: "worker:latest",
+				Ports: []corev1.ContainerPort{},
+			},
+		},
+	}
+
+	t.Log("Convert the spoke shared spec to the hub representation")
+	dst := &v1beta1.DynamoComponentDeploymentSharedSpec{}
+	if err := ConvertFromDynamoComponentDeploymentSharedSpec(src, dst, nil, nil, DynamoComponentDeploymentSharedSpecConversionContext{}); err != nil {
+		t.Fatalf("ConvertFromDynamoComponentDeploymentSharedSpec() error = %v", err)
+	}
+
+	t.Log("Verify the hub main container preserves the explicit empty ports slice")
+	if dst.PodTemplate == nil {
+		t.Fatal("ConvertFromDynamoComponentDeploymentSharedSpec().PodTemplate = nil, want a pod template")
+	}
+	main, ok := findContainerByName(dst.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("converted podTemplate containers = %#v, want %q", dst.PodTemplate.Spec.Containers, mainContainerName)
+	}
+	if main.Ports == nil || len(main.Ports) != 0 {
+		t.Fatalf("converted main container ports = %#v, want explicit empty slice", main.Ports)
+	}
+}
+
 func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	in := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "volume-mounts", Namespace: "ns"},
@@ -325,6 +355,129 @@ func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T)
 	}
 	if gotHash != wantHash {
 		t.Fatalf("round-trip worker hash = %q, want %q", gotHash, wantHash)
+	}
+}
+
+func TestBugDCD_HubVolumeMountOrderRoundTrips(t *testing.T) {
+	t.Log("Build a hub component whose cache mount follows another volume mount")
+	data := corev1.VolumeMount{Name: "data", MountPath: "/data"}
+	cache := corev1.VolumeMount{Name: "cache", MountPath: "/cache"}
+	hub := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "volume-mount-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "volume-mount-order",
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   cache.Name,
+					MountPath: cache.MountPath,
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:         mainContainerName,
+							VolumeMounts: []corev1.VolumeMount{data, cache},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Round-trip the hub component through the v1alpha1 spoke")
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify the sparse save restores the original hub mount order")
+	main, ok := findContainerByName(restored.Spec.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("main container missing from restored podTemplate: %#v", restored.Spec.PodTemplate)
+	}
+	if diff := cmp.Diff([]corev1.VolumeMount{data, cache}, main.VolumeMounts); diff != "" {
+		t.Fatalf("hub volume mount order changed after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestRestoreNativeVolumeMountOrder(t *testing.T) {
+	t.Log("Build the cache-first v1alpha1 projection and original hub order")
+	cache := corev1.VolumeMount{Name: "cache", MountPath: "/cache"}
+	data := corev1.VolumeMount{Name: "data", MountPath: "/data"}
+	src := &DynamoComponentDeploymentSharedSpec{VolumeMounts: []VolumeMount{
+		{Name: "cache", MountPoint: "/cache", UseAsCompilationCache: true},
+		{Name: "data", MountPoint: "/data"},
+	}}
+	want := []corev1.VolumeMount{data, cache}
+	got := restoreNativeVolumeMountOrder([]corev1.VolumeMount{cache, data}, want, src)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("projected volume mount order mismatch (-want +got):\n%s", diff)
+	}
+
+	t.Log("Verify a user-reordered flat list takes precedence over stale saved order")
+	src.VolumeMounts = []VolumeMount{
+		{Name: "data", MountPoint: "/data"},
+		{Name: "cache", MountPoint: "/cache", UseAsCompilationCache: true},
+	}
+	got = restoreNativeVolumeMountOrder(want, []corev1.VolumeMount{cache, data}, src)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("live volume mount order mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDCD_ChangedCompilationCachePreservesLiveVolumeMountOrder(t *testing.T) {
+	t.Log("Build a hub component with saved volume-mount order and cache identity")
+	x := corev1.VolumeMount{Name: "x", MountPath: "/x"}
+	oldCache := corev1.VolumeMount{Name: "old", MountPath: "/old"}
+	newCache := corev1.VolumeMount{Name: "new", MountPath: "/new"}
+	hub := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "changed-cache-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "changed-cache-order",
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   oldCache.Name,
+					MountPath: oldCache.MountPath,
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:         mainContainerName,
+							VolumeMounts: []corev1.VolumeMount{x, oldCache, newCache},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Convert to the spoke and select a different live cache and mount order")
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	spoke.Spec.VolumeMounts = []VolumeMount{
+		{Name: newCache.Name, MountPoint: newCache.MountPath, UseAsCompilationCache: true},
+		{Name: x.Name, MountPoint: x.MountPath},
+		{Name: oldCache.Name, MountPoint: oldCache.MountPath},
+	}
+
+	t.Log("Convert back to the hub representation")
+	restored := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	t.Log("Verify stale saved order does not override the live cache projection")
+	want := []corev1.VolumeMount{newCache, x, oldCache}
+	main, ok := findContainerByName(restored.Spec.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("main container missing from restored podTemplate: %#v", restored.Spec.PodTemplate)
+	}
+	if diff := cmp.Diff(want, main.VolumeMounts); diff != "" {
+		t.Fatalf("live volume mount order changed with cache selection (-want +got):\n%s", diff)
 	}
 }
 

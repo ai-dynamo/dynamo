@@ -90,6 +90,21 @@ This validation only prevents:
 {{- end -}}
 
 {{/*
+Validation for defaultExtraPodSpecMergeStrategy configuration
+*/}}
+{{- define "dynamo-operator.validateExtraPodSpecMergeStrategy" -}}
+{{- $manager := .Values.controllerManager.manager -}}
+{{- if hasKey $manager "defaultExtraPodSpecMergeStrategy" -}}
+  {{- $strategy := get $manager "defaultExtraPodSpecMergeStrategy" -}}
+  {{- if not (kindIs "string" $strategy) -}}
+    {{- fail (printf "VALIDATION ERROR: controllerManager.manager.defaultExtraPodSpecMergeStrategy must be a string with value 'override' or 'strategic'. Got %s: %v" (kindOf $strategy) $strategy) -}}
+  {{- else if and (ne $strategy "override") (ne $strategy "strategic") -}}
+    {{- fail (printf "VALIDATION ERROR: controllerManager.manager.defaultExtraPodSpecMergeStrategy must be 'override' or 'strategic'. Got: '%s'" $strategy) -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Validation for configuration consistency
 */}}
 {{- define "dynamo-operator.validateConfiguration" -}}

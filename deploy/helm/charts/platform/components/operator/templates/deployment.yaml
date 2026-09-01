@@ -17,6 +17,7 @@
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
 {{- include "dynamo-operator.validateDiscoveryBackend" . -}}
+{{- include "dynamo-operator.validateExtraPodSpecMergeStrategy" . -}}
 
 ---
 apiVersion: apps/v1

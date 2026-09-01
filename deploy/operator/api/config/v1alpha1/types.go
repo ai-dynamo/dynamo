@@ -69,6 +69,9 @@ type OperatorConfiguration struct {
 	// Checkpoint/restore configuration
 	Checkpoint CheckpointConfiguration `json:"checkpoint"`
 
+	// Pod generation configuration
+	PodGeneration PodGenerationConfiguration `json:"podGeneration,omitempty"`
+
 	// Discovery backend configuration
 	Discovery DiscoveryConfiguration `json:"discovery"`
 
@@ -80,6 +83,29 @@ type OperatorConfiguration struct {
 
 	// HTTP/2 and TLS settings
 	Security SecurityConfiguration `json:"security"`
+}
+
+// ExtraPodSpecMergeStrategy selects how component pod templates overlay generated defaults.
+// +kubebuilder:validation:Enum=override;strategic
+type ExtraPodSpecMergeStrategy string
+
+const (
+	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
+	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
+	DefaultExtraPodSpecMergeStrategy   ExtraPodSpecMergeStrategy = ExtraPodSpecMergeStrategyOverride
+)
+
+// IsValid reports whether the merge strategy is supported.
+func (s ExtraPodSpecMergeStrategy) IsValid() bool {
+	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
+}
+
+// PodGenerationConfiguration holds pod generation defaults applied by the operator.
+type PodGenerationConfiguration struct {
+	// DefaultExtraPodSpecMergeStrategy is the operator-wide fallback when a
+	// component leaves spec.extraPodSpecMergeStrategy unset.
+	// +kubebuilder:default="override"
+	DefaultExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"defaultExtraPodSpecMergeStrategy,omitempty"`
 }
 
 // ServerConfiguration holds server bind addresses and ports.

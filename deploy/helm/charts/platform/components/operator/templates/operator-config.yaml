@@ -230,6 +230,11 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
+    {{- $defaultExtraPodSpecMergeStrategy := default "override" .Values.controllerManager.manager.defaultExtraPodSpecMergeStrategy }}
+    {{- if ne ($defaultExtraPodSpecMergeStrategy | toString) "override" }}
+    podGeneration:
+      defaultExtraPodSpecMergeStrategy: {{ $defaultExtraPodSpecMergeStrategy | quote }}
+    {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:
       backend: {{ .Values.discoveryBackend | quote }}
