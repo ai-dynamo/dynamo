@@ -775,6 +775,24 @@ type ComponentReplicaStatus struct {
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
+	// gpusPerEngine is the number of GPUs assigned to one inference engine in a
+	// component replica, across all of its nodes. Independent auxiliary GPU
+	// allocations are excluded. A present zero means the engine itself has no
+	// GPUs; consult gpusPerReplica for auxiliary allocations.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
+
+	// gpusPerReplica is the unique GPU allocation added when this component
+	// scales by one replica, across all nodes, application and initialization
+	// phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+	// Pod scheduling footprint; shared DRA claims are counted once. A present
+	// zero records a successful non-GPU resolution; omission means no current
+	// shape is available.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
+
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`

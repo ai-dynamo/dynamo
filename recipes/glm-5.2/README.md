@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GLM-5.2 Recipes
+# GLM-5.3/5.2 Recipes
 
-Recipes for [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2).
+Recipes for [GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) / [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2).
 
 ## Configurations
 
@@ -34,8 +34,8 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
-2. **Hugging Face token** with access to `nvidia/GLM-5.2-NVFP4` for B200 or
-   `zai-org/GLM-5.2-FP8` for H200.
+2. **Hugging Face token** with access to `RadixArk/GLM-5.3-NVFP4` / `nvidia/GLM-5.2-NVFP4`
+   for B200 or `zai-org/GLM-5.3` / `zai-org/GLM-5.2-FP8` for H200.
 
 ## Quick Start
 
@@ -61,8 +61,9 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 
 ### 3. Download the model
 
-Edit `model-cache/model-download.yaml` and remove the `hf download` command for
-the checkpoint that does not match the target SKU.
+Edit `model-cache/model-download.yaml` (select between GLM-5.3 and GLM-5.2 checkpoints,
+and between FP8 and NVFP4 precisions). Uncomment the `hf download` line for your
+checkpoint and remove the others.
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
@@ -70,6 +71,10 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```
 
 ### 4. Deploy the DGD
+
+When serving GLM-5.3, update every `model-path` in the target DGD to
+`RadixArk/GLM-5.3-NVFP4` for B200 or `zai-org/GLM-5.3` for H200, and update every
+`served-model-name` to `zai-org/GLM-5.3`.
 
 Deploy the target DGD:
 
@@ -95,7 +100,7 @@ See [perf/README.md](perf/README.md) for the full benchmark workflow — trace s
 
 Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU offloading, see [perf/README.md](perf/README.md) for details.
 
-## Performance results
+## Performance results (run on GLM-5.2)
 
 
 | Workload             | Recipe                 | SKU  | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |

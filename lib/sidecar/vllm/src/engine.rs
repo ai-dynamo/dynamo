@@ -6,9 +6,9 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
@@ -59,26 +59,19 @@ impl VllmSidecarEngine {
     /// `spawn_blocking` or a dedicated thread because discovery uses
     /// `Runtime::block_on`.
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let parsing_process_args = argv.is_none();
-        let parsed = match argv {
-            Some(argv) => <Args as clap::Parser>::try_parse_from(argv),
-            None => <Args as clap::Parser>::try_parse(),
-        };
-        let args = match parsed {
-            Ok(args) => args,
-            Err(error)
-                if parsing_process_args
-                    && matches!(
-                        error.kind(),
-                        clap::error::ErrorKind::DisplayHelp
-                            | clap::error::ErrorKind::DisplayVersion
-                    ) =>
-            {
-                error.exit()
-            }
-            Err(error) => return Err(client::invalid_argument(error.to_string())),
-        };
-        Self::from_parsed(args)
+        match argv {
+            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
+            None => Self::from_parsed(<Args as clap::Parser>::parse()),
+        }
+    }
+
+    /// Parse injected arguments while retaining Clap's structured exit error.
+    ///
+    /// Embedded callers use this to distinguish help and version output from
+    /// Dynamo startup failures without changing `from_args`'s error contract.
+    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::from_parsed(args).map_err(Into::into)
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -101,6 +94,17 @@ impl VllmSidecarEngine {
         }
 
         let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_http_url = args
+            .vllm_http_endpoint
+            .map(|endpoint| {
+                RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
+                    client::invalid_argument(format!(
+                        "invalid RL admin endpoint derived from --vllm-http-endpoint: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(
@@ -109,6 +113,9 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        let rl_metadata = enable_rl
+            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
@@ -134,7 +141,8 @@ impl VllmSidecarEngine {
             enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
-            enable_rl: args.sidecar.common.enable_rl,
+            enable_rl,
+            rl_metadata,
             ..Default::default()
         };
         Ok((engine, config))
