@@ -532,6 +532,8 @@ def test_registry_keys_match_vllm_connector_names():
         "NixlConnector",
         "MooncakeConnector",
         "LMCacheMPConnector",
+        "NeuronNixlConnector",
+        "MooncakeConnector",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)

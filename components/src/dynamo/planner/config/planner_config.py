@@ -422,9 +422,10 @@ class PlannerConfig(BaseModel):
     planner pins the per-DGD total and only redistributes replicas between
     prefill and decode. Tolerance band:
     ``[min_gpu_budget - tolerance, max_gpu_budget + tolerance]`` where
-    ``tolerance = max(prefill_engine_num_gpu, decode_engine_num_gpu)`` —
-    needed because integer worker steps from pools with different per-replica
-    GPU counts can't always exactly cancel.
+    ``tolerance`` is the largest effective per-replica GPU cost among the
+    pools being adjusted. It can exceed the inference-engine width when a
+    replica contains independently allocated GPU sidecars. Integer worker
+    steps from pools with different costs cannot always exactly cancel.
 
     This is per-DGD scope. The GlobalPlanner has a separate cluster-wide
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
@@ -577,6 +578,23 @@ class PlannerConfig(BaseModel):
             "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
             "Setting this field enables TLS verification against the given bundle, "
             "regardless of ssl_verify."
+        ),
+    )
+    metric_pulling_prometheus_request_timeout_seconds: float = Field(
+        default_factory=lambda: float(
+            os.environ.get(
+                "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds,
+            )
+        ),
+        validate_default=True,
+        gt=0,
+        exclude=True,
+        description=(
+            "Connection and read inactivity timeout in seconds for each Prometheus "
+            "API request. This is not a total wall-clock deadline: a response that "
+            "continues delivering data can run longer. Failed requests are not "
+            "retried within the same collection cycle."
         ),
     )
 

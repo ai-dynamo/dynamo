@@ -11,7 +11,12 @@ spec:
     podTemplate:
       spec:
         containers:
-        - envFrom:
+        - args:
+          - -m
+          - dynamo.frontend
+          command:
+          - python3
+          envFrom:
           - secretRef:
               name: hf-token-secret
           image: my-registry/tensorrtllm-runtime:my-tag

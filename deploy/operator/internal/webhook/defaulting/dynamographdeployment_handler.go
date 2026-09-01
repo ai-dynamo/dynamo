@@ -25,6 +25,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -82,6 +83,11 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Resolve the authoritative or creation-time provider before applying component defaults.
 	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
 
+	// Persist the root target only when this provider context resolves unambiguously.
+	if dgd.Spec.ProviderOverride != nil {
+		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
+	}
+
 	// Default nil replicas on every operation so newly added components remain safe to expand.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
@@ -94,6 +100,37 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		// Default Grove's minimum available replicas only for Grove-selected DGDs.
 		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
 			component.MinAvailable = ptr.To(int32(1))
+		}
+
+		// Persist the component target only when this provider context resolves unambiguously.
+		if component.ProviderOverride != nil {
+			provideroverride.DefaultTarget(
+				component.ProviderOverride,
+				provider,
+				provideroverride.ScopeComponent,
+				component,
+			)
+		}
+
+		// Default the explicit leader and worker provider contexts for multinode components.
+		if component.Multinode != nil {
+			if component.Multinode.Leader != nil && component.Multinode.Leader.ProviderOverride != nil {
+				provideroverride.DefaultTarget(
+					component.Multinode.Leader.ProviderOverride,
+					provider,
+					provideroverride.ScopeMultinodeLeader,
+					component,
+				)
+			}
+
+			if component.Multinode.Worker != nil && component.Multinode.Worker.ProviderOverride != nil {
+				provideroverride.DefaultTarget(
+					component.Multinode.Worker.ProviderOverride,
+					provider,
+					provideroverride.ScopeMultinodeWorker,
+					component,
+				)
+			}
 		}
 	}
 

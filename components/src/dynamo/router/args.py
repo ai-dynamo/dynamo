@@ -74,6 +74,15 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                     "--router-prefill-load-model=aic requires "
                     "--router-track-prefill-tokens"
                 )
+        if (
+            self.conditional_disagg_enabled
+            or self.conditional_disagg_config is not None
+        ):
+            raise ValueError(
+                "--router-conditional-disagg is only supported by dynamo.frontend "
+                "disaggregated serving; standalone dynamo.router does not run "
+                "conditional disaggregation"
+            )
 
 
 class DynamoRouterArgGroup(ArgGroup):
