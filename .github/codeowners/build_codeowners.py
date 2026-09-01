@@ -270,6 +270,35 @@ def _grant_pattern(kind: str, glob: str) -> str:
     return glob if kind == "filetype" else anchor(glob)
 
 
+def _transfer_entries(spec: dict) -> list[dict]:
+    """Validated ``ownership_transfers`` entries.
+
+    Fails closed with a policy error rather than a traceback. The resolver
+    never sees this key, so nothing else would catch a malformed entry.
+    """
+    entries = spec.get("ownership_transfers") or []
+    if not isinstance(entries, list):
+        raise SystemExit("areas.yaml: ownership_transfers must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} must be a mapping"
+            )
+        if not isinstance(entry.get("glob"), str) or not entry["glob"]:
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} needs a glob"
+            )
+        removing = entry.get("removing")
+        if not isinstance(removing, list) or not all(
+            isinstance(label, str) and label for label in removing
+        ):
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} needs a "
+                "'removing' list of owner labels"
+            )
+    return entries
+
+
 def _acknowledged_removals(
     spec: dict, label_to_team: dict[str, str]
 ) -> dict[str, set[str]]:
@@ -282,13 +311,9 @@ def _acknowledged_removals(
     as inert.
     """
     acknowledged: dict[str, set[str]] = {}
-    for entry in spec.get("ownership_transfers") or []:
-        glob = entry.get("glob")
-        if glob:
-            teams = {
-                label_to_team.get(label, label) for label in entry.get("removing") or []
-            }
-            acknowledged.setdefault(anchor(glob), set()).update(teams)
+    for entry in _transfer_entries(spec):
+        teams = {label_to_team.get(la, la) for la in entry["removing"]}
+        acknowledged.setdefault(anchor(entry["glob"]), set()).update(teams)
     return acknowledged
 
 
@@ -304,14 +329,11 @@ def unmatched_transfers(
     """
     live = {(anchor(entry.glob), team) for entry in removals for team in entry.lost}
     unmatched: set[tuple[str, str]] = set()
-    for entry in spec.get("ownership_transfers") or []:
-        glob = entry.get("glob")
-        if not glob:
-            continue
-        for label in entry.get("removing") or []:
+    for entry in _transfer_entries(spec):
+        for label in entry["removing"]:
             team = label_to_team.get(label, label)
-            if (anchor(glob), team) not in live:
-                unmatched.add((glob, team))
+            if (anchor(entry["glob"]), team) not in live:
+                unmatched.add((entry["glob"], team))
     return unmatched
 
 

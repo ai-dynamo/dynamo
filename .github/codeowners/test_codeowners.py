@@ -30,10 +30,10 @@ from build_codeowners import (  # noqa: E402
     CoverageGate,
     _acknowledged_removals,
     _dead_patterns,
+    describe_transfers,
     is_policy_change,
     ownership_contract_violations,
     shared_additivity_violations,
-    describe_transfers,
     split_coverage,
     strict_failure,
     unacknowledged,
@@ -1001,13 +1001,34 @@ class TestWeakenedDeclarations:
         assert weakened[0].glob == "lib/"
         assert weakened[0].lost == ("@docs",)
 
-    def test_removing_a_required_owner_is_reported(self) -> None:
+    def test_removing_a_required_owner_contract_is_not_a_routing_loss(self) -> None:
+        # required_owners are validation contracts, not emitted routing rules,
+        # so deleting one renders identical CODEOWNERS and this gate stays
+        # quiet. Worth pinning because required_owners IS in the declared-grant
+        # set, so the quiet comes from the resolved-ownership confirmation
+        # rather than from the grant being ignored. That the requirement itself
+        # lifts is covered by TestOwnershipContracts.
         base = self._spec()
         base["shared"] = []
         base["required_owners"] = [{"glob": "lib/", "owners": ["docs"]}]
         head = self._spec()
         head["shared"] = []
         assert weakened_declarations(base, head, ["lib/a.rs"]) == []
+
+    @pytest.mark.parametrize(
+        "entries",
+        [
+            "not-a-list",
+            ["bad-entry"],
+            [{"glob": "lib/"}],
+            [{"glob": "lib/", "removing": "docs"}],
+        ],
+    )
+    def test_malformed_transfer_entries_fail_closed(self, entries) -> None:
+        head = self._spec()
+        head["ownership_transfers"] = entries
+        with pytest.raises(SystemExit, match="ownership_transfers"):
+            _acknowledged_removals(head, {})
 
     def test_pruning_a_grant_whose_files_are_gone_passes(self) -> None:
         # The deletion PR removed lib/ entirely, so dropping the grant that
