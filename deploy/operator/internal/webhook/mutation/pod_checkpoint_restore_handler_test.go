@@ -193,6 +193,7 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.Equal(t, "main=engine-0,main=engine-1", shaped.Annotations[podcontract.RestoreContainerMapAnnotation])
 		assert.NotContains(t, shaped.Annotations, consts.CheckpointRestoreCandidateAnnotation)
+		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
 		assert.NotContains(t, shaped.Annotations, snapshotprotocol.TargetContainersAnnotation)
 		require.Len(t, shaped.Spec.Volumes, 1)
 		assert.Equal(t, podcontract.SnapshotControlVolumeName, shaped.Spec.Volumes[0].Name)
@@ -248,6 +249,14 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				},
 				wantErr: "conflicts with legacy checkpoint metadata",
 			},
+			{
+				name: "retired Snapshot target annotation without Dynamo target metadata",
+				mutate: func(pod *corev1.Pod) {
+					delete(pod.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
+					pod.Annotations[snapshotprotocol.TargetContainersAnnotation] = "engine-0,engine-1"
+				},
+				wantErr: "missing required nvidia.com/dynamo-restore-target-containers annotation",
+			},
 		}
 
 		for _, test := range tests {
@@ -294,6 +303,11 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 		{
 			name:      "TensorRT-LLM module with versioned Python path",
 			command:   []string{"/usr/bin/python3.11", "-m", "dynamo.trtllm"},
+			supported: true,
+		},
+		{
+			name:      "vLLM module after operand-free interpreter flags",
+			command:   []string{"python3", "-u", "-O", "-m", "dynamo.vllm"},
 			supported: true,
 		},
 		{
@@ -391,14 +405,14 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 				consts.KubeLabelDynamoWorkerHash: "worker-v1",
 			},
 			Annotations: map[string]string{
-				consts.CheckpointRestoreCandidateAnnotation: consts.KubeLabelValueTrue,
-				consts.CheckpointNameAnnotation:             snapshot.Name,
-				consts.CheckpointSourceKindAnnotation:       consts.CheckpointSourceKindSnapshot,
-				consts.SnapshotCandidateUIDAnnotation:       string(snapshot.UID),
-				consts.SnapshotCandidateContentAnnotation:   "content-a",
-				consts.SnapshotCandidateGMSModeAnnotation:   consts.SnapshotGMSModeDisabled,
-				consts.SnapshotCandidateVersionAnnotation:   consts.SnapshotCompatibilityVersion,
-				snapshotprotocol.TargetContainersAnnotation: "engine-0,engine-1",
+				consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,
+				consts.CheckpointNameAnnotation:                   snapshot.Name,
+				consts.CheckpointSourceKindAnnotation:             consts.CheckpointSourceKindSnapshot,
+				consts.SnapshotCandidateUIDAnnotation:             string(snapshot.UID),
+				consts.SnapshotCandidateContentAnnotation:         "content-a",
+				consts.SnapshotCandidateGMSModeAnnotation:         consts.SnapshotGMSModeDisabled,
+				consts.SnapshotCandidateVersionAnnotation:         consts.SnapshotCompatibilityVersion,
+				consts.RestoreCandidateTargetContainersAnnotation: "engine-0,engine-1",
 			},
 		},
 		Spec: corev1.PodSpec{

@@ -33,6 +33,7 @@ func OverlayClients(checkpointGMS **nvidiacomv1alpha1.GPUMemoryServiceSpec, chec
 
 // OverlayCompatibleSnapshotClients validates the immutable snapshot topology,
 // then applies the current workload's client-only GMS configuration.
+// checkpointGMS must be non-nil; a nil serviceGMS means GMS is disabled.
 func OverlayCompatibleSnapshotClients(
 	checkpointGMS **nvidiacomv1alpha1.GPUMemoryServiceSpec,
 	checkpointName string,

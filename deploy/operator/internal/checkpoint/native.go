@@ -31,6 +31,8 @@ type ResolvedPodSnapshot struct {
 // PodSnapshot and validates the Dynamo compatibility contract. A compatible
 // but not-yet-ready snapshot is returned with Ready=false so callers can gate
 // workloads while retaining an admission-time reference to the same object.
+// A nil config means checkpointing is disabled. Reader must be non-nil when
+// checkpointing is enabled.
 func ResolvePodSnapshotForService(
 	ctx context.Context,
 	reader client.Reader,

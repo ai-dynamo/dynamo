@@ -56,6 +56,36 @@ func TestRestorePodReplacementPredicate(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects terminal failure from an unrelated Snapshot workload", func(t *testing.T) {
+		t.Log("Given a controller-owned native restore Pod without Dynamo workload identity")
+		pod := gmsPodReplacementTestPod("pod-uid", 0)
+		delete(pod.Labels, consts.KubeLabelDynamoComponent)
+		delete(pod.Labels, consts.KubeLabelDynamoNamespace)
+		delete(pod.Labels, snapshotprotocol.RestoreTargetLabel)
+		pod.Annotations = map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+			Status: corev1.ConditionFalse,
+			Reason: podcontract.RestoreReasonFailed,
+		}}
+
+		t.Log("Then the replacement predicate leaves the unrelated Pod to its own controller")
+		assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
+	})
+
+	t.Run("rejects terminal Snapshot outcomes on legacy-only restore Pods", func(t *testing.T) {
+		t.Log("Given a legacy restore Pod with no native restore annotation and no GMS restart")
+		pod := gmsPodReplacementTestPod("pod-uid", 0)
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+			Status: corev1.ConditionFalse,
+			Reason: podcontract.RestoreReasonFailed,
+		}}
+
+		t.Log("Then the legacy path ignores the standalone Snapshot outcome")
+		assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
+	})
+
 	t.Run("admits restart transition", func(t *testing.T) {
 		oldPod := gmsPodReplacementTestPod("pod-uid", 0)
 		newPod := gmsPodReplacementTestPod("pod-uid", 1)
@@ -126,6 +156,21 @@ func TestRestorePodReplacementReconcile(t *testing.T) {
 			podExists: true,
 			mutate: func(pod *corev1.Pod) {
 				pod.Labels[snapshotprotocol.RestoreTargetLabel] = "false"
+			},
+		},
+		{
+			name:      "unrelated native restore Pod is retained",
+			podExists: true,
+			mutate: func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoComponent)
+				delete(pod.Labels, consts.KubeLabelDynamoNamespace)
+				delete(pod.Labels, snapshotprotocol.RestoreTargetLabel)
+				pod.Annotations = map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+				pod.Status.Conditions = []corev1.PodCondition{{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionFalse,
+					Reason: podcontract.RestoreReasonFailed,
+				}}
 			},
 		},
 		{
@@ -250,6 +295,8 @@ func gmsPodReplacementTestPod(uid types.UID, restartCount int32) *corev1.Pod {
 			Namespace: "inference",
 			UID:       uid,
 			Labels: map[string]string{
+				consts.KubeLabelDynamoComponent:     "worker",
+				consts.KubeLabelDynamoNamespace:     "inference-graph",
 				snapshotprotocol.RestoreTargetLabel: consts.KubeLabelValueTrue,
 			},
 			OwnerReferences: []metav1.OwnerReference{{

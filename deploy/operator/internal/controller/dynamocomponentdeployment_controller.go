@@ -963,6 +963,7 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index native PodSnapshot references so dependency events can find affected DCDs.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := mgr.GetFieldIndexer().IndexField(
 			context.Background(),
@@ -987,6 +988,8 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Watch PodSnapshot changes that can unblock native DCD restore reconciliation.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		m = m.Watches(
 			&snapshotv1alpha1.PodSnapshot{},

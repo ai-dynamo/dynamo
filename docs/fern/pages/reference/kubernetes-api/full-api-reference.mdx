@@ -85,13 +85,13 @@ checkpoint resources when the owning DGD is deleted.
 **Allowed values**
 
 - <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Retained automatic checkpoints are not valid checkpointRef targets.
 </Accordion>
 
 <Accordion id="checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 
 **Kind:** `enum`
@@ -102,7 +102,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 **Allowed values**
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
-- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing PodSnapshot.
 </Accordion>
 
 <Accordion id="checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -279,9 +279,8 @@ See [DynamoCheckpointStatus](#dynamocheckpointstatus).
 </Accordion>
 
 <Accordion id="dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: legacy identity metadata. The DynamoCheckpoint API still
+requires spec.identity; DGD-managed automatic capture synthesizes it.
 
 
 **Kind:** `type`
@@ -393,7 +392,7 @@ DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 **Appears in:** [DynamoCheckpoint](#dynamocheckpoint)
 
 <ParamField path="identity" type="DynamoCheckpointIdentity" required={true}>
-Deprecated: required by v1alpha1 for standalone checkpoints. Auto checkpoints synthesize it; checkpointRef restores use the referenced CR.
+Deprecated: required by the legacy DynamoCheckpoint API. DGD-managed automatic capture synthesizes it; native explicit restore uses PodSnapshot.
 See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -2058,12 +2057,12 @@ ServiceCheckpointConfig configures checkpointing for a DGD service
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled indicates whether checkpointing is enabled for this service
+Enabled indicates whether checkpointing is enabled for this service. When true, omit CheckpointRef for a DGD-managed automatic checkpoint or set CheckpointRef to restore a PodSnapshot in the same namespace.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="CheckpointMode">
-Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named checkpoint.
+Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named PodSnapshot.
 See [CheckpointMode](#checkpointmode).
 **Validation:** Enum: [Auto Manual]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2075,18 +2074,18 @@ See [CheckpointStartupPolicy](#checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointRef" type="string">
-CheckpointRef references an existing DynamoCheckpoint CR by metadata.name. If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+CheckpointRef references an existing PodSnapshot in the same namespace by metadata.name. If specified, this service's Identity is ignored and the referenced PodSnapshot is used directly.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identity" type="DynamoCheckpointIdentity">
-Deprecated: omit for DGD-managed checkpoints; no action is needed. Use CheckpointRef to restore an existing checkpoint.
+Deprecated: omit for DGD-managed checkpoints; no action is needed. Use CheckpointRef to restore an existing PodSnapshot.
 See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2346,13 +2345,13 @@ checkpoint resources when the owning DGD is deleted.
 **Allowed values**
 
 - <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Retained automatic checkpoints are not valid checkpointRef targets.
 </Accordion>
 
 <Accordion id="v1beta1-checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 
 **Kind:** `enum`
@@ -2363,7 +2362,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 **Allowed values**
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
-- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing PodSnapshot.
 </Accordion>
 
 <Accordion id="v1beta1-checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -2409,12 +2408,12 @@ ComponentCheckpointConfig configures checkpointing for a DGD component.
 **Appears in:** [ExperimentalSpec](#experimentalspec)
 
 <ParamField path="enabled" type="boolean" required={true}>
-enabled indicates whether checkpointing is enabled for this component. When true, omit checkpointRef for a DGD-managed automatic checkpoint or set checkpointRef to restore an existing checkpoint. Omit the checkpoint block, or set enabled=false, to disable checkpointing.
+enabled indicates whether checkpointing is enabled for this component. When true, omit checkpointRef for a DGD-managed automatic checkpoint or set checkpointRef to restore an existing PodSnapshot in the same namespace. Omit the checkpoint block, or set enabled=false, to disable checkpointing.
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="CheckpointMode">
-Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named checkpoint.
+Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named PodSnapshot.
 See [CheckpointMode](#v1beta1-checkpointmode).
 **Validation:** Enum: [Auto Manual]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2426,18 +2425,18 @@ See [CheckpointStartupPolicy](#v1beta1-checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#v1beta1-checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointRef" type="string">
-checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`. When set, this component's `identity` is ignored and the referenced checkpoint is used directly.
+checkpointRef references an existing PodSnapshot in the same namespace by metadata.name. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identity" type="DynamoCheckpointIdentity">
-Deprecated: omit for DGD-managed checkpoints; no action is needed. Use checkpointRef to restore an existing checkpoint.
+Deprecated: omit for DGD-managed checkpoints; no action is needed. Use checkpointRef to restore an existing PodSnapshot.
 See [DynamoCheckpointIdentity](#v1beta1-dynamocheckpointidentity).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2655,8 +2654,8 @@ AvailableReplicas is the number of replicas that are available and ready.
 </Accordion>
 
 <Accordion id="v1beta1-dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: omit in DGD component checkpoint configs. Auto needs no
-replacement; use checkpointRef for explicit restores.
+Deprecated: omit in DGD component checkpoint configs. Automatic capture
+needs no replacement; use checkpointRef to restore a PodSnapshot.
 Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
 
 
@@ -3450,7 +3449,7 @@ See [GroveSpec](#grovespec).
 </ParamField>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint CR and later restores pods in the same DGD generation from that checkpoint. With checkpointRef, the DGD restores from that existing checkpoint instead. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
+checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint CR and later restores pods in the same DGD generation from that checkpoint. With checkpointRef, the DGD restores from the named PodSnapshot in the same namespace. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
 See [ComponentCheckpointConfig](#componentcheckpointconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

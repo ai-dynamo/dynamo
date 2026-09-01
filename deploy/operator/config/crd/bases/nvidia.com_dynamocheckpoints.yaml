@@ -146,8 +146,8 @@ spec:
                       rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
                   description: |-
-                    Deprecated: required by v1alpha1 for standalone checkpoints. Auto
-                    checkpoints synthesize it; checkpointRef restores use the referenced CR.
+                    Deprecated: required by the legacy DynamoCheckpoint API. DGD-managed
+                    automatic capture synthesizes it; native explicit restore uses PodSnapshot.
                   properties:
                     backendFramework:
                       description: |-

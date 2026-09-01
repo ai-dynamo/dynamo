@@ -239,6 +239,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	); err != nil {
 		return fmt.Errorf("register DGD component Pod index: %w", err)
 	}
+
+	// Index native PodSnapshot references so dependency events can find affected DGDs.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := mgr.GetFieldIndexer().IndexField(
 			context.Background(),
@@ -302,6 +304,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Watch PodSnapshot changes that can unblock native DGD restore reconciliation.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		ctrlBuilder = ctrlBuilder.Watches(
 			&snapshotv1alpha1.PodSnapshot{},

@@ -101,8 +101,7 @@ const (
 	// the snapshot CheckpointIDLabel because the snapshot-agent watches that
 	// label to start a restore.
 	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
-	// CheckpointNameAnnotation stores the candidate checkpoint resource name;
-	// CheckpointSourceKindAnnotation identifies its API kind.
+	// CheckpointNameAnnotation stores the candidate checkpoint resource name.
 	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
@@ -127,6 +126,9 @@ const (
 	SnapshotCandidateContentAnnotation = "nvidia.com/dynamo-restore-snapshot-content"
 	SnapshotCandidateGMSModeAnnotation = "nvidia.com/dynamo-restore-snapshot-gms-mode"
 	SnapshotCandidateVersionAnnotation = "nvidia.com/dynamo-restore-snapshot-version"
+	// RestoreCandidateTargetContainersAnnotation carries Dynamo's rendered
+	// restore destinations from workload reconciliation to Pod admission.
+	RestoreCandidateTargetContainersAnnotation = "nvidia.com/dynamo-restore-target-containers"
 
 	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
 	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the

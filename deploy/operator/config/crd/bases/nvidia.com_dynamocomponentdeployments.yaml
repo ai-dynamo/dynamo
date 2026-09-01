@@ -680,27 +680,31 @@ spec:
                   properties:
                     checkpointRef:
                       description: |-
-                        CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-                        If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+                        CheckpointRef references an existing PodSnapshot in the same namespace by
+                        metadata.name. If specified, this service's Identity is ignored and the
+                        referenced PodSnapshot is used directly.
                       type: string
                     deletionPolicy:
                       default: Delete
                       description: |-
                         DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
                         artifact are deleted or retained when the owning DGD is deleted.
-                        Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                        Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
                       enum:
                         - Delete
                         - Retain
                       type: string
                     enabled:
                       default: false
-                      description: Enabled indicates whether checkpointing is enabled for this service
+                      description: |-
+                        Enabled indicates whether checkpointing is enabled for this service. When
+                        true, omit CheckpointRef for a DGD-managed automatic checkpoint or set
+                        CheckpointRef to restore a PodSnapshot in the same namespace.
                       type: boolean
                     identity:
                       description: |-
                         Deprecated: omit for DGD-managed checkpoints; no action is needed.
-                        Use CheckpointRef to restore an existing checkpoint.
+                        Use CheckpointRef to restore an existing PodSnapshot.
                       properties:
                         backendFramework:
                           description: |-
@@ -787,7 +791,7 @@ spec:
                       description: |-
                         Deprecated: omit mode. Use enabled=true without checkpointRef for a
                         DGD-managed automatic checkpoint, or use checkpointRef to restore the
-                        named checkpoint.
+                        named PodSnapshot.
                       enum:
                         - Auto
                         - Manual
@@ -11980,23 +11984,24 @@ spec:
                         this component. Set `checkpoint.enabled: true` to opt in. Without
                         checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
                         CR and later restores pods in the same DGD generation from that
-                        checkpoint. With checkpointRef, the DGD restores from that existing
-                        checkpoint instead. The user-facing shape of this field is still settling,
-                        which is why it lives under `experimental` in v1beta1 instead of at the
-                        top level.
+                        checkpoint. With checkpointRef, the DGD restores from the named
+                        PodSnapshot in the same namespace. The user-facing shape of this field is
+                        still settling, which is why it lives under `experimental` in v1beta1
+                        instead of at the top level.
                       properties:
                         checkpointRef:
                           description: |-
-                            checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+                            checkpointRef references an existing PodSnapshot in the same namespace by
+                            metadata.name.
                             When set, this component's `identity` is ignored and the referenced
-                            checkpoint is used directly.
+                            PodSnapshot is used directly.
                           type: string
                         deletionPolicy:
                           default: Delete
                           description: |-
                             DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
                             artifact are deleted or retained when the owning DGD is deleted.
-                            Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                            Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
                           enum:
                             - Delete
                             - Retain
@@ -12005,13 +12010,13 @@ spec:
                           description: |-
                             enabled indicates whether checkpointing is enabled for this component.
                             When true, omit checkpointRef for a DGD-managed automatic checkpoint or
-                            set checkpointRef to restore an existing checkpoint. Omit the checkpoint
-                            block, or set enabled=false, to disable checkpointing.
+                            set checkpointRef to restore an existing PodSnapshot in the same namespace.
+                            Omit the checkpoint block, or set enabled=false, to disable checkpointing.
                           type: boolean
                         identity:
                           description: |-
                             Deprecated: omit for DGD-managed checkpoints; no action is needed.
-                            Use checkpointRef to restore an existing checkpoint.
+                            Use checkpointRef to restore an existing PodSnapshot.
                           properties:
                             backendFramework:
                               description: |-
@@ -12098,7 +12103,7 @@ spec:
                           description: |-
                             Deprecated: omit mode. Use enabled=true without checkpointRef for a
                             DGD-managed automatic checkpoint, or use checkpointRef to restore the
-                            named checkpoint.
+                            named PodSnapshot.
                           enum:
                             - Auto
                             - Manual

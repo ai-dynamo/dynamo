@@ -65,14 +65,14 @@ func (r *dcdCheckpointStorageReconciler) Reconcile(
 	if !r.gate.Enabled(features.Checkpoint) {
 		return nil
 	}
+
+	// Workloads without checkpointing require no checkpoint storage.
 	checkpointConfig := dynamo.GetCheckpoint(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if checkpointConfig == nil {
 		return nil
 	}
 
-	// Direct references use standalone Snapshot storage. A generated DCD carries
-	// an explicit legacy marker only while its parent DGD still captures through
-	// DynamoCheckpoint during the staged migration.
+	// Only generated DCDs for legacy automatic capture require Dynamo checkpoint storage.
 	hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 	if hasCheckpointRef && dcd.Annotations[consts.CheckpointSourceKindAnnotation] != consts.CheckpointSourceKindLegacy {
 		return nil

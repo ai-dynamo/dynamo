@@ -67,19 +67,27 @@ func (r *restorePodReplacementReconciler) setupWithManager(mgr ctrl.Manager) err
 		Complete(r)
 }
 
+// isRestorePodReplacementEligible reports whether an owned Dynamo restore Pod must be recreated.
+// Pod must not be nil.
 func isRestorePodReplacementEligible(pod *corev1.Pod) bool {
-	if pod == nil || metav1.GetControllerOf(pod) == nil || !isRestoreTargetPod(pod) {
+	// Require both a replacing controller and Dynamo workload identity before deleting a Pod.
+	if metav1.GetControllerOf(pod) == nil ||
+		pod.Labels[commonconsts.KubeLabelDynamoComponent] == "" ||
+		pod.Labels[commonconsts.KubeLabelDynamoNamespace] == "" {
 		return false
 	}
-	outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
-	return outcome == podcontract.RestoreOutcomeFailed ||
-		outcome == podcontract.RestoreOutcomePartiallySucceeded ||
-		hasRestartedNativeGMSServer(pod)
-}
 
-func isRestoreTargetPod(pod *corev1.Pod) bool {
-	return pod.Annotations[podcontract.RestoreFromAnnotation] != "" ||
-		pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue
+	// Native restore Pods require replacement after a terminal restore outcome or GMS restart.
+	if pod.Annotations[podcontract.RestoreFromAnnotation] != "" {
+		outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
+		return outcome == podcontract.RestoreOutcomeFailed ||
+			outcome == podcontract.RestoreOutcomePartiallySucceeded ||
+			hasRestartedNativeGMSServer(pod)
+	}
+
+	// Legacy restore Pods retain their narrower GMS-restart replacement policy.
+	return pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue &&
+		hasRestartedNativeGMSServer(pod)
 }
 
 func hasRestartedNativeGMSServer(pod *corev1.Pod) bool {

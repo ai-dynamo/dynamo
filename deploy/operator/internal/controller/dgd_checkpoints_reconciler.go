@@ -100,8 +100,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
 		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 
-		// Explicit references use standalone Snapshot storage. Only automatic
-		// capture still needs Dynamo's legacy checkpoint PVC during this MR train.
+		// Only automatic capture requires Dynamo's legacy checkpoint PVC.
 		if !hasCheckpointRef && !storageEnsured {
 			if err := checkpoint.EnsureStoragePVC(ctx, r.Client, dgd.Namespace, r.config.Checkpoint.Storage); err != nil {
 				logger.Error(err, "Failed to ensure checkpoint storage PVC", "component", componentName)
@@ -116,6 +115,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 
+		// Derive the compatibility identity expected by captured and restored workers.
 		workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
 		if err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
@@ -145,6 +145,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				}
 			}
 		} else {
+			// Resolve explicit references against the standalone PodSnapshot API.
 			info, err = checkpoint.ResolvePodSnapshotForService(
 				ctx,
 				r.Client,
@@ -165,6 +166,8 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
+
+		// Apply client settings through the compatibility path for the resolved artifact kind.
 		serviceGMS := dynamo.GetGPUMemoryService(component)
 		if info.NativeSnapshot != nil {
 			err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
