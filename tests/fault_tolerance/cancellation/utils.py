@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request, timeout_s: int = 300):
+    def __init__(self, request):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             "DYN_LOG": "debug",
@@ -38,7 +38,6 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             extra_env=extra_env,
             terminate_all_matching_process_names=False,
         )
-        self.timeout = timeout_s
 
 
 class CancellableRequest:
