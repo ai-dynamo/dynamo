@@ -412,9 +412,8 @@ class ServiceSpec:
                         return value
                     variable = match.group(1) or match.group(2)
                     container = self._get_main_container_for_args()
-                    envs = list(self.envs)
-                    if container is not None:
-                        envs.extend(container.get("env", []))
+                    envs = list(container.get("env", [])) if container else []
+                    envs.extend(self.envs)
                     for env in envs:
                         if env.get("name") == variable and isinstance(
                             env.get("value"), str

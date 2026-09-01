@@ -30,7 +30,7 @@ from dynamo.profiler.tests.sweeper.run_cases import (
     recipe_gpu_count,
     write_discovered_recipe_requirement,
 )
-from tests.deploy.conftest import DeploymentTarget
+from tests.deploy.conftest import DEFAULT_SWEEPER_VARIANTS, DeploymentTarget
 from tests.deploy.dgd_utils import DeploymentSpec
 from tests.deploy.dgdr_utils import kubectl
 from tests.deploy.test_dgd import test_deployment as run_dgd_deployment_test
@@ -41,6 +41,8 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.integration,
     pytest.mark.nightly,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(3600),
 ]
 
 _VARIANT_FILES = {
@@ -212,7 +214,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         _selected_variants(
             metafunc.config.getoption(
                 "--sweeper-variants",
-                default="profiler-v1beta1,sweeper-aic,recipe",
+                default=DEFAULT_SWEEPER_VARIANTS,
             )
         ),
         metafunc.config.getoption("--sweeper-discover-recipe-hardware", default=False),

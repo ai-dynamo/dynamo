@@ -17,6 +17,8 @@ import pytest
 from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
 from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
 
+DEFAULT_SWEEPER_VARIANTS = "profiler-v1beta1,sweeper-aic,recipe"
+
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
 # Deploy-specific options are defined here.
@@ -124,7 +126,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--sweeper-variants",
-        default="profiler-v1beta1,sweeper-aic,recipe",
+        default=DEFAULT_SWEEPER_VARIANTS,
         help="Comma-separated generated or recipe DGD variants to validate.",
     )
     parser.addoption(

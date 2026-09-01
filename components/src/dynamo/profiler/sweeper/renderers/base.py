@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ from typing import Any, Protocol
 import yaml
 
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
+_EVALUATION_CONTEXT_ANNOTATION = "nvidia.com/sweeper-evaluation-context"
 _RUNTIME_VERSION_PATTERN = re.compile(
     r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$"
 )
@@ -106,6 +108,7 @@ def patch_dgd_manifest(
     options: DGDGenerationOptions,
     *,
     dgd_name: str,
+    evaluation_context: dict[str, Any] | None = None,
 ) -> str:
     """Apply shared v1 finalization and CLI-owned fields to one rendered DGD."""
     documents = [document for document in yaml.safe_load_all(rendered) if document]
@@ -153,6 +156,17 @@ def patch_dgd_manifest(
     metadata["name"] = dgd_name
     if options.namespace:
         metadata["namespace"] = options.namespace
+    if evaluation_context:
+        annotations = metadata.setdefault("annotations", {})
+        if not isinstance(annotations, dict):
+            raise CandidateMaterializationError(
+                "rendered DGD metadata.annotations must be an object"
+            )
+        annotations[_EVALUATION_CONTEXT_ANNOTATION] = json.dumps(
+            evaluation_context,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     components = dgd.get("spec", {}).get("components")
     if not isinstance(components, list):

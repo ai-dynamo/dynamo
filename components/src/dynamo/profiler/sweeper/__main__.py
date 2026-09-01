@@ -206,20 +206,30 @@ def _render_pareto(
     output_dir: Path,
 ) -> list[dict[str, str]]:
     names = [f"{name_prefix}-{index:03d}" for index in range(len(result.candidates))]
-    rendered = [
-        render_dgd(
-            candidate,
-            result.config.workload,
-            options,
-            dgd_name=name,
-            renderer=renderer,
-        )
-        for candidate, name in zip(result.candidates, names, strict=True)
-    ]
+    rendered = []
+    rendered_names = []
+    for candidate, name in zip(result.candidates, names, strict=True):
+        try:
+            rendered.append(
+                render_dgd(
+                    candidate,
+                    result.config.workload,
+                    options,
+                    dgd_name=name,
+                    renderer=renderer,
+                )
+            )
+        except CandidateMaterializationError as exc:
+            print(f"skipping Pareto candidate {name}: {exc}", file=sys.stderr)
+            continue
+        rendered_names.append(name)
+    if not rendered:
+        raise CandidateMaterializationError("no Pareto candidate could be rendered")
+
     return write_outputs(
         rendered,
         output_dir,
-        stems=names,
+        stems=rendered_names,
         renderer=renderer,
         output=output,
     )

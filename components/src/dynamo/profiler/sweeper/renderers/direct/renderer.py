@@ -57,4 +57,5 @@ def render(
         candidate,
         options,
         dgd_name=dgd_name,
+        evaluation_context=result.experimental,
     )
