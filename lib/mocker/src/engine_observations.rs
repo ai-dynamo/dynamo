@@ -104,6 +104,7 @@ mod tests {
         KvEvent {
             event_id,
             dp_rank,
+            tier: Default::default(),
             data: KvEventData::Stored(StoredBlocks {
                 parent_hash,
                 start_position: Some(start_position),
@@ -145,6 +146,7 @@ mod tests {
         let (event, token_ids) = dynamo_kv_event(KvEvent {
             event_id: 18,
             dp_rank: 3,
+            tier: Default::default(),
             data: KvEventData::Removed {
                 block_hashes: vec![101, 102],
             },
@@ -195,6 +197,7 @@ mod tests {
         let removed = dynamo_kv_event(KvEvent {
             event_id: 3,
             dp_rank: 3,
+            tier: Default::default(),
             data: KvEventData::Removed {
                 block_hashes: vec![101, 102],
             },

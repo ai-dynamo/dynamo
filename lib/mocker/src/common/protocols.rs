@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use aisimulate_core::engine::NativeHostOffloadConfig;
 use derive_builder::Builder;
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
@@ -434,6 +435,8 @@ struct MockEngineArgsSerde {
     speedup_ratio: OptionalConfigValue<f64>,
     decode_speedup_ratio: OptionalConfigValue<f64>,
     dp_size: OptionalConfigValue<u32>,
+    cache_domain_ids: OptionalConfigValue<Vec<u32>>,
+    native_host_offload: OptionalConfigValue<NativeHostOffloadConfig>,
     startup_time: OptionalConfigValue<f64>,
     worker_type: OptionalConfigValue<String>,
     is_prefill: OptionalConfigValue<bool>,
@@ -551,6 +554,16 @@ pub struct MockEngineArgs {
     #[builder(default = "1")]
     #[validate(range(min = 1))]
     pub dp_size: u32,
+
+    /// Host-cache domain for each attention-DP rank. Equal IDs share one G2 cache.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cache_domain_ids: Vec<u32>,
+
+    /// Framework-native G1-to-host offload simulation.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_host_offload: Option<NativeHostOffloadConfig>,
 
     /// Optional startup time in seconds to simulate engine initialization delay
     #[builder(default = "None")]
@@ -803,6 +816,25 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
+    if !args.cache_domain_ids.is_empty()
+        && args.cache_domain_ids.len() != args.dp_size.max(1) as usize
+    {
+        return Err(mock_engine_args_validation_error(
+            "cache_domain_count_mismatch",
+            format!(
+                "cache_domain_ids has {} entries but dp_size is {}",
+                args.cache_domain_ids.len(),
+                args.dp_size.max(1)
+            ),
+        ));
+    }
+    if args.native_host_offload.is_some() && args.dp_size > 1 && args.cache_domain_ids.is_empty() {
+        return Err(mock_engine_args_validation_error(
+            "cache_domains_required_for_host_offload",
+            "attention-DP native_host_offload requires one cache_domain_id per DP rank".to_string(),
+        ));
+    }
+
     if let Some(policy) = args
         .trtllm
         .as_ref()
@@ -898,6 +930,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(dp_size) = compat.dp_size.into_non_null("dp_size")? {
             builder = builder.dp_size(dp_size);
+        }
+        if let Some(cache_domain_ids) = compat.cache_domain_ids.into_non_null("cache_domain_ids")? {
+            builder = builder.cache_domain_ids(cache_domain_ids);
+        }
+        if let Some(native_host_offload) = compat.native_host_offload.into_nullable() {
+            builder = builder.native_host_offload(native_host_offload);
         }
         if let Some(startup_time) = compat.startup_time.into_nullable() {
             builder = builder.startup_time(startup_time);
@@ -1342,6 +1380,32 @@ mod tests {
         assert_eq!(serialized["engine_type"], "vllm");
         assert_eq!(serialized["worker_type"], "aggregated");
         assert_eq!(serialized["preemption_mode"], "lifo");
+    }
+
+    #[test]
+    fn test_mock_engine_args_accepts_native_host_cache_topology() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "dp_size": 2,
+                "cache_domain_ids": [7, 7],
+                "kv_bytes_per_token": 128,
+                "native_host_offload": {
+                    "num_host_blocks": 1024,
+                    "d2h_bandwidth_gbps": 64.0,
+                    "h2d_bandwidth_gbps": 64.0
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(args.cache_domain_ids, vec![7, 7]);
+        assert_eq!(
+            args.native_host_offload
+                .as_ref()
+                .map(|config| config.num_host_blocks),
+            Some(1024)
+        );
     }
 
     #[test]

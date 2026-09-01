@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,23 +11,26 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::indexer::{
+    KvIndexerInterface, LowerTierIndexers, TieredMatchDetails, query_lower_tiers,
+};
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
+    BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, StorageTier,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
+    ScheduleMode, SchedulingContext, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
     SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
+use futures::executor::block_on;
 use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -40,6 +43,7 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
     replay_slots, replay_worker_config, replay_workers_with_configs,
 };
+use aisimulate_core::replay::SchedulerTopology;
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
     Placement, PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy,
@@ -154,6 +158,7 @@ pub(crate) struct WorkerAdmission {
     uuid: Uuid,
     worker_idx: usize,
     overlap_blocks: u32,
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -169,6 +174,7 @@ pub(crate) struct RouterEffects {
 struct AdmitOutcome {
     worker_idx: usize,
     overlap_blocks: u32,
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -199,6 +205,7 @@ pub(crate) struct OfflineRouterSnapshot {
 struct SyncReplayIndexer {
     block_size: u32,
     tree: RadixTree,
+    lower_tier: Option<LowerTierIndexers>,
 }
 
 impl SyncReplayIndexer {
@@ -206,10 +213,15 @@ impl SyncReplayIndexer {
         Self {
             block_size,
             tree: RadixTree::new(),
+            lower_tier: None,
         }
     }
 
-    fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
+    fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+        lora_name: Option<&str>,
+    ) -> TieredMatchDetails {
         let sequence = compute_block_hash_for_seq(
             tokens,
             self.block_size,
@@ -218,19 +230,48 @@ impl SyncReplayIndexer {
                 ..Default::default()
             },
         );
-        self.tree.find_matches(sequence, false)
+        self.find_tiered_matches(sequence)
     }
 
-    fn find_matches_for_hashes(&self, local_block_hashes: Vec<LocalBlockHash>) -> OverlapScores {
-        self.tree.find_matches(local_block_hashes, false)
+    fn find_matches_for_hashes(
+        &self,
+        local_block_hashes: Vec<LocalBlockHash>,
+    ) -> TieredMatchDetails {
+        self.find_tiered_matches(local_block_hashes)
+    }
+
+    fn find_tiered_matches(&self, sequence: Vec<LocalBlockHash>) -> TieredMatchDetails {
+        let device = self.tree.find_match_details(sequence.clone(), false);
+        let lower_tier = self
+            .lower_tier
+            .as_ref()
+            .map(|indexers| query_lower_tiers(indexers, &sequence, &device))
+            .unwrap_or_default();
+        TieredMatchDetails { device, lower_tier }
     }
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
-        // TODO: support lower tier events in replay indexer
-        if !event.storage_tier.is_gpu() {
-            return Ok(());
+        if event.storage_tier.is_gpu() {
+            return self.tree.apply_event(event).map_err(Into::into);
         }
-        self.tree.apply_event(event).map_err(Into::into)
+        let lower_tier = self
+            .lower_tier
+            .get_or_insert_with(|| LowerTierIndexers::new(1, self.block_size));
+        block_on(
+            lower_tier
+                .get_or_create(event.storage_tier)
+                .apply_event_and_wait(event),
+        )
+        .map_err(Into::into)
+    }
+
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.tree.remove_worker(worker_id);
+        if let Some(lower_tier) = &self.lower_tier {
+            for indexer in lower_tier.all() {
+                block_on(indexer.remove_worker(worker_id));
+            }
+        }
     }
 
     #[cfg(test)]
@@ -255,7 +296,7 @@ struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
-    overlaps: OverlapScores,
+    overlap: OverlapSignals,
     track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
@@ -271,32 +312,15 @@ impl PendingRequest {
 
     fn scheduling_request(
         &self,
-        block_size: usize,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) -> SchedulingRequest {
-        let effective_overlap_blocks = self
-            .overlaps
-            .scores
-            .iter()
-            .map(|(worker, overlap)| (*worker, *overlap as f64))
-            .collect();
-        let effective_cached_tokens = self
-            .overlaps
-            .scores
-            .iter()
-            .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
-            .collect();
         SchedulingRequest {
             mode: ScheduleMode::Tracked {
                 request_id: self.request_id(),
             },
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            overlap: OverlapSignals {
-                tier_overlap_blocks: TierOverlapBlocks::default(),
-                effective_overlap_blocks,
-                effective_cached_tokens,
-            },
+            overlap: self.overlap.clone(),
             router_hint_candidates: None,
             retain_router_hint_chain: false,
             worker_loads,
@@ -327,6 +351,7 @@ pub(crate) struct OfflineReplayRouter {
     profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
+    worker_topologies: FxHashMap<WorkerId, WorkerTopology>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: DefaultWorkerSelector,
     pending: PolicyQueue<PendingRequest>,
@@ -345,10 +370,11 @@ impl KvRouterPlacement {
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
+        topology: Vec<WorkerTopology>,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
-        let router = match selector_seed {
+        let num_workers = topology.len();
+        let mut router = match selector_seed {
             Some(seed) => OfflineReplayRouter::new_with_selector_seed(
                 args,
                 router_config,
@@ -360,6 +386,9 @@ impl KvRouterPlacement {
                 OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
             }
         };
+        for worker in topology {
+            router.register_worker_topology(worker)?;
+        }
         Ok(Self { router })
     }
 
@@ -371,8 +400,10 @@ impl KvRouterPlacement {
                 * self.router.block_size as usize,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
+                best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
+            placement_replica_id: None,
         }
     }
 
@@ -499,7 +530,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.router.add_worker(worker.worker_id)?;
+        self.router.add_worker_topology(worker)?;
         Ok(Vec::new())
     }
 
@@ -552,13 +583,14 @@ impl OfflineReplayRouter {
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
 
-        Ok(Self {
+        let mut router = Self {
             config,
             block_size: args.block_size as u32,
             dp_size: args.dp_size.max(1),
             profile: profile.clone(),
             worker_config_template,
             workers_with_configs,
+            worker_topologies: FxHashMap::default(),
             slots,
             selector,
             pending: PolicyQueue::new(profile),
@@ -569,7 +601,9 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
-        })
+        };
+        router.register_default_topology(num_workers)?;
+        Ok(router)
     }
 
     #[cfg(test)]
@@ -661,6 +695,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             }],
         })
@@ -672,9 +707,49 @@ impl OfflineReplayRouter {
             let event_id = event.event.event_id;
             let dp_rank = event.event.dp_rank;
             let summary = KvEventSummary::from_data(&event.event.data);
+            if event.storage_tier != StorageTier::HostPinned {
+                self.indexer.apply_event(event).with_context(|| {
+                    format!(
+                        "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
+                    )
+                })?;
+                continue;
+            }
+
+            let topology = self
+                .worker_topologies
+                .get(&worker_id)
+                .with_context(|| {
+                    format!(
+                        "lower-tier KV event references unknown cache domain for worker={worker_id} dp_rank={dp_rank}"
+                    )
+                })?;
+            let source = topology.schedulers.get(dp_rank as usize).with_context(|| {
+                format!(
+                    "lower-tier KV event references unknown cache domain for worker={worker_id} dp_rank={dp_rank}"
+                )
+            })?;
+            for (readable_dp_rank, _) in
+                topology
+                    .schedulers
+                    .iter()
+                    .enumerate()
+                    .filter(|(rank, scheduler)| {
+                        *rank != dp_rank as usize
+                            && scheduler.cache_domain_id == source.cache_domain_id
+                    })
+            {
+                let mut readable_event = event.clone();
+                readable_event.event.dp_rank = readable_dp_rank as u32;
+                self.indexer.apply_event(readable_event).with_context(|| {
+                    format!(
+                        "failed to apply replay lower-tier KV event worker={worker_id} source_dp_rank={dp_rank} readable_dp_rank={readable_dp_rank} event_id={event_id} data={summary}"
+                    )
+                })?;
+            }
             self.indexer.apply_event(event).with_context(|| {
                 format!(
-                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
+                    "failed to apply replay lower-tier KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
                 )
             })?;
         }
@@ -720,25 +795,108 @@ impl OfflineReplayRouter {
         self.pending.pending_count()
     }
 
+    fn register_default_topology(&mut self, num_workers: usize) -> Result<()> {
+        for worker_id in 0..num_workers {
+            let wid = WorkerId::try_from(worker_id)
+                .context("Replay worker ID does not fit the Dynamo Router wire type")?;
+            let first_scheduler_id = worker_id
+                .checked_mul(self.dp_size as usize)
+                .context("Replay scheduler ID overflow")?;
+            self.worker_topologies.insert(
+                wid,
+                WorkerTopology {
+                    worker_id,
+                    schedulers: (0..self.dp_size)
+                        .map(|dp_rank| SchedulerTopology {
+                            scheduler_id: first_scheduler_id + dp_rank as usize,
+                            cache_domain_id: dp_rank,
+                        })
+                        .collect(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn register_worker_topology(&mut self, topology: WorkerTopology) -> Result<()> {
+        let worker_id = WorkerId::try_from(topology.worker_id)
+            .context("Replay worker ID does not fit the Dynamo Router wire type")?;
+        if topology.schedulers.len() != self.dp_size as usize {
+            return Err(anyhow!(
+                "router worker {} exposes {} scheduler ranks; expected {}",
+                topology.worker_id,
+                topology.schedulers.len(),
+                self.dp_size
+            ));
+        }
+
+        let mut scheduler_ids = HashSet::new();
+        for scheduler in &topology.schedulers {
+            if !scheduler_ids.insert(scheduler.scheduler_id) {
+                return Err(anyhow!(
+                    "router worker {} repeats scheduler ID {}",
+                    topology.worker_id,
+                    scheduler.scheduler_id
+                ));
+            }
+            if self
+                .worker_topologies
+                .iter()
+                .any(|(existing_worker, topology)| {
+                    *existing_worker != worker_id
+                        && topology
+                            .schedulers
+                            .iter()
+                            .any(|existing| existing.scheduler_id == scheduler.scheduler_id)
+                })
+            {
+                return Err(anyhow!(
+                    "Replay topology repeats scheduler ID {}",
+                    scheduler.scheduler_id
+                ));
+            }
+        }
+        self.worker_topologies.insert(worker_id, topology);
+        Ok(())
+    }
+
     /// Register a new worker with the router without disturbing existing slot state.
-    pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
-        let wid = worker_id as WorkerId;
-        if self
-            .workers_with_configs
-            .insert(wid, self.worker_config_template.clone())
-            .is_some()
-        {
+    fn add_worker_topology(&mut self, topology: WorkerTopology) -> Result<()> {
+        let worker_id = topology.worker_id;
+        let wid = WorkerId::try_from(worker_id)
+            .context("Replay worker ID does not fit the Dynamo Router wire type")?;
+        if self.workers_with_configs.contains_key(&wid) {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
+        self.register_worker_topology(topology)?;
+        self.workers_with_configs
+            .insert(wid, self.worker_config_template.clone());
         if let Err(error) = self
             .slots
             .upsert_worker(WorkerDpRange::new(wid, 0, self.dp_size))
         {
             self.workers_with_configs.remove(&wid);
+            self.worker_topologies.remove(&wid);
             return Err(error.into());
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
+        let first_scheduler_id = worker_id
+            .checked_mul(self.dp_size as usize)
+            .context("Replay scheduler ID overflow")?;
+        self.add_worker_topology(WorkerTopology {
+            worker_id,
+            schedulers: (0..self.dp_size)
+                .map(|dp_rank| SchedulerTopology {
+                    scheduler_id: first_scheduler_id + dp_rank as usize,
+                    cache_domain_id: dp_rank,
+                })
+                .collect(),
+        })
     }
 
     /// Remove a worker from routing eligibility.
@@ -763,7 +921,8 @@ impl OfflineReplayRouter {
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
-        self.indexer.tree.remove_worker(wid);
+        self.indexer.remove_worker(wid);
+        self.worker_topologies.remove(&wid);
         Ok(())
     }
 
@@ -786,10 +945,11 @@ impl OfflineReplayRouter {
             .map(|entry| {
                 let mut overlap_blocks_by_worker = entry
                     .payload()
-                    .overlaps
-                    .scores
+                    .overlap
+                    .tier_overlap_blocks
+                    .device
                     .iter()
-                    .map(|(worker, overlap)| (worker.worker_id as usize, *overlap))
+                    .map(|(worker, overlap)| (worker.worker_id as usize, *overlap as u32))
                     .collect::<Vec<_>>();
                 overlap_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
 
@@ -848,7 +1008,7 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (tiered_matches, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let overlaps =
                     self.indexer
@@ -892,11 +1052,13 @@ impl OfflineReplayRouter {
             }
         };
 
+        let overlap =
+            OverlapAnalysis::new(&self.config, self.block_size, &tiered_matches).signals();
         Ok(PendingRequest {
             uuid,
             token_seq,
             isl_tokens: input_length,
-            overlaps,
+            overlap,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
                 u32::try_from(max_output_tokens)
@@ -924,7 +1086,13 @@ impl OfflineReplayRouter {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let scheduling_request = request.scheduling_request(worker_loads);
+        let best_available_overlap_blocks = u32::try_from(
+            SchedulingContext::new(&scheduling_request, &self.workers_with_configs)
+                .best_cached_tokens()
+                / self.block_size as usize,
+        )
+        .unwrap_or(u32::MAX);
         let eligibility = scheduling_request.eligibility();
         let selection = self
             .selector
@@ -934,14 +1102,17 @@ impl OfflineReplayRouter {
                 eligibility,
                 self.block_size,
             ))?;
-        let worker_id = usize::try_from(selection.worker.worker_id)
-            .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
-        let dp_rank = usize::try_from(selection.worker.dp_rank)
-            .map_err(|_| anyhow!("selected dp rank does not fit into usize"))?;
-        let worker_idx = worker_id
-            .checked_mul(self.dp_size as usize)
-            .and_then(|base| base.checked_add(dp_rank))
-            .ok_or_else(|| anyhow!("selected worker/rank index overflow"))?;
+        let worker_idx = self
+            .worker_topologies
+            .get(&selection.worker.worker_id)
+            .and_then(|topology| topology.schedulers.get(selection.worker.dp_rank as usize))
+            .map(|scheduler| scheduler.scheduler_id)
+            .with_context(|| {
+                format!(
+                    "selected worker {:?} has no Replay scheduler",
+                    selection.worker
+                )
+            })?;
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -971,6 +1142,7 @@ impl OfflineReplayRouter {
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,
+            best_available_overlap_blocks,
             isl_blocks,
         })
     }
@@ -992,6 +1164,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             });
         }
@@ -1025,14 +1198,13 @@ impl OfflineReplayRouter {
 
     fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
         let cached_tokens = request
-            .overlaps
-            .scores
+            .overlap
+            .effective_cached_tokens
             .iter()
             .filter(|(worker, _)| self.workers_with_configs.contains_key(&worker.worker_id))
-            .map(|(_, overlap)| *overlap)
+            .map(|(_, cached_tokens)| *cached_tokens)
             .max()
-            .unwrap_or(0) as usize
-            * self.block_size as usize;
+            .unwrap_or(0);
         QueueSnapshot::new(request.isl_tokens, cached_tokens)
     }
 
@@ -1095,7 +1267,9 @@ mod tests {
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
+    use aisimulate_core::replay::{
+        ReplayPromptTokenSource, ReplayRequestContext, SchedulerTopology, WorkerTopology,
+    };
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
@@ -1250,7 +1424,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(FxHashMap::default());
 
         assert_eq!(
             scheduling_request
@@ -1297,13 +1471,19 @@ mod tests {
     }
 
     #[test]
-    fn lower_tier_events_do_not_enter_offline_primary_index() {
+    fn lower_tier_events_enter_only_the_offline_lower_tier_index() {
         let mut indexer = SyncReplayIndexer::new(64);
 
         indexer
             .apply_event(store_event(7, 1, 101, StorageTier::HostPinned))
             .unwrap();
         assert_eq!(indexer.debug_snapshot().total_cached_blocks, 0);
+        let tiered = indexer.find_matches_for_hashes(vec![LocalBlockHash(101)]);
+        assert_eq!(
+            tiered.lower_tier[&StorageTier::HostPinned].hits
+                [&dynamo_kv_router::protocols::WorkerWithDpRank::new(7, 0)],
+            1
+        );
 
         indexer
             .apply_event(store_event(7, 2, 101, StorageTier::Device))
@@ -1418,9 +1598,61 @@ mod tests {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 1,
                 overlap_blocks: 1,
+                best_available_overlap_blocks: 1,
                 isl_blocks: 1,
             }]
         );
+    }
+
+    #[test]
+    fn attention_dp_host_hit_routes_within_the_shared_cache_domain() {
+        let mut args = replay_args();
+        args.dp_size = 3;
+        let config = KvRouterConfig {
+            overlap_score_credit: 1.0,
+            host_cache_hit_weight: 1.0,
+            router_temperature: 0.0,
+            ..router_config()
+        };
+        let mut router = OfflineReplayRouter::new(&args, Some(config), None, 1).unwrap();
+        router
+            .register_worker_topology(WorkerTopology {
+                worker_id: 0,
+                schedulers: vec![
+                    SchedulerTopology {
+                        scheduler_id: 10,
+                        cache_domain_id: 7,
+                    },
+                    SchedulerTopology {
+                        scheduler_id: 11,
+                        cache_domain_id: 7,
+                    },
+                    SchedulerTopology {
+                        scheduler_id: 12,
+                        cache_domain_id: 8,
+                    },
+                ],
+            })
+            .unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                0,
+                0,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::HostPinned,
+            )])
+            .unwrap();
+
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(effects.admissions.len(), 1);
+        assert!(matches!(effects.admissions[0].worker_idx, 10 | 11));
+        assert_eq!(effects.admissions[0].overlap_blocks, 1);
     }
 
     #[test]
@@ -1803,6 +2035,7 @@ policy_classes:
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );
@@ -1900,6 +2133,7 @@ policy_classes:
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );

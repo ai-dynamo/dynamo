@@ -175,7 +175,7 @@ impl ReplayComposition for KvReplayComposition {
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
-            topology.len(),
+            topology,
             self.determinism.selector_seed(),
         )
     }
@@ -218,7 +218,7 @@ impl ReplayComposition for KvReplayComposition {
                 router_config.clone(),
             )),
             self.prefill_load_estimator.take(),
-            prefill_topology.len(),
+            prefill_topology,
             self.determinism.selector_seed(),
         )
         .context("constructing prefill KV Router placement")?;
@@ -226,7 +226,7 @@ impl ReplayComposition for KvReplayComposition {
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
             None,
-            decode_topology.len(),
+            decode_topology,
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?;
@@ -317,16 +317,19 @@ fn validate_runtime_topology(
                 worker.worker_id
             );
         }
-        if worker.scheduler_ids.len() != expected_ranks {
+        if worker.schedulers.len() != expected_ranks {
             bail!(
                 "{stage} Replay worker {} exposes {} scheduler ranks; expected DP size {dp_size}",
                 worker.worker_id,
-                worker.scheduler_ids.len()
+                worker.schedulers.len()
             );
         }
-        for scheduler_id in &worker.scheduler_ids {
-            if !scheduler_ids.insert(*scheduler_id) {
-                bail!("{stage} Replay topology repeats scheduler ID {scheduler_id}");
+        for scheduler in &worker.schedulers {
+            if !scheduler_ids.insert(scheduler.scheduler_id) {
+                bail!(
+                    "{stage} Replay topology repeats scheduler ID {}",
+                    scheduler.scheduler_id
+                );
             }
         }
     }
@@ -368,7 +371,9 @@ pub(in crate::replay) fn derive_decode_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisimulate_core::replay::{ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec};
+    use aisimulate_core::replay::{
+        ProviderSpec, ReplayAdapters, ReplayTopology, SchedulerTopology, WorkerPoolSpec,
+    };
 
     use crate::common::protocols::DirectRequest;
     use crate::replay::ReplayRouterMode;
@@ -418,7 +423,10 @@ mod tests {
             2,
             &[WorkerTopology {
                 worker_id: 0,
-                scheduler_ids: vec![0],
+                schedulers: vec![SchedulerTopology {
+                    scheduler_id: 0,
+                    cache_domain_id: 0,
+                }],
             }],
         )
         .unwrap_err();
