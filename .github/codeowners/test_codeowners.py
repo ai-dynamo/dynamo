@@ -1621,8 +1621,8 @@ class TestRealPolicyRoutingContracts:
         ("path", "labels"),
         [
             (
-                "deploy/inference-gateway/epp/Makefile",
-                ("epp", "operator", "ops"),
+                "deploy/inference-gateway/ext-proc/Dockerfile",
+                ("epp", "router", "ops"),
             ),
             (
                 "deploy/operator/internal/checkpoint/resolve.go",

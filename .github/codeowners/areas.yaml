@@ -1162,16 +1162,6 @@ shared:
   owners:
   - operator
   - backend-vllm
-- glob: deploy/inference-gateway/epp/Dockerfile
-  owners:
-  - epp
-  - ops
-  - operator
-- glob: deploy/inference-gateway/epp/Makefile
-  owners:
-  - epp
-  - operator
-  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator

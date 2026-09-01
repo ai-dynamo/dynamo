@@ -640,7 +640,6 @@
 /lib/llm/src/protocols/openai/images/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/protocols/openai/videos/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /tests/frontend/agent_smoke_inputs.py                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
-/deploy/inference-gateway/epp/Makefile                                                                  @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/kv_router/shared_cache.rs                                                                  @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /recipes/**/tokenspeed/**/*Dockerfile*                                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-ops-codeowners
 /tests/deploy/test_dynamocheckpoint.py                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
@@ -659,7 +658,6 @@
 /components/src/dynamo/vllm/publisher.py                                                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /container/deps/requirements.planner.txt                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
 /container/templates/frontend.Dockerfile                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
-/deploy/inference-gateway/epp/Dockerfile                                                                @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/checkpointjob/                                                                @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/observability/                                                                @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/runtime/src/system_status_server.rs                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
