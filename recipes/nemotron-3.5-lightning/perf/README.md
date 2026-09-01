@@ -66,3 +66,17 @@ The following table contains BF16 rows for B200 and GB200 recipes.
 | BF16 | `trtllm/agg-b200-mtp-bf16/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | MTP | 3 | 2.874 | 18 | 3541 | 3411 | 130 | 244.95 | 3295.50 | 183.08 |
 | BF16 | `trtllm/agg-gb200-bf16/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | None | 0 | 0.0 | 18 | 3541 | 3411 | 130 | 216.77 | 1985.84 | 110.32 |
 | BF16 | `trtllm/agg-gb200-mtp-bf16/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | MTP | 3 | 2.874 | 18 | 3541 | 3411 | 130 | 231.34 | 3556.40 | 197.58 |
+
+### RTX PRO 6000
+
+| Precision | Recipe | FW | Mode | GPU | Routing | Spec method | Spec tok | Synthetic AL | Concurrency | Requests | Valid requests | Errors | TTFT p50 (ms) | Output tok/s/GPU | Tok/s/user |
+|----------|--------|----|------|-----|---------|-------------|----------|--------------|-------------|----------|----------------|--------|---------------|------------------|------------|
+| NVFP4 | `vllm/agg-rtxpro6000-dspark/deploy.yaml` | vLLM | agg | RTX PRO 6000 | Single worker | DSpark | 7 | n/m | 20 | 3541 | 3526 | 15 | 542.50 | 776.03 | 53.42 |
+
+`Synthetic AL` is `n/m` (not measured): the value in the manifest is inherited from the H100
+recipe and was not re-derived on sm_120. This row shows 15 errors rather than 130 because the
+deployment resolves `max_seq_len` to 1048576, so the long trace requests that exceed a
+262144-token context on the other SKUs completed here.
+
+RTX PRO 6000 is single-node only (PCIe, no NVLink) and uses NVFP4 rather than the BF16 weights
+used on B200 and GB200; BF16 measured 3.3x slower on sm_120.

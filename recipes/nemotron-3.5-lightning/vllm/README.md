@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo vLLM recipes for Nemotron 3.5 Lightning. H100 and H200 use
 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, while B200 and GB200 use
-`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`. Aggregate and
+`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`. RTX PRO 6000 (sm_120) uses NVFP4:
+BF16 measured 3.3x slower there, the opposite of the B200 result, because decode is
+memory-bandwidth-bound and RTX PRO 6000 uses GDDR7 rather than HBM. Aggregate and
 disaggregated configurations are available as explained below.
 
 ## Configurations
@@ -18,6 +20,7 @@ disaggregated configurations are available as explained below.
 | H200 | `agg-h200-{mtp,dflash,dspark}` | `disagg-h200-{dflash,dspark}` | UCX over IB/RDMA |
 | B200 | `agg-b200-{mtp,dspark}-bf16` | `disagg-b200-dspark-bf16` | UCX over IB/RDMA |
 | GB200 | `agg-gb200-{mtp,dspark}-bf16` | `disagg-gb200-{dflash,dspark}-bf16` | UCX/NIXL, cluster-specific fabric resources |
+| RTX PRO 6000 | `agg-rtxpro6000-dspark` | -- | Single-node only (PCIe, no NVLink) |
 
 B200 and GB200 directories use BF16 weights and include a `-bf16` suffix, for
 example `agg-b200-dspark-bf16` and `disagg-gb200-dspark-bf16`.
