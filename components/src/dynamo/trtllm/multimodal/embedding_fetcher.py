@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
+from dynamo.common.http import HttpStatusError
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -159,7 +160,16 @@ async def _fetch_embeddings_with_cache(
     mm_kwargs = (
         resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
     )
-    if not isinstance(mm_kwargs, dict) or not mm_kwargs:
+    # Reject before the lookup, not after: normalizing a malformed value to None
+    # would hash the plain URL and serve a cache hit with 200, while the
+    # aggregated path 400s on the same input.
+    if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+        raise HttpStatusError(
+            400,
+            "Malformed mm_processor_kwargs field: expected an object",
+            str(mm_kwargs),
+        )
+    if not mm_kwargs:
         mm_kwargs = None
 
     def _cache_key(url: str) -> str:

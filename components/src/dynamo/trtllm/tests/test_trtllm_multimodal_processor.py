@@ -453,17 +453,30 @@ async def test_epd_non_object_kwargs_raises_client_error() -> None:
     """
     from dynamo.trtllm.encode_helper import EncodeHelper
 
+    # URLs come from the processor, not the request; the engine must report an
+    # available encoder, or the flow short-circuits before the kwargs check.
+    processor = MagicMock()
+    processor.extract_prompt_and_media.return_value = (
+        "describe",
+        ["http://example.invalid/a.png"],
+        [],
+    )
+    engine = MagicMock()
+    engine.encoder_available = True
+
     with pytest.raises(HttpStatusError) as excinfo:
         async for _ in EncodeHelper.process_encode_request(
             request={
                 "token_ids": [1, 2, 3],
-                "image_urls": ["http://example.invalid/a.png"],
+                "messages": [{"role": "user", "content": "describe"}],
                 "mm_processor_kwargs": "invalid",
             },
+            multimodal_processor=processor,
+            connector=None,
             tokenizer=MagicMock(),
             model_dir="unused",
             model_type="multimodal",
-            engine=MagicMock(),
+            engine=engine,
         ):
             pass
 
@@ -508,3 +521,25 @@ async def test_embedding_cache_key_unchanged_without_overrides() -> None:
     url = "http://example.invalid/a.png"
     key = await _cache_keys_for({}, url)
     assert key == MultimodalHasher.hash_bytes(url.encode())
+
+
+@pytest.mark.asyncio
+async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
+    """A cache hit must not mask a malformed value with a 200."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    url = "http://example.invalid/a.png"
+    cache = MagicMock()
+    # Pre-seeded so a plain-URL hash would hit and return early.
+    cache.get.return_value = MagicMock(tensor=torch.zeros(1))
+
+    async def _encode(_req):
+        raise AssertionError("encode must not run")
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await ef._fetch_embeddings_with_cache(
+            [url], {"mm_processor_kwargs": "invalid"}, cache, _encode
+        )
+
+    assert excinfo.value.status == 400
+    cache.get.assert_not_called()
