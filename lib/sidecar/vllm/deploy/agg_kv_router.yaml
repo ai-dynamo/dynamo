@@ -68,6 +68,8 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: status.podIP
+          - name: PYTHONHASHSEED
+            value: "0"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -87,8 +89,7 @@ spec:
             --block-size 64
             --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://${POD_IP}:20080\",\"enable_kv_cache_events\":true}"
         containers:
-        # No published image yet; build lib/sidecar/Dockerfile and set the
-        # registry below. Must be named "main" for operator injection.
+        # Must be named "main" for operator injection.
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
           command:

@@ -13,8 +13,8 @@
 # do not publish events, matching the local disaggregated KV-router launcher.
 #
 # PREREQUISITES / CAVEATS:
-#   - Needs a sidecar built from lib/sidecar/Dockerfile that carries the
-#     disaggregation fixes (component-by-role + NIXL port encoding).
+#   - Build the sidecar from the same Dynamo revision as this manifest; older
+#     builds can lack component-by-role routing and NIXL port encoding.
 #   - RDMA/NIXL: the engine needs rdma/ib devices, IPC_LOCK/SYS_RESOURCE, pinned
 #     memory (ulimit -l unlimited), and UCX tuning; adjust for your fabric.
 #   - VLLM_NIXL_SIDE_CHANNEL_HOST must be a routable pod IP (set via downward API).
@@ -79,6 +79,8 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: status.podIP
+          - name: PYTHONHASHSEED
+            value: "0"
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:
               fieldRef:

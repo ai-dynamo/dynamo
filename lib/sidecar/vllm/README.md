@@ -229,13 +229,22 @@ kubectl apply -f lib/sidecar/vllm/deploy/agg_kv_router.yaml -n <namespace>
 kubectl apply -f lib/sidecar/vllm/deploy/disagg_kv_router.yaml -n <namespace>
 ```
 
+After deploying one of the KV-routing manifests, port-forward its frontend:
+
+```bash
+# Aggregated.
+kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-kv-router-frontend 8000:8000
+
+# Disaggregated.
+kubectl port-forward -n <namespace> svc/vllm-sidecar-disagg-kv-router-frontend 8000:8000
+```
+
 ### Disaggregated
 
 `deploy/disagg.yaml` runs prefill and decode as separate worker pods with NIXL
 KV transfer. It needs multiple GPUs and an RDMA fabric, and both worker pods
 must reach `2/2 Running`. `deploy/disagg_kv_router.yaml` uses two replicas per
-role and enables exact KV routing from the prefill event streams. Apply either
-manifest the same way and call its frontend as above.
+role and enables exact KV routing from the prefill event streams.
 
 ## Packaging
 
