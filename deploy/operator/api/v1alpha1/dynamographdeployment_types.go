@@ -306,6 +306,24 @@ type ServiceReplicaStatus struct {
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
+	// GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+	// service replica, across all of its nodes. Independent auxiliary GPU
+	// allocations are excluded. A present zero means the engine itself has no
+	// GPUs; consult GPUsPerReplica for auxiliary allocations.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
+
+	// GPUsPerReplica is the unique GPU allocation added when this service scales
+	// by one replica, across all nodes, application and initialization phases,
+	// and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod
+	// scheduling footprint; shared DRA claims are counted once. A present zero
+	// records a successful non-GPU resolution; omission means no current shape
+	// is available.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
+
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0

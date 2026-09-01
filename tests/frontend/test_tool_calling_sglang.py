@@ -1029,6 +1029,7 @@ class TestToolCallingMultiTurn:
                 },
             ],
             tools=TOOLS_WEATHER,
+            temperature=0,
         )
         assert_finish_reason(result, {"stop"})
         assert result.tool_calls == []

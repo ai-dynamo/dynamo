@@ -378,13 +378,14 @@ struct OutputBlockTracker {
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
 /// a KV worker is selected.
-struct KvRequestCleanup<Sel>
+pub(super) struct KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     chooser: Arc<KvRouter<Sel>>,
     context_id: String,
     worker: WorkerWithDpRank,
+    approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
 }
 
@@ -392,16 +393,40 @@ impl<Sel> KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    fn new(
+    pub(super) fn new(
         chooser: Arc<KvRouter<Sel>>,
         context_id: String,
         worker: WorkerWithDpRank,
-        lifecycle: Option<RequestAttemptLease>,
+        attempt: AdmissionAttempt,
     ) -> Self {
+        let attempt_id = match attempt {
+            AdmissionAttempt::Untracked => None,
+            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
+        };
+        let approximate_lru = attempt_id
+            .and_then(|_| chooser.approximate_lru_rank_registration(worker))
+            .and_then(|registration| {
+                chooser.indexer().begin_approximate_lru_request(
+                    worker,
+                    registration.incarnation,
+                    attempt_id?,
+                )
+            });
+        let lifecycle = attempt_id.map(|attempt_id| {
+            chooser.request_lease_manager().register_local(
+                SchedulerBookingDescriptor {
+                    request_id: context_id.clone(),
+                    worker,
+                    attempt_id,
+                },
+                approximate_lru.clone(),
+            )
+        });
         Self {
             chooser,
             context_id,
             worker,
+            approximate_lru,
             lifecycle,
         }
     }
@@ -410,7 +435,7 @@ where
         self.lifecycle.as_ref()
     }
 
-    async fn finish(&self) {
+    pub(super) async fn finish(&self) {
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.finish().await;
         }
@@ -556,49 +581,39 @@ where
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
     ) -> Self {
-        // Snapshot request-scoped inputs now so the guard can outlive the
-        // PreprocessedRequest after it is moved into backend dispatch.
+        Self::new_kv_with_cleanup(
+            request_metrics,
+            KvRequestCleanup::new(chooser, context_id, worker, attempt),
+            request,
+        )
+    }
+
+    pub(super) fn new_kv_with_cleanup(
+        request_metrics: Arc<RouterRequestMetrics>,
+        cleanup: KvRequestCleanup<Sel>,
+        request: &PreprocessedRequest,
+    ) -> Self {
+        let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
         let expected_output_tokens = request
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
-        let attempt_id = match attempt {
-            AdmissionAttempt::Untracked => None,
-            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
-        };
+        let attempt_id = cleanup
+            .lifecycle()
+            .map(|lifecycle| lifecycle.booking().attempt_id);
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
             request_metrics.requests_started_total().inc();
         }
-        let lru_registration =
-            attempt_id.and_then(|_| chooser.approximate_lru_rank_registration(worker));
-        let approximate_lru = lru_registration.and_then(|registration| {
-            chooser.indexer().begin_approximate_lru_request(
-                worker,
-                registration.incarnation,
-                attempt_id?,
-            )
-        });
+        let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
-        let lifecycle = attempt_id.map(|attempt_id| {
-            chooser.request_lease_manager().register_local(
-                SchedulerBookingDescriptor {
-                    request_id: context_id.clone(),
-                    worker,
-                    attempt_id,
-                },
-                approximate_lru.clone(),
-            )
-        });
         Self {
-            cleanup: RequestCleanup::Kv(KvRequestCleanup::new(
-                chooser, context_id, worker, lifecycle,
-            )),
+            cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,

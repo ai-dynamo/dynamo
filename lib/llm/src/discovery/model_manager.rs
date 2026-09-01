@@ -3429,7 +3429,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
             crate::discovery::LoadThresholdHandle::new(Default::default()),
