@@ -74,6 +74,9 @@ pub enum KvEventSourceConfig {
         /// vLLM BlockStored events to the canonical pad_value scheme. `None`
         /// for text-only / non-MM deployments (normalization is a no-op).
         image_token_id: Option<u32>,
+        /// Model video-placeholder token id. `None` leaves video runs on the
+        /// engine's native hashing path.
+        video_token_id: Option<u32>,
     },
 }
 
@@ -131,6 +134,7 @@ impl KvEventSource {
                 endpoint,
                 topic,
                 image_token_id,
+                video_token_id,
             } => {
                 let listener_handle =
                     component
@@ -146,6 +150,7 @@ impl KvEventSource {
                             kv_block_size,
                             next_event_id,
                             image_token_id,
+                            video_token_id,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =

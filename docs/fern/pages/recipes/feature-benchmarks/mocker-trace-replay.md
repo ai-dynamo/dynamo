@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Mocker Trace Replay
-subtitle: Replay Mooncake-style traces through the mocker in offline or online mode
+subtitle: Replay Mooncake-style traces through the mocker in offline mode
 ---
 
 This page has moved to [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
+
+> [!NOTE]
+> The former `online` replay mode has no replacement in the unified AISimulate CLI yet. It will
+> return in a future release. The public `python -m dynamo.mocker` CLI has also been removed.
 
 The old path remains so existing links, including the DynoSim blog post's
 related guide link, continue to resolve.

@@ -941,6 +941,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         WorkerWithDpRank::new(3, 0),
         &warning_count,
         None,
+        None,
     );
 
     match placement_event.unwrap().event.data {
@@ -1026,6 +1027,7 @@ fn cpu_event_with_placeholder_payload_is_dropped_safely() {
         WorkerWithDpRank::new(7, 0),
         &warning_count,
         None,
+        None,
     )
     .unwrap();
 
@@ -1055,6 +1057,7 @@ fn cpu_event_with_full_payload_is_indexable() {
         4,
         WorkerWithDpRank::new(7, 0),
         &warning_count,
+        None,
         None,
     )
     .unwrap();
@@ -1204,7 +1207,15 @@ fn raw_placement_event(
 }
 
 fn convert_placement(event: RawKvEvent, worker: WorkerWithDpRank) -> Option<PlacementEvent> {
-    convert_event(event, 1, 2, worker, &Arc::new(AtomicU32::new(0)), None)
+    convert_event(
+        event,
+        1,
+        2,
+        worker,
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
 }
 
 /// Absent/LOCAL locality keeps events worker-local at their medium's tier
@@ -1382,6 +1393,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         16,
         WorkerWithDpRank::new(7, 0),
         &warning_count,
+        None,
         None,
     )
     .expect("placeholder STORAGE store still produces a placement");
