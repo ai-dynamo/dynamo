@@ -1686,7 +1686,7 @@ impl RequestPlaneClient for TcpRequestClient {
             prepare_request_frame(payload, &headers, self.max_message_size).map_err(|e| {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
-                tracing::warn!(%addr, error = %e, "TCP request validation failed");
+                tracing::warn!(%addr, error = ?e, "TCP request validation failed");
                 e
             })?;
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
