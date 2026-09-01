@@ -172,6 +172,7 @@ spec:
             schedulerName: default-scheduler
             securityContext:
                 fsGroup: 1000
+                fsGroupChangePolicy: OnRootMismatch
             serviceAccount: component-manifests-k8s-service-discovery
             serviceAccountName: component-manifests-k8s-service-discovery
             terminationGracePeriodSeconds: 60
@@ -288,6 +289,7 @@ spec:
             schedulerName: default-scheduler
             securityContext:
                 fsGroup: 1000
+                fsGroupChangePolicy: OnRootMismatch
             serviceAccount: component-manifests-k8s-service-discovery
             serviceAccountName: component-manifests-k8s-service-discovery
             terminationGracePeriodSeconds: 60

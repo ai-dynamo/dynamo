@@ -1684,8 +1684,9 @@ func applyCheckpointProbeCadence(
 	}
 }
 
-// applyDefaultSecurityContext sets secure defaults for pod security context.
-// Currently only sets fsGroup to solve volume permission issues.
+// applyDefaultSecurityContext sets volume-permission defaults for pod security context.
+// It sets fsGroup and avoids recursively changing ownership when the volume root
+// already has the expected ownership.
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
 // with images that may expect to run as root.
 // User-provided security context values (via extraPodSpec) will override these defaults.
@@ -1700,11 +1701,13 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 		podSpec.SecurityContext = &corev1.PodSecurityContext{}
 	}
 
-	// Only set fsGroup by default
-	// This fixes volume permission issues without forcing a specific UID/GID
-	// which maintains compatibility with both root and non-root images
+	// These defaults fix volume permission issues without forcing a specific
+	// UID/GID, which maintains compatibility with both root and non-root images.
 	if podSpec.SecurityContext.FSGroup == nil {
 		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
+	if podSpec.SecurityContext.FSGroupChangePolicy == nil {
+		podSpec.SecurityContext.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch)
 	}
 }
 

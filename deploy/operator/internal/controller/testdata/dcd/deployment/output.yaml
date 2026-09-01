@@ -124,6 +124,7 @@ spec:
             schedulerName: default-scheduler
             securityContext:
                 fsGroup: 1000
+                fsGroupChangePolicy: OnRootMismatch
             serviceAccount: deployment-manifest-k8s-service-discovery
             serviceAccountName: deployment-manifest-k8s-service-discovery
             terminationGracePeriodSeconds: 60
