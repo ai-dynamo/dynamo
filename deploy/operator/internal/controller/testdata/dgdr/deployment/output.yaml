@@ -55,7 +55,7 @@ spec:
               command:
                 - python3
                 - -m
-                - dynamo.mocker
+                - dynamo.mocker._worker
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -98,7 +98,7 @@ spec:
               command:
                 - python3
                 - -m
-                - dynamo.mocker
+                - dynamo.mocker._worker
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -155,7 +155,7 @@ spec:
           command:
             - python3
             - -m
-            - dynamo.mocker
+            - dynamo.mocker._worker
           envFrom:
             - secretRef:
                 name: hf-token-secret
@@ -229,7 +229,7 @@ spec:
           command:
             - python3
             - -m
-            - dynamo.mocker
+            - dynamo.mocker._worker
           env:
             - name: DYN_COMPONENT
               value: decode
@@ -514,7 +514,7 @@ spec:
           command:
             - python3
             - -m
-            - dynamo.mocker
+            - dynamo.mocker._worker
           env:
             - name: DYN_COMPONENT
               value: prefill
@@ -692,7 +692,7 @@ spec:
           command:
             - python3
             - -m
-            - dynamo.mocker
+            - dynamo.mocker._worker
           envFrom:
             - secretRef:
                 name: hf-token-secret
