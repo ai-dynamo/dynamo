@@ -388,7 +388,7 @@ func TestGroveProgram_ReconcileRequeuesAfterCurrentWorkerHashBackfill(t *testing
 
 	t.Log("Verify worker hash status is persisted before reconciling shared resources")
 	require.NoError(t, err)
-	assert.True(t, result.Result.Requeue)
+	assert.Positive(t, result.Result.RequeueAfter)
 	assert.Equal(t, previous.Components, result.Status.Components)
 	assert.Equal(t, previous.State, result.Status.State)
 	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
@@ -437,7 +437,7 @@ func TestComponentProgram_ReconcileRequeuesAfterCurrentWorkerHashBackfill(t *tes
 
 	t.Log("Verify status is returned for persistence and dependent work is deferred")
 	require.NoError(t, err)
-	assert.True(t, result.Result.Requeue)
+	assert.Positive(t, result.Result.RequeueAfter)
 	assert.Equal(t, currentWorkerHash, result.Status.CurrentWorkerHash)
 	assert.Empty(t, dgd.Status.CurrentWorkerHash)
 	assert.Nil(t, result.Status.RollingUpdate)

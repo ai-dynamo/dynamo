@@ -91,7 +91,7 @@ func (p *componentProgram) Reconcile(
 	}
 	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	if currentWorkerHashStatusChanged {
-		programResult.Result.Requeue = true
+		programResult.requeueAfterWorkerHashStatusChange()
 		return programResult, nil
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)

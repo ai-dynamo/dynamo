@@ -229,10 +229,11 @@ func waitForGroveWorkerHash(
 		if err := env.Client().Get(ctx, key, current); err != nil {
 			return false, fmt.Sprintf("get DynamoGraphDeployment: %v", err)
 		}
-		if got := current.GetAnnotations()[consts.AnnotationCurrentWorkerHashV2]; got != want {
+		annotationHash := current.GetAnnotations()[consts.AnnotationCurrentWorkerHashV2]
+		if annotationHash != want || current.Status.CurrentWorkerHash != want {
 			return false, fmt.Sprintf(
-				"DynamoGraphDeployment current worker hash = %q, want %q (state=%s, conditions=%v)",
-				got, want, current.Status.State, current.Status.Conditions,
+				"DynamoGraphDeployment current worker hashes annotation=%q status=%q, want %q (state=%s, conditions=%v)",
+				annotationHash, current.Status.CurrentWorkerHash, want, current.Status.State, current.Status.Conditions,
 			)
 		}
 		return true, "DynamoGraphDeployment recorded the expected worker hash"

@@ -677,7 +677,8 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1beta1.RollingUpdatePhaseNone:
-		return false, r.startRollingUpdate(ctx, dgd, status, newWorkerHash)
+		r.startRollingUpdate(ctx, dgd, status, newWorkerHash)
+		return false, nil
 
 	case nvidiacomv1beta1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseInProgress
@@ -700,7 +701,7 @@ func (r *dgdWorkerRolloutReconciler) startRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
-) error {
+) {
 	logger := log.FromContext(ctx)
 
 	current := r.currentWorkerHashes(dgd)
@@ -715,8 +716,6 @@ func (r *dgdWorkerRolloutReconciler) startRollingUpdate(
 	rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedComponents = nil
-
-	return nil // the workload program returns this status to the outer reconciler
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.

@@ -1411,8 +1411,7 @@ func TestStartRollingUpdate_UpdatedComponentsInitializedToNil(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
-	err := r.startRollingUpdate(ctx, dgd, &dgd.Status, testNewWorkerHash)
-	require.NoError(t, err)
+	r.startRollingUpdate(ctx, dgd, &dgd.Status, testNewWorkerHash)
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(&dgd.Status)
 	assert.Nil(t, rollingUpdateStatus.UpdatedComponents)

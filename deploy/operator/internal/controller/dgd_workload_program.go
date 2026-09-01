@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -91,6 +92,13 @@ func newWorkloadProgramResult(
 ) workloadProgramResult {
 	status := dgd.DeepCopy().Status
 	return workloadProgramResult{Status: status}
+}
+
+func (r *workloadProgramResult) requeueAfterWorkerHashStatusChange() {
+	if r.Status.State == "" {
+		r.Status.State = nvidiacomv1beta1.DGDStateInitializing
+	}
+	r.Result.RequeueAfter = time.Nanosecond
 }
 
 func (r *workloadProgramResult) Eventf(

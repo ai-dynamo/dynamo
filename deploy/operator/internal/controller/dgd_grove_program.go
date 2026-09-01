@@ -109,7 +109,7 @@ func (p *groveProgram) Reconcile(
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
 	if currentWorkerHashStatusChanged {
-		programResult.Result.Requeue = true
+		programResult.requeueAfterWorkerHashStatusChange()
 		return programResult, nil
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
@@ -141,7 +141,7 @@ func (p *groveProgram) Reconcile(
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 	if currentWorkerHashStatusChanged {
-		programResult.Result.Requeue = true
+		programResult.requeueAfterWorkerHashStatusChange()
 		return programResult, nil
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
