@@ -579,7 +579,11 @@ pub(super) fn new_tool_use_id() -> String {
 /// would hand back a call that looks complete, carries only some of its arguments, and
 /// reports no error anywhere. That is worse than the empty object, because a partial
 /// call can pass schema validation and then run.
-fn tool_use_input(tool_name: &str, arguments: &str, truncated: bool) -> serde_json::Value {
+pub(super) fn tool_use_input(
+    tool_name: &str,
+    arguments: &str,
+    truncated: bool,
+) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(arguments) {
         Ok(value) => return value,
         Err(error) => {
