@@ -2078,7 +2078,7 @@ def test_streaming_parallel_tool_calls_no_think(
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
 
 
-_LONG_ARGUMENT_FRAGMENTS = [
+_LONG_ARGUMENT_FRAGMENTS = (
     "James",
     " Joyce",
     " Dubliners",
@@ -2089,26 +2089,29 @@ _LONG_ARGUMENT_FRAGMENTS = [
     " of",
     " the",
     " Artist",
-]
+)
 
-_LONG_ARGUMENT_CHUNK_TEXTS = [
+_LONG_ARGUMENT_CHUNK_TEXTS = (
     '<tool_call>\n{"name": "search_gutenberg_books", '
     '"arguments": {"search_terms": ["',
     *_LONG_ARGUMENT_FRAGMENTS,
     '"]}}\n</tool_call>',
-]
+)
 
-OUTPUTS_LONG_STRING_ARGUMENT = [
-    CompletionOutput(
-        index=0,
-        text=text,
-        token_ids=list(range(1000 + i * 4, 1000 + i * 4 + 4)),
-        cumulative_logprob=None,
-        logprobs=None,
-        finish_reason=("stop" if i == len(_LONG_ARGUMENT_CHUNK_TEXTS) - 1 else None),
-    )
-    for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
-]
+def _long_string_argument_outputs():
+    return [
+        CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=list(range(1000 + i * 4, 1000 + i * 4 + 4)),
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=(
+                "stop" if i == len(_LONG_ARGUMENT_CHUNK_TEXTS) - 1 else None
+            ),
+        )
+        for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
+    ]
 
 
 @pytest.mark.vllm
@@ -2127,7 +2130,7 @@ def test_streaming_tool_call_arguments_are_not_withheld(
         chat_template_kwargs={"enable_thinking": False},
     )
 
-    outputs = OUTPUTS_LONG_STRING_ARGUMENT
+    outputs = _long_string_argument_outputs()
     results = [proc.process_output(output) for output in outputs]
 
     def _tool_calls_of(result):
