@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+- op: test
+  path: /spec/components/1/name
+  value: PrefillWorker
+- op: test
+  path: /spec/components/1/type
+  value: prefill
+- op: test
+  path: /spec/components/1/podTemplate/spec/containers/0/name
+  value: main
+- op: add
+  path: /spec/components/1/podTemplate/metadata/annotations/networking.gke.io~1default-interface
+  value: "your-prefill-default-interface"
+- op: add
+  path: /spec/components/1/podTemplate/metadata/annotations/networking.gke.io~1interfaces
+  value: >-
+    [{"interfaceName":"your-prefill-default-interface","network":"default"},{"interfaceName":"your-prefill-rdma-interface-0","network":"your-prefill-network-0"},{"interfaceName":"your-prefill-rdma-interface-1","network":"your-prefill-network-1"},{"interfaceName":"your-prefill-rdma-interface-2","network":"your-prefill-network-2"},{"interfaceName":"your-prefill-rdma-interface-3","network":"your-prefill-network-3"}]
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/env/-
+  value:
+    name: NCCL_SOCKET_IFNAME
+    value: "your-prefill-nccl-socket-interface"
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/env/-
+  value:
+    name: GLOO_SOCKET_IFNAME
+    value: "your-prefill-gloo-socket-interface"
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/env/-
+  value:
+    name: NCCL_CROSS_NIC
+    value: "your-prefill-cross-nic-value"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-0"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-0"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-0.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-0.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-1"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-1"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-1.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-1.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-2"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-2"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-2.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-2.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-3"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-3"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-prefill-network-3.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: add
+  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-prefill-network-3.IP"
+  value: "your-prefill-network-resource-quantity"
+- op: test
+  path: /spec/components/2/name
+  value: DecodeWorker
+- op: test
+  path: /spec/components/2/type
+  value: decode
+- op: test
+  path: /spec/components/2/podTemplate/spec/containers/0/name
+  value: main
+- op: add
+  path: /spec/components/2/podTemplate/metadata/annotations/networking.gke.io~1default-interface
+  value: "your-decode-default-interface"
+- op: add
+  path: /spec/components/2/podTemplate/metadata/annotations/networking.gke.io~1interfaces
+  value: >-
+    [{"interfaceName":"your-decode-default-interface","network":"default"},{"interfaceName":"your-decode-rdma-interface-0","network":"your-decode-network-0"},{"interfaceName":"your-decode-rdma-interface-1","network":"your-decode-network-1"},{"interfaceName":"your-decode-rdma-interface-2","network":"your-decode-network-2"},{"interfaceName":"your-decode-rdma-interface-3","network":"your-decode-network-3"}]
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/env/-
+  value:
+    name: NCCL_SOCKET_IFNAME
+    value: "your-decode-nccl-socket-interface"
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/env/-
+  value:
+    name: GLOO_SOCKET_IFNAME
+    value: "your-decode-gloo-socket-interface"
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/env/-
+  value:
+    name: NCCL_CROSS_NIC
+    value: "your-decode-cross-nic-value"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-0"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-0"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-0.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-0.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-1"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-1"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-1.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-1.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-2"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-2"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-2.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-2.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-3"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-3"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/networking.gke.io.networks~1your-decode-network-3.IP"
+  value: "your-decode-network-resource-quantity"
+- op: add
+  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/networking.gke.io.networks~1your-decode-network-3.IP"
+  value: "your-decode-network-resource-quantity"

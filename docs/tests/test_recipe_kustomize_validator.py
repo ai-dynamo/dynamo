@@ -313,7 +313,7 @@ def _neutral_component_case(
     operations: list[dict[str, Any]],
 ) -> tuple[Path, Path]:
     case = _filled_case(tmp_path, with_case_override=False)
-    reference = "components/network-interface/agg"
+    reference = "components/registry-credentials/agg"
     component = case / reference
     _write_component(component, operations)
     return case, component
@@ -364,6 +364,9 @@ def test_scaffold_inventory_is_complete() -> None:
         path.relative_to(SCAFFOLD).as_posix()
         for path in SCAFFOLD.rglob("*")
         if path.is_file()
+        and not path.relative_to(SCAFFOLD)
+        .as_posix()
+        .startswith("components/provider-networking/")
     }
     assert expected == actual
 
@@ -1181,7 +1184,7 @@ fi"""
         "2. `registry-credentials`",
         "3. `probes`, when required",
         "4. `scheduling`",
-        "5. `network-interface`",
+        "5. exactly one generic `network-interface`",
         "6. `placement`, when required",
     )
     component_positions = [readme.index(item) for item in ordered_components]

@@ -154,7 +154,7 @@ def test_check_yaml_excludes_renderer_owned_templates_but_not_recipe_yaml() -> N
         "examples/deployments/EKS/templates/eksctl.yaml",
     )
 
-    assert len(recipe_paths) == 42
+    assert len(recipe_paths) == 46
     assert not any(exclusion.match(path) for path in recipe_paths)
     assert all(exclusion.match(path) for path in interpolation_template_paths)
 

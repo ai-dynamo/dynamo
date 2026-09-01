@@ -65,6 +65,8 @@ spec:
       replicas: 2
       sharedMemorySize: 64Gi
       podTemplate:
+        metadata:
+          annotations: {}
         spec:
           containers:
             - name: main
@@ -145,6 +147,8 @@ spec:
       replicas: 6
       sharedMemorySize: 64Gi
       podTemplate:
+        metadata:
+          annotations: {}
         spec:
           containers:
             - name: main
