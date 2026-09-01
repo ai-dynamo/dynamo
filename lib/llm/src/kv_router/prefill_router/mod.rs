@@ -30,6 +30,8 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 
+use census::{ContinuationCensus, ContinuationPermit};
+
 use crate::{
     discovery::{ModelManager, RuntimeConfigWatch},
     kv_router::{RoutingHost, WorkerSelectorFactory},
@@ -45,6 +47,7 @@ use crate::{
 
 mod activation;
 mod admission;
+mod census;
 mod conditional_bypass;
 mod query;
 
@@ -130,6 +133,10 @@ struct PreparedPrefill {
     worker_id: u64,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
+    /// Present only when the request is going out as a continuation. Its
+    /// absence on a request that asked to continue means dispatch demoted it
+    /// back to today's handoff.
+    continuation_permit: Option<ContinuationPermit>,
 }
 
 /// Advisory prefill worker selection result.
@@ -235,6 +242,9 @@ where
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     prefill_continue_policy: PrefillContinuePolicy,
+    /// Continuations in flight per prefill worker. The only bound that can see
+    /// a continuation after its first token.
+    continuations: Arc<ContinuationCensus>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
     conditional_disagg_prefill_busy_threshold: Option<f64>,
@@ -360,6 +370,18 @@ where
             false
         }
     }
+}
+
+/// Put a request that asked to continue back on today's handoff path.
+///
+/// Both halves of the ask have to come off together. Leaving the marker on
+/// would have the worker generate a whole response that nothing returns;
+/// leaving the budget unclamped would have it generate one that nothing reads.
+fn demote_to_handoff(request: &mut PreprocessedRequest) {
+    request
+        .annotations
+        .retain(|annotation| annotation != PREFILL_CONTINUE_ANNOTATION);
+    request.stop_conditions.max_tokens = Some(1);
 }
 
 struct PrefillBuildContext<Sel>
@@ -548,19 +570,12 @@ where
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         propagate_first_response_guard(&context, &mut prefill_context)?;
-        if prefill_continues {
-            // The prefill context has its own controller, so a cancel would not
-            // reach the worker on a stream we hand back to the client. Link it,
-            // as Migration does for its retry children.
-            engine_ctx.link_child(prefill_context.context());
-            // link_child does not replay state already set, so a cancel that
-            // arrived before the link would be lost and the worker would generate
-            // a whole response for a client that is gone. Migration guards the
-            // same race the same way.
-            if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-                prefill_context.context().stop_generating();
-            }
-        }
+        // Kept so the continuation arm can link this context to the client's
+        // once dispatch confirms the request really is continuing. Linking here
+        // would be too early: dispatch can still demote, and `link_child` has
+        // no inverse, so the handoff path would be left carrying a cancel route
+        // into the prefill leg that it does not have today.
+        let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -576,22 +591,34 @@ where
         }
 
         let router = &binding.router;
-        let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    self.prepare_prefill_dispatch(request, target, &binding, prefill_continues)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
-            let outcome = if prefill_continues {
+            // Not `prefill_continues`: dispatch has the last word, because only
+            // it knew which worker was chosen.
+            let outcome = if let Some(permit) = prepared.continuation_permit {
                 // Outranks bootstrap: that path backgrounds the prefill stream and
                 // dispatches a decode leg, which would discard the response. Drop
                 // the phase permit as the ordinary path does, so a migration retry
                 // can set Prefill again.
                 drop(prefill_phase_barrier);
+                // The prefill context has its own controller, so a cancel would
+                // not reach the worker on a stream we hand back to the client.
+                // Link it, as Migration does for its retry children.
+                engine_ctx.link_child(prefill_ctx.clone());
+                // link_child does not replay state already set, so a cancel that
+                // arrived before the link would be lost and the worker would
+                // generate a whole response for a client that is gone. Migration
+                // guards the same race the same way.
+                if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+                    prefill_ctx.stop_generating();
+                }
                 PrefillOutcome::Continuation {
-                    stream: prefill_stream,
+                    stream: permit.into_stream(prefill_stream),
                 }
             } else if let Some(bootstrap_info) = prepared.bootstrap_info {
                 self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
@@ -765,11 +792,21 @@ where
         &self,
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
-        endpoint_id: &EndpointId,
+        binding: &PrefillBinding<Sel>,
+        wants_continuation: bool,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
+        let endpoint_id = &binding.endpoint_id;
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
+
+        // The continuation decision is only final here, because only here is
+        // the worker known. Everything before this ran against the pool.
+        let continuation_permit = if wants_continuation {
+            self.admit_continuation(request, worker_id, binding)
+        } else {
+            None
+        };
 
         let bootstrap_info = self
             .model_manager
@@ -799,7 +836,70 @@ where
             worker_id,
             bootstrap_info,
             topology_constraints,
+            continuation_permit,
         })
+    }
+
+    /// Take a place in the census for `worker_id`, or put the request back on
+    /// today's handoff.
+    ///
+    /// Two things can refuse here, and both need the chosen worker:
+    ///
+    /// - the worker is already running its share of continuations, and
+    /// - the worker never declared it understands the marker. The pool check
+    ///   before routing reads the routable set, but that set is sampled before
+    ///   selection; a worker that appeared in between reaches this point
+    ///   unchecked. Asking again once it is chosen closes that window.
+    ///
+    /// Demoting means undoing both halves of the ask: the marker comes off, so
+    /// the worker builds its usual handoff, and the one-token clamp goes back
+    /// on, so it stops after the token that handoff carries.
+    fn admit_continuation(
+        &self,
+        request: &mut PreprocessedRequest,
+        worker_id: u64,
+        binding: &PrefillBinding<Sel>,
+    ) -> Option<ContinuationPermit> {
+        let declared = binding
+            .prefill_runtime_configs
+            .borrow()
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY));
+        if !declared {
+            tracing::debug!(
+                worker_id,
+                "Prefill continuation demoted to a handoff: the selected worker never declared \
+                 support for the continuation marker"
+            );
+            demote_to_handoff(request);
+            return None;
+        }
+
+        // Refuse rather than run unbounded when no cap is configured. Startup
+        // validation asks for one, but it only runs when the decode set is
+        // KV-routed, so a round-robin frontend reaches here with none.
+        let Some(cap) = self.prefill_continue_policy.max_concurrent() else {
+            tracing::debug!(
+                worker_id,
+                "Prefill continuation demoted to a handoff: no continuation cap is configured, \
+                 and the cap is the only bound on continuations that are already running"
+            );
+            demote_to_handoff(request);
+            return None;
+        };
+        if let Some(permit) = self.continuations.try_admit(worker_id, cap) {
+            return Some(permit);
+        }
+
+        tracing::debug!(
+            worker_id,
+            in_flight = self.continuations.in_flight(worker_id),
+            ?cap,
+            "Prefill continuation demoted to a handoff: the selected worker has no free \
+             continuation place"
+        );
+        demote_to_handoff(request);
+        None
     }
 
     fn preflight_kv_transfer_constraints(

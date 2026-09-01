@@ -127,27 +127,25 @@ mod tests {
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
 
+    #[derive(Default)]
     struct RecordingDispatch {
         worker_ids: Mutex<Vec<u64>>,
         pending_responses: bool,
         /// `stop_conditions.max_tokens` as it reached the worker, per dispatch.
         dispatched_max_tokens: Mutex<Vec<Option<u32>>>,
+        /// Annotations as they reached the worker, per dispatch.
+        dispatched_annotations: Mutex<Vec<Vec<String>>>,
     }
 
     impl RecordingDispatch {
         fn completed() -> Self {
-            Self {
-                worker_ids: Mutex::new(Vec::new()),
-                pending_responses: false,
-                dispatched_max_tokens: Mutex::new(Vec::new()),
-            }
+            Self::default()
         }
 
         fn pending() -> Self {
             Self {
-                worker_ids: Mutex::new(Vec::new()),
                 pending_responses: true,
-                dispatched_max_tokens: Mutex::new(Vec::new()),
+                ..Self::default()
             }
         }
 
@@ -180,6 +178,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(payload.stop_conditions.max_tokens);
+            self.dispatched_annotations
+                .lock()
+                .unwrap()
+                .push(payload.annotations.clone());
             self.worker_ids
                 .lock()
                 .unwrap()
@@ -421,6 +423,7 @@ mod tests {
                 prefill_continue_enabled: true,
                 prefill_continue_force: true,
                 prefill_continue_prefill_busy_threshold: Some(0.4),
+                prefill_continue_max_concurrent: Some(2),
                 ..Default::default()
             }),
             PoolSupport::Unanimous,
@@ -442,10 +445,26 @@ mod tests {
         let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
             .await
             .expect("a continuation should be served by the prefill worker");
+
+        let worker_id = dispatch.worker_ids.lock().unwrap()[0];
+        assert_eq!(
+            prefill_router.continuations.in_flight(worker_id),
+            1,
+            "the continuation must hold its place for as long as the stream lives"
+        );
+
         let mut chunks = 0;
         while response.next().await.is_some() {
             chunks += 1;
         }
+
+        // Still holding the stream, and the place is already back: it is
+        // returned when the worker finishes, not when the client lets go.
+        assert_eq!(
+            prefill_router.continuations.in_flight(worker_id),
+            0,
+            "the place must come back at the end of the stream"
+        );
 
         // the prefill worker's stream reached the client
         assert_eq!(
@@ -470,6 +489,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_configured_cap_nothing_continues() {
+        // Startup validation asks for a cap, but it only runs when the decode
+        // set is KV-routed — this router is round-robin, so it reaches dispatch
+        // with none. An unbounded continuation is worse than no continuation,
+        // so the absent cap must refuse rather than waive the bound.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-uncapped",
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+            Some(&dynamo_kv_router::config::KvRouterConfig {
+                prefill_continue_enabled: true,
+                prefill_continue_force: true,
+                prefill_continue_prefill_busy_threshold: Some(0.4),
+                // Deliberately absent.
+                prefill_continue_max_concurrent: None,
+                ..Default::default()
+            }),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        let decode_calls = Arc::new(AtomicUsize::new(0));
+        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
+            Arc::new(CountingDecodeHost {
+                calls: decode_calls.clone(),
+            });
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "an uncapped router must hand off, not continue without a bound"
+        );
+        assert_eq!(
+            *dispatch.dispatched_annotations.lock().unwrap(),
+            vec![Vec::<String>::new()],
+            "and the marker must not reach the worker"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_worker_at_its_continuation_cap_is_demoted_to_a_handoff() {
+        // Every worker declares support and the override is on, so the request
+        // is marked before routing. The cap is what stops it, and the cap can
+        // only be read once the worker is chosen — so this exercises the
+        // dispatch-time demotion, not the pool check.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-capped",
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+            Some(&dynamo_kv_router::config::KvRouterConfig {
+                prefill_continue_enabled: true,
+                prefill_continue_force: true,
+                prefill_continue_prefill_busy_threshold: Some(0.4),
+                // No place for any continuation at all.
+                prefill_continue_max_concurrent: Some(0),
+                ..Default::default()
+            }),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        let decode_calls = Arc::new(AtomicUsize::new(0));
+        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
+            Arc::new(CountingDecodeHost {
+                calls: decode_calls.clone(),
+            });
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "a demoted request must carry the one-token clamp again"
+        );
+        let annotations = dispatch.dispatched_annotations.lock().unwrap().clone();
+        assert_eq!(
+            annotations,
+            vec![Vec::<String>::new()],
+            "the marker must come off, or the worker generates a whole response nothing returns"
+        );
+        let worker_id = dispatch.worker_ids.lock().unwrap()[0];
+        assert_eq!(
+            prefill_router.continuations.in_flight(worker_id),
+            0,
+            "a demoted request must hold no place in the census"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn a_mixed_pool_refuses_to_continue_and_hands_off_as_today() {
         // Three of four workers declare the capability. The fourth would answer
         // a marked request with a handoff message and pin cache, so the gate
@@ -487,6 +619,7 @@ mod tests {
                 prefill_continue_enabled: true,
                 prefill_continue_force: true,
                 prefill_continue_prefill_busy_threshold: Some(0.4),
+                prefill_continue_max_concurrent: Some(2),
                 ..Default::default()
             }),
             PoolSupport::AllButOne,

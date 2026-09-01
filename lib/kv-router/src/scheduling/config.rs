@@ -976,7 +976,18 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_max_budget_tokens: Option<u32>,
 
-    /// Maximum concurrent continuations per prefill worker. When unset, unbounded.
+    /// Maximum concurrent continuations per prefill worker.
+    ///
+    /// Required whenever the feature is enabled, and enforced at dispatch,
+    /// where the chosen worker is known. This is the bound that holds: the
+    /// prefill-load interlock reads a figure the router clears at a request's
+    /// first token, so one token into a long continuation it sees no load at
+    /// all and cannot count what is still running.
+    ///
+    /// Set it to at least 2 if migration is in play. A migration retry builds
+    /// its replacement stream before dropping the failed attempt, so the two
+    /// briefly overlap; at a cap of 1 every retry of a continuation is refused
+    /// and hands off instead. A cap of 0 is a kill switch, not a setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_max_concurrent: Option<usize>,
 
@@ -1206,6 +1217,20 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
         return Err(
             "prefill_continue_enabled needs prefill_continue_decode_busy_threshold (or \
              prefill_continue_force for bring-up); it would never trigger"
+                .to_string(),
+        );
+    }
+    if config.prefill_continue_max_concurrent == Some(0) {
+        tracing::warn!(
+            "prefill_continue_max_concurrent is 0: the feature is enabled but every request will \
+             hand off as today. This is a valid kill switch; it is not a working configuration."
+        );
+    }
+    if config.prefill_continue_enabled && config.prefill_continue_max_concurrent.is_none() {
+        return Err(
+            "prefill_continue_enabled needs prefill_continue_max_concurrent; the prefill-load \
+             interlock is cleared at a request's first token, so it cannot see continuations \
+             that are already running, and this cap is the only bound that can"
                 .to_string(),
         );
     }
@@ -1829,6 +1854,7 @@ mod tests {
     fn prefill_continue_enabled_without_a_trigger_is_rejected() {
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
             ..Default::default()
         };
         let error = config.validate().unwrap_err();
@@ -1837,6 +1863,7 @@ mod tests {
         // force is the documented bring-up path, so it satisfies the rule.
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
             prefill_continue_force: true,
             prefill_continue_prefill_busy_threshold: Some(0.4),
             ..Default::default()
@@ -1846,9 +1873,32 @@ mod tests {
         // so does a configured trigger.
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
             prefill_continue_decode_busy_threshold: Some(0.9),
             prefill_continue_prefill_busy_threshold: Some(0.4),
             ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn prefill_continue_requires_a_concurrency_cap() {
+        // The cap is the only bound that can see a continuation after its first
+        // token, so enabling the feature without one is refused rather than
+        // silently running unbounded.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            ..Default::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("prefill_continue_max_concurrent"), "{error}");
+
+        let config = KvRouterConfig {
+            prefill_continue_max_concurrent: Some(2),
+            ..config
         };
         assert!(config.validate().is_ok());
     }
@@ -1860,6 +1910,7 @@ mod tests {
         // rejected rather than silently skipped.
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
             prefill_continue_decode_busy_threshold: Some(0.9),
             ..Default::default()
         };
@@ -1870,6 +1921,7 @@ mod tests {
         // sibling feature.
         let config = KvRouterConfig {
             prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
             prefill_continue_decode_busy_threshold: Some(0.9),
             router_queue_threshold: Some(4.0),
             ..Default::default()

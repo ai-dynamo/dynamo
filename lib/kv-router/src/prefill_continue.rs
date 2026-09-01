@@ -191,6 +191,16 @@ impl PrefillContinuePolicy {
         self.enabled && self.prefill_busy_threshold_configured
     }
 
+    /// The per-worker ceiling on concurrent continuations, if one is set.
+    ///
+    /// Enforced where the worker is known, which is at dispatch. [`Self::decide`]
+    /// runs before a worker is chosen, so its own cap check can only ever be a
+    /// pool-level filter on a count the caller measured; the authoritative
+    /// bound is the router's per-worker census.
+    pub fn max_concurrent(&self) -> Option<usize> {
+        self.max_concurrent
+    }
+
     /// The decision.
     ///
     /// Order matters: every safety gate runs before `force`, so the bring-up
