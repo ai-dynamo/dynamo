@@ -401,27 +401,34 @@ kubectl get crd -o json | jq -r '
 
 Back up every listed custom resource before decommissioning. Use the CRD name from the first column
 and choose the command that matches its scope. The output can contain sensitive workload
-configuration, so store it accordingly.
+configuration, so create the backups with owner-only permissions.
 
 ```bash
 # Example for a Namespaced row; set this to each CRD name from the inventory
+BACKUP_DIR=dynamo-cr-backup
+umask 077
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 CRD_NAME=dynamographdeployments.nvidia.com
-kubectl get "$CRD_NAME" --all-namespaces -o yaml > "${CRD_NAME}.backup.yaml"
+kubectl get "$CRD_NAME" --all-namespaces -o yaml \
+  > "$BACKUP_DIR/${CRD_NAME}.backup.yaml"
 ```
 
 For a `Cluster`-scoped row, set `CRD_NAME` to that row's CRD name and omit
 `--all-namespaces`:
 
 ```bash
-kubectl get "$CRD_NAME" -o yaml > "${CRD_NAME}.backup.yaml"
+kubectl get "$CRD_NAME" -o yaml > "$BACKUP_DIR/${CRD_NAME}.backup.yaml"
 ```
 
 If the workloads are also being decommissioned, first delete any DGDRs so they cannot create or
-update deployments. Deleting a DGDR does not delete the DGD it generated, so explicitly delete
-every DGD and any other top-level Dynamo custom resources being decommissioned through the normal
-Kubernetes API while the operator is still running. Verify that their child workloads are gone
-before uninstalling the platform. If workloads must remain running, do not uninstall this chart
-until a supported replacement control plane has assumed their reconciliation and dependencies.
+update deployments. The standard controller leaves each generated DGD in place, but temporary
+profiling workflows can owner-reference the DGD to its DGDR and allow Kubernetes to garbage-collect
+it. After deleting the DGDRs, list and explicitly delete every remaining DGD and any other top-level
+Dynamo custom resources being decommissioned through the normal Kubernetes API while the operator
+is still running. Verify that their child workloads are gone before uninstalling the platform. If
+workloads must remain running, do not uninstall this chart until a supported replacement control
+plane has assumed their reconciliation and dependencies.
 
 ```bash
 helm uninstall dynamo-platform --namespace $NAMESPACE
@@ -429,9 +436,12 @@ helm uninstall dynamo-platform --namespace $NAMESPACE
 
 For a namespace-restricted development or test installation, do not treat the shared CRDs as owned
 by that release: `dynamo-operator.upgradeCRD=false` makes the cluster-wide operator responsible for
-them. Remove or hand off only the target namespace's workloads, verify reconciliation has moved to a
-supported operator if they remain, and then uninstall the namespace-restricted release. Do not
-delete the shared CRDs.
+them. Before uninstalling, delete every DGDR, DGD, and other Dynamo custom resource in the target
+namespace, or complete a supported handoff for all of them. Uninstalling the release removes or
+stops renewing its namespace-scope Lease; after that Lease is deleted or expires, the cluster-wide
+operator resumes reconciliation for retained custom resources and may recreate workloads. Verify
+that reconciliation has moved to the replacement operator if resources remain. Do not delete the
+shared CRDs.
 
 > [!WARNING]
 > Do not delete Dynamo CRDs as routine release or namespace cleanup. CRDs are cluster-scoped, and
