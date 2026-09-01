@@ -56,6 +56,8 @@ type dgdCheckpointsResult struct {
 	Statuses map[string]nvidiacomv1beta1.ComponentCheckpointStatus
 }
 
+// errAutomaticSnapshotCleanupPending keeps the DGD finalizer in place while
+// Snapshot finishes the asynchronous deletion of managed SnapshotJobs.
 var errAutomaticSnapshotCleanupPending = errors.New("automatic snapshot cleanup pending")
 
 // dgdCheckpointsReconciler owns checkpoint discovery, automatic checkpoint
@@ -529,8 +531,15 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		CheckpointName:   snapshotJob.Status.PodSnapshotName,
 		StartupPolicy:    startupPolicy,
 	}
-	if snapshotv1alpha1.IsSnapshotJobFailed(snapshotJob) ||
-		!snapshotv1alpha1.IsSnapshotJobCompleted(snapshotJob) {
+	if snapshotv1alpha1.IsSnapshotJobFailed(snapshotJob) {
+		failed := meta.FindStatusCondition(snapshotJob.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+		failure := failed.Reason
+		if failed.Message != "" {
+			failure += ": " + failed.Message
+		}
+		return nil, fmt.Errorf("automatic SnapshotJob %s/%s failed: %s", snapshotJob.Namespace, snapshotJob.Name, failure)
+	}
+	if !snapshotv1alpha1.IsSnapshotJobCompleted(snapshotJob) {
 		return info, nil
 	}
 	if snapshotJob.Status.PodSnapshotName == "" || snapshotJob.Status.PodSnapshotUID == "" {

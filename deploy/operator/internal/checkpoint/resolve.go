@@ -33,8 +33,7 @@ type SourceKind string
 const (
 	// SourceKindLegacy identifies a DynamoCheckpoint reference retained until
 	// the legacy checkpoint implementation is removed.
-	SourceKindLegacy SourceKind = "DynamoCheckpoint"
-	// SourceKindPodSnapshot identifies a standalone Snapshot PodSnapshot.
+	SourceKindLegacy      SourceKind = "DynamoCheckpoint"
 	SourceKindPodSnapshot SourceKind = "PodSnapshot"
 )
 
