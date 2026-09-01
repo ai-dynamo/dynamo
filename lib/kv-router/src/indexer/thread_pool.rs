@@ -15,14 +15,16 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::{
+    ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
+    ApproximateLruLease, ApproximateLruRequestId, ApproximateLruStats, ApproximateLruTask,
+    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
+};
 #[cfg(feature = "bench")]
 use super::{
     EventCompletionBuffer, EventCompletionWriter, ObservationError, ObservationSeal,
     ObservedEnqueueReceipt, ThreadPoolObservationPlan, ThreadPoolObservationSnapshot,
-};
-use super::{
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -88,8 +90,26 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Synthetic event IDs for approximate store/remove events.
     synthetic_event_id: Arc<AtomicU64>,
 
+    /// Whether approximate routing decisions use request-scoped LRU leases.
+    approximate_lru_enabled: bool,
+
     #[cfg(feature = "bench")]
     observation_active: AtomicBool,
+}
+
+struct ThreadPoolLruSink {
+    sender: flume::Sender<WorkerTask>,
+    fallback_prune_manager: WorkerPruneManager,
+}
+
+impl ApproximateLruCommandSink for ThreadPoolLruSink {
+    fn send(&self, mut task: ApproximateLruTask) -> Result<(), KvRouterError> {
+        task.observe_enqueue_depth(self.sender.len());
+        task.set_fallback_prune_manager(self.fallback_prune_manager.clone());
+        self.sender
+            .send(WorkerTask::ApproximateLru(task))
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
 }
 
 #[cfg(feature = "bench")]
@@ -138,6 +158,10 @@ pub struct ThreadPoolSealedObservation<'a, T: SyncIndexer> {
 }
 
 impl<T: SyncIndexer> ThreadPoolIndexer<T> {
+    pub fn approximate_lru_enabled(&self) -> bool {
+        self.approximate_lru_enabled
+    }
+
     /// Create a new `ThreadPoolIndexer` wrapping the given backend.
     ///
     /// Spawns `num_workers` OS threads, each running a blocking recv loop
@@ -178,7 +202,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> Self {
-        Self::new_with_metrics_and_pruning(backend, num_workers, kv_block_size, metrics, None)
+        Self::new_with_metrics_and_approximate_retention(
+            backend,
+            num_workers,
+            kv_block_size,
+            metrics,
+            None,
+        )
     }
 
     pub fn new_with_pruning(
@@ -197,12 +227,33 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        mut backend: T,
+        backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        Self::new_with_metrics_and_approximate_retention(
+            backend,
+            num_workers,
+            kv_block_size,
+            metrics,
+            prune_config.map(ApproximateRetentionConfig::Ttl),
+        )
+    }
+
+    pub fn new_with_metrics_and_approximate_retention(
+        mut backend: T,
+        num_workers: usize,
+        kv_block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> Self {
+        let (prune_config, approximate_lru_enabled) = match retention {
+            Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
+            Some(ApproximateRetentionConfig::Lru { fallback_ttl }) => (Some(fallback_ttl), true),
+            None => (None, false),
+        };
         assert!(num_workers > 0, "Number of workers must be greater than 0");
         assert!(
             prune_config.is_none() || backend.supports_routing_decision_pruning(),
@@ -277,9 +328,113 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
+            approximate_lru_enabled,
             #[cfg(feature = "bench")]
             observation_active: AtomicBool::new(false),
         }
+    }
+
+    fn approximate_lru_client_for_worker(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Option<ApproximateLruClient> {
+        if !self.approximate_lru_enabled {
+            return None;
+        }
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        Some(ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
+            sender: self.worker_event_channels[thread_idx].clone(),
+            fallback_prune_manager: self
+                .prune_manager
+                .as_ref()
+                .expect("LRU fallback TTL requires a prune manager")
+                .clone(),
+        })))
+    }
+
+    pub fn begin_approximate_lru_request(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        lru_request_id: ApproximateLruRequestId,
+    ) -> Option<ApproximateLruLease> {
+        let client = self.approximate_lru_client_for_worker(worker)?;
+        Some(client.begin_request(worker, incarnation, lru_request_id))
+    }
+
+    pub async fn set_approximate_lru_capacity(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(client) = self.approximate_lru_client_for_worker(worker) else {
+            return Ok(());
+        };
+        client.set_capacity(worker, incarnation, capacity).await
+    }
+
+    pub fn set_approximate_lru_capacity_now(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(client) = self.approximate_lru_client_for_worker(worker) else {
+            return Ok(());
+        };
+        client.set_capacity_now(worker, incarnation, capacity)
+    }
+
+    pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
+        if !self.approximate_lru_enabled {
+            return Ok(ApproximateLruStats::default());
+        }
+        let mut total = ApproximateLruStats::default();
+        for sender in &self.worker_event_channels {
+            let client = ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
+                sender: sender.clone(),
+                fallback_prune_manager: self
+                    .prune_manager
+                    .as_ref()
+                    .expect("LRU fallback TTL requires a prune manager")
+                    .clone(),
+            }));
+            let stats = client.stats().await?;
+            total.ranks += stats.ranks;
+            total.fallback_ranks += stats.fallback_ranks;
+            total.resident_blocks += stats.resident_blocks;
+            total.active_blocks += stats.active_blocks;
+            total.inactive_blocks += stats.inactive_blocks;
+            total.private_blocks += stats.private_blocks;
+            total.leases += stats.leases;
+            total.overcapacity_blocks += stats.overcapacity_blocks;
+            total.requests = total.requests.saturating_add(stats.requests);
+            total.request_messages = total
+                .request_messages
+                .saturating_add(stats.request_messages);
+            total.output_batches = total.output_batches.saturating_add(stats.output_batches);
+            total.fallback_activations = total
+                .fallback_activations
+                .saturating_add(stats.fallback_activations);
+            total.eviction_batches = total
+                .eviction_batches
+                .saturating_add(stats.eviction_batches);
+            total.evicted_blocks = total.evicted_blocks.saturating_add(stats.evicted_blocks);
+            total.mutation_queue_depth += stats.mutation_queue_depth;
+            total.mutation_wait_ns = total
+                .mutation_wait_ns
+                .saturating_add(stats.mutation_wait_ns);
+            total.mutation_wait_samples = total
+                .mutation_wait_samples
+                .saturating_add(stats.mutation_wait_samples);
+        }
+        Ok(total)
     }
 
     /// Get a reference to the underlying backend.
@@ -866,6 +1021,22 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             return Err(KvRouterError::IndexerDroppedRequest);
         }
 
+        if self.approximate_lru_enabled {
+            return Err(KvRouterError::Unsupported(
+                "approximate LRU routing decisions require an admitted request attempt".to_string(),
+            ));
+        }
+
+        self.record_ttl_fallback_hashes(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    pub async fn record_ttl_fallback_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
         let Some(prune_manager) = &self.prune_manager else {
             // Approximate routing decisions are only recorded when explicitly enabled.
             return Ok(());
@@ -895,7 +1066,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         if applied {
             prune_manager.insert_worker_block_entries(worker, prune_entries);
         }
-
         Ok(())
     }
 
@@ -1094,6 +1264,18 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        if self.approximate_lru_enabled {
+            if let Err(error) = self
+                .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
+                .expect("LRU client is available when LRU is enabled")
+                .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                .await
+            {
+                tracing::error!(worker_id, dp_rank, %error, "Failed to reset approximate LRU rank");
+            }
+            return;
+        }
+
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
@@ -1114,6 +1296,14 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         worker_id: WorkerId,
         dp_rank: DpRank,
     ) -> Result<(), KvRouterError> {
+        if self.approximate_lru_enabled {
+            return self
+                .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
+                .expect("LRU client is available when LRU is enabled")
+                .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                .await;
+        }
+
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }

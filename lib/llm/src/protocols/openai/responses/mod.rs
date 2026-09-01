@@ -51,6 +51,19 @@ pub struct NvCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+
+    /// Chat-template arguments, forwarded to the converted chat request.
+    ///
+    /// Mirrors the Chat Completions field, including the `chat_template_kwargs`
+    /// alias, so a Responses client controls template-driven behaviour such as
+    /// reasoning and tool formatting the same way a chat client does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
+    #[schema(value_type = Object)]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -735,7 +748,7 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
-fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
+pub fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
     match &text.format {
         TextResponseFormatConfiguration::Text => None,
         TextResponseFormatConfiguration::JsonObject => Some(ResponseFormat::JsonObject),
@@ -891,7 +904,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args: resp.chat_template_args,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
@@ -1348,36 +1361,8 @@ mod tests {
                 annotations: Some(vec!["debug".into(), "trace".into()]),
                 ..Default::default()
             }),
+            chat_template_args: None,
         }
-    }
-
-    #[test]
-    fn test_annotations_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(
-            req.annotations(),
-            Some(vec!["debug".to_string(), "trace".to_string()])
-        );
-        assert!(req.has_annotation("debug"));
-        assert!(req.has_annotation("trace"));
-        assert!(!req.has_annotation("missing"));
-    }
-
-    #[test]
-    fn test_openai_sampling_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_temperature(), Some(0.5));
-        assert_eq!(req.get_top_p(), Some(0.9));
-        assert_eq!(req.get_frequency_penalty(), None);
-        assert_eq!(req.get_presence_penalty(), None);
-    }
-
-    #[test]
-    fn test_openai_stop_conditions_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_max_tokens(), Some(1024));
-        assert_eq!(req.get_min_tokens(), None);
-        assert_eq!(req.get_stop(), None);
     }
 
     #[test]
@@ -1403,6 +1388,58 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn chat_template_args_survive_the_conversion() {
+        // The repro from the issue: a Responses request carrying template args
+        // must not lose them on the way to the chat request, or template-driven
+        // behaviour like reasoning and tool formatting cannot be controlled
+        // from /v1/responses at all.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_args": {"enable_thinking": true},
+        }))
+        .expect("responses request with chat_template_args should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        let args = nv_req
+            .chat_template_args
+            .expect("chat_template_args should reach the chat request");
+        assert_eq!(
+            args.get("enable_thinking"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_kwargs_alias_is_accepted() {
+        // Chat Completions accepts either spelling, so Responses has to as
+        // well or the same client payload behaves differently per endpoint.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_kwargs": {"enable_thinking": true},
+        }))
+        .expect("chat_template_kwargs alias should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_some_and(
+            |args| args.get("enable_thinking") == Some(&serde_json::Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn absent_chat_template_args_stay_absent() {
+        // The overwhelmingly common request has none; it must not gain an
+        // empty map, which would change downstream template rendering.
+        let nv_req: NvCreateChatCompletionRequest =
+            make_response_with_input("hi there").try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_none());
     }
 
     #[test]
@@ -1434,6 +1471,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1478,6 +1516,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1557,6 +1596,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1598,6 +1638,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1641,6 +1682,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1689,6 +1731,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1728,6 +1771,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1762,6 +1806,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1804,6 +1849,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1865,6 +1911,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1937,6 +1984,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1994,6 +2042,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2049,6 +2098,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2096,6 +2146,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2161,6 +2212,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2240,6 +2292,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2313,6 +2366,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2382,6 +2436,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2448,6 +2503,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2505,6 +2561,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;

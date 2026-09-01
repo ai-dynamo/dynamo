@@ -90,4 +90,8 @@ pub struct CommonArgs {
     /// shim does not read this env var.
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
+
+    /// Publish this worker's engine control/update routes on the RL request-plane endpoint.
+    #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
+    pub enable_rl: bool,
 }

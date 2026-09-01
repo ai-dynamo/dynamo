@@ -311,8 +311,8 @@ class BaseConfigModifier:
 
         # If operator defaults are being used (no command/args), we must provide full CLI.
         if not main_container.command and not main_container.args:
-            main_container.command = ["python3", "-m", "dynamo.frontend"]
-            main_container.args = []
+            main_container.command = ["python3"]
+            main_container.args = ["-m", "dynamo.frontend"]
 
         def _patch(tokens: list[str]) -> list[str]:
             tokens = set_unique_argument_value(tokens, "--model-name", model_name)

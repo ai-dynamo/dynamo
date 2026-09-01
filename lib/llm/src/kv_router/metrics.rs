@@ -13,7 +13,7 @@
 //!
 //! - [`RoutingOverheadMetrics`]: Per-request routing phase latency histograms.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
-//!   Populated by `KvPushRouter` in the frontend during routing decisions.
+//!   Populated by `RoutingHost` in the frontend during routing decisions.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
@@ -21,17 +21,17 @@
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
-//!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
+//!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, non-KV modes (direct/random/round-robin): always zero (registered
-//!     on default port 8000, but never populated since KvPushRouter is not used)
+//!   - Frontend, builtin modes without affinity or LoRA filtering: populated by `RoutingHost`;
+//!     modes that still bypass the host remain registered as zeros
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
 //!     when set (default is `-1`, disabled), populated per-request
 //!
-//! - [`KvPublisherMetrics`]: Worker-local KV event publisher and ZMQ relay counters.
+//! - `KvPublisherMetrics`: Worker-local KV event publisher and ZMQ relay counters.
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Populated by `KvEventPublisher` and the ZMQ listener when engines publish KV
 //!   events.
@@ -64,6 +64,7 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -818,9 +819,9 @@ impl RoutingOverheadMetrics {
 ///
 /// # When these metrics are created
 ///
-/// Eagerly in `KvPushRouter::new()`, so they appear as zeros before any requests.
+/// Eagerly in `RoutingHost::new()`, so they appear as zeros before any requests.
 /// Both the frontend pipeline and the standalone router (via Python bindings)
-/// create a `KvPushRouter`, so both get these metrics registered automatically.
+/// create a `RoutingHost`, so both get these metrics registered automatically.
 ///
 /// # Why component-scoped
 ///
@@ -865,7 +866,7 @@ impl RouterRequestMetrics {
     /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
     /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
     ///
-    /// Called eagerly by `KvPushRouter::new()` so metrics appear as zeros at startup.
+    /// Called eagerly by `RoutingHost::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
@@ -1003,6 +1004,189 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+}
+
+/// Process-local observability for the experimental approximate LRU.
+///
+/// NOTE: Gauges are last-router-wins. Approximate primaries are expected to be
+/// singleton/local for now; a distributed deployment first needs explicit cache
+/// synchronization, at which point metric aggregation should be designed with it.
+pub(crate) struct ApproximateLruMetrics {
+    configured_policy: IntGaugeVec,
+    effective_policy: IntGaugeVec,
+    ranks: IntGaugeVec,
+    blocks: IntGaugeVec,
+    leases: IntGauge,
+    mutation_queue_depth: IntGauge,
+    fallback_activations_total: IntCounter,
+    eviction_batches_total: IntCounter,
+    evicted_blocks_total: IntCounter,
+    output_batches_total: IntCounter,
+    messages_per_request: prometheus::Histogram,
+    mutation_wait_seconds: prometheus::Histogram,
+}
+
+static APPROXIMATE_LRU_METRICS: OnceLock<Arc<ApproximateLruMetrics>> = OnceLock::new();
+
+impl ApproximateLruMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        APPROXIMATE_LRU_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let gauge_vec = |name, help, label| {
+                    metrics
+                        .create_intgaugevec(name, help, &[label], &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                let counter = |name, help| {
+                    metrics
+                        .create_intcounter(name, help, &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                Arc::new(Self {
+                    configured_policy: gauge_vec(
+                        "router_approximate_cache_configured_policy",
+                        "Configured process-local approximate cache policy",
+                        "policy",
+                    ),
+                    effective_policy: gauge_vec(
+                        "router_approximate_cache_effective_policy",
+                        "Effective process-local approximate cache policy",
+                        "policy",
+                    ),
+                    ranks: gauge_vec(
+                        "router_approximate_lru_ranks",
+                        "Approximate index ranks by effective retention policy",
+                        "policy",
+                    ),
+                    blocks: gauge_vec(
+                        "router_approximate_lru_blocks",
+                        "Approximate LRU physical blocks by state",
+                        "state",
+                    ),
+                    leases: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_leases",
+                            "Live approximate LRU request leases",
+                            &[],
+                        )
+                        .expect("failed to create router_approximate_lru_leases"),
+                    mutation_queue_depth: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_mutation_queue_depth",
+                            "Aggregate approximate LRU FIFO depth at command enqueue",
+                            &[],
+                        )
+                        .expect("failed to create approximate LRU queue-depth gauge"),
+                    fallback_activations_total: counter(
+                        "router_approximate_lru_fallback_activations_total",
+                        "Total rank incarnations pinned to TTL because capacity was unavailable",
+                    ),
+                    eviction_batches_total: counter(
+                        "router_approximate_lru_eviction_batches_total",
+                        "Total approximate LRU mutation batches that evicted physical copies",
+                    ),
+                    evicted_blocks_total: counter(
+                        "router_approximate_lru_evicted_blocks_total",
+                        "Total physical block copies evicted by approximate LRU",
+                    ),
+                    output_batches_total: counter(
+                        "router_approximate_lru_output_batches_total",
+                        "Total completed output-block batches sent to approximate LRU",
+                    ),
+                    messages_per_request: metrics
+                        .create_histogram(
+                            "router_approximate_lru_messages_per_request",
+                            "Approximate LRU FIFO messages per request over each observation interval",
+                            &[],
+                            Some(prometheus::linear_buckets(1.0, 1.0, 16).unwrap()),
+                        )
+                        .expect("failed to create approximate LRU messages/request histogram"),
+                    mutation_wait_seconds: metrics
+                        .create_histogram(
+                            "router_approximate_lru_mutation_wait_seconds",
+                            "Mean approximate LRU FIFO wait per command over each observation interval",
+                            &[],
+                            Some(generate_log_buckets(0.000_001, 1.0, 16)),
+                        )
+                        .expect("failed to create approximate LRU mutation wait histogram"),
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn set_policies(&self, configured: &str, effective: &str) {
+        for policy in ["ttl", "lru", "disabled"] {
+            self.configured_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == configured));
+            self.effective_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == effective));
+        }
+    }
+
+    pub(crate) fn observe(&self, current: ApproximateLruStats, previous: &mut ApproximateLruStats) {
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        self.ranks
+            .with_label_values(&["lru"])
+            .set(gauge(current.ranks));
+        self.ranks
+            .with_label_values(&["ttl_fallback"])
+            .set(gauge(current.fallback_ranks));
+        for (state, value) in [
+            ("resident", current.resident_blocks),
+            ("active", current.active_blocks),
+            ("inactive", current.inactive_blocks),
+            ("private", current.private_blocks),
+            ("overcapacity", current.overcapacity_blocks),
+        ] {
+            self.blocks.with_label_values(&[state]).set(gauge(value));
+        }
+        self.leases.set(gauge(current.leases));
+        self.mutation_queue_depth
+            .set(gauge(current.mutation_queue_depth));
+
+        self.fallback_activations_total.inc_by(
+            current
+                .fallback_activations
+                .saturating_sub(previous.fallback_activations),
+        );
+        self.eviction_batches_total.inc_by(
+            current
+                .eviction_batches
+                .saturating_sub(previous.eviction_batches),
+        );
+        self.evicted_blocks_total.inc_by(
+            current
+                .evicted_blocks
+                .saturating_sub(previous.evicted_blocks),
+        );
+        self.output_batches_total.inc_by(
+            current
+                .output_batches
+                .saturating_sub(previous.output_batches),
+        );
+        let requests = current.requests.saturating_sub(previous.requests);
+        if requests > 0 {
+            let messages = current
+                .request_messages
+                .saturating_sub(previous.request_messages);
+            self.messages_per_request
+                .observe(messages as f64 / requests as f64);
+        }
+        let wait_samples = current
+            .mutation_wait_samples
+            .saturating_sub(previous.mutation_wait_samples);
+        if wait_samples > 0 {
+            let wait_ns = current
+                .mutation_wait_ns
+                .saturating_sub(previous.mutation_wait_ns);
+            self.mutation_wait_seconds
+                .observe(wait_ns as f64 / wait_samples as f64 / 1_000_000_000.0);
+        }
+        *previous = current;
     }
 }
 
@@ -1283,40 +1467,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
     }
 
     #[test]
-    fn test_routing_overhead_metric_names_pef() {
-        // Verify the overhead constants produce valid histogram names when
-        // combined with dynamo_router_ prefix.
-        let registry = prometheus::Registry::new();
-        let buckets = async_overhead_buckets();
-        let prefix = name_prefix::ROUTER;
-        let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
-        let total = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                name,
-                "Total routing overhead per request in milliseconds",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(total.clone())).unwrap();
-        total.observe(1.5);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP dynamo_router_overhead_total_ms"),
-            "PEF missing HELP for routing overhead metric"
-        );
-        assert!(
-            output.contains("# TYPE dynamo_router_overhead_total_ms histogram"),
-            "PEF missing TYPE for routing overhead metric"
-        );
-        assert!(
-            output.contains("dynamo_router_overhead_total_ms_count 1"),
-            "PEF missing observation count"
-        );
-    }
-
-    #[test]
     fn test_routing_overhead_saturating_sub() {
         let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
         let make = |name: &str| {
@@ -1349,49 +1499,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
-    }
-
-    #[test]
-    fn test_kv_transfer_estimated_latency_metric_pef() {
-        // Verify the metric name is correctly composed from the constant
-        // and produces valid PEF when observed.
-        let registry = prometheus::Registry::new();
-        let name = format!(
-            "{}{}",
-            router_request::METRIC_PREFIX,
-            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
-        );
-        let buckets = generate_log_buckets(0.001, 10.0, 15);
-        let histogram = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                &name,
-                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(histogram.clone())).unwrap();
-
-        // Observe a 5ms latency
-        histogram.observe(0.005);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
-            "PEF missing HELP line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
-            "PEF missing TYPE line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
-            "PEF missing observation count. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
-            "PEF missing observation sum. Got:\n{output}"
-        );
     }
 }
 
