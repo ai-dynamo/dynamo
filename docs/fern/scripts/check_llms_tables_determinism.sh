@@ -38,7 +38,6 @@ outputs=(
 for tree in first second; do
   rm -f "$tmp_dir/$tree/docs/fern/assets/releases.json" \
         "$tmp_dir/$tree/docs/fern/assets/releases-atom.xml"
-  # One interpreter for the whole tree rather than one per file.
   python3 - "$tmp_dir/$tree" "${outputs[@]}" <<'CRLF_PY'
 import pathlib
 import sys
