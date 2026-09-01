@@ -26,22 +26,23 @@ import (
 // DynamoGraphDeploymentScalingAdapterSpec defines the desired state of a
 // DynamoGraphDeploymentScalingAdapter.
 type DynamoGraphDeploymentScalingAdapterSpec struct {
-	// replicas is the desired number of replicas for the target component.
+	// replicas is the desired number of replicas for the target component or
+	// component group.
 	// This field is modified by external autoscalers (HPA/KEDA/Planner) or
 	// manually by users.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
-	// dgdRef references the DynamoGraphDeployment and the specific component to scale.
+	// dgdRef references the DynamoGraphDeployment and the specific scale target.
 	// +kubebuilder:validation:Required
 	DGDRef DynamoGraphDeploymentComponentRef `json:"dgdRef"`
 }
 
-// DynamoGraphDeploymentComponentRef identifies a specific component within a
-// DynamoGraphDeployment. Renamed from v1alpha1's `DynamoGraphDeploymentServiceRef`
-// to align with the v1beta1 `services -> components` and
-// `serviceName -> componentName` renames.
+// DynamoGraphDeploymentComponentRef identifies a specific scale target within
+// a DynamoGraphDeployment. Use ComponentName for component-scoped scaling or
+// ComponentGroupName for experimental multi-component group scaling.
+// +kubebuilder:validation:XValidation:rule="has(self.componentName) != has(self.componentGroupName)",message="exactly one of componentName or componentGroupName must be set"
 type DynamoGraphDeploymentComponentRef struct {
 	// name is the `metadata.name` of the target DynamoGraphDeployment.
 	// +kubebuilder:validation:Required
@@ -50,17 +51,24 @@ type DynamoGraphDeploymentComponentRef struct {
 
 	// componentName is the `componentName` of the entry within the target
 	// DGD's `spec.components` list to scale.
-	// +kubebuilder:validation:Required
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	ComponentName string `json:"componentName"`
+	ComponentName string `json:"componentName,omitempty"`
+
+	// componentGroupName is the name of an entry within the target DGD's
+	// `spec.experimental.componentGroups` list. Scaling this target updates
+	// that component group's `replicas` field.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ComponentGroupName string `json:"componentGroupName,omitempty"`
 }
 
 // DynamoGraphDeploymentScalingAdapterStatus defines the observed state of a
 // DynamoGraphDeploymentScalingAdapter.
 type DynamoGraphDeploymentScalingAdapterStatus struct {
-	// replicas is the current number of replicas for the target component.
-	// This is synced from the DGD's component replicas and is required for
-	// the scale subresource.
+	// replicas is the current number of replicas for the target component or
+	// component group. This is synced from the DGD target and is required for
+	// the Scale subresource.
 	Replicas int32 `json:"replicas"`
 
 	// selector is a label selector string for the pods managed by this
@@ -78,17 +86,18 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
-// +kubebuilder:printcolumn:name="COMPONENT",type="string",JSONPath=".spec.dgdRef.componentName",description="Component name"
+// +kubebuilder:printcolumn:name="COMPONENT",type="string",JSONPath=".spec.dgdRef['componentName','componentGroupName']",description="Component or component group name"
 // +kubebuilder:printcolumn:name="REPLICAS",type="integer",JSONPath=".status.replicas",description="Current replicas"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName={dgdsa}
 
-// DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual
-// components within a DynamoGraphDeployment. It implements the Kubernetes scale
-// subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+// DynamoGraphDeploymentScalingAdapter provides a scaling interface for
+// individual components and component groups within a DynamoGraphDeployment.
+// It implements the Kubernetes scale subresource, enabling integration with
+// HPA, KEDA, and custom autoscalers.
 //
 // The adapter acts as an intermediary between autoscalers and the DGD,
-// ensuring that only the adapter controller modifies the DGD's component replicas.
+// ensuring that only the adapter controller modifies the DGD's target replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
 //
 // v1beta1 is the storage version; conversion to and from the served v1alpha1

@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -27,6 +28,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -67,10 +69,18 @@ type dynamoGraphDeploymentValidation struct {
 
 type dynamoGraphDeploymentSpecValidationOptions struct {
 	dgdName                 string
+	pcsName                 string
 	generation              int64
 	workloadProvider        string
 	grovePathway            bool
 	grovePathwayRequirement string
+}
+
+type dynamoGraphDeploymentExperimentalSpecValidationOptions struct {
+	generation              int64
+	grovePathway            bool
+	grovePathwayRequirement string
+	components              map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -146,6 +156,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		dgdName:                 dgd.Name,
+		pcsName:                 dynamo.PCSNameForDGDWithComponentGroups(dgd),
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
 		grovePathway:            grovePathway,
@@ -253,25 +264,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
 	components := componentsByName(spec.Components)
+	groups := componentgroups.New(spec.Experimental)
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
 
 		if opts.grovePathway {
-			combinedLength, detail := dgdComponentResourceNameLength(opts.dgdName, spec.Components, component)
-			if combinedLength > maxCombinedResourceNameLength {
-				allErrs = append(allErrs, field.Invalid(
-					componentPath.Child("name"),
-					component.ComponentName,
-					fmt.Sprintf(
-						"combined resource name length %d exceeds the %d-character pod-name limit (%s); shorten DynamoGraphDeployment name %q or component name %q",
-						combinedLength,
-						maxCombinedResourceNameLength,
-						detail,
-						opts.dgdName,
-						component.ComponentName,
-					),
-				))
+			if nameErr := validateDGDComponentResourceName(spec.Components, component, componentPath, groups, opts); nameErr != nil {
+				allErrs = append(allErrs, nameErr)
 			}
 		}
 
@@ -387,13 +387,55 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDynamoGraphDeploymentExperimentalSpec(
 			spec.Experimental,
 			fldPath.Child("experimental"),
-			opts.generation,
-			opts.grovePathway,
-			opts.grovePathwayRequirement,
+			dynamoGraphDeploymentExperimentalSpecValidationOptions{
+				generation:              opts.generation,
+				grovePathway:            opts.grovePathway,
+				grovePathwayRequirement: opts.grovePathwayRequirement,
+				components:              components,
+			},
 		)...)
 	}
 
 	return allErrs
+}
+
+func validateDGDComponentResourceName(
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+	groups *componentgroups.ComponentGroups,
+	opts dynamoGraphDeploymentSpecValidationOptions,
+) *field.Error {
+	combinedLength, detail := dgdComponentResourceNameLength(opts.dgdName, components, component)
+	groupName, grouped := groups.GroupNameForComponent(component.ComponentName)
+	if grouped {
+		combinedLength = len(opts.pcsName) + dynamo.ComponentNameBudget(component, groups)
+		detail = "PCS name + component group name + rendered clique name"
+	}
+	if combinedLength <= maxCombinedResourceNameLength {
+		return nil
+	}
+
+	errorDetail := fmt.Sprintf(
+		"combined resource name length %d exceeds the %d-character pod-name limit (%s); shorten DynamoGraphDeployment name %q or component name %q",
+		combinedLength,
+		maxCombinedResourceNameLength,
+		detail,
+		opts.dgdName,
+		component.ComponentName,
+	)
+	if grouped {
+		errorDetail = fmt.Sprintf(
+			"combined resource name length %d exceeds the %d-character pod-name limit (%s); shorten DynamoGraphDeployment name %q, component group name %q, or component name %q",
+			combinedLength,
+			maxCombinedResourceNameLength,
+			detail,
+			opts.dgdName,
+			groupName,
+			component.ComponentName,
+		)
+	}
+	return field.Invalid(componentPath.Child("name"), component.ComponentName, errorDetail)
 }
 
 // groveTopologyOverrideCompositionErrors returns conflicts between the typed
@@ -534,20 +576,120 @@ func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraint(
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentExperimentalSpec(
 	experimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
 	fldPath *field.Path,
-	generation int64,
-	grovePathway bool,
-	grovePathwayRequirement string,
+	opts dynamoGraphDeploymentExperimentalSpecValidationOptions,
 ) field.ErrorList {
-	if experimental.KvTransferPolicy == nil {
-		return nil
+	allErrs := field.ErrorList{}
+	if experimental.KvTransferPolicy != nil {
+		allErrs = append(allErrs, v.validateKvTransferPolicy(
+			experimental.KvTransferPolicy,
+			fldPath.Child("kvTransferPolicy"),
+			opts.generation,
+			opts.grovePathway,
+			opts.grovePathwayRequirement,
+		)...)
 	}
-	return v.validateKvTransferPolicy(
-		experimental.KvTransferPolicy,
-		fldPath.Child("kvTransferPolicy"),
-		generation,
-		grovePathway,
-		grovePathwayRequirement,
-	)
+
+	groupsPath := fldPath.Child("componentGroups")
+	if len(experimental.ComponentGroups) == 0 {
+		return allErrs
+	}
+	if !opts.grovePathway {
+		allErrs = append(allErrs, field.Forbidden(groupsPath, opts.grovePathwayRequirement))
+	}
+
+	// Enforce group identity and single ownership across the full declaration.
+	groupNames := make(map[string]struct{}, len(experimental.ComponentGroups))
+	groupedComponents := make(map[string]string)
+	for i := range experimental.ComponentGroups {
+		group := &experimental.ComponentGroups[i]
+		groupPath := groupsPath.Index(i)
+		groupName := strings.ToLower(group.Name)
+		if group.Name == "" {
+			allErrs = append(allErrs, field.Required(groupPath.Child("name"), "is required"))
+		}
+		if _, duplicate := groupNames[groupName]; duplicate {
+			allErrs = append(allErrs, field.Duplicate(groupPath.Child("name"), group.Name))
+		}
+		groupNames[groupName] = struct{}{}
+
+		for j := range group.Components {
+			member := &group.Components[j]
+			namePath := groupPath.Child("components").Index(j).Child("name")
+			if previous, grouped := groupedComponents[member.Name]; grouped {
+				allErrs = append(allErrs, field.Invalid(
+					namePath,
+					member.Name,
+					fmt.Sprintf("is already a member of component group %q", previous),
+				))
+			} else {
+				groupedComponents[member.Name] = group.Name
+			}
+		}
+
+		allErrs = append(allErrs, v.validateComponentGroupSpec(group, groupPath, opts.components)...)
+	}
+	return allErrs
+}
+
+// validateComponentGroupSpec validates group. group and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateComponentGroupSpec(
+	group *nvidiacomv1beta1.ComponentGroupSpec,
+	fldPath *field.Path,
+	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	namePath := fldPath.Child("name")
+	for componentName := range components {
+		if strings.EqualFold(group.Name, componentName) {
+			allErrs = append(allErrs, field.Forbidden(namePath, "must not shadow a component name"))
+			break
+		}
+	}
+
+	componentsPath := fldPath.Child("components")
+	if len(group.Components) == 0 {
+		allErrs = append(allErrs, field.Required(componentsPath, "must contain at least one component"))
+	}
+	for i := range group.Components {
+		allErrs = append(allErrs, v.validateComponentGroupComponentSpec(
+			&group.Components[i],
+			componentsPath.Index(i),
+			components,
+		)...)
+	}
+	return allErrs
+}
+
+// validateComponentGroupComponentSpec validates component. component and
+// fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateComponentGroupComponentSpec(
+	component *nvidiacomv1beta1.ComponentGroupComponentSpec,
+	fldPath *field.Path,
+	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) field.ErrorList {
+	namePath := fldPath.Child("name")
+	member, exists := components[component.Name]
+	if !exists {
+		return field.ErrorList{field.NotSupported(namePath, component.Name, sortedComponentNames(components))}
+	}
+
+	allErrs := field.ErrorList{}
+	if member.IsMultinode() {
+		allErrs = append(allErrs, field.Forbidden(namePath, "component groups do not support multinode components"))
+	}
+	if k8sptr.Deref(member.Replicas, 1) == 0 {
+		allErrs = append(allErrs, field.Forbidden(namePath, "component groups do not support members with replicas set to 0"))
+	}
+	if member.TopologyConstraint != nil {
+		allErrs = append(allErrs, field.Forbidden(namePath, "component groups do not support component-level topology constraints"))
+	}
+	if member.ScalingAdapter != nil {
+		allErrs = append(allErrs, field.Forbidden(namePath, "component groups require scaling through dgdRef.componentGroupName rather than a component scalingAdapter"))
+	}
+	if member.UsesPCSG() && member.ProviderOverride != nil {
+		allErrs = append(allErrs, field.Forbidden(namePath, "component groups do not support providerOverride on PCSG-backed components"))
+	}
+	return allErrs
 }
 
 // validateKvTransferPolicy validates policy. policy and fldPath must not be nil.
@@ -752,18 +894,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		))
 	}
 
-	if newSpec.Experimental != nil {
+	if newSpec.Experimental != nil || oldSpec.Experimental != nil {
 		allErrs = append(allErrs, v.validateDynamoGraphDeploymentExperimentalSpecUpdate(
 			newSpec.Experimental,
 			oldSpec.Experimental,
 			fldPath.Child("experimental"),
+			canModifyReplicas,
 		)...)
-	} else if oldPolicy := kvTransferPolicyFor(oldSpec.Experimental); oldPolicy != nil {
-		allErrs = append(allErrs, field.Invalid(
-			fldPath.Child("experimental", "kvTransferPolicy"),
-			newSpec.Experimental,
-			"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
-		))
 	}
 
 	return allErrs
@@ -835,25 +972,76 @@ func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraintUpdate(
 	)}
 }
 
-// validateDynamoGraphDeploymentExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition.
+// validateDynamoGraphDeploymentExperimentalSpecUpdate validates an experimental
+// spec update. fldPath must not be nil; either experimental value may be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
 	fldPath *field.Path,
+	canModifyReplicas bool,
 ) field.ErrorList {
-	newPolicy := newExperimental.KvTransferPolicy
+	allErrs := field.ErrorList{}
+
+	newGroups := componentgroups.New(newExperimental)
+	oldGroups := componentgroups.New(oldExperimental)
+	groupsPath := fldPath.Child("componentGroups")
+
+	if len(newGroups.Groups()) != len(oldGroups.Groups()) {
+		allErrs = append(allErrs, field.Forbidden(
+			groupsPath,
+			"component group names and membership are immutable after creation; update only replicas or scalingAdapter",
+		))
+	} else {
+		// Compare same-name groups so replica ownership cannot be bypassed.
+		for i, newGroup := range newGroups.Groups() {
+			oldGroup := oldGroups.Groups()[i]
+			if newGroup.Name != oldGroup.Name || !reflect.DeepEqual(newGroup.Components, oldGroup.Components) {
+				allErrs = append(allErrs, field.Forbidden(
+					groupsPath,
+					"component group names and membership are immutable after creation; update only replicas or scalingAdapter",
+				))
+
+				continue
+			}
+
+			allErrs = append(allErrs, v.validateComponentGroupSpecUpdate(
+				&newGroup,
+				&oldGroup,
+				groupsPath.Index(i),
+				canModifyReplicas,
+			)...)
+		}
+	}
+
+	newPolicy := kvTransferPolicyFor(newExperimental)
 	oldPolicy := kvTransferPolicyFor(oldExperimental)
 	if newPolicy != nil {
-		return v.validateKvTransferPolicyUpdate(newPolicy, oldPolicy, fldPath.Child("kvTransferPolicy"))
+		return append(allErrs, v.validateKvTransferPolicyUpdate(newPolicy, oldPolicy, fldPath.Child("kvTransferPolicy"))...)
 	}
 	if oldPolicy == nil {
-		return nil
+		return allErrs
 	}
-	return field.ErrorList{field.Invalid(
+	return append(allErrs, field.Invalid(
 		fldPath.Child("kvTransferPolicy"),
 		newPolicy,
 		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
+	))
+}
+
+// validateComponentGroupSpecUpdate validates a component group update.
+// newGroup, oldGroup, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateComponentGroupSpecUpdate(
+	newGroup *nvidiacomv1beta1.ComponentGroupSpec,
+	oldGroup *nvidiacomv1beta1.ComponentGroupSpec,
+	fldPath *field.Path,
+	canModifyReplicas bool,
+) field.ErrorList {
+	if canModifyReplicas || (newGroup.ScalingAdapter == nil && oldGroup.ScalingAdapter == nil) || newGroup.Replicas == oldGroup.Replicas {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(
+		fldPath.Child("replicas"),
+		"cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead",
 	)}
 }
 

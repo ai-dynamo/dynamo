@@ -74,6 +74,23 @@ func TestDGDSA_RoundTripFromV1beta1_Minimal(t *testing.T) {
 	}
 }
 
+func TestDGDSA_RoundTripFromV1beta1_ComponentGroup(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "group-adapter", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: 4,
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+				Name:               "my-dgd",
+				ComponentGroupName: "workers",
+			},
+		},
+	}
+	got := dgdsaRoundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDGDSA_RoundTripFromV1beta1_FullStatus(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC))
 	src := &v1beta1.DynamoGraphDeploymentScalingAdapter{

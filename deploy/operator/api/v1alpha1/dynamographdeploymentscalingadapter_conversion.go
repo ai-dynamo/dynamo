@@ -49,8 +49,9 @@ func (src *DynamoGraphDeploymentScalingAdapter) ConvertTo(dstRaw conversion.Hub)
 
 	dst.Spec.Replicas = src.Spec.Replicas
 	dst.Spec.DGDRef = v1beta1.DynamoGraphDeploymentComponentRef{
-		Name:          src.Spec.DGDRef.Name,
-		ComponentName: src.Spec.DGDRef.ServiceName,
+		Name:               src.Spec.DGDRef.Name,
+		ComponentName:      src.Spec.DGDRef.ServiceName,
+		ComponentGroupName: src.Spec.DGDRef.ComponentGroupName,
 	}
 
 	dst.Status.Replicas = src.Status.Replicas
@@ -73,8 +74,9 @@ func (dst *DynamoGraphDeploymentScalingAdapter) ConvertFrom(srcRaw conversion.Hu
 
 	dst.Spec.Replicas = src.Spec.Replicas
 	dst.Spec.DGDRef = DynamoGraphDeploymentServiceRef{
-		Name:        src.Spec.DGDRef.Name,
-		ServiceName: src.Spec.DGDRef.ComponentName,
+		Name:               src.Spec.DGDRef.Name,
+		ServiceName:        src.Spec.DGDRef.ComponentName,
+		ComponentGroupName: src.Spec.DGDRef.ComponentGroupName,
 	}
 
 	dst.Status.Replicas = src.Status.Replicas

@@ -25,8 +25,8 @@ spec:
           jsonPath: .spec.dgdRef.name
           name: DGD
           type: string
-        - description: Service name
-          jsonPath: .spec.dgdRef.serviceName
+        - description: Service or component group name
+          jsonPath: .spec.dgdRef['serviceName','componentGroupName']
           name: SERVICE
           type: string
         - description: Current replicas
@@ -42,12 +42,13 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
-            within a DynamoGraphDeployment. It implements the Kubernetes scale
-            subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+            DynamoGraphDeploymentScalingAdapter provides a scaling interface for
+            individual services and component groups within a DynamoGraphDeployment. It
+            implements the Kubernetes scale subresource, enabling integration with HPA,
+            KEDA, and custom autoscalers.
 
             The adapter acts as an intermediary between autoscalers and the DGD,
-            ensuring that only the adapter controller modifies the DGD's service replicas.
+            ensuring that only the adapter controller modifies the DGD's target replicas.
             This prevents conflicts when multiple autoscaling mechanisms are in play.
           properties:
             apiVersion:
@@ -71,23 +72,33 @@ spec:
               description: DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
               properties:
                 dgdRef:
-                  description: DGDRef references the DynamoGraphDeployment and the specific service to scale.
+                  description: DGDRef references the DynamoGraphDeployment and the specific scale target.
                   properties:
+                    componentGroupName:
+                      description: |-
+                        ComponentGroupName is the name of the experimental component group within
+                        the DGD's spec.experimental.componentGroups list. Scaling this target
+                        updates the component group's replicas field.
+                      minLength: 1
+                      type: string
                     name:
                       description: Name of the DynamoGraphDeployment
                       minLength: 1
                       type: string
                     serviceName:
-                      description: ServiceName is the key name of the service within the DGD's spec.services map to scale
+                      description: ServiceName is the key name of the service within the DGD's spec.services map to scale.
                       minLength: 1
                       type: string
                   required:
                     - name
-                    - serviceName
                   type: object
+                  x-kubernetes-validations:
+                    - message: exactly one of serviceName or componentGroupName must be set
+                      rule: has(self.serviceName) != has(self.componentGroupName)
                 replicas:
                   description: |-
-                    Replicas is the desired number of replicas for the target service.
+                    Replicas is the desired number of replicas for the target service or
+                    component group.
                     This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users.
                   format: int32
                   minimum: 0
@@ -105,8 +116,9 @@ spec:
                   type: string
                 replicas:
                   description: |-
-                    Replicas is the current number of replicas for the target service.
-                    This is synced from the DGD's service replicas and is required for the scale subresource.
+                    Replicas is the current number of replicas for the target service or
+                    component group. This is synced from the DGD target and is required for
+                    the Scale subresource.
                   format: int32
                   type: integer
                 selector:
@@ -129,8 +141,8 @@ spec:
           jsonPath: .spec.dgdRef.name
           name: DGD
           type: string
-        - description: Component name
-          jsonPath: .spec.dgdRef.componentName
+        - description: Component or component group name
+          jsonPath: .spec.dgdRef['componentName','componentGroupName']
           name: COMPONENT
           type: string
         - description: Current replicas
@@ -144,12 +156,13 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual
-            components within a DynamoGraphDeployment. It implements the Kubernetes scale
-            subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+            DynamoGraphDeploymentScalingAdapter provides a scaling interface for
+            individual components and component groups within a DynamoGraphDeployment.
+            It implements the Kubernetes scale subresource, enabling integration with
+            HPA, KEDA, and custom autoscalers.
 
             The adapter acts as an intermediary between autoscalers and the DGD,
-            ensuring that only the adapter controller modifies the DGD's component replicas.
+            ensuring that only the adapter controller modifies the DGD's target replicas.
             This prevents conflicts when multiple autoscaling mechanisms are in play.
 
             v1beta1 is the storage version; conversion to and from the served v1alpha1
@@ -179,8 +192,15 @@ spec:
                 DynamoGraphDeploymentScalingAdapter.
               properties:
                 dgdRef:
-                  description: dgdRef references the DynamoGraphDeployment and the specific component to scale.
+                  description: dgdRef references the DynamoGraphDeployment and the specific scale target.
                   properties:
+                    componentGroupName:
+                      description: |-
+                        componentGroupName is the name of an entry within the target DGD's
+                        `spec.experimental.componentGroups` list. Scaling this target updates
+                        that component group's `replicas` field.
+                      minLength: 1
+                      type: string
                     componentName:
                       description: |-
                         componentName is the `componentName` of the entry within the target
@@ -192,12 +212,15 @@ spec:
                       minLength: 1
                       type: string
                   required:
-                    - componentName
                     - name
                   type: object
+                  x-kubernetes-validations:
+                    - message: exactly one of componentName or componentGroupName must be set
+                      rule: has(self.componentName) != has(self.componentGroupName)
                 replicas:
                   description: |-
-                    replicas is the desired number of replicas for the target component.
+                    replicas is the desired number of replicas for the target component or
+                    component group.
                     This field is modified by external autoscalers (HPA/KEDA/Planner) or
                     manually by users.
                   format: int32
@@ -218,9 +241,9 @@ spec:
                   type: string
                 replicas:
                   description: |-
-                    replicas is the current number of replicas for the target component.
-                    This is synced from the DGD's component replicas and is required for
-                    the scale subresource.
+                    replicas is the current number of replicas for the target component or
+                    component group. This is synced from the DGD target and is required for
+                    the Scale subresource.
                   format: int32
                   type: integer
                 selector:

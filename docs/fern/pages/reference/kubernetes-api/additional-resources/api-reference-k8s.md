@@ -115,6 +115,41 @@ _Appears in:_
 | `WaitForCheckpoint` | CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the<br />component's checkpoint is Ready, then starts them from the checkpoint.<br /> |
 
 
+#### ComponentGroupComponentSpec
+
+
+
+ComponentGroupComponentSpec identifies one component in a component group.
+
+
+
+_Appears in:_
+- [ComponentGroupSpec](#componentgroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the DGD service included in this group. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### ComponentGroupSpec
+
+
+
+ComponentGroupSpec defines an experimental multi-component scale unit.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the stable logical identifier for this component group. It must<br />be unique within spec.experimental.componentGroups. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the desired number of replicas for this component group.<br />When ScalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this component group uses the<br />DynamoGraphDeploymentScalingAdapter. When enabled, Replicas is managed<br />through the Scale subresource. When disabled, Replicas can be modified<br />directly. |  | Optional: \{\} <br /> |
+| `components` _[ComponentGroupComponentSpec](#componentgroupcomponentspec) array_ | Components are the components that belong to this component group. |  | MaxItems: 16 <br />MinItems: 1 <br />Required: \{\} <br /> |
+
+
 #### ComponentKind
 
 _Underlying type:_ _string_
@@ -531,6 +566,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `kvTransferPolicy` _[KvTransferPolicy](#kvtransferpolicy)_ | KvTransferPolicy configures topology-aware routing for KV-cache<br />transfers between prefill and decode workers. |  | Optional: \{\} <br /> |
+| `componentGroups` _[ComponentGroupSpec](#componentgroupspec) array_ | ComponentGroups define experimental scale units that contain multiple<br />components. A group is rendered as one Grove PodCliqueScalingGroup so<br />all component cliques scale together. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequest
@@ -621,12 +657,13 @@ _Appears in:_
 
 
 
-DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
-within a DynamoGraphDeployment. It implements the Kubernetes scale
-subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+DynamoGraphDeploymentScalingAdapter provides a scaling interface for
+individual services and component groups within a DynamoGraphDeployment. It
+implements the Kubernetes scale subresource, enabling integration with HPA,
+KEDA, and custom autoscalers.
 
 The adapter acts as an intermediary between autoscalers and the DGD,
-ensuring that only the adapter controller modifies the DGD's service replicas.
+ensuring that only the adapter controller modifies the DGD's target replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
 
@@ -655,8 +692,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the desired number of replicas for the target service.<br />This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users. |  | Minimum: 0 <br />Required: \{\} <br /> |
-| `dgdRef` _[DynamoGraphDeploymentServiceRef](#dynamographdeploymentserviceref)_ | DGDRef references the DynamoGraphDeployment and the specific service to scale. |  | Required: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the desired number of replicas for the target service or<br />component group.<br />This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `dgdRef` _[DynamoGraphDeploymentServiceRef](#dynamographdeploymentserviceref)_ | DGDRef references the DynamoGraphDeployment and the specific scale target. |  | Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapterStatus
@@ -672,7 +709,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the current number of replicas for the target service or<br />component group. This is synced from the DGD target and is required for<br />the Scale subresource. |  | Optional: \{\} <br /> |
 | `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  | Optional: \{\} <br /> |
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  | Optional: \{\} <br /> |
 
@@ -681,7 +718,9 @@ _Appears in:_
 
 
 
-DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
+DynamoGraphDeploymentServiceRef identifies a specific scale target within a
+DynamoGraphDeployment. Use ServiceName for service-scoped scaling or
+ComponentGroupName for experimental multi-component group scaling.
 
 
 
@@ -691,7 +730,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name of the DynamoGraphDeployment |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `serviceName` _string_ | ServiceName is the key name of the service within the DGD's spec.services map to scale |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `serviceName` _string_ | ServiceName is the key name of the service within the DGD's spec.services map to scale. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `componentGroupName` _string_ | ComponentGroupName is the name of the experimental component group within<br />the DGD's spec.experimental.componentGroups list. Scaling this target<br />updates the component group's replicas field. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentSpec
@@ -1424,6 +1464,7 @@ bare `scalingAdapter: {}` is disabled.
 
 
 _Appears in:_
+- [ComponentGroupSpec](#componentgroupspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -1783,6 +1824,41 @@ _Appears in:_
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
+#### ComponentGroupComponentSpec
+
+
+
+ComponentGroupComponentSpec identifies one component in a component group.
+
+
+
+_Appears in:_
+- [ComponentGroupSpec](#componentgroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the DGD component included in this group. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### ComponentGroupSpec
+
+
+
+ComponentGroupSpec defines an experimental multi-component scale unit.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the stable logical identifier for this component group. It must<br />be unique within `spec.experimental.componentGroups`. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of replicas for this component group.<br />When `scalingAdapter` is set, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component group into using the<br />DynamoGraphDeploymentScalingAdapter. When set, a DGDSA owns `replicas`<br />through the Scale subresource. Omit the field to opt out. |  | Optional: \{\} <br /> |
+| `components` _[ComponentGroupComponentSpec](#componentgroupcomponentspec) array_ | components are the components that belong to this component group. |  | MaxItems: 16 <br />MinItems: 1 <br />Required: \{\} <br /> |
+
+
 #### ComponentKind
 
 _Underlying type:_ _string_
@@ -2060,10 +2136,9 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
-DynamoGraphDeploymentComponentRef identifies a specific component within a
-DynamoGraphDeployment. Renamed from v1alpha1's `DynamoGraphDeploymentServiceRef`
-to align with the v1beta1 `services -> components` and
-`serviceName -> componentName` renames.
+DynamoGraphDeploymentComponentRef identifies a specific scale target within
+a DynamoGraphDeployment. Use ComponentName for component-scoped scaling or
+ComponentGroupName for experimental multi-component group scaling.
 
 
 
@@ -2073,7 +2148,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | name is the `metadata.name` of the target DynamoGraphDeployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `componentGroupName` _string_ | componentGroupName is the name of an entry within the target DGD's<br />`spec.experimental.componentGroups` list. Scaling this target updates<br />that component group's `replicas` field. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentExperimentalSpec
@@ -2093,6 +2169,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `kvTransferPolicy` _[KvTransferPolicy](#kvtransferpolicy)_ | kvTransferPolicy configures topology-aware routing for KV-cache<br />transfers between prefill and decode workers. |  | Optional: \{\} <br /> |
+| `componentGroups` _[ComponentGroupSpec](#componentgroupspec) array_ | componentGroups define experimental scale units that contain multiple<br />components. A group is rendered as one Grove PodCliqueScalingGroup so<br />all component cliques scale together. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
 
 
 #### v1beta1 DynamoGraphDeploymentRequest
@@ -2180,12 +2257,13 @@ _Appears in:_
 
 
 
-DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual
-components within a DynamoGraphDeployment. It implements the Kubernetes scale
-subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+DynamoGraphDeploymentScalingAdapter provides a scaling interface for
+individual components and component groups within a DynamoGraphDeployment.
+It implements the Kubernetes scale subresource, enabling integration with
+HPA, KEDA, and custom autoscalers.
 
 The adapter acts as an intermediary between autoscalers and the DGD,
-ensuring that only the adapter controller modifies the DGD's component replicas.
+ensuring that only the adapter controller modifies the DGD's target replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
 v1beta1 is the storage version; conversion to and from the served v1alpha1
@@ -2219,8 +2297,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | replicas is the desired number of replicas for the target component.<br />This field is modified by external autoscalers (HPA/KEDA/Planner) or<br />manually by users. |  | Minimum: 0 <br />Required: \{\} <br /> |
-| `dgdRef` _[DynamoGraphDeploymentComponentRef](#dynamographdeploymentcomponentref)_ | dgdRef references the DynamoGraphDeployment and the specific component to scale. |  | Required: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of replicas for the target component or<br />component group.<br />This field is modified by external autoscalers (HPA/KEDA/Planner) or<br />manually by users. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `dgdRef` _[DynamoGraphDeploymentComponentRef](#dynamographdeploymentcomponentref)_ | dgdRef references the DynamoGraphDeployment and the specific scale target. |  | Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapterStatus
@@ -2237,7 +2315,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | replicas is the current number of replicas for the target component.<br />This is synced from the DGD's component replicas and is required for<br />the scale subresource. |  |  |
+| `replicas` _integer_ | replicas is the current number of replicas for the target component or<br />component group. This is synced from the DGD target and is required for<br />the Scale subresource. |  |  |
 | `selector` _string_ | selector is a label selector string for the pods managed by this<br />adapter. Required for HPA compatibility via the scale subresource. |  | Optional: \{\} <br /> |
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastScaleTime is the last time the adapter scaled the target component. |  | Optional: \{\} <br /> |
 
@@ -2991,6 +3069,7 @@ Omit the field to opt out.
 
 
 _Appears in:_
+- [ComponentGroupSpec](#componentgroupspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 

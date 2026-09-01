@@ -19,9 +19,12 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,7 +49,7 @@ func (r *groveRestartProgressResolver) Resolve(
 	logger := log.FromContext(ctx)
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcsName := dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components)
+	pcsName := dynamo.PCSNameForDGDWithComponentGroups(dgd)
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: pcsName, Namespace: dgd.Namespace}, pcs); err != nil {
 		logger.Error(err, "failed to get PodCliqueSet")
 		return inProgress
@@ -61,11 +64,12 @@ func (r *groveRestartProgressResolver) Resolve(
 			"PodCliqueSet not yet reconciled",
 			"name", dgd.Name,
 			"generation", pcs.Generation,
-			"observedGeneration", *pcs.Status.ObservedGeneration,
+			"observedGeneration", pcs.Status.ObservedGeneration,
 		)
 		return inProgress
 	}
 
+	groups := componentgroups.New(dgd.Spec.Experimental)
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
 		component := dgd.GetComponentByName(componentName)
@@ -74,6 +78,14 @@ func (r *groveRestartProgressResolver) Resolve(
 			continue
 		}
 		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		usesPCSG := component.UsesPCSG()
+		if groupName, grouped := groups.GroupNameForComponent(componentName); grouped {
+			resourceName = grovecommon.GeneratePodCliqueScalingGroupName(
+				grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0},
+				strings.ToLower(groupName),
+			)
+			usesPCSG = true
+		}
 
 		var (
 			isReady bool
@@ -82,7 +94,7 @@ func (r *groveRestartProgressResolver) Resolve(
 		// Any component represented by a PodCliqueScalingGroup must use the
 		// PCSG readiness path. Read failures conservatively keep the component
 		// in progress; authoritative readiness returns the error separately.
-		if component.UsesPCSG() {
+		if usesPCSG {
 			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(
 				ctx,
 				r.reader,

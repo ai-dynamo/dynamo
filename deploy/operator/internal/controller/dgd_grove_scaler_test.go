@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -89,6 +90,47 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	assert.Equal(t, int32(2), frontend.Spec.Replicas)
 	assert.Equal(t, int32(3), worker.Spec.Replicas)
 	assert.Equal(t, int32(0), gated.Spec.Replicas)
+}
+
+func TestGroveScalerReconcileTargetsSharedComponentGroup(t *testing.T) {
+	t.Log("Create a grouped component with both its shared and legacy-shaped Grove children")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				Replicas:      ptr.To(int32(5)),
+			}},
+			Experimental: &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+				ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{{
+					Name:       "Runtime",
+					Replicas:   0,
+					Components: []nvidiacomv1beta1.ComponentGroupComponentSpec{{Name: "worker"}},
+				}},
+			},
+		},
+	}
+	shared := &grovev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph-0-runtime", Namespace: "default"},
+		Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1},
+	}
+	legacy := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"},
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithObjects(shared, legacy).
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
+		Build()
+
+	t.Log("Scale only the shared PCSG to the group replica target")
+	require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(shared), shared))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(legacy), legacy))
+	assert.Equal(t, int32(0), shared.Spec.Replicas)
+	assert.Equal(t, int32(1), legacy.Spec.Replicas)
 }
 
 func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor.Funcs {

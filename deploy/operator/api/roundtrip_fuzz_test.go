@@ -177,6 +177,15 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		// A v1alpha1 group scaling adapter is meaningful only when enabled.
+		// Disabled normalizes to omission because v1beta1 uses a presence-only
+		// marker for the same setting.
+		func(s *v1alpha1.ComponentGroupSpec, c randfill.Continue) {
+			c.FillNoCustom(s)
+			if s.ScalingAdapter != nil {
+				s.ScalingAdapter.Enabled = true
+			}
+		},
 		fuzzAlphaDGDRSpec,
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
