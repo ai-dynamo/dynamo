@@ -297,7 +297,7 @@ service.
 </ParamField>
 
 <ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity passed directly to the `aiconfigurator-core` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+  Native AIConfigurator forward-pass model identity passed to the compatibility `aiconfigurator_core` namespace in the `aisimulate` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
 </ParamField>
 
 <Indent>
