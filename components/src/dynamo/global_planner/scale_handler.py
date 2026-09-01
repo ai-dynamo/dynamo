@@ -19,6 +19,7 @@ Behavior is unchanged from the pre-refactor monolithic handler.
 import logging
 from typing import Optional
 
+from dynamo.global_planner.gpu_cost import GpuCostConfig, GpuCostResolver
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.global_planner.orchestrator import Orchestrator
 from dynamo.global_planner.priority import (
@@ -61,6 +62,7 @@ class ScaleRequestHandler:
         min_total_gpus: int = -1,
         intent_cache_ttl_seconds: float = 360.0,
         priority_config: Optional[PriorityConfig] = None,
+        gpu_cost_config: Optional[GpuCostConfig] = None,
     ):
         """Initialize the scale request handler.
 
@@ -75,6 +77,8 @@ class ScaleRequestHandler:
                 is considered fresh for pairing
             priority_config: Pool priorities used to order partner selection
                 under contention (None = every pool equally important)
+            gpu_cost_config: Declared GPU cost per replica for pools whose DGD
+                requests no GPUs (None = every pool priced by its DGD)
         """
         self.runtime = runtime
         self.no_operation = no_operation
@@ -84,7 +88,10 @@ class ScaleRequestHandler:
         # managed_namespaces and a namespace-prefix convention.
         # The wire vocabulary (K8s namespace / DGD name) is mapped here onto the
         # orchestrator's neutral vocabulary; the orchestrator is a no-K8s zone.
-        capacity_manager = KubernetesCapacityManager(namespace=k8s_namespace)
+        capacity_manager = KubernetesCapacityManager(
+            namespace=k8s_namespace,
+            gpu_cost=GpuCostResolver(gpu_cost_config),
+        )
         self.orchestrator = Orchestrator(
             capacity_manager=capacity_manager,
             managed_deployments=managed_namespaces,

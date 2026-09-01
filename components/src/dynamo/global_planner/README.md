@@ -153,6 +153,38 @@ and then misbehaved at request time are now startup failures:
 - `intent_cache_ttl_seconds <= 0` — no cached intent is ever fresh, silently
   disabling all pool pairing.
 
+## Declared GPU Costs
+
+The GPU budget is computed from each pool's `gpu_per_replica`, read from the
+DGD's `resources.limits["nvidia.com/gpu"]`. A pool that requests no GPU has no
+cost to read — and with a budget enabled that fails the whole snapshot, so every
+scale request errors. That rules out **mocker topologies**, which exist to
+exercise a deployment without hardware but could not take part in the budget
+they are meant to help test.
+
+Declare what such a pool costs instead:
+
+```yaml
+gpu_cost:
+  pools:
+    - selector: sachalm/dsv4-**
+      gpu_per_replica: 8
+    - selector: sachalm/gpt-oss-**
+      gpu_per_replica: 4
+```
+
+Selectors work exactly as they do for priorities below — same syntax, same
+most-specific-wins rule, same shared implementation.
+
+**A declared cost is a fallback, not an override.** It applies only where the DGD
+is silent, so a pool that really does request GPUs is always charged what the
+cluster says and a stale config can never make the planner under-count real
+hardware. An explicit `gpu_per_replica: 0` is different from declaring nothing:
+zero keeps a pool out of budget totals, while undeclared leaves it unreadable.
+
+This mirrors the local planner, whose `_initialize_gpu_counts` already falls back
+to configured GPU counts for "mockers that don't specify GPU resources".
+
 ## Pool Priorities
 
 Pool priorities declare which pools should be served first when several compete

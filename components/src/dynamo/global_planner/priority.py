@@ -55,13 +55,18 @@ the requester's -- a partner's context comes from the intent it published, so
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from dynamo.global_planner.pool_selectors import (
+    PoolSelector,
+    order_by_specificity,
+    reject_duplicate_selectors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +242,7 @@ class PriorityRule(BaseModel):
         return self.when is None or self.when.matches(ctx)
 
 
-class PoolPriorityPolicy(BaseModel):
+class PoolPriorityPolicy(PoolSelector):
     """A selector bound to an ordered, first-match-wins list of rules.
 
     ``priority`` is shorthand for a single unconditional rule; it and ``rules``
@@ -246,17 +251,6 @@ class PoolPriorityPolicy(BaseModel):
     sees exactly one shape.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
-    selector: str = Field(
-        description=(
-            "Slash-separated path matched against '<participant_id>/<sub_type>'. "
-            "'*' matches exactly one segment, '**' matches any number, and a "
-            "selector shorter than the pool path covers everything beneath it -- "
-            "so 'prod/chat' selects every pool of that deployment while "
-            "'prod/chat/prefill' selects one."
-        )
-    )
     priority: Optional[int] = Field(default=None, ge=LOWEST_PRIORITY)
     rules: Optional[list[PriorityRule]] = Field(default=None)
 
@@ -285,74 +279,7 @@ class PoolPriorityPolicy(BaseModel):
                 f"so every context resolves to a priority"
             )
 
-        segments = self.selector.split("/")
-        if not segments or any(not seg for seg in segments):
-            raise ValueError(
-                f"selector {self.selector!r} must be a slash-separated path with "
-                f"no empty segments"
-            )
         return self
-
-    # ------------------------------------------------------------------ #
-    # Matching                                                           #
-    # ------------------------------------------------------------------ #
-
-    @property
-    def _segments(self) -> tuple[str, ...]:
-        return tuple(self.selector.split("/"))
-
-    @property
-    def _pattern(self) -> tuple[str, ...]:
-        """Declared segments, implicitly covering everything beneath them.
-
-        A selector shorter than a pool path should select every pool under it,
-        which is exactly "match the declared segments, then anything" -- so a
-        trailing ``**`` is appended unless one is already there.
-        """
-        segments = self._segments
-        if segments[-1] == "**":
-            return segments
-        return segments + ("**",)
-
-    @staticmethod
-    def _match_segments(pattern: tuple[str, ...], path: tuple[str, ...]) -> bool:
-        """Glob a segment path, where ``**`` spans any number of segments.
-
-        Wildcards other than ``**`` never span a ``/``, so ``a/*/prefill``
-        matches ``a/b/prefill`` but not ``a/b/c/prefill``; ``a/**/prefill``
-        matches both.
-        """
-        if not pattern:
-            return not path
-        head, rest = pattern[0], pattern[1:]
-        if head == "**":
-            # Try consuming 0, 1, 2 ... segments here.
-            return any(
-                PoolPriorityPolicy._match_segments(rest, path[i:])
-                for i in range(len(path) + 1)
-            )
-        if not path:
-            return False
-        if not fnmatch.fnmatchcase(path[0], head):
-            return False
-        return PoolPriorityPolicy._match_segments(rest, path[1:])
-
-    def matches(self, participant_id: str, sub_type: str) -> bool:
-        """Whether this selector covers the pool ``participant_id``/``sub_type``."""
-        path = tuple(participant_id.split("/")) + (sub_type,)
-        return self._match_segments(self._pattern, path)
-
-    @property
-    def specificity(self) -> tuple[int, int]:
-        """Sort key ranking selectors most-specific first (smaller wins).
-
-        Ranked by how many segments are named exactly, then by depth. So
-        ``prod/chat/prefill`` beats ``prod/chat``, which beats ``prod/*``,
-        which beats ``**``. Ties fall back to declaration order in
-        :class:`PriorityResolver`.
-        """
-        exact = sum(1 for seg in self._segments if not any(c in seg for c in "*?["))
-        return (-exact, -len(self._segments))
 
     def resolve(self, ctx: PriorityContext) -> Optional[tuple[int, int]]:
         """First applicable rule as ``(priority, rule_index)``, else ``None``."""
@@ -383,14 +310,7 @@ class PriorityConfig(BaseModel):
 
     @model_validator(mode="after")
     def _reject_duplicate_selectors(self) -> "PriorityConfig":
-        seen: set[str] = set()
-        for policy in self.pools:
-            if policy.selector in seen:
-                raise ValueError(
-                    f"duplicate selector {policy.selector!r}: merge the entries, "
-                    f"since only one of them could ever take effect"
-                )
-            seen.add(policy.selector)
+        reject_duplicate_selectors(self.pools)
         return self
 
 
@@ -409,10 +329,7 @@ class PriorityResolver:
 
     def __init__(self, config: Optional[PriorityConfig] = None):
         self.config = config or PriorityConfig()
-        self._ordered = sorted(
-            enumerate(self.config.pools),
-            key=lambda pair: (pair[1].specificity, pair[0]),
-        )
+        self._ordered = order_by_specificity(self.config.pools)
 
     def resolve(
         self,
@@ -426,7 +343,7 @@ class PriorityResolver:
         which is the normal path for a pool the operator never named.
         """
         context = ctx if ctx is not None else PriorityContext()
-        for _, policy in self._ordered:
+        for policy in self._ordered:
             if not policy.matches(participant_id, sub_type):
                 continue
             outcome = policy.resolve(context)
