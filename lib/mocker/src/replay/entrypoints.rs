@@ -63,6 +63,7 @@ fn load_trace_from_file(
         TraceFileFormat::Dynamo => {
             bail!("Dynamo request traces must be loaded through the multi-file replay path")
         }
+        _ => bail!("unsupported trace format: {}", trace_format.as_str()),
     }
 }
 
