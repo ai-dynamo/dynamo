@@ -3,7 +3,7 @@
 
 //! Python↔Rust bridge for the AIC (AI Configurator) perf model.
 //!
-//! [`RustAicCallback`] wraps a compiled `aiconfigurator_core::AicEngine` and
+//! [`RustAicCallback`] wraps a compiled `aisimulate_core::AicEngine` and
 //! answers the mocker/router latency predictions purely in Rust — no GIL on the
 //! predict hot path. Engine build failures are hard errors. KV-block sizing still
 //! crosses into Python via [`estimate_aic_num_gpu_blocks`].
@@ -20,11 +20,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(feature = "aic-forward-pass")]
-use aiconfigurator_core::{AicEngine, AicEngineBuilder, BackendKind};
+use aisimulate_core::{AicEngine, AicEngineBuilder, BackendKind};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
 
-/// Pure-Rust AIC callback: wraps an `aiconfigurator_core::AicEngine`
+/// Pure-Rust AIC callback: wraps an `aisimulate_core::AicEngine`
 /// compiled once at startup and answers predict calls with NO PyO3 / GIL on the
 /// hot path — `AicEngine::{prefill,decode}_latency_ms` are pure Rust.
 ///

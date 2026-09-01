@@ -16,6 +16,7 @@ use validator::ValidationError;
 use crate::vllm_render_client::parse_tokenizer_service_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
+const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +32,10 @@ pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
 pub const STANDALONE_MODE: &str = "standalone";
 /// `DYN_EPP_MODE` value selecting the Dynamo runtime.
 pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
+
+/// Mirrors `DYN_KUBE_DISCOVERY_MODE` in `dynamo_runtime::discovery`; read
+/// directly here because standalone mode has no Dynamo runtime to read it for.
+const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
@@ -82,14 +87,31 @@ impl std::str::FromStr for TokenizerProtocol {
     }
 }
 
+/// Complete replica synchronization configuration. Its presence enables
+/// replica-sync; its fields are validated together when parsing the environment.
+#[derive(Debug, Clone, Validate)]
+pub struct PeerReplicationConfig {
+    /// EPP Service used for peer discovery and state synchronization.
+    pub service_name: String,
+    /// Local EPP Pod IP from `POD_IP` (downward API), used to exclude self.
+    pub pod_ip: String,
+    /// ZMQ listener and peer dial port. Every EPP selected by `service_name`
+    /// must use the same port.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
+    ))]
+    pub sync_port: u16,
+}
+
 #[derive(Debug, Clone, Validate)]
 pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization. The eventual
-    /// selector resolves its named `replica-agg` port from EndpointSlices.
-    pub peer_service: Option<String>,
+    /// Enables replica synchronization when set.
+    #[validate(nested)]
+    pub peer_replication: Option<PeerReplicationConfig>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
@@ -142,6 +164,7 @@ pub struct EppStandaloneConfig {
 impl EppStandaloneConfig {
     /// Build and validate the standalone contract from the process environment.
     pub fn from_env() -> anyhow::Result<Self> {
+        reject_unsupported_container_discovery(&|k| std::env::var(k).ok())?;
         let config = Self::parse(&|k| std::env::var(k).ok())?;
         config.validate_config()?;
         Ok(config)
@@ -151,11 +174,30 @@ impl EppStandaloneConfig {
         let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
+        let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
+        let pod_ip = trimmed(get("POD_IP"));
+        let sync_port = opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
+            .unwrap_or(DEFAULT_REPLICA_SYNC_PORT);
+        let peer_replication = peer_service
+            .map(|service_name| -> anyhow::Result<_> {
+                let pod_ip = pod_ip.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                         inject POD_IP via the downward API (fieldRef status.podIP)"
+                    )
+                })?;
+                Ok(PeerReplicationConfig {
+                    service_name,
+                    pod_ip,
+                    sync_port,
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
-            peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
+            peer_replication,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
@@ -183,7 +225,41 @@ impl EppStandaloneConfig {
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
-            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+        Ok(())
+    }
+}
+
+/// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
+/// in standalone mode. Deferred, not a permanent restriction — see
+/// TODO(epp-standalone-container-discovery) below for what unblocks it.
+///
+/// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
+/// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
+/// standalone has no Dynamo runtime worker registration to fall back on:
+/// `pod_discovery.rs` selects workers purely from the K8s Pod's own aggregate
+/// `Ready` condition. An intra-pod failover pod never satisfies that
+/// condition in steady state — each engine container gets its own readiness
+/// probe, and the standby engine is intentionally `NotReady` while armed —
+/// so the whole pod, including the healthy active engine, would be silently
+/// excluded from every worker index rather than just failing to fail over.
+/// Reject it at startup instead of shipping that silent malfunction.
+///
+/// TODO(epp-standalone-container-discovery): replace `pod_discovery.rs`'s
+/// pod-aggregate `pod_is_ready()` gate with a per-named-container readiness
+/// check (mirroring dynamo mode's `pod_worker_ids`) so a `WorkerIndex` entry
+/// is keyed on an individual container's own `Ready` status, not the pod's.
+/// Once that lands, lift this rejection.
+fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
+    match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
+        Some("container") => anyhow::bail!(
+            "standalone EPP ({STANDALONE_MODE} mode) does not yet support \
+             {DYN_KUBE_DISCOVERY_MODE}=container (e.g. intra-pod GMS failover): pod discovery \
+             selects workers from the Pod's aggregate Ready condition, which a pod with an \
+             intentionally-standby engine container never satisfies; use \
+             {DYN_EPP_MODE}={DYNAMO_RUNTIME_MODE} instead, or disable intra-pod failover for this worker"
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -278,6 +354,28 @@ mod tests {
     }
 
     #[test]
+    fn container_discovery_mode_rejected_for_standalone() {
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[(
+                "DYN_KUBE_DISCOVERY_MODE",
+                "container"
+            )]))
+            .is_err(),
+            "intra-pod failover's container discovery must fail fast in standalone mode, \
+             not silently exclude every pod from the worker index"
+        );
+    }
+
+    #[test]
+    fn pod_discovery_mode_and_unset_are_fine_for_standalone() {
+        assert!(reject_unsupported_container_discovery(&getter(&[])).is_ok());
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[("DYN_KUBE_DISCOVERY_MODE", "pod")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn parses_required_and_defaults() {
         let cfg = parse_cfg(&[
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -290,7 +388,7 @@ mod tests {
         .expect("config should parse");
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
-        assert!(cfg.peer_service.is_none());
+        assert!(cfg.peer_replication.is_none());
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
@@ -325,21 +423,92 @@ mod tests {
     }
 
     #[test]
-    fn peer_service_config_parsed() {
-        let cfg = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+    fn peer_replication_config() {
+        type ExtraEnv = &'static [(&'static str, &'static str)];
+        type Expected = Result<(u16, usize), &'static str>;
+        type Case = (&'static str, ExtraEnv, Expected);
+
+        let required = [
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect("peer service config should parse");
-        assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.selector_threads, 8);
-        assert_eq!(cfg.namespace, "inference");
+        ];
+        let cases: [Case; 6] = [
+            (
+                "default port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+                ],
+                Ok((DEFAULT_REPLICA_SYNC_PORT, 8)),
+            ),
+            (
+                "overridden port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
+                ],
+                Ok((9192, DEFAULT_SELECTOR_THREADS)),
+            ),
+            (
+                "missing pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp")],
+                Err("POD_IP"),
+            ),
+            (
+                "blank pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp"), ("POD_IP", " ")],
+                Err("POD_IP"),
+            ),
+            (
+                "zero port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+            (
+                "out of range port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "65536"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+        ];
+
+        for (name, extra, expected) in cases {
+            let mut env = required.to_vec();
+            env.extend_from_slice(extra);
+            match expected {
+                Ok((port, selector_threads)) => {
+                    let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
+                    let replication = cfg
+                        .peer_replication
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{name}: replication should be enabled"));
+                    assert_eq!(replication.service_name, "dynamo-epp", "{name}");
+                    assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
+                    assert_eq!(replication.sync_port, port, "{name}");
+                    assert_eq!(cfg.selector_threads, selector_threads, "{name}");
+                }
+                Err(expected_error) => {
+                    let error = parse_cfg(&env).expect_err(name);
+                    assert!(
+                        error.to_string().contains(expected_error),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

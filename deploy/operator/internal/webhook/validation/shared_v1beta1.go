@@ -30,6 +30,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -45,6 +46,7 @@ type sharedValidation struct {
 	mgr                                ctrl.Manager
 	warnings                           admission.Warnings
 	runtimeVersionSource               runtimeVersionValidationSource
+	ratchetRuntimeVersion              bool
 	allowMissingRuntimeVersionOverride bool
 }
 
@@ -130,11 +132,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				"EPP component must have exactly 1 replica",
 			))
 		}
-		if spec.EPPConfig == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("eppConfig"), "is required for EPP components"))
-		}
 	}
-	if spec.EPPConfig != nil {
+	// Validate the represented eppConfig once using the submitted API version's field path.
+	if spec.EPPConfig != nil && !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 
@@ -172,9 +172,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if err := eppRuntimeCompatibilityError(
+			eppRuntimeContractV1Beta1(spec, image),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if !v.allowMissingRuntimeVersionOverride &&
+		} else if !v.toleratesMissingRuntimeVersionOverride(string(spec.ComponentType)) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
@@ -352,7 +358,7 @@ func (v *sharedValidation) validateMultinodeRoleSpec(
 	)
 }
 
-// validateEPPConfig validates config. config and fldPath must not be nil.
+// validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
 func (v *sharedValidation) validateEPPConfig(
 	config *nvidiacomv1beta1.EPPConfig,
 	fldPath *field.Path,
@@ -724,19 +730,30 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
-	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+	// Ratchet only complete, unchanged source-version runtime contract violations.
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
+
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if !v.allowMissingRuntimeVersionOverride &&
+		} else if !v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			(newImage != oldImage || overrideChanged) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
+		}
+
+		if err := eppRuntimeCompatibilityUpdateError(
+			eppRuntimeContractV1Beta1(newComponent, newImage),
+			eppRuntimeContractV1Beta1(oldComponent, oldImage),
+			apiequality.Semantic.DeepEqual(newComponent.EPPConfig, oldComponent.EPPConfig),
+			fldPath.Child("eppConfig"),
+		); err != nil {
+			allErrs = append(allErrs, err)
 		}
 	}
 	return allErrs
