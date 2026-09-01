@@ -21,7 +21,9 @@ Accepted references, matching how the Linear GitHub integration links work:
   optionally behind a magic word (``Closes DYN-1234``), or embedded in the
   branch name (``user/dyn-1234-short-description``).
 - A GitHub issue reference in the PR title or description: ``#123``, a
-  closing keyword form (``Fixes #123``), or a full issue URL.
+  closing keyword form (``Fixes #123``), an org-scoped cross-repo reference
+  (``ai-dynamo/enhancements#12`` - DEP and contribution-request issues live in
+  sibling repositories), or a full issue URL.
 
 Every candidate is verified against the corresponding API; a reference to an
 issue that does not exist does not count. Verification failures caused by API
@@ -39,6 +41,8 @@ import urllib.request
 LINEAR_TEXT_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b")
 LINEAR_BRANCH_RE = re.compile(r"(?:^|[/_-])([a-z][a-z0-9]{1,9}-\d{1,6})(?:$|[/_-])")
 GITHUB_REF_RE = re.compile(r"(?:^|[^\w&])#(\d{1,7})\b")
+CROSS_REPO_RE = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d{1,7})\b")
+ISSUE_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/issues/(\d{1,7})\b")
 BOT_AUTHORS = {"dependabot[bot]", "github-actions[bot]", "copy-pr-bot[bot]"}
 
 
@@ -111,17 +115,32 @@ def main() -> int:
     text = f"{title}\n{body}"
     linear_ids = set(LINEAR_TEXT_RE.findall(text))
     linear_ids.update(m.upper() for m in LINEAR_BRANCH_RE.findall(branch))
-    github_ids = set(GITHUB_REF_RE.findall(text))
+    github_refs = {(repo, n) for n in GITHUB_REF_RE.findall(text)}
+    org = repo.split("/")[0]
+    for other_repo, number in CROSS_REPO_RE.findall(text) + ISSUE_URL_RE.findall(text):
+        # Cross-repo references count when they stay inside the same org -
+        # DEP issues (ai-dynamo/enhancements) and contribution requests live
+        # in sibling repositories.
+        if other_repo.split("/")[0].lower() == org.lower():
+            github_refs.add((other_repo, number))
 
     verified: list[str] = []
     unverified: list[str] = []
 
-    for number in sorted(github_ids, key=int):
-        exists, api_ok = verify_github_issue(repo, number, gh_token)
+    for ref_repo, number in sorted(github_refs, key=lambda r: (r[0], int(r[1]))):
+        exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
+        label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
         if exists:
-            verified.append(f"GitHub issue #{number}")
+            verified.append(f"GitHub issue {label}")
         elif not api_ok:
-            unverified.append(f"GitHub reference #{number} (API unavailable)")
+            unverified.append(f"GitHub reference {label} (API unavailable)")
+        elif ref_repo != repo:
+            # A 404 on a cross-repo reference can mean the workflow token
+            # cannot see that repository (internal visibility) rather than
+            # that the issue does not exist. Fail open.
+            unverified.append(
+                f"GitHub reference {label} (not visible to the workflow token)"
+            )
 
     for identifier in sorted(linear_ids):
         exists, api_ok = verify_linear_issue(identifier, linear_key)
@@ -161,7 +180,9 @@ def main() -> int:
             "",
             "- A Linear issue, for example `Closes DYN-1234` in the description, or the",
             "  issue ID in the branch name (`user/dyn-1234-description`).",
-            "- A GitHub issue, for example `Fixes #123` or the full issue URL.",
+            "- A GitHub issue: `Fixes #123` to close it, or a non-closing form like",
+            "  `Part of #123` for long-running tracking issues (DEPs). Org repos count",
+            "  too, for example `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
             f"This check is advisory today and becomes required on {blocking_date}.",
