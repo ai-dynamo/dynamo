@@ -318,21 +318,21 @@ def _build_assistant_guided_decoding(
     )
 
     request_extra = request.model_extra or {}
-    # Pick a single legacy guided_* constraint by precedence rather than merging
-    # several keys into one dict, because guided_decoding carries exactly one
-    # constraint and the elif chain above already honors that for
-    # structured_outputs.
-    #
-    # TODO: first-match-wins silently discards the other constraints the caller
-    # explicitly set, with no error and no annotation.
-    # GuidedDecodingOptions::validate in protocols/common.rs rejects the same
-    # request outright, so `guided_json` + `guided_regex` is a 400 through the Rust
-    # frontend and a silent single-constraint request here. Rejecting is the
-    # correct behavior; it is left as-is only to avoid adding a second new 400 to
-    # this change. The {"json": ..., "whitespace_pattern": ...} pair built below is
-    # now accepted on both sides: validate() no longer counts whitespace_pattern
-    # toward its exclusivity limit, because it modifies a grammar rather than being
-    # one.
+    # Match GuidedDecodingOptions::validate: modifiers are allowed alongside one
+    # constraint, but multiple legacy constraints must not be silently discarded.
+    legacy_constraints = [
+        ("json", request_extra.get("guided_json") is not None),
+        ("regex", request_extra.get("guided_regex") is not None),
+        ("grammar", request_extra.get("guided_grammar") is not None),
+        ("choice", bool(request_extra.get("guided_choice"))),
+    ]
+    active_constraints = [name for name, is_set in legacy_constraints if is_set]
+    if len(active_constraints) > 1:
+        raise InvalidArgument(
+            "Only one guided-decoding constraint can be set; received: "
+            + ", ".join(active_constraints)
+        )
+
     legacy_guidance: dict[str, Any] = {}
     for key, value in (
         ("json", request_extra.get("guided_json")),
