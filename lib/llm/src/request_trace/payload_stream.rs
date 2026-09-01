@@ -129,14 +129,10 @@ where
 /// Aggregate the buffered chunks, keeping whatever content arrived before an
 /// error-tagged chunk.
 ///
-/// `Annotated::into_data` returns `Err` for exactly the chunks `is_error()` matches,
-/// and `DeltaAggregator::apply` drives the buffer through a `try_fold` that
-/// short-circuits on the first of them and discards the accumulator. So a buffer
-/// containing an error-tagged chunk can only aggregate to `Err`, and aggregating the
-/// prefix before that chunk recovers the content the client already received. The
-/// aggregator itself is deliberately left alone: its short-circuit is load-bearing on
-/// the client-facing non-streaming path, where a typed backend error must surface as
-/// an error rather than as a truncated success.
+/// `DeltaAggregator` is deliberately left alone rather than taught to recover here:
+/// its short-circuit on the first error-tagged chunk is load-bearing on the
+/// client-facing non-streaming path, where a typed backend error must surface as an
+/// error rather than as a truncated success.
 async fn aggregate_with_partial_recovery(
     mut chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
     parsing_options: ParsingOptions,
