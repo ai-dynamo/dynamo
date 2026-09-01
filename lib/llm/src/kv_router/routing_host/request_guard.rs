@@ -944,8 +944,9 @@ where
             .request_metrics()
             .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
         if let Some(history_request) = self.cache_history_request.as_mut() {
+            let prompt_hashes = history_request.prompt_hashes();
             let mut history = self.cache_history.lock();
-            history_request.record_prompt(&mut history);
+            history_request.record_prompt(&mut history, prompt_hashes);
             let stats = history.stats();
             self.observability.request_metrics().set_cache_loss_history(
                 stats.retained_records,
@@ -977,8 +978,10 @@ where
         let Some(history_request) = self.cache_history_request.as_mut() else {
             return;
         };
+        let prompt_hashes = history_request.prompt_hashes();
+        let output_hashes = history_request.output_hashes();
         let mut history = self.cache_history.lock();
-        history_request.finalize(&mut history);
+        history_request.finalize(&mut history, prompt_hashes, output_hashes);
         let stats = history.stats();
         self.observability.request_metrics().set_cache_loss_history(
             stats.retained_records,

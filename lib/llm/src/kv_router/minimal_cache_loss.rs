@@ -55,11 +55,12 @@ impl CacheHistory {
             .and_then(|value| value.parse().ok())
             .filter(|&value| value > 0)
             .unwrap_or(DEFAULT_HISTORY_BLOCK_CAPACITY);
-        let capacity_bytes = std::env::var(HISTORY_BYTES_ENV)
+        let requested_bytes = std::env::var(HISTORY_BYTES_ENV)
             .ok()
             .and_then(|value| value.parse().ok())
             .filter(|&value| value > 0)
             .unwrap_or(DEFAULT_HISTORY_BYTES);
+        let capacity_bytes = requested_bytes.max(ESTIMATED_BYTES_PER_HISTORY_RECORD);
         let byte_limited_blocks = capacity_bytes / ESTIMATED_BYTES_PER_HISTORY_RECORD;
         let capacity_blocks = requested_blocks.min(byte_limited_blocks.max(1));
         Arc::new(Mutex::new(Self::new_with_budget(
@@ -204,29 +205,47 @@ impl CacheHistoryRequest {
         }
     }
 
-    pub fn record_prompt(&mut self, history: &mut CacheHistory) {
+    pub fn prompt_hashes(&self) -> Vec<u64> {
+        self.sequence_hashes(&self.prompt_tokens)
+    }
+
+    pub fn output_hashes(&self) -> Vec<Vec<u64>> {
+        self.output_branches
+            .values()
+            .filter_map(|output| {
+                let computed_output = &output[..output.len().saturating_sub(1)];
+                (!computed_output.is_empty()).then(|| {
+                    let mut sequence =
+                        Vec::with_capacity(self.prompt_tokens.len() + computed_output.len());
+                    sequence.extend_from_slice(&self.prompt_tokens);
+                    sequence.extend_from_slice(computed_output);
+                    self.sequence_hashes(&sequence)
+                })
+            })
+            .collect()
+    }
+
+    pub fn record_prompt(&mut self, history: &mut CacheHistory, hashes: Vec<u64>) {
         if self.prompt_recorded {
             return;
         }
-        history.record_completed(self.sequence_hashes(&self.prompt_tokens));
+        history.record_completed(hashes);
         self.prompt_recorded = true;
     }
 
-    pub fn finalize(&mut self, history: &mut CacheHistory) {
+    pub fn finalize(
+        &mut self,
+        history: &mut CacheHistory,
+        prompt_hashes: Vec<u64>,
+        output_hashes: Vec<Vec<u64>>,
+    ) {
         if self.finalized {
             return;
         }
         self.finalized = true;
-        self.record_prompt(history);
-        for output in self.output_branches.values() {
-            let computed_output = &output[..output.len().saturating_sub(1)];
-            if computed_output.is_empty() {
-                continue;
-            }
-            let mut sequence = Vec::with_capacity(self.prompt_tokens.len() + computed_output.len());
-            sequence.extend_from_slice(&self.prompt_tokens);
-            sequence.extend_from_slice(computed_output);
-            history.record_completed(self.sequence_hashes(&sequence));
+        self.record_prompt(history, prompt_hashes);
+        for hashes in output_hashes {
+            history.record_completed(hashes);
         }
     }
 
@@ -299,7 +318,9 @@ mod tests {
             super::CacheHistoryRequest::new(vec![1, 2, 3, 4], None, None, None, 2, false);
         request.observe_output(0, &[5, 6, 7]);
         let mut history = CacheHistory::new(32, 2);
-        request.finalize(&mut history);
+        let prompt_hashes = request.prompt_hashes();
+        let output_hashes = request.output_hashes();
+        request.finalize(&mut history, prompt_hashes, output_hashes);
 
         // Prompt has two complete blocks; prompt plus the first two generated
         // tokens has three. The final sampled token is deliberately absent.

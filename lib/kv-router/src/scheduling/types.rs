@@ -405,6 +405,18 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         }
     }
 
+    pub fn with_eligibility(
+        request: &'a SchedulingRequest,
+        workers: &'a HashMap<WorkerId, C>,
+        eligibility: RoutingEligibility<'a>,
+    ) -> Self {
+        Self {
+            request,
+            eligibility,
+            workers,
+        }
+    }
+
     pub fn request(&self) -> &'a SchedulingRequest {
         self.request
     }

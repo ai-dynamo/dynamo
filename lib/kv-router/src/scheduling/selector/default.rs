@@ -990,6 +990,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+        assert_eq!(result.max_cached_tokens, 0);
     }
 
     #[test]
