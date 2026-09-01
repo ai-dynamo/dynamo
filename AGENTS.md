@@ -53,6 +53,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
@@ -229,15 +230,22 @@ cargo fmt --all && cargo clippy --workspace
   a maintainer can manually approve the current head with `/ok to test <sha>`.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
-  `--check` mode that fails when the committed output is stale. The root
-  `CODEOWNERS` and `CONTRIBUTORS.md` come from `.github/codeowners/areas.yaml`
-  via `emit_codeowners.py`; CI gates 100% coverage and
-  `CODEOWNERS`↔`areas.yaml` drift (see `.github/codeowners/README.md`, and
-  `who_owns.py` to check who reviews a path). Resolve a conflict in a generated
-  file by regenerating rather than editing the conflict — a hand-resolved
-  artifact passes review and then fails the next `--check` — and resolve one in
-  an aggregate list, such as a coverage set or a filter list, as the union of
-  both sides.
+  `--check` mode that fails when the committed output is stale. Resolve a
+  conflict in a generated file by regenerating rather than editing the
+  conflict — a hand-resolved artifact passes review and then fails the next
+  `--check` — and resolve one in an aggregate list, such as a coverage set or
+  a filter list, as the union of both sides.
+- Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
+  routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
+  coverage and `CODEOWNERS`↔`areas.yaml` drift. See
+  `.github/codeowners/README.md`. To check who reviews your PR:
+  `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`
+  (`--people` expands teams to members for org members).
+  If the `codeowners` check fails after adding a new directory, claim it with
+  one line under the owning area in `areas.yaml`, regenerate, and commit both
+  files together. External contributors earn area-scoped co-ownership via
+  `.github/codeowners/external_contributors.yaml`. The `repo-codeowners`
+  skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. For an eligible fork PR, the automatic approval flow posts that command only

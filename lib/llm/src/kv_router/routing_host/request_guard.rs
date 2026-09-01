@@ -4,7 +4,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter,
+        indexer::ApproximateRequestLease,
+        metrics::RouterRequestMetrics,
+        request_lease::RequestAttemptLease,
+        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -15,13 +21,12 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    indexer::{
-        ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, RoutingDecisionHashes,
-    },
+    indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
     protocols::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
+    scheduling::AdmissionAttempt,
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
@@ -68,7 +73,7 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
-fn prompt_private_blocks(
+pub(crate) fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
     block_size: usize,
@@ -371,7 +376,8 @@ struct OutputBlockTracker {
     expected_output_tokens: Option<u32>,
 }
 
-/// Owns scheduler cleanup for an admitted KV request.
+/// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
+/// a KV worker is selected.
 pub(super) struct KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -379,8 +385,8 @@ where
     chooser: Arc<KvRouter<Sel>>,
     context_id: String,
     worker: WorkerWithDpRank,
-    scheduler_tracked: bool,
-    freed: bool,
+    approximate_lru: Option<ApproximateRequestLease>,
+    lifecycle: Option<RequestAttemptLease>,
 }
 
 impl<Sel> KvRequestCleanup<Sel>
@@ -391,68 +397,48 @@ where
         chooser: Arc<KvRouter<Sel>>,
         context_id: String,
         worker: WorkerWithDpRank,
-        scheduler_tracked: bool,
+        attempt: AdmissionAttempt,
     ) -> Self {
+        let attempt_id = match attempt {
+            AdmissionAttempt::Untracked => None,
+            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
+        };
+        let approximate_lru = attempt_id
+            .and_then(|_| chooser.approximate_lru_rank_registration(worker))
+            .and_then(|registration| {
+                chooser.indexer().begin_approximate_lru_request(
+                    worker,
+                    registration.incarnation,
+                    attempt_id?,
+                )
+            });
+        let lifecycle = attempt_id.map(|attempt_id| {
+            chooser.request_lease_manager().register_local(
+                SchedulerBookingDescriptor {
+                    request_id: context_id.clone(),
+                    worker,
+                    attempt_id,
+                },
+                approximate_lru.clone(),
+            )
+        });
         Self {
             chooser,
             context_id,
             worker,
-            scheduler_tracked,
-            freed: false,
+            approximate_lru,
+            lifecycle,
         }
     }
 
-    pub(super) async fn finish(&mut self) {
-        if self.freed {
-            return;
-        }
-        if self.scheduler_tracked
-            && let Err(error) = self
-                .chooser
-                .free_if_worker(&self.context_id, self.worker)
-                .await
-        {
-            tracing::warn!(
-                request_id = %self.context_id,
-                worker = ?self.worker,
-                %error,
-                "Failed to free request"
-            );
-        }
-        self.freed = true;
+    fn lifecycle(&self) -> Option<&RequestAttemptLease> {
+        self.lifecycle.as_ref()
     }
-}
 
-impl<Sel> Drop for KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    fn drop(&mut self) {
-        if self.freed || !self.scheduler_tracked {
-            return;
+    pub(super) async fn finish(&self) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.finish().await;
         }
-
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                request_id = %self.context_id,
-                "No tokio runtime for request cleanup"
-            );
-            return;
-        };
-
-        let chooser = self.chooser.clone();
-        let context_id = self.context_id.clone();
-        let worker = self.worker;
-        handle.spawn(async move {
-            if let Err(error) = chooser.free_if_worker(&context_id, worker).await {
-                tracing::warn!(
-                    request_id = %context_id,
-                    ?worker,
-                    %error,
-                    "Failed to free request from drop guard"
-                );
-            }
-        });
     }
 }
 
@@ -513,6 +499,13 @@ where
         }
     }
 
+    fn lifecycle(&self) -> Option<&RequestAttemptLease> {
+        match self {
+            Self::Kv(cleanup) => cleanup.lifecycle(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
@@ -568,7 +561,7 @@ where
     cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
-    approximate_lru: Option<ApproximateLruLease>,
+    approximate_lru: Option<ApproximateRequestLease>,
     output_hashes: Option<CanonicalOutputTracker>,
     record_itl_at_completion: bool,
     prefill_marked: bool,
@@ -585,12 +578,12 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
+        attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
-        scheduler_tracked: bool,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
+            KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
         )
     }
@@ -607,23 +600,15 @@ where
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
-        let scheduler_tracked = cleanup.scheduler_tracked;
-        let worker = cleanup.worker;
+        let attempt_id = cleanup
+            .lifecycle()
+            .map(|lifecycle| lifecycle.booking().attempt_id);
         let track_output_blocks =
-            scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        if scheduler_tracked {
+            attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
+        if attempt_id.is_some() {
             request_metrics.requests_started_total().inc();
         }
-        let lru_registration = scheduler_tracked
-            .then(|| chooser.approximate_lru_rank_registration(worker))
-            .flatten();
-        let approximate_lru = lru_registration.and_then(|registration| {
-            chooser.indexer().begin_approximate_lru_request(
-                worker,
-                registration.incarnation,
-                chooser.next_approximate_lru_request_id(),
-            )
-        });
+        let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
@@ -713,22 +698,12 @@ where
             .output_hashes
             .as_ref()
             .map_or(0, CanonicalOutputTracker::initial_private_blocks);
-        let Some(lease) = self.approximate_lru.as_ref() else {
+        let Some(lease) = self.approximate_lru.as_mut() else {
             return Ok(());
         };
-        let blocks = hashes
-            .local_hashes
-            .iter()
-            .zip(&hashes.sequence_hashes)
-            .map(|(&local_hash, &sequence_hash)| ApproximateLruBlock {
-                local_hash,
-                sequence_hash,
-            })
-            .collect();
-        let mode = lease.acquire(blocks, private_blocks).await?;
+        let mode = lease.acquire(hashes, private_blocks).await?;
         if mode != ApproximateAcquireMode::Lru {
             self.output_hashes = None;
-            self.approximate_lru = None;
             return Ok(());
         }
         if let Some(output_hashes) = self.output_hashes.as_mut() {
@@ -741,6 +716,11 @@ where
         self.observability.observe_response();
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
+        if new_tokens > 0
+            && let Some(lifecycle) = self.cleanup.lifecycle()
+        {
+            lifecycle.touch();
+        }
         if !self.prefill_marked {
             let has_tokens = item
                 .data
@@ -748,10 +728,11 @@ where
                 .is_some_and(|data| !data.token_ids.is_empty());
             if has_tokens {
                 if let RequestCleanup::Kv(cleanup) = &self.cleanup
-                    && cleanup.scheduler_tracked
+                    && let Some(lifecycle) = cleanup.lifecycle()
+                    && lifecycle.is_active()
                     && let Err(error) = cleanup
                         .chooser
-                        .mark_prefill_completed(&cleanup.context_id)
+                        .mark_prefill_completed_if_booking(lifecycle.booking())
                         .await
                 {
                     tracing::warn!(
@@ -764,12 +745,17 @@ where
             }
         }
 
-        if let (Some(data), Some(output_hashes), Some(lease)) = (
-            item.data.as_ref(),
-            self.output_hashes.as_mut(),
-            self.approximate_lru.as_ref(),
-        ) && let Some(materialized) =
-            output_hashes.observe(data.index.unwrap_or(0), &data.token_ids)
+        if self
+            .cleanup
+            .lifecycle()
+            .is_some_and(RequestAttemptLease::is_active)
+            && let (Some(data), Some(output_hashes), Some(lease)) = (
+                item.data.as_ref(),
+                self.output_hashes.as_mut(),
+                self.approximate_lru.as_ref(),
+            )
+            && let Some(materialized) =
+                output_hashes.observe(data.index.unwrap_or(0), &data.token_ids)
             && let Err(error) = lease.materialize(
                 materialized.parent_hash,
                 materialized.blocks,
@@ -790,9 +776,12 @@ where
         };
 
         if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Some(lifecycle) = cleanup.lifecycle()
+            && lifecycle.is_active()
             && let Err(error) = cleanup
                 .chooser
-                .add_output_block(&cleanup.context_id, update.decay_fraction)
+                .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
+                .await
         {
             tracing::warn!(
                 request_id = %cleanup.context_id,
@@ -808,34 +797,10 @@ where
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability
             .record_metrics(self.record_itl_at_completion);
-        let lru_ack = self
-            .approximate_lru
-            .as_ref()
-            .map_or(Ok(None), ApproximateLruLease::begin_finish);
         self.cleanup.finish().await;
-        match lru_ack {
-            Ok(Some(ack)) => {
-                if let Err(error) = ack.wait().await {
-                    tracing::warn!(
-                        request_id = self.cleanup.context_id().unwrap_or("stateless"),
-                        %error,
-                        "Failed to release approximate LRU request lease"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                request_id = self.cleanup.context_id().unwrap_or("stateless"),
-                %error,
-                "Failed to enqueue approximate LRU request release"
-            ),
-        }
     }
 
     pub(super) async fn abort(&mut self) {
-        if let Some(lease) = &self.approximate_lru {
-            lease.release_now();
-        }
         self.cleanup.finish().await;
     }
 }
@@ -847,9 +812,6 @@ where
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);
-        if let Some(lease) = &self.approximate_lru {
-            lease.release_now();
-        }
         // RequestCleanup drops immediately afterward and performs resource cleanup.
     }
 }

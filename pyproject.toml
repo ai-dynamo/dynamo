@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.1.0.dev1; python_version < '3.13'",
+    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -82,10 +82,6 @@ sglang = [
     "cupy-cuda13x>=13.6.0",
 ]
 
-mocker = [
-    "aiconfigurator-core==0.11.0.dev20260728",
-]
-
 [tool.uv]
 # Some backend extras have incompatible transitive dependency requirements.
 # Each conflict below identifies the dependency that prevents co-installation.
@@ -95,19 +91,9 @@ conflicts = [
         { extra = "vllm" },
         { extra = "sglang" },
     ],
-    # TensorRT-LLM and the mocker have incompatible NumPy requirements.
-    [
-        { extra = "trtllm" },
-        { extra = "mocker" },
-    ],
     # TensorRT-LLM and vLLM have incompatible flashinfer-python requirements.
     [
         { extra = "trtllm" },
-        { extra = "vllm" },
-    ],
-    # The mocker and vLLM have incompatible NumPy requirements on macOS with Python 3.14.
-    [
-        { extra = "mocker" },
         { extra = "vllm" },
     ],
     # SGLang and TensorRT-LLM have incompatible XGrammar requirements.
@@ -127,6 +113,13 @@ trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
 [project.entry-points."aisimulate.sweep_config_providers"]
+"dynamo.planner" = "dynamo.planner.simulation:create_provider"
+"dynamo.router" = "dynamo.router.simulation:create_provider"
+
+[project.entry-points."aisimulate.runner_factories"]
+dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
+
+[project.entry-points."aisimulate.config_adapters"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
@@ -296,6 +289,8 @@ filterwarnings = [
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
     # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
     "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
+    # pandas 2.3 emits this from the bundled compatibility report path on fillna.
+    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aiconfigurator.cli.report_and_save",
 ]
 
 
@@ -461,6 +456,12 @@ ignore_missing_imports = true
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# NumPy 2.3+ leaves np.empty() untyped when NumPy imports are skipped. Keep the
+# existing realtime handler accepted without suppressing other error classes.
+module = ["dynamo.vllm.realtime.handler"]
+disable_error_code = ["var-annotated"]
 
 [[tool.mypy.overrides]]
 # Third-party libs without type stubs or optional internal deps
