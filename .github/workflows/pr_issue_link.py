@@ -44,6 +44,9 @@ GITHUB_REF_RE = re.compile(r"(?:^|[^\w&])#(\d{1,7})\b")
 CROSS_REPO_RE = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d{1,7})\b")
 ISSUE_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/issues/(\d{1,7})\b")
 BOT_AUTHORS = {"dependabot[bot]", "github-actions[bot]", "copy-pr-bot[bot]"}
+# PR text is untrusted input; bound the number of authenticated lookups it
+# can trigger.
+MAX_CANDIDATES = 10
 
 
 def http_json(
@@ -59,6 +62,11 @@ def http_json(
             return e.code, json.loads(e.read().decode() or "{}")
         except Exception:
             return e.code, {}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        # DNS, connection, TLS, timeout, or response-decoding failure.
+        # Status 0 flows through the api_ok=False paths so the reference is
+        # reported as unverified rather than failing the workflow.
+        return 0, {}
 
 
 def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool]:
@@ -104,6 +112,8 @@ def main() -> int:
     branch = os.environ.get("PR_HEAD_REF", "")
     author = os.environ.get("PR_AUTHOR", "")
     repo = os.environ.get("REPO", "")
+    head_repo = os.environ.get("PR_HEAD_REPO", repo)
+    is_fork = head_repo.lower() != repo.lower()
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
     blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-15")
@@ -127,7 +137,8 @@ def main() -> int:
     verified: list[str] = []
     unverified: list[str] = []
 
-    for ref_repo, number in sorted(github_refs, key=lambda r: (r[0], int(r[1]))):
+    ordered_refs = sorted(github_refs, key=lambda r: (r[0], int(r[1])))[:MAX_CANDIDATES]
+    for ref_repo, number in ordered_refs:
         exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
         if exists:
@@ -141,8 +152,20 @@ def main() -> int:
             unverified.append(
                 f"GitHub reference {label} (not visible to the workflow token)"
             )
+        if verified:
+            # One verified issue satisfies the check; stop spending lookups.
+            break
 
-    for identifier in sorted(linear_ids):
+    for identifier in sorted(linear_ids)[:MAX_CANDIDATES]:
+        if verified:
+            break
+        if is_fork:
+            # Do not turn the CI into an existence oracle for Linear IDs
+            # guessed from fork PRs; fork contributors use GitHub issues.
+            unverified.append(
+                f"Linear reference {identifier} (not verified for fork PRs)"
+            )
+            continue
         exists, api_ok = verify_linear_issue(identifier, linear_key)
         if exists:
             verified.append(f"Linear issue {identifier}")

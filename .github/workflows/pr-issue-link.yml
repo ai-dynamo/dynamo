@@ -25,7 +25,8 @@ on:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 
 env:
-  # The date this check is planned to become a required status check.
+  # Referenced in the failure message; on this date the check is added to the
+  # required status checks in branch protection after the announced notice.
   BLOCKING_DATE: "2026-10-15"
 
 jobs:
@@ -48,6 +49,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
