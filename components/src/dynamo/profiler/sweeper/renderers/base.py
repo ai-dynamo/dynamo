@@ -128,8 +128,7 @@ def patch_dgd_manifest(
 
     # TODO(#13770 follow-up after #14040): Remove this materialize_dgd() call
     # once required runtime rules run during base rendering and optional patches
-    # move into the common assembler. That follow-up also removes
-    # ConfigModifier.finalize_dgd() and its call sites.
+    # move into the common assembler.
     try:
         dgd = materialize_dgd(
             dgd,
