@@ -2,79 +2,91 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Run a DynoSim Simulation
-subtitle: Replay a synthetic workload or saved trace against one simulated configuration
+subtitle: Predict a synthetic workload or saved trace against one simulated configuration
 ---
 
-A DynoSim run evaluates one workload against one simulated Dynamo configuration. This is an
-**offline replay**: the harness drives simulated engine cores directly without starting a frontend,
-registering workers, or sending HTTP requests. The command runs on your local machine, but the
-configuration you evaluate can be a candidate for either Kubernetes or local deployment. It
-does not require GPUs and produces an AIPerf-style summary plus a JSON report.
+A DynoSim prediction evaluates one workload against one simulated Dynamo configuration. AISimulate
+drives the simulated engine cores directly without starting a frontend, registering workers, or
+sending HTTP requests. It runs on CPUs and writes an AIPerf-style summary and JSON report.
 
-Use [Simulate a Local Deployment with Mocker](mocker-live-simulation.mdx) instead when you need to exercise the
-live Dynamo frontend, discovery, routing, event publication, and worker lifecycle.
-
-Use this tutorial to establish a working baseline before changing topology, routing, or timing
-settings. For all flags, trace fields, constraints, and report fields, see the
-[DynoSim Replay CLI Reference](../../../reference/components/dynosim-replay-cli-reference.mdx). For the internal
-execution model, see [DynoSim Architecture](../../../developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md).
+Online simulation with live Mocker workers is temporarily unavailable; see
+[Simulate a Local Deployment with Mocker](mocker-live-simulation.mdx) for its status. For the
+configuration and output contract, see the
+[DynoSim Replay CLI Reference](../../../reference/components/dynosim-replay-cli-reference.mdx). For
+the internal execution model, see
+[DynoSim Architecture](../../../developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md).
 
 ## Prerequisites
 
-Run the commands from the repository root. Use the project virtual environment and build the runtime
-bindings if they are not already available:
+Run the commands from the repository root. Build the runtime bindings and install Dynamo into the
+project virtual environment:
 
 ```bash
 .venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
 uv pip install -e .
 ```
 
-The release build is recommended because the simulation is CPU-bound.
+Use a release build because simulation is CPU-bound.
 
 <Steps toc={true}>
 <Step title="Run a synthetic workload" id="run-a-synthetic-workload">
-Start with a small aggregated simulation:
 
-```bash
-.venv/bin/python -m dynamo.replay \
-  --input-tokens 2048 \
-  --output-tokens 128 \
-  --request-count 100 \
-  --replay-mode offline \
-  --replay-concurrency 16 \
-  --num-workers 2 \
-  --extra-engine-args '{"block_size":64}' \
-  --report-json /tmp/dynosim-synthetic.json
+Save this configuration as `/tmp/dynosim-synthetic.yaml`:
+
+```yaml
+traffic:
+  source: {type: synthetic, input_tokens: 2048, output_tokens: 128}
+  load: {type: concurrency, concurrency: 16}
+  stop: {requests: 100}
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 8192
+  workers:
+    aggregated:
+      parallelism: {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 32768}}
+      timing: {type: polynomial}
+router:
+  policy: round_robin
+  prefill_load_model: {type: none}
+planner: {policy: disabled}
 ```
 
-The command prints a latency and throughput table. Confirm that all requests completed and that
-`/tmp/dynosim-synthetic.json` was created.
+Run the prediction through the Dynamo stack:
+
+```bash
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/dynosim-synthetic.yaml \
+  --output-dir /tmp/dynosim-synthetic
+```
+
+Confirm that all requests completed and that `/tmp/dynosim-synthetic/prediction.json` exists.
 
 </Step>
 <Step title="Add prefix reuse and multiple turns" id="add-prefix-reuse-and-multiple-turns">
-Run a second synthetic workload with shared prefixes and three turns per session:
+
+Override the synthetic source with three-turn sessions. `--set` parses its right-hand side as YAML
+and applies it after loading the file:
 
 ```bash
-.venv/bin/python -m dynamo.replay \
-  --input-tokens 5000 \
-  --output-tokens 500 \
-  --request-count 200 \
-  --turns-per-session 3 \
-  --shared-prefix-ratio 0.5 \
-  --num-prefix-groups 8 \
-  --inter-turn-delay-ms 250 \
-  --replay-mode offline \
-  --replay-concurrency 32 \
-  --num-workers 2 \
-  --extra-engine-args '{"block_size":64}' \
-  --report-json /tmp/dynosim-prefix.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/dynosim-synthetic.yaml \
+  --set 'traffic.source={type: synthetic-session, new_input_tokens_per_turn: 1024, output_tokens_per_turn: 128, session: {turns: 3, shared_prefix_ratio: 0.5, prefix_groups: 8, inter_turn_delay_ms: 250}}' \
+  --set 'traffic.stop={sessions: 50}' \
+  --output-dir /tmp/dynosim-prefix
 ```
 
-Compare the prefix-cache reuse and latency metrics with the first run. Keep the worker count and
-engine arguments fixed so the workload change is the only variable.
+Compare the prefix-cache reuse and latency metrics with the independent-request run.
 
 </Step>
 <Step title="Replay a saved trace" id="replay-a-saved-trace">
+
 Download the public FAST'25 tool-agent trace:
 
 ```bash
@@ -83,64 +95,95 @@ curl -sL \
   -o /tmp/toolagent_trace.jsonl
 ```
 
-Replay it with the trace block size used by the dataset:
+Override the workload mappings while keeping the engine configuration fixed:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/toolagent_trace.jsonl \
-  --trace-block-size 512 \
-  --replay-mode offline \
-  --router-mode round_robin \
-  --num-workers 4 \
-  --extra-engine-args '{"block_size":64}' \
-  --report-json /tmp/dynosim-trace.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/dynosim-synthetic.yaml \
+  --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \
+  --set 'traffic.load={type: trace_timestamps, speedup: 1.0}' \
+  --set 'traffic.stop={max_virtual_time_seconds: 3600}' \
+  --output-dir /tmp/dynosim-trace
 ```
 
-`--trace-block-size` describes how the trace encodes `hash_ids`. The engine `block_size` describes
-the simulated KV-cache block size, so the two values do not need to match.
+`traffic.source.block_size` describes the trace hash granularity. The simulated KV-cache block size
+remains `engine.workers.aggregated.kv_cache.block_size: 64`.
 
 </Step>
 <Step title="Compare routing modes" id="compare-routing-modes">
-Run the same trace through the KV router. Change only the routing settings:
+
+Run the same trace through four workers and the KV router:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/toolagent_trace.jsonl \
-  --trace-block-size 512 \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --extra-engine-args '{"block_size":64}' \
-  --router-config '{"router_queue_policy":"fcfs"}' \
-  --report-json /tmp/dynosim-kv-router.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/dynosim-synthetic.yaml \
+  --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \
+  --set 'traffic.load={type: trace_timestamps, speedup: 1.0}' \
+  --set 'traffic.stop={max_virtual_time_seconds: 3600}' \
+  --set router.policy=kv_router \
+  --set engine.workers.aggregated.parallelism.replicas=4 \
+  --output-dir /tmp/dynosim-kv-router
 ```
 
-Compare `/tmp/dynosim-trace.json` and `/tmp/dynosim-kv-router.json`. Review throughput, Time to First
-Token (TTFT), Inter-Token Latency (ITL), and prefix-cache reuse before deciding whether the routing
-change is promising.
+Compare `/tmp/dynosim-trace/prediction.json` with
+`/tmp/dynosim-kv-router/prediction.json`. Review throughput, Time to First Token (TTFT), Inter-Token
+Latency (ITL), and prefix-cache reuse.
 
 </Step>
 <Step title="Simulate disaggregated serving" id="simulate-disaggregated-serving">
-Use separate prefill and decode worker pools and engine arguments:
 
-```bash
-.venv/bin/python -m dynamo.replay /tmp/toolagent_trace.jsonl \
-  --trace-block-size 512 \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-prefill-workers 2 \
-  --num-decode-workers 2 \
-  --prefill-engine-args '{"block_size":64,"worker_type":"prefill"}' \
-  --decode-engine-args '{"block_size":64,"worker_type":"decode"}' \
-  --report-json /tmp/dynosim-disagg.json
+Save a disaggregated configuration as `/tmp/dynosim-disaggregated.yaml`:
+
+```yaml
+traffic:
+  source: {type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}
+  load: {type: trace_timestamps, speedup: 1.0}
+  stop: {max_virtual_time_seconds: 3600}
+engine:
+  mode: disaggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 8192
+  kv_transfer: {bytes_per_token: 131072, bandwidth_gb_per_second: 400, timing_mode: destination_missing}
+  workers:
+    prefill:
+      parallelism: {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 64}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 32768}}
+      timing: {type: polynomial}
+    decode:
+      parallelism: {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 32768}}
+      timing: {type: polynomial}
+router:
+  policy: kv_router
+  prefill_load_model: {type: none}
+planner: {policy: disabled}
 ```
 
-Compare this report with the aggregated baseline. If the result is worth exploring, use
-[Sweep DynoSim Configurations](dynosim-sweeps.mdx) to search more worker and topology combinations.
+Run the disaggregated prediction:
+
+```bash
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/dynosim-disaggregated.yaml \
+  --output-dir /tmp/dynosim-disaggregated
+```
+
+Compare the result with the aggregated baseline. To search topology and parallelism choices, use
+[Sweep DynoSim Configurations](dynosim-sweeps.mdx).
 
 </Step>
 <Step title="Validate the result" id="validate-the-result">
+
 DynoSim models scheduler, KV-cache, routing, and timing behavior, but it does not replace a
 real-hardware benchmark. Validate the candidate with AIPerf against either a
-[Kubernetes deployment](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or a [local deployment](../benchmarking-with-aiperf.mdx) to include
-frontend, transport, engine, and GPU behavior.
+[Kubernetes deployment](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or a
+[local deployment](../benchmarking-with-aiperf.mdx).
+
 </Step>
 </Steps>

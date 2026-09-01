@@ -32,6 +32,7 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -267,6 +268,10 @@ def build_tool_call_guided_decoding(
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
+            if _is_named_tool_choice(tool_choice) and admits_only_empty_object(
+                json_schema
+            ):
+                return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
                 and json_schema.get("type") == "array"
@@ -747,7 +752,7 @@ async def preprocess_chat_request(
         and parser_guided_decoding is None
         and guided_decoding is tool_guided_decoding
         and isinstance(tool_guided_decoding, dict)
-        and "json" in tool_guided_decoding
+        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
