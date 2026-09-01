@@ -190,7 +190,7 @@ fn parse_tcp_request_frame(bytes: &[u8]) -> Result<TcpRequestWireHeader, std::io
     Ok(parsed)
 }
 
-fn check_tcp_request_max_message_size(
+pub(super) fn check_tcp_request_max_message_size(
     total_len: usize,
     max_message_size: usize,
 ) -> Result<(), std::io::Error> {

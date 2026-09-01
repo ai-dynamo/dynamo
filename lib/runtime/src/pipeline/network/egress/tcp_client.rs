@@ -11,10 +11,11 @@
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::error::{DynamoError, ErrorType, match_error_chain};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
-use crate::pipeline::network::codec::TcpRequestFrame;
+use crate::pipeline::network::codec::{TcpRequestFrame, check_tcp_request_max_message_size};
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,6 +44,8 @@ use tokio_util::codec::FramedRead;
 
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+const MAX_MESSAGE_SIZE_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
 
 /// Default connection pool size per host.
 /// Ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400 concurrent
@@ -926,6 +929,7 @@ impl TcpConnection {
         // a Bytes chunk and is not copied into a flattened request frame.
         let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
         let frame = request_msg.into_frame()?;
+        validate_request_frame_size(frame.encoded_len(), get_tcp_max_message_size())?;
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -1013,6 +1017,28 @@ fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error
             .cause(cause)
             .build()
     )
+}
+
+fn validate_request_frame_size(frame_len: usize, max_message_size: usize) -> Result<()> {
+    if let Err(cause) = check_tcp_request_max_message_size(frame_len, max_message_size) {
+        return Err(anyhow::anyhow!(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(MAX_MESSAGE_SIZE_USER_MESSAGE)
+                .cause(cause)
+                .build()
+        ));
+    }
+
+    Ok(())
+}
+
+fn request_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error {
+    if match_error_chain(error.as_ref(), &[ErrorType::InvalidArgument], &[]) {
+        error
+    } else {
+        cannot_connect_error(addr, error)
+    }
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -1675,16 +1701,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
-                let cause = crate::error::DynamoError::from(
-                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
-                );
-                Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
-                        .message(format!("TCP request to {addr} failed"))
-                        .cause(cause)
-                        .build()
-                ))
+                Err(request_error(addr, e))
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -1926,6 +1943,43 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.transport_name(), "tcp");
         assert!(client.is_healthy());
+    }
+
+    #[test]
+    fn test_request_frame_size_validation() {
+        assert!(validate_request_frame_size(1024, 1024).is_ok());
+
+        let err = validate_request_frame_size(1025, 1024).unwrap_err();
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), MAX_MESSAGE_SIZE_USER_MESSAGE);
+        assert!(err.chain().any(|cause| cause.to_string().contains("1025")));
+    }
+
+    #[test]
+    fn test_invalid_argument_request_error_retains_type() {
+        let source = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message("invalid request")
+            .build();
+        let addr = "127.0.0.1:8080".parse().unwrap();
+
+        let err = request_error(addr, anyhow::anyhow!(source));
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
     }
 
     #[tokio::test]
