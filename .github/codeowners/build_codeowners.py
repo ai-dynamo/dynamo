@@ -239,6 +239,13 @@ class WeakenedDeclaration:
 def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
     """Flatten the enforceable ownership grants of a raw areas spec.
 
+    Covers the three declaration kinds that grant ownership a head-only check
+    cannot re-derive once they are gone: ``required_owners``, ``shared``, and
+    the blocking ``classify.filetype_rules``. The file-type rules matter as
+    much as the others -- deleting the ``*Dockerfile*`` rule drops its coowner
+    from every Dockerfile while directory areas keep coverage green, so
+    nothing else would notice.
+
     Reads raw YAML rather than a ``ResolvedModel`` on purpose. The resolver
     rejects retired schema keys outright, and the base revision this gate
     compares against is by definition older than HEAD, so resolving it would
@@ -250,13 +257,30 @@ def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
             glob = rule.get("glob")
             if glob:
                 grants[(kind, glob)] = set(rule.get("owners") or [])
+    classify = spec.get("classify") or {}
+    for rule in classify.get("filetype_rules") or []:
+        pattern, coowner = rule.get("pattern"), rule.get("coowner")
+        if pattern and coowner:
+            grants.setdefault(("filetype", pattern), set()).add(coowner)
     return grants
+
+
+def _grant_pattern(kind: str, glob: str) -> str:
+    """Match form for a grant key. File-type rules match unanchored."""
+    return glob if kind == "filetype" else anchor(glob)
 
 
 def _acknowledged_removals(
     spec: dict, label_to_team: dict[str, str]
 ) -> dict[str, set[str]]:
-    """Teams each ``ownership_transfers`` entry records as deliberately gone."""
+    """Teams each ``ownership_transfers`` entry records as deliberately gone.
+
+    Registered under both the written and the anchored spelling of the glob,
+    so ``lib/`` in a transfer entry still matches ``/lib/`` in the grant it
+    covers. Without that, a benign spelling difference costs the author two
+    failures at once: the removal reads as unacknowledged and the entry reads
+    as inert.
+    """
     acknowledged: dict[str, set[str]] = {}
     for entry in spec.get("ownership_transfers") or []:
         glob = entry.get("glob")
@@ -264,28 +288,36 @@ def _acknowledged_removals(
             teams = {
                 label_to_team.get(label, label) for label in entry.get("removing") or []
             }
-            acknowledged.setdefault(glob, set()).update(teams)
+            acknowledged.setdefault(anchor(glob), set()).update(teams)
     return acknowledged
 
 
-def stale_transfers(
-    removals: list[WeakenedDeclaration], head_spec: dict, label_to_team: dict[str, str]
-) -> list[str]:
-    """Transfer entries that acknowledge a removal which is not happening.
+def unmatched_transfers(
+    removals: list[WeakenedDeclaration], spec: dict, label_to_team: dict[str, str]
+) -> set[tuple[str, str]]:
+    """Acknowledged ``(glob, team)`` pairs that match no actual removal.
 
-    Held to the same standard as a glob matching no file. A transfer is a
-    one-time record of a deliberate hand-off, so once it has served its
-    purpose it is dead weight, and dead weight in this file is what the
-    stale-glob gate already exists to stop. Failing on an inert entry keeps
-    the list self-cleaning instead of letting it accumulate into a list
-    nobody reads and everyone appends to.
+    Judged per pair, not per entry. An entry naming both a real removal and a
+    misspelled one would otherwise pass whole on the strength of the real
+    one, and the misspelling would sit there forever -- exactly the rot the
+    self-cleaning rule exists to prevent.
     """
-    live = {(entry.glob, team) for entry in removals for team in entry.lost}
-    return sorted(
-        f"{glob} ({', '.join(sorted(teams))})"
-        for glob, teams in _acknowledged_removals(head_spec, label_to_team).items()
-        if not any((glob, team) in live for team in teams)
-    )
+    live = {(anchor(entry.glob), team) for entry in removals for team in entry.lost}
+    unmatched: set[tuple[str, str]] = set()
+    for entry in spec.get("ownership_transfers") or []:
+        glob = entry.get("glob")
+        if not glob:
+            continue
+        for label in entry.get("removing") or []:
+            team = label_to_team.get(label, label)
+            if (anchor(glob), team) not in live:
+                unmatched.add((glob, team))
+    return unmatched
+
+
+def describe_transfers(pairs: set[tuple[str, str]]) -> list[str]:
+    """Render acknowledgement pairs for a report line."""
+    return sorted(f"{glob} ({team})" for glob, team in pairs)
 
 
 def weakened_declarations(
@@ -330,8 +362,9 @@ def weakened_declarations(
         if not owners - head_grants.get((kind, glob), set()):
             continue
         lost: set[str] = set()
+        pattern = _grant_pattern(kind, glob)
         for path in tree:
-            if match(anchor(glob), path):
+            if match(pattern, path):
                 lost |= set(resolve_owners(base_rules, path)) - set(
                     resolve_owners(head_rules, path)
                 )
@@ -355,7 +388,8 @@ def unacknowledged(
     """
     remaining = []
     for entry in removals:
-        lost = tuple(t for t in entry.lost if t not in acknowledged.get(entry.glob, ()))
+        covered = acknowledged.get(anchor(entry.glob), ())
+        lost = tuple(t for t in entry.lost if t not in covered)
         if lost:
             remaining.append(
                 WeakenedDeclaration(kind=entry.kind, glob=entry.glob, lost=lost)
@@ -651,6 +685,24 @@ def _print_warnings(gate: CoverageGate, base: str) -> None:
     print("   ", gate.warnings[:15])
 
 
+def _removal_label_map(base_spec: dict | None, model: ResolvedModel) -> dict[str, str]:
+    """Label-to-team map spanning both revisions.
+
+    A hand-off can delete the area it hands off from, and then the label the
+    transfer entry names exists only in the base. Head-only resolution would
+    leave it as a bare label, never matching the resolved team in the loss, so
+    the entry would read as both unacknowledged and inert at once. Head wins
+    where both define a label.
+    """
+    head_map = model.label_to_team()
+    if base_spec is None:
+        return head_map
+    try:
+        return {**compute_resolution(base_spec).label_to_team(), **head_map}
+    except SystemExit:
+        return head_map
+
+
 def _merge_base_spec(repo: str, base: str, areas: str) -> dict | None:
     """The areas spec at the merge-base, or ``None`` with a printed reason.
 
@@ -694,15 +746,34 @@ def main() -> int:
         # One git call, and only when something is stale to attribute.
         base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
         newly_stale = newly_stale_patterns(dead, base_paths)
-    removals = weakened_declarations(
-        _merge_base_spec(args.repo, args.base, args.areas), spec, tree
+    base_spec = _merge_base_spec(args.repo, args.base, args.areas)
+    removals = weakened_declarations(base_spec, spec, tree)
+    label_map = _removal_label_map(base_spec, model)
+    weakened = unacknowledged(removals, _acknowledged_removals(spec, label_map))
+    unmatched_acks = unmatched_transfers(removals, spec, label_map)
+    # An entry the base already carried is not this change's problem. Blocking
+    # on it would red-X every unrelated policy PR the moment a hand-off lands,
+    # and would fail the push-to-main run outright, where HEAD is its own
+    # merge-base and no removal can be observed. Same split the stale-glob
+    # gate makes between what a branch orphaned and what it inherited.
+    inherited = (
+        unmatched_transfers(removals, base_spec, label_map)
+        if base_spec
+        else unmatched_acks
     )
-    acknowledged = _acknowledged_removals(spec, model.label_to_team())
-    weakened = unacknowledged(removals, acknowledged)
-    inert = stale_transfers(removals, spec, model.label_to_team())
+    inert = describe_transfers(unmatched_acks - inherited)
+    stale_inherited = describe_transfers(unmatched_acks & inherited)
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
     print_shared_additivity_violations(additivity)
     print_weakened_declarations(weakened)
+    if stale_inherited:
+        print(
+            f"warning: {len(stale_inherited)} ownership_transfers entry/entries "
+            "inherited from the base match no removal (not blocking here; a "
+            "later policy change should prune them):"
+        )
+        for line in stale_inherited[:10]:
+            print(f"    {line}")
     gate = split_coverage(unmatched, changed)
     _print_warnings(gate, args.base)
     failure = strict_failure(

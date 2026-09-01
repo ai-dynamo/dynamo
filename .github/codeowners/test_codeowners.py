@@ -33,10 +33,11 @@ from build_codeowners import (  # noqa: E402
     is_policy_change,
     ownership_contract_violations,
     shared_additivity_violations,
+    describe_transfers,
     split_coverage,
-    stale_transfers,
     strict_failure,
     unacknowledged,
+    unmatched_transfers,
     weakened_declarations,
 )
 from codeowners_match import (  # noqa: E402
@@ -1016,15 +1017,13 @@ class TestWeakenedDeclarations:
         head["shared"] = []
         assert weakened_declarations(base, head, ["docs/index.md"]) == []
 
-    def test_reassignment_to_a_new_owner_passes(self) -> None:
-        # Ownership moves from docs to a more specific claim. The files stay
-        # owned, so nothing was silently dropped.
+    def test_replacement_declaration_passes(self) -> None:
+        # The lib/ grant is replaced by a narrower one that still carries both
+        # owners for lib/a.rs. The declaration key really is gone, so this
+        # reaches the resolved-ownership comparison rather than exiting early.
         base = self._spec()
         head = self._spec()
-        head["areas"].append(
-            {"label": "perf", "github_team": "@perf", "path_globs": ["lib/"]}
-        )
-        head["shared"] = [{"glob": "lib/", "owners": ["runtime", "docs", "perf"]}]
+        head["shared"] = [{"glob": "lib/a.rs", "owners": ["runtime", "docs"]}]
         assert weakened_declarations(base, head, ["lib/a.rs"]) == []
 
     def test_redundant_grant_removal_passes(self) -> None:
@@ -1050,18 +1049,67 @@ class TestWeakenedDeclarations:
             {"glob": "lib/", "removing": ["docs"], "reason": "narrowed to runtime"}
         ]
         removals = weakened_declarations(base, head, ["lib/a.rs"])
-        model = compute_resolution(head)
-        acknowledged = _acknowledged_removals(head, model.label_to_team())
-        assert unacknowledged(removals, acknowledged) == []
-        assert stale_transfers(removals, head, model.label_to_team()) == []
+        teams = compute_resolution(head).label_to_team()
+        assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
+        assert unmatched_transfers(removals, head, teams) == set()
+
+    def test_hand_off_matches_despite_glob_spelling(self) -> None:
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        head["ownership_transfers"] = [{"glob": "/lib/", "removing": ["docs"]}]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = compute_resolution(head).label_to_team()
+        assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
+        assert unmatched_transfers(removals, head, teams) == set()
+
+    def test_each_acknowledged_team_is_judged_separately(self) -> None:
+        # One real removal must not carry a misspelled one through with it.
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs", "typo"]}]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = compute_resolution(head).label_to_team()
+        assert describe_transfers(unmatched_transfers(removals, head, teams)) == [
+            "lib/ (typo)"
+        ]
+
+    def test_removed_filetype_grant_is_reported(self) -> None:
+        base = self._spec()
+        base["classify"] = {
+            "filetype_rules": [{"pattern": "*Dockerfile*", "coowner": "docs"}]
+        }
+        head = self._spec()
+        weakened = weakened_declarations(base, head, ["svc/Dockerfile"])
+        assert [w.kind for w in weakened] == ["filetype"]
+        assert weakened[0].lost == ("@docs",)
 
     def test_inert_hand_off_entry_is_reported(self) -> None:
         # Nothing is being removed, so the entry is dead weight. Held to the
         # same standard as a glob that matches no file.
         head = self._spec()
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
-        model = compute_resolution(head)
-        assert stale_transfers([], head, model.label_to_team()) == ["lib/ (@docs)"]
+        teams = compute_resolution(head).label_to_team()
+        assert describe_transfers(unmatched_transfers([], head, teams)) == [
+            "lib/ (@docs)"
+        ]
+
+    def test_landed_hand_off_does_not_block_its_own_base(self) -> None:
+        # After the hand-off merges, the push-to-main run has HEAD as its own
+        # merge-base, so no removal is observable and the entry reads as
+        # inert. It must warn rather than block, or every hand-off would
+        # guarantee a red main the moment it lands.
+        head = self._spec()
+        head["shared"] = []
+        head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
+        removals = weakened_declarations(head, head, ["lib/a.rs"])
+        teams = compute_resolution(head).label_to_team()
+        unmatched = unmatched_transfers(removals, head, teams)
+        inherited = unmatched_transfers(removals, head, teams)
+        assert removals == []
+        assert unmatched - inherited == set()
+        assert unmatched & inherited != set()
 
     def test_strict_gate_blocks_on_a_weakened_declaration(self) -> None:
         base = self._spec()
