@@ -489,9 +489,12 @@ where
         }
 
         let request_context = request.context();
-        let operation = affinity
-            .acquire_with_context(&session_id, explicit, request_context.as_ref())
-            .await?;
+        let operation = await_with_phase_policy(
+            request_context.as_ref(),
+            phase,
+            affinity.acquire_with_context(&session_id, explicit, request_context.as_ref()),
+        )
+        .await??;
         let target = operation.target();
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
@@ -503,9 +506,12 @@ where
                     }) =>
             {
                 operation.invalidate();
-                let retry = affinity
-                    .acquire_with_context(&session_id, None, request_context.as_ref())
-                    .await?;
+                let retry = await_with_phase_policy(
+                    request_context.as_ref(),
+                    phase,
+                    affinity.acquire_with_context(&session_id, None, request_context.as_ref()),
+                )
+                .await??;
                 match select(retry.target()).await {
                     Ok(selection) => Ok((selection, Some(retry))),
                     Err(retry_error) => Err(retry_error),
