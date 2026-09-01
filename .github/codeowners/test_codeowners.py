@@ -34,6 +34,7 @@ from build_codeowners import (  # noqa: E402
     shared_additivity_violations,
     split_coverage,
     strict_failure,
+    weakened_declarations,
 )
 from codeowners_match import (  # noqa: E402
     Area,
@@ -963,6 +964,91 @@ class TestOwnershipContracts:
             True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None
         )
         assert message and "lost declared owners" in message
+
+
+class TestWeakenedDeclarations:
+    """A grant deleted from areas.yaml while its files stay in the tree.
+
+    The contract check catches an owner lost to last-match-wins precedence
+    while its declaration survives. This is the inverse case, where the
+    declaration goes and takes its own enforcement with it.
+    """
+
+    def _spec(self) -> dict:
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": ["lib/"],
+                },
+                {"label": "docs", "github_team": "@docs", "path_globs": []},
+            ],
+            "shared": [{"glob": "lib/", "owners": ["runtime", "docs"]}],
+        }
+
+    def test_removing_a_shared_grant_is_reported(self) -> None:
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        weakened = weakened_declarations(base, head, ["lib/a.rs"])
+        assert len(weakened) == 1
+        assert weakened[0].glob == "lib/"
+        assert weakened[0].lost == ("@docs",)
+
+    def test_removing_a_required_owner_is_reported(self) -> None:
+        base = self._spec()
+        base["shared"] = []
+        base["required_owners"] = [{"glob": "lib/", "owners": ["docs"]}]
+        head = self._spec()
+        head["shared"] = []
+        assert weakened_declarations(base, head, ["lib/a.rs"]) == []
+
+    def test_pruning_a_grant_whose_files_are_gone_passes(self) -> None:
+        # The deletion PR removed lib/ entirely, so dropping the grant that
+        # covered it is housekeeping rather than an ownership loss.
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        assert weakened_declarations(base, head, ["docs/index.md"]) == []
+
+    def test_reassignment_to_a_new_owner_passes(self) -> None:
+        # Ownership moves from docs to a more specific claim. The files stay
+        # owned, so nothing was silently dropped.
+        base = self._spec()
+        head = self._spec()
+        head["areas"].append(
+            {"label": "perf", "github_team": "@perf", "path_globs": ["lib/"]}
+        )
+        head["shared"] = [{"glob": "lib/", "owners": ["runtime", "docs", "perf"]}]
+        assert weakened_declarations(base, head, ["lib/a.rs"]) == []
+
+    def test_redundant_grant_removal_passes(self) -> None:
+        # The shared line only restated what runtime's own area glob already
+        # granted, so deleting it changes nothing about who owns lib/.
+        # Declaration removal is the trigger, not the verdict.
+        base = self._spec()
+        base["shared"] = [{"glob": "lib/", "owners": ["runtime"]}]
+        head = self._spec()
+        head["shared"] = []
+        assert weakened_declarations(base, head, ["lib/a.rs"]) == []
+
+    def test_missing_base_policy_skips_rather_than_blocks(self) -> None:
+        # No reference frame means the gate cannot judge. It must skip, so a
+        # bug in it can never block the change that removes it.
+        assert weakened_declarations(None, self._spec(), ["lib/a.rs"]) == []
+
+    def test_strict_gate_blocks_on_a_weakened_declaration(self) -> None:
+        base = self._spec()
+        head = self._spec()
+        head["shared"] = []
+        weakened = weakened_declarations(base, head, ["lib/a.rs"])
+        failure = strict_failure(
+            True, CoverageGate([], []), None, [], [], None, [], weakened
+        )
+        assert failure is not None
+        assert "removed while their files remain tracked" in failure
 
 
 class TestSharedAdditivity:
