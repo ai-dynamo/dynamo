@@ -124,9 +124,9 @@ enum ReadinessWatch {
 
 impl ReadinessWatch {
     fn from_cluster(pod_info: &PodInfo, kube_client: KubeClient) -> Self {
-        let labels = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+        let labels = Config::default().labels(
+            "nvidia.com/dynamo-discovery-backend=kubernetes,nvidia.com/dynamo-discovery-enabled=true",
+        );
 
         match pod_info.mode {
             KubeDiscoveryMode::Pod => {
@@ -337,10 +337,14 @@ impl DiscoveryDaemon {
             ("readiness", readiness_task),
             ("DynamoWorkerMetadata", cr_task),
         ] {
-            // A JoinError means the runtime is already tearing that task down, so
-            // the watch is released either way; shutdown is not an error path.
+            // The watch is released either way; a cancellation is expected during
+            // shutdown, while a panic merits a visible warning.
             if let Err(e) = task.await {
-                tracing::debug!(kind, "Reflector task did not exit cleanly: {e}");
+                if e.is_panic() {
+                    tracing::warn!(kind, "Reflector task panicked: {e}");
+                } else {
+                    tracing::debug!(kind, "Reflector task did not exit cleanly: {e}");
+                }
             }
         }
 
