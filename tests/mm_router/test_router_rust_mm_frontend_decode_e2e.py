@@ -61,7 +61,6 @@ BLOCK_SIZE = 16
 NAMESPACE = "router-rust-mm-fed"
 
 pytestmark = [
-    pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
@@ -373,12 +372,14 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
 @pytest.fixture(scope="module")
 def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
     (port,) = allocate_ports(count=1, start_port=18700)
-    video_bytes = (
-        Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media/240p_100.mp4"
-    ).read_bytes()
+    media_dir = Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media"
+    video_bytes = (media_dir / "240p_100.mp4").read_bytes()
+    secondary_video_bytes = (media_dir / "triangle_240p_10_h264.mp4").read_bytes()
     media_map = {
         "/video_A.mp4": video_bytes,
         "/video_A_alias.mp4": video_bytes,
+        "/video_B.mp4": secondary_video_bytes,
+        "/video_B_alias.mp4": secondary_video_bytes,
     }
     server = HTTPServer(("127.0.0.1", port), _make_image_handler(media_map))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -387,6 +388,8 @@ def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
         yield {
             "primary": f"http://127.0.0.1:{port}/video_A.mp4",
             "alias": f"http://127.0.0.1:{port}/video_A_alias.mp4",
+            "secondary": f"http://127.0.0.1:{port}/video_B.mp4",
+            "secondary_alias": f"http://127.0.0.1:{port}/video_B_alias.mp4",
         }
     finally:
         server.shutdown()
@@ -394,6 +397,7 @@ def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
         thread.join(timeout=5)
 
 
+@pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_frontend_decode_content_hash_collides_across_urls(
     start_frontend_decode_services,
@@ -441,6 +445,7 @@ def test_frontend_decode_content_hash_collides_across_urls(
     )
 
 
+@pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_frontend_decode_logs_decoded_bytes_source(
     start_frontend_decode_services,
@@ -470,39 +475,75 @@ def test_frontend_decode_logs_decoded_bytes_source(
     )
 
 
+@pytest.mark.pre_merge
 @pytest.mark.timeout(300)
 def test_frontend_decoded_video_routes_by_sampled_content(
     start_frontend_decode_services,
     predownload_models,
     http_video_server_with_alias,
 ):
+    """Cover video identity reuse and separation under one model startup.
+
+    CI runs each selected test in its own pytest process, so keeping both video
+    scenarios here avoids paying the vLLM startup cost twice in pre-merge.
+    """
     frontend_port, router_proc = start_frontend_decode_services
-    overlap_1, total_1, _ = _send(
+    overlap_a1, total_a1, _ = _send(
         frontend_port,
         router_proc,
         _build_video_payload(http_video_server_with_alias["primary"]),
-        "fed_video_primary",
+        "fed_video_a_primary",
     )
-    overlap_2, total_2, data_2 = _send(
+    overlap_a2, total_a2, data_a2 = _send(
         frontend_port,
         router_proc,
         _build_video_payload(http_video_server_with_alias["alias"]),
-        "fed_video_alias",
+        "fed_video_a_alias",
     )
 
-    assert total_1 > 1 and total_2 > 1
-    assert overlap_2 > overlap_1, (
+    assert total_a1 > 1 and total_a2 > 1
+    assert overlap_a2 > overlap_a1, (
         "frontend-decoded aliases of the same video should share the sampled "
-        f"video routing key, got {overlap_1}/{total_1} then {overlap_2}/{total_2}"
+        f"video routing key, got {overlap_a1}/{total_a1} then "
+        f"{overlap_a2}/{total_a2}"
     )
-    cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
+    cached_a2 = (data_a2.get("usage", {}).get("prompt_tokens_details") or {}).get(
         "cached_tokens"
     )
-    prompt_tokens_2 = data_2.get("usage", {}).get("prompt_tokens", 0)
-    assert cached_2 is not None and cached_2 > prompt_tokens_2 // 2
+    prompt_tokens_a2 = data_a2.get("usage", {}).get("prompt_tokens", 0)
+    assert cached_a2 is not None and cached_a2 > prompt_tokens_a2 // 2
+
+    overlap_b1, total_b1, _ = _send(
+        frontend_port,
+        router_proc,
+        _build_video_payload(http_video_server_with_alias["secondary"]),
+        "fed_video_b_primary",
+    )
+    overlap_b2, total_b2, data_b2 = _send(
+        frontend_port,
+        router_proc,
+        _build_video_payload(http_video_server_with_alias["secondary_alias"]),
+        "fed_video_b_alias",
+    )
+
+    assert total_b1 > 1 and total_b2 > 1
+    assert overlap_b1 < overlap_a2, (
+        "a distinct decoded video must not reuse video A's full routing prefix, "
+        f"got A warm={overlap_a2}/{total_a2}, B cold={overlap_b1}/{total_b1}"
+    )
+    assert overlap_b2 > overlap_b1 and overlap_b2 >= total_b2 - 1, (
+        "repeating video B through an alias URL should reuse its complete cached "
+        f"prefix, got {overlap_b1}/{total_b1} then {overlap_b2}/{total_b2}"
+    )
+    cached_b2 = (data_b2.get("usage", {}).get("prompt_tokens_details") or {}).get(
+        "cached_tokens"
+    )
+    prompt_tokens_b2 = data_b2.get("usage", {}).get("prompt_tokens", 0)
+    assert cached_b2 is not None and cached_b2 > prompt_tokens_b2 // 2
     assert "video routing metadata resolved" in router_proc.read_logs()
 
 
+@pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_frontend_decoded_mixed_media_preserves_i_v_i_order(
     start_frontend_decode_services,
