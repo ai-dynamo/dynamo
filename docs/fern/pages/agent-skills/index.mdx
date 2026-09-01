@@ -1,0 +1,38 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Agent Skills
+subtitle: Repository-native skills that AI coding agents use to develop, deploy, operate, and optimize Dynamo.
+---
+
+Dynamo includes agent skills for development, documentation, deployment, operations, and
+performance optimization. Compatible coding agents discover the skills from the repository and
+select them based on your request. Describe the outcome you want; you do not normally need to name
+a skill explicitly.
+
+The canonical sources live in
+[`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills). The `skills/` and
+`.claude/skills/` directories are compatibility symlinks to the same content.
+
+<CardGroup cols={3}>
+  <Card title="Development and Documentation" icon="code" href="development.mdx">
+    Investigate bugs, file enhancement proposals, review Rust changes, audit CI, and author docs.
+  </Card>
+  <Card title="Deployment and Operations" icon="screwdriver-wrench" href="deployment.mdx">
+    Deploy a recipe, start a router, validate interconnects, and diagnose unhealthy deployments.
+  </Card>
+  <Card title="Performance Optimization" icon="gauge-high" href="optimization.mdx">
+    Run the evidence-driven loop that benchmarks a baseline and challenges it with candidates.
+  </Card>
+</CardGroup>
+
+## Usage Notes
+
+- **Invoke by intent.** Ask for the result you need, such as deploying a model, investigating a
+  regression, reviewing a pull request, or optimizing against a Service Level Objective (SLO).
+- **Set budgets for optimization.** State GPU-hour, wall-clock, and failed-deployment limits before
+  starting a long-running optimization loop.
+- **Use goal mode for unattended runs.** Answer the agent's workload questions before enabling the
+  harness's goal or budget mode.
+- **Protect credentials.** Do not provide secrets in prompts or allow credentials into generated run
+  artifacts.
