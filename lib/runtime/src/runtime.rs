@@ -517,18 +517,17 @@ impl RuntimeType {
     /// Shut down a uniquely-owned Tokio runtime without allowing its task teardown to block
     /// indefinitely. External handles have no runtime ownership to shut down.
     fn shutdown_owned_timeout(self, timeout: Duration) {
-        let mut runtime_type = ManuallyDrop::new(self);
-        let mut runtime = match unsafe { ManuallyDrop::take(&mut runtime_type) } {
-            RuntimeType::External(_) => return,
-            RuntimeType::Shared(runtime) => runtime,
+        let RuntimeType::Shared(runtime) = &self else {
+            return;
         };
+        let mut runtime = runtime.clone();
+        drop(self);
 
         let Some(manually_dropped_runtime) = Arc::get_mut(&mut runtime) else {
             return;
         };
 
         let tokio_runtime = unsafe { ManuallyDrop::take(manually_dropped_runtime) };
-        drop(runtime);
         tokio_runtime.shutdown_timeout(timeout);
     }
 }
