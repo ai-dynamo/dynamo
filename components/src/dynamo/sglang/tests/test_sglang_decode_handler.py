@@ -4,10 +4,13 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
@@ -2094,3 +2097,98 @@ async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
 
 async def _collect(stream):
     return [item async for item in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_type", [PrefillWorkerHandler, DecodeWorkerHandler])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sampling_options": {"n": 2}},
+        {"n": 2},
+        {"request": {"sampling_options": {"n": 2}}, "sampling_params": {"n": 1}},
+        {"request": {}, "sampling_params": {"n": 2}},
+        {"extra_args": {"sglang_tito": {"sampling_params": {"n": 2}}}},
+        {"request": {"extra_args": {"sglang_tito": {"sampling_params": {"n": 2}}}}},
+    ],
+    ids=[
+        "tokens",
+        "openai",
+        "wrapped-original",
+        "wrapped-params",
+        "native",
+        "wrapped-native",
+    ],
+)
+async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, payload):
+    handler = handler_type.__new__(handler_type)
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler._first_token_source = None
+    handler.engine = SimpleNamespace(async_generate=AsyncMock())
+    handler._generate_bootstrap_room = Mock(return_value=123)
+    handler._get_input_param = Mock(
+        side_effect=AssertionError("input preparation ran before rejection")
+    )
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = 1234
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    original = deepcopy(payload)
+
+    with pytest.raises(
+        HttpError, match="disaggregated serving supports only n=1"
+    ) as error:
+        await anext(handler.generate(payload, context))
+
+    assert error.value.code == 400
+    handler.engine.async_generate.assert_not_awaited()
+    handler._generate_bootstrap_room.assert_not_called()
+    handler._get_input_param.assert_not_called()
+    assert payload == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,n", [(DisaggregationMode.AGGREGATED, 2), (DisaggregationMode.DECODE, 1)]
+)
+async def test_supported_sampling_reaches_engine(mode, n):
+    handler = _new_decode_handler()
+    handler.serving_mode = mode
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunks = [
+        {
+            "index": index,
+            "output_ids": [42],
+            "meta_info": {"id": f"sample-{index}", "finish_reason": {"type": "length"}},
+        }
+        for index in range(n)
+    ]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": n},
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    outputs = [output async for output in handler.generate(request, context)]
+
+    assert [output["index"] for output in outputs] == list(range(n))
+    assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
+    assert all(output["finish_reason"] for output in outputs)
