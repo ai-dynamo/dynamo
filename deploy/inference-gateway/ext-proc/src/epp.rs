@@ -243,17 +243,28 @@ impl Router {
     /// `/v1/completions` bodies; the request kind is discriminated by a
     /// non-empty `messages` array (chat) versus a `prompt` (completions).
     pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
-        let value: serde_json::Value = serde_json::from_str(request_json)?;
-        let has_messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .is_some_and(|messages| !messages.is_empty());
-        if !has_messages && value.get("prompt").is_some() {
-            let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
+        // Discriminate on a shape that materializes neither field: `IgnoredAny`
+        // skips each payload in place, and `Vec<IgnoredAny>` is a vector of ZSTs,
+        // so this pass allocates nothing. Parsing the body into
+        // `serde_json::Value` first would build the whole `messages`/tools tree
+        // just to read two keys, then throw it away -- a second full
+        // materialization of every request on the `pick()` path.
+        #[derive(serde::Deserialize)]
+        struct RequestKind {
+            #[serde(default)]
+            messages: Option<Vec<serde::de::IgnoredAny>>,
+            #[serde(default)]
+            prompt: Option<serde::de::IgnoredAny>,
+        }
+
+        let kind: RequestKind = serde_json::from_str(request_json)?;
+        let has_messages = kind.messages.is_some_and(|messages| !messages.is_empty());
+        if !has_messages && kind.prompt.is_some() {
+            let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
             return self.tokenize_completion(request).await;
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_value(value)?;
+            serde_json::from_str(request_json)?;
         self.tokenize_chat(&request)
     }
 
@@ -306,16 +317,15 @@ impl Router {
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let (tokens, tokens_safe_to_inject) =
-            match completion_prompt_token_ids(&request.inner.prompt) {
-                Some(ids) => (ids, true),
-                None => {
-                    let text = completion_prompt_routing_text(&request.inner.prompt);
-                    let tokens = self.tokenize_completion_text(&request, &text).await?;
-                    let safe = completion_text_tokens_safe_to_inject(&request.inner.prompt);
-                    (tokens, safe)
-                }
-            };
+        let pre_tokenized = completion_prompt_token_ids(&request.inner.prompt);
+        let (tokens, tokens_safe_to_inject) = match pre_tokenized {
+            Some(ids) => (ids, true),
+            None => {
+                // Read the injection verdict before the request is consumed.
+                let safe = completion_text_tokens_safe_to_inject(&request.inner.prompt);
+                (self.tokenize_completion_text(request).await?, safe)
+            }
+        };
 
         Ok((
             tokens,
@@ -334,16 +344,18 @@ impl Router {
     /// would have tokenized itself, so preempting backend tokenization does
     /// not change the generated output.
     ///
-    /// Reuses `request` (already parsed from the client body) with `prompt`
-    /// overwritten to the routing text, instead of serializing a synthetic
-    /// body and re-parsing it.
+    /// Consumes `request` (already parsed from the client body) with `prompt`
+    /// replaced by the routing text, instead of serializing a synthetic body
+    /// and re-parsing it. Takes ownership so the prompt is moved through rather
+    /// than copied: cloning the request here duplicated every field including
+    /// the full prompt -- for a `StringArray` batch, every prompt in the batch
+    /// -- only for the next line to overwrite the one field that was expensive.
     async fn tokenize_completion_text(
         &self,
-        request: &NvCreateCompletionRequest,
-        text: &str,
+        mut request: NvCreateCompletionRequest,
     ) -> Result<Vec<u32>> {
-        let mut request = request.clone();
-        request.inner.prompt = Prompt::String(text.to_string());
+        let prompt = std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new()));
+        request.inner.prompt = Prompt::String(completion_prompt_routing_text(prompt));
         let (tokens, _annotations) = self
             .preprocessor
             .gather_tokens(&request, None, None)
@@ -661,10 +673,12 @@ fn completion_prompt_token_ids(prompt: &Prompt) -> Option<Vec<u32>> {
 /// Routing text for a text completion prompt (the first prompt in a batch).
 /// Returns an empty string for pre-tokenized prompts, which never reach this
 /// path.
-fn completion_prompt_routing_text(prompt: &Prompt) -> String {
+/// Takes the prompt by value so the routing text is moved out rather than
+/// copied; this runs per request, and a batch's first prompt can be large.
+fn completion_prompt_routing_text(prompt: Prompt) -> String {
     match prompt {
-        Prompt::String(text) => text.clone(),
-        Prompt::StringArray(texts) => texts.first().cloned().unwrap_or_default(),
+        Prompt::String(text) => text,
+        Prompt::StringArray(texts) => texts.into_iter().next().unwrap_or_default(),
         Prompt::IntegerArray(_) | Prompt::ArrayOfIntegerArray(_) => String::new(),
     }
 }
@@ -846,16 +860,47 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
     Some(SocketAddr::new(ip, port).to_string())
 }
 
-/// All worker instance IDs `pod` is currently known under: its pod-level
-/// identity, plus each `Ready` container's identity when `container_discovery`
-/// is set (`DYN_KUBE_DISCOVERY_MODE=container`, e.g. intra-pod GMS failover).
-/// `"main"` collapses to the pod identity so it never double-counts, and the
-/// HTTP endpoint stays pod-level either way (see [`pod_endpoint_address`]).
+/// An externally supplied [`Endpoint`] rendered the way [`WorkerEndpointIndex`]
+/// stores addresses, so the two can be compared.
 ///
-/// The gate is load-bearing: under pod discovery a worker registers under its
-/// pod identity alone, so per-container ids would invent phantom workers that
-/// `register_workers` defaults to zero load and zero KV overlap — making them
-/// the most attractive candidates the scheduler sees.
+/// [`Endpoint::address_port`] builds its string with `format!("{ip}:{port}")`,
+/// which leaves an IPv6 literal unbracketed (`fd00::2:8000`), while the index
+/// stores `SocketAddr`-rendered addresses (`[fd00::2]:8000`). Comparing the two
+/// forms directly matches on IPv4 and silently never matches on IPv6, so both
+/// sides go through `SocketAddr` here. Returns `None` for an address or port
+/// that does not parse, which is not a routable endpoint either way.
+fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
+    let ip: IpAddr = endpoint.address.parse().ok()?;
+    let port: u16 = endpoint.port.parse().ok()?;
+    Some(SocketAddr::new(ip, port).to_string())
+}
+
+/// The worker instance IDs `pod` is currently known under, per discovery mode:
+/// its pod-level identity under pod discovery, or each `Ready` container's
+/// identity under container discovery (`DYN_KUBE_DISCOVERY_MODE=container`,
+/// e.g. intra-pod GMS failover). The HTTP endpoint stays pod-level either way
+/// (see [`pod_endpoint_address`]).
+///
+/// The mode is exclusive, and so are the identities. A worker process picks one
+/// `KubeDiscoveryTarget` from its own mode, so under container discovery
+/// nothing registers under the bare pod identity — emitting it there would
+/// invent a worker that `register_workers` upserts at zero load and zero KV
+/// overlap, making it the most attractive candidate the scheduler sees.
+/// `"main"` hashes to the pod identity (`hash_container_name`), so a pod whose
+/// main container is Ready still contributes that id through the container
+/// path; one whose main container is *not* Ready correctly contributes nothing
+/// for it.
+///
+/// Symmetrically, under pod discovery per-container ids would be the phantoms,
+/// which is why the container arm is gated at all.
+///
+/// Not fixed here: under container discovery this still trusts every `Ready`
+/// container to be a Dynamo worker, matching `extract_ready_containers` in
+/// `lib/runtime`. A pod carrying a Ready non-worker sidecar would contribute an
+/// id for it. Nothing in the Pod distinguishes the two — the port name this
+/// file keys on is the generic `"http"` — so filtering here would risk dropping
+/// real workers; the authoritative fix is to intersect against the router's
+/// registered worker set.
 ///
 /// An unnamed pod yields nothing at all, container ids included:
 /// `hash_container_name("", …)` is the same value for every unnamed pod, so
@@ -866,7 +911,7 @@ fn pod_worker_ids(
 ) -> impl Iterator<Item = u64> + '_ {
     let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
     let named = !pod_name.is_empty();
-    let pod_id = named.then(|| hash_pod_name(pod_name));
+    let pod_id = (named && !container_discovery).then(|| hash_pod_name(pod_name));
     let container_ids = (container_discovery && named)
         .then_some(pod.status.as_ref())
         .flatten()
@@ -1047,6 +1092,17 @@ async fn run_pod_reflector(
             Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => continue,
             Some(Ok(watcher::Event::InitDone)) => {
                 write_index(&index).rebuild(&store);
+                // Raise readiness here, and only here: this task owns the
+                // reflector's whole lifecycle, so it is the only writer that
+                // cannot be reordered against the stream-end/panic lowering
+                // below. Raising it from the startup waiter instead let a
+                // reflector that died right after the initial LIST be
+                // overwritten back to ready -- exactly the ready-but-empty pod
+                // the lowering exists to prevent, since `wait_until_ready()`
+                // resolves when the store applies `InitDone`, before this arm
+                // runs. Ordering it after `rebuild` also closes the lesser
+                // window where a request passed the gate and saw an empty index.
+                ready.store(true, Ordering::Release);
             }
             Some(Ok(watcher::Event::Apply(pod))) => {
                 write_index(&index).upsert(&pod);
@@ -1112,42 +1168,26 @@ async fn spawn_pod_reflector(
     ));
 
     // Wait for the initial LIST to populate the store so the first inference
-    // request after startup doesn't race against an empty cache. Bounded so
-    // we don't block startup forever if the API server is slow.
+    // request after startup doesn't race against an empty cache. Bounded so we
+    // don't block startup forever if the API server is slow.
+    //
+    // This only *observes* the sync; readiness is raised by the reflector task
+    // at `InitDone` (see `run_pod_reflector`). Storing it here as well would
+    // make two independent tasks write one flag, and the loser of that race
+    // decides -- so a reflector that died immediately after the initial LIST
+    // could be marked ready by this task afterwards. Nothing is needed on the
+    // timeout path either: whenever `InitDone` does arrive, the reflector
+    // raises readiness itself, so the pod recovers without a second waiter.
     match tokio::time::timeout(Duration::from_secs(30), store_for_wait.wait_until_ready()).await {
-        Ok(Ok(())) => {
-            ready.store(true, Ordering::Release);
-            tracing::info!("Pod reflector initial LIST sync complete");
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(
-                error = %e,
-                "Pod reflector writer was dropped before initial LIST completed; \
-                 returning 503 until ready"
-            );
-        }
-        Err(_) => {
-            tracing::warn!(
-                "Pod reflector initial LIST sync timed out after 30s; returning 503 until ready"
-            );
-            let store_for_background_wait = store_for_wait.clone();
-            let ready_for_background_wait = ready.clone();
-            tokio::spawn(async move {
-                match store_for_background_wait.wait_until_ready().await {
-                    Ok(()) => {
-                        ready_for_background_wait.store(true, Ordering::Release);
-                        tracing::info!("Pod reflector became ready after startup timeout");
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Pod reflector writer dropped while waiting in background; \
-                             store will remain not-ready"
-                        );
-                    }
-                }
-            });
-        }
+        Ok(Ok(())) => tracing::info!("Pod reflector initial LIST sync complete"),
+        Ok(Err(e)) => tracing::warn!(
+            error = %e,
+            "Pod reflector writer was dropped before initial LIST completed; \
+             returning 503 until ready"
+        ),
+        Err(_) => tracing::warn!(
+            "Pod reflector initial LIST sync timed out after 30s; returning 503 until ready"
+        ),
     }
 
     Ok((index, ready))
@@ -1295,10 +1335,44 @@ impl EndpointPicker for Router {
                 });
             }
 
-            let wm: Vec<(u64, &Endpoint)> = subset_filtered
-                .iter()
-                .map(|ep| (hash_pod_name(&ep.pod_name), *ep))
-                .collect();
+            // Resolve each supplied endpoint to the worker IDs the reflector
+            // actually holds at that address, rather than re-deriving
+            // `hash_pod_name(&ep.pod_name)`.
+            //
+            // Only pod discovery registers a worker under its pod identity.
+            // Under container discovery each engine container registers under
+            // its own (`KubeDiscoveryTarget::Container`), so a hand-built pod
+            // hash names a worker present in no registry: `register_workers`
+            // would upsert it at zero load and zero KV overlap, making it the
+            // scheduler's most attractive candidate, and the reverse lookup
+            // below would then fail to match and silently forward to
+            // `endpoints[0]`. The index is the one place that knows which
+            // identity scheme is in effect (see `pod_worker_ids`), so ask it.
+            let wm: Vec<(u64, &Endpoint)> = {
+                let index = read_index(&self.worker_index);
+                let mut wm = Vec::new();
+                for ep in &subset_filtered {
+                    let Some(addr) = indexed_endpoint_address(ep) else {
+                        continue;
+                    };
+                    wm.extend(
+                        index
+                            .endpoints
+                            .iter()
+                            .filter(|(_, indexed)| **indexed == addr)
+                            .map(|(id, _)| (*id, *ep)),
+                    );
+                }
+                wm
+            };
+            if wm.is_empty() {
+                tracing::warn!(
+                    supplied_endpoints = subset_filtered.len(),
+                    "No supplied endpoint resolves to a discovered worker; \
+                     refusing to route to an unidentifiable backend"
+                );
+                return Err(PickError::NoEndpoints);
+            }
             let ids: HashSet<u64> = wm.iter().map(|(id, _)| *id).collect();
             (Some(ids), wm)
         };
@@ -1806,7 +1880,7 @@ mod tests {
         .unwrap();
 
         // Mirrors `Router::tokenize_completion`: route on prompt 1's tokens.
-        let routing_text = completion_prompt_routing_text(&batch_request.inner.prompt);
+        let routing_text = completion_prompt_routing_text(batch_request.inner.prompt.clone());
         assert_eq!(routing_text, prompt1);
         let routing_request: NvCreateCompletionRequest = serde_json::from_str(
             &serde_json::json!({"model": "default", "prompt": routing_text}).to_string(),
@@ -1884,7 +1958,7 @@ mod tests {
             serde_json::from_str(r#"{"model": "test", "prompt": "hello world"}"#).unwrap();
         assert_eq!(completion_prompt_token_ids(&single.inner.prompt), None);
         assert_eq!(
-            completion_prompt_routing_text(&single.inner.prompt),
+            completion_prompt_routing_text(single.inner.prompt.clone()),
             "hello world"
         );
 
@@ -1892,7 +1966,7 @@ mod tests {
             serde_json::from_str(r#"{"model": "test", "prompt": ["first", "second"]}"#).unwrap();
         assert_eq!(completion_prompt_token_ids(&batched.inner.prompt), None);
         assert_eq!(
-            completion_prompt_routing_text(&batched.inner.prompt),
+            completion_prompt_routing_text(batched.inner.prompt.clone()),
             "first"
         );
     }
@@ -1973,21 +2047,27 @@ mod tests {
         }
     }
 
-    /// Only currently-`Ready` engine containers contribute a live worker_id;
-    /// a demoted/crashed standby must never be matched, and the pod-level
-    /// identity is always present alongside per-container ones.
+    /// Only currently-`Ready` engine containers contribute a live worker_id; a
+    /// demoted/crashed standby must never be matched. The pod-level identity is
+    /// *not* among them: a container-mode process registers as
+    /// `KubeDiscoveryTarget::Container` (`CONTAINER_NAME` is required), so
+    /// nothing in a failover pod ever registers the bare pod identity, and
+    /// emitting it would put a zero-load phantom into `allowed_worker_ids`.
     #[test]
-    fn pod_worker_ids_includes_pod_and_ready_containers_only() {
+    fn pod_worker_ids_includes_ready_containers_only() {
         let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
         let ids: HashSet<u64> = pod_worker_ids(&pod, true).collect();
 
-        assert!(ids.contains(&hash_pod_name("worker-0")));
+        assert!(
+            !ids.contains(&hash_pod_name("worker-0")),
+            "no container-mode worker registers under the bare pod identity"
+        );
         assert!(ids.contains(&hash_container_name("worker-0", "engine-0")));
         assert!(
             !ids.contains(&hash_container_name("worker-0", "engine-1")),
             "the not-ready standby engine must not be a live worker_id"
         );
-        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.len(), 1);
     }
 
     /// Builds an ordinary pod-discovery worker pod: a `main` engine container
@@ -2079,6 +2159,34 @@ mod tests {
             assert!(ids.contains(&hash_container_name("worker-0", sidecar)));
         }
         assert_eq!(ids.len(), 3);
+    }
+
+    /// Under container discovery a worker registers under its *container*
+    /// identity, so the bare pod identity is not a worker. It is only covered
+    /// because `"main"` hashes to it -- when main is not Ready, nothing may
+    /// contribute it, or the scheduler gains a zero-load phantom for a pod
+    /// whose main container is down.
+    #[test]
+    fn pod_worker_ids_omits_the_pod_identity_when_main_is_not_ready() {
+        let mut pod = pod_mode_worker_pod();
+        for cs in pod
+            .status
+            .as_mut()
+            .and_then(|s| s.container_statuses.as_mut())
+            .expect("fixture has container statuses")
+        {
+            if cs.name == "main" {
+                cs.ready = false;
+            }
+        }
+
+        let ids: HashSet<u64> = pod_worker_ids(&pod, true).collect();
+
+        assert!(
+            !ids.contains(&hash_pod_name("worker-0")),
+            "the pod identity must not be advertised when no Ready container claims it"
+        );
+        assert_eq!(ids.len(), 2);
     }
 
     /// End of the chain that made this matter: the index feeds
@@ -2314,6 +2422,70 @@ mod tests {
         assert!(!ready2.load(Ordering::Acquire));
     }
 
+    /// An externally supplied endpoint must resolve to the identity the
+    /// reflector actually holds. Under container discovery that is the engine
+    /// container's id, never `hash_pod_name` -- deriving the latter names a
+    /// worker no registry contains, which `register_workers` then upserts at
+    /// zero load as the scheduler's most attractive candidate.
+    #[test]
+    fn external_endpoint_resolves_to_the_indexed_container_identity() {
+        let mut index = WorkerEndpointIndex::new(true);
+        index.upsert(&failover_pod(&[("engine-0", true)], true));
+
+        let endpoint = Endpoint {
+            pod_name: "worker-0".to_string(),
+            address: "10.0.0.1".to_string(),
+            port: "8000".to_string(),
+            labels: HashMap::new(),
+        };
+        let addr = indexed_endpoint_address(&endpoint).expect("endpoint parses");
+
+        let resolved: Vec<u64> = index
+            .endpoints
+            .iter()
+            .filter(|(_, indexed)| **indexed == addr)
+            .map(|(id, _)| *id)
+            .collect();
+
+        assert_eq!(resolved, vec![hash_container_name("worker-0", "engine-0")]);
+        assert!(
+            !resolved.contains(&hash_pod_name("worker-0")),
+            "the pod identity is not a registered worker under container discovery"
+        );
+    }
+
+    /// `Endpoint::address_port` does not bracket IPv6, while the index stores
+    /// `SocketAddr`-rendered addresses. Comparing the raw forms matches on
+    /// IPv4 and silently never matches on IPv6, so the normalization has to
+    /// agree with what the index stores.
+    #[test]
+    fn indexed_endpoint_address_brackets_ipv6_to_match_the_index() {
+        let endpoint = Endpoint {
+            pod_name: "worker-0".to_string(),
+            address: "fd00::2".to_string(),
+            port: "8000".to_string(),
+            labels: HashMap::new(),
+        };
+
+        assert_eq!(
+            indexed_endpoint_address(&endpoint).as_deref(),
+            Some("[fd00::2]:8000")
+        );
+        assert_ne!(
+            endpoint.address_port(),
+            "[fd00::2]:8000",
+            "guards the reason this helper exists: the raw form is unbracketed"
+        );
+
+        let mut index = WorkerEndpointIndex::default();
+        index.upsert(&simple_pod("worker-0", "fd00::2"));
+        assert_eq!(
+            index.endpoints.get(&hash_pod_name("worker-0")).cloned(),
+            indexed_endpoint_address(&endpoint),
+            "normalized endpoint must equal what the index stored"
+        );
+    }
+
     /// A minimal pod exposing an `http`-named port, for
     /// [`WorkerEndpointIndex`] tests that don't need failover's
     /// multi-container shape.
@@ -2346,16 +2518,17 @@ mod tests {
     }
 
     /// Upserting a pod maps every id `pod_worker_ids` reports for it to its
-    /// resolved endpoint.
+    /// resolved endpoint -- container identities under container discovery, and
+    /// not the pod identity, which no container-mode worker registers under.
     #[test]
-    fn worker_index_upsert_maps_pod_and_container_ids_to_the_pod_endpoint() {
+    fn worker_index_upsert_maps_container_ids_to_the_pod_endpoint() {
         let mut index = WorkerEndpointIndex::new(true);
         let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
         index.upsert(&pod);
 
-        assert_eq!(
-            index.endpoints.get(&hash_pod_name("worker-0")),
-            Some(&"10.0.0.1:8000".to_string())
+        assert!(
+            !index.endpoints.contains_key(&hash_pod_name("worker-0")),
+            "the pod identity is not a worker under container discovery"
         );
         assert_eq!(
             index
@@ -2398,7 +2571,12 @@ mod tests {
                 .contains_key(&hash_container_name("worker-0", "engine-1")),
             "demoting engine-1 must retract its stale index entry"
         );
-        assert!(index.endpoints.contains_key(&hash_pod_name("worker-0")));
+        assert!(
+            index
+                .endpoints
+                .contains_key(&hash_container_name("worker-0", "engine-0")),
+            "the still-Ready engine keeps its entry"
+        );
     }
 
     /// Deleting a pod drops every id it had registered, and only those ids —
