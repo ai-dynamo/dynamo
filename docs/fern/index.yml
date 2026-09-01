@@ -152,6 +152,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: pages/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: MatrixHub
+                path: pages/kubernetes/model-deployment/model-loading/matrixhub.md
 
       - section: KV-Aware Routing
         icon: route
