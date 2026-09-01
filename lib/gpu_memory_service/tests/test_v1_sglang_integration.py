@@ -39,12 +39,12 @@ _RELEASE_MEMORY_OCCUPATION_TARGET = (
     "sglang.srt.managers.scheduler_components.weight_updater."
     "SchedulerWeightUpdaterManager.release_memory_occupation"
 )
-_CREATE_DSA_INDEX_BUFFERS_TARGET = (
-    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers"
+_CREATE_DSA_INDEX_KEY_CACHE_TARGET = (
+    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache"
 )
-_LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET = (
+_LAYER_SPLIT_DSA_INDEX_KEY_CACHE_TARGET = (
     "sglang.srt.mem_cache.dsa_cache_layer_split."
-    "LayerSplitDSATokenToKVPool._create_index_buffers"
+    "LayerSplitDSATokenToKVPool._create_index_key_cache"
 )
 
 
@@ -74,8 +74,8 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
         _INITIAL_MODEL_LOAD_TARGET,
         _INIT_ALL_CUDA_GRAPHS_TARGET,
         _FACTORY_TARGET,
-        _CREATE_DSA_INDEX_BUFFERS_TARGET,
-        _LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET,
+        _CREATE_DSA_INDEX_KEY_CACHE_TARGET,
+        _LAYER_SPLIT_DSA_INDEX_KEY_CACHE_TARGET,
         _RELEASE_MEMORY_OCCUPATION_TARGET,
     }
     assert hook_types[_INIT_ALL_CUDA_GRAPHS_TARGET] is HookType.BEFORE

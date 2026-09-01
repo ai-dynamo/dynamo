@@ -77,7 +77,7 @@ def register_gms_v1_plugin() -> None:
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         return
 
-    def around_create_dsa_index_buffers(original, *args, **kwargs):
+    def around_create_dsa_index_key_cache(original, *args, **kwargs):
         with _adapter().region("kv_cache"):
             return original(*args, **kwargs)
 
@@ -110,15 +110,15 @@ def register_gms_v1_plugin() -> None:
         HookType.AFTER,
     )
     HookRegistry.register(
-        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
-        around_create_dsa_index_buffers,
+        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache",
+        around_create_dsa_index_key_cache,
         HookType.AROUND,
     )
     # Layer-split DSA overrides the parent method, so the parent hook does not
-    # wrap index_k_with_scale_buffer or remote_index_k_with_scale_buffer.
+    # wrap its index cache or remote buffer.
     HookRegistry.register(
         "sglang.srt.mem_cache.dsa_cache_layer_split."
-        "LayerSplitDSATokenToKVPool._create_index_buffers",
-        around_create_dsa_index_buffers,
+        "LayerSplitDSATokenToKVPool._create_index_key_cache",
+        around_create_dsa_index_key_cache,
         HookType.AROUND,
     )
