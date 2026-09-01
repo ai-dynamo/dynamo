@@ -52,6 +52,15 @@ def dgdr_name_env(monkeypatch):
     monkeypatch.setenv("DGDR_NAME", "test-dgdr")
 
 
+@pytest.fixture(autouse=True)
+def remote_code_detection(monkeypatch):
+    """Keep profiler integration tests independent of Hugging Face access."""
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
+        lambda _model: False,
+    )
+
+
 def _load_dgdr(yaml_path) -> DynamoGraphDeploymentRequestSpec:
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
@@ -501,7 +510,7 @@ def _run_mocked_thorough(dgdr, ops, backend: str):
     thorough_patches = _make_thorough_patches(backend)
     kv_patch = _patch_kv_cache_log(backend)
     trust_patch = patch(
-        "dynamo.profiler.utils.dgd_materialization."
+        "dynamo.profiler.utils.dgd_remote_code."
         "model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     )
@@ -530,9 +539,10 @@ def mock_dgd_override_engine(monkeypatch) -> MagicMock:
         return result
 
     engine = MagicMock(side_effect=return_marked_copy)
+    monkeypatch.setattr("dynamo.profiler.profile_sla.apply_dgd_overrides", engine)
+    monkeypatch.setattr("dynamo.profiler.thorough.apply_dgd_overrides", engine)
     monkeypatch.setattr(
-        "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
-        engine,
+        "dynamo.profiler.utils.dgd_generation.apply_dgd_overrides", engine
     )
     return engine
 

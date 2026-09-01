@@ -263,6 +263,11 @@ class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
     @classmethod
+    def apply_runtime_defaults(cls, config: dict) -> dict:
+        """Enable chunked prefill required by generated TRT-LLM deployments."""
+        return enable_trtllm_chunked_prefill(config)
+
+    @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
         return load_dgd_template(cls.BACKEND, mode)
 

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import importlib
 import json
 import logging
@@ -46,16 +47,19 @@ from dynamo.profiler.utils.config import (
     set_argument_value,
     set_unique_env_value,
 )
-from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
+from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
+    inject_tolerations_into_dgd,
     is_kv_router_enabled,
     is_mocker_enabled,
     is_planner_enabled,
     needs_mocker_aic_perf_model,
     needs_profile_data,
+    resolve_model_path,
 )
 from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
@@ -107,29 +111,30 @@ def assemble_final_config(
     aic_spec: Optional[AICInterpolationSpec] = None,
     aic_perf_model: Optional[AICPerfModelSpec] = None,
     resolved_backend: Optional[str] = None,
+    job_tolerations: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
-    1. **TRT-LLM runtime defaults** — enable chunked prefill on generated
-       TRT-LLM workers so their token budget may be smaller than the request ISL.
-    2. **Mocker** — swap the base to the mocker DGD template if enabled.
-    3. **vLLM self-benchmark** — when the resolved backend is vLLM, set
+    1. **Mocker** — swap the base to the mocker DGD template if enabled.
+    2. **vLLM self-benchmark** — when the resolved backend is vLLM, set
        ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
-    4. **KV router** — configure the frontend for KV-cache-aware routing when
+    3. **KV router** — configure the frontend for KV-cache-aware routing when
        ``features.kvRouter.enabled`` is true.
-    5. **Planner** — inject the Planner service + planner-config ConfigMap.
+    4. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
        initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
-    6. **Profile data** — attach interpolation-data ConfigMap when mocker
+    5. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
        were produced on disk; rapid-mode deployments never emit it (the
        planner uses AIC in-process or ``get_perf_metrics`` instead), and
        agg picks skip interpolation entirely.
+    6. **Execution options** — apply the runtime version, DGD override,
+       profiling-job tolerations, and remote-code trust policy.
     """
     if not dgd_config:
         return dgd_config
@@ -139,26 +144,18 @@ def assemble_final_config(
     kv_router = is_kv_router_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
-    if not mocker and resolved_backend == "trtllm":
-        enable_trtllm_chunked_prefill(dgd_config)
-
-    if not mocker and not planner:
-        if kv_router:
-            enable_kv_router(dgd_config)
-        apply_runtime_version_override(dgdr, dgd_config)
-        return dgd_config
-
-    # Save picked config for auditing
-    dgd_config_path = f"{ops.output_dir}/picked_dgd_config.yaml"
-    with open(dgd_config_path, "w") as f:
-        yaml.safe_dump(dgd_config, f, sort_keys=False)
+    if mocker or planner:
+        # Save picked config for auditing before optional features are applied.
+        dgd_config_path = f"{ops.output_dir}/picked_dgd_config.yaml"
+        with open(dgd_config_path, "w") as f:
+            yaml.safe_dump(dgd_config, f, sort_keys=False)
 
     # Step 1: choose base config
     if mocker:
         logger.info("Mocker enabled — using mocker DGD as base.")
         base = generate_mocker_config(dgdr, aic_spec=aic_spec)
     else:
-        base = dgd_config
+        base = copy.deepcopy(dgd_config)
 
     if kv_router:
         enable_kv_router(base)
@@ -193,6 +190,13 @@ def assemble_final_config(
             config_maps.append(profile_cm)
 
     apply_runtime_version_override(dgdr, base)
+    dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
+    if dgd_override:
+        base = apply_dgd_overrides(base, dgd_override)
+    if job_tolerations:
+        base = inject_tolerations_into_dgd(base, job_tolerations)
+    base = apply_remote_code_policy(base, resolved_backend, resolve_model_path(dgdr))
+
     if config_maps:
         return config_maps + [base]
     return base

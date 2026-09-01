@@ -15,6 +15,7 @@
 
 """Profiler main entry point."""
 
+import copy
 import logging
 import os
 from typing import Any
@@ -30,17 +31,14 @@ from dynamo.profiler.thorough import run_thorough
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
-from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
     build_aic_perf_model_spec,
 )
-from dynamo.profiler.utils.dgd_materialization import (
-    DGDMaterializationPurpose,
-    materialize_dgd,
-)
+from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
+from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
@@ -54,6 +52,7 @@ from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
     get_profiling_job_tolerations,
+    inject_tolerations_into_dgd,
     needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
@@ -466,19 +465,22 @@ async def run_profile(
                     chosen_exp,
                 )
             else:
-                # Materialize an independent interpolation input while preserving
-                # the clean picked blueprint for final assembly. Overrides can
-                # append worker arguments, so repeated application is not safe.
-                interpolation_dgd_config = materialize_dgd(
-                    base_dgd_config,
-                    purpose=DGDMaterializationPurpose.INTERPOLATION,
-                    override=dgd_override,
-                    tolerations=job_tolerations,
-                    runtime_backend=resolved_backend,
-                    model_name_or_path=resolve_model_path(dgdr),
+                # Build an independent interpolation input while preserving the
+                # picked DGD for final assembly.
+                interpolation_dgd_config = copy.deepcopy(base_dgd_config)
+                if dgd_override:
+                    interpolation_dgd_config = apply_dgd_overrides(
+                        interpolation_dgd_config, dgd_override
+                    )
+                if job_tolerations:
+                    interpolation_dgd_config = inject_tolerations_into_dgd(
+                        interpolation_dgd_config, job_tolerations
+                    )
+                interpolation_dgd_config = apply_remote_code_policy(
+                    interpolation_dgd_config,
+                    resolved_backend,
+                    resolve_model_path(dgdr),
                 )
-                if resolved_backend == "trtllm":
-                    enable_trtllm_chunked_prefill(interpolation_dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,
@@ -537,15 +539,7 @@ async def run_profile(
             aic_spec=aic_spec,
             aic_perf_model=aic_perf_model,
             resolved_backend=resolved_backend,
-        )
-
-        final_config = materialize_dgd(
-            final_config,
-            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
-            override=dgd_override,
-            tolerations=job_tolerations,
-            runtime_backend=resolved_backend,
-            model_name_or_path=resolve_model_path(dgdr),
+            job_tolerations=job_tolerations,
         )
 
         if final_config:

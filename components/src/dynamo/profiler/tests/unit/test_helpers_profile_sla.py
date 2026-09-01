@@ -8,6 +8,7 @@ profiling pipeline.  External I/O (DGD generation, deployment) is mocked
 where needed.
 """
 
+import copy
 import logging
 import os
 from pathlib import Path
@@ -49,6 +50,7 @@ try:
         KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
+        OverridesSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -517,7 +519,7 @@ _DGD_GEN = "dynamo.profiler.utils.dgd_generation"
 class TestAssembleFinalConfig:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_no_planner_no_mocker_returns_dgd_config_unchanged(self, tmp_path):
+    def test_no_planner_no_mocker_preserves_input_config(self, tmp_path):
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)
         dgd_config = {"kind": "DynamoGraphDeployment"}
@@ -530,20 +532,29 @@ class TestAssembleFinalConfig:
             PickedParallelConfig(tp=1),
         )
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
-        dgdr = _make_dgdr()
-        ops = _make_ops(tmp_path)
+    def test_execution_options_are_applied_in_order(self, tmp_path, monkeypatch):
+        events: list[str] = []
+        dgd_override = {"metadata": {"annotations": {"user": "override"}}}
+        tolerations = [{"key": "nvidia.com/gpu", "operator": "Exists"}]
+        dgdr = _make_dgdr(
+            backend="vllm",
+            runtimeVersionOverride="1.5.0",
+            overrides=OverridesSpec(dgd=dgd_override),
+        )
         dgd_config = {
+            "apiVersion": "nvidia.com/v1beta1",
             "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "generated"},
             "spec": {
                 "components": [
                     {
-                        "name": "decode",
-                        "type": "decode",
+                        "name": "VllmDecodeWorker",
+                        "type": "worker",
                         "podTemplate": {
                             "spec": {"containers": [{"name": "main", "args": []}]}
                         },
@@ -552,20 +563,63 @@ class TestAssembleFinalConfig:
             },
         }
 
+        def apply_runtime_version(_dgdr, config):
+            events.append("runtime-version")
+            config["spec"]["components"][0]["runtimeVersionOverride"] = "1.5.0"
+
+        def apply_override(config, override):
+            events.append("dgd-override")
+            assert override == dgd_override
+            assert config["spec"]["components"][0]["runtimeVersionOverride"] == "1.5.0"
+            result = copy.deepcopy(config)
+            result["metadata"]["annotations"] = override["metadata"]["annotations"]
+            return result
+
+        def apply_tolerations(config, requested_tolerations):
+            events.append("tolerations")
+            assert requested_tolerations == tolerations
+            assert config["metadata"]["annotations"] == {"user": "override"}
+            result = copy.deepcopy(config)
+            result["spec"]["components"][0]["podTemplate"]["spec"][
+                "tolerations"
+            ] = requested_tolerations
+            return result
+
+        def apply_remote_code(config, backend, model):
+            events.append("remote-code")
+            assert backend == "vllm"
+            assert model == dgdr.model
+            assert (
+                config["spec"]["components"][0]["podTemplate"]["spec"]["tolerations"]
+                == tolerations
+            )
+            return config
+
+        monkeypatch.setattr(
+            f"{_DGD_GEN}.apply_runtime_version_override", apply_runtime_version
+        )
+        monkeypatch.setattr(f"{_DGD_GEN}.apply_dgd_overrides", apply_override)
+        monkeypatch.setattr(
+            f"{_DGD_GEN}.inject_tolerations_into_dgd", apply_tolerations
+        )
+        monkeypatch.setattr(f"{_DGD_GEN}.apply_remote_code_policy", apply_remote_code)
+
         result = assemble_final_config(
             dgdr,
-            ops,
+            _make_ops(tmp_path),
             dgd_config,
-            PickedParallelConfig(tp=1),
-            PickedParallelConfig(tp=1),
-            resolved_backend="trtllm",
+            resolved_backend="vllm",
+            job_tolerations=tolerations,
         )
 
-        args = result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
-            "args"
+        assert events == [
+            "runtime-version",
+            "dgd-override",
+            "tolerations",
+            "remote-code",
         ]
-        idx = args.index("--trtllm.enable_chunked_prefill")
-        assert args[idx + 1] == "true"
+        assert result is not dgd_config
+        assert "runtimeVersionOverride" not in dgd_config["spec"]["components"][0]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -637,7 +691,8 @@ class TestAssembleFinalConfig:
 
         result = assemble_final_config(dgdr, ops, dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         container = result["spec"]["components"][0]["podTemplate"]["spec"][
             "containers"
         ][0]
@@ -778,7 +833,8 @@ class TestAssembleFinalConfig:
         with caplog.at_level(logging.WARNING):
             result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         assert "has no frontend component" in caplog.text
 
     @pytest.mark.pre_merge
@@ -795,7 +851,8 @@ class TestAssembleFinalConfig:
         with caplog.at_level(logging.WARNING):
             result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        assert result is dgd_config
+        assert result == dgd_config
+        assert result is not dgd_config
         assert frontend["podTemplate"]["spec"]["containers"] == [{"name": "sidecar"}]
         assert "has no main container" in caplog.text
 
@@ -813,9 +870,9 @@ class TestAssembleFinalConfig:
         ]
         dgd_config = {"spec": {"components": frontends}}
 
-        assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
 
-        for frontend in frontends:
+        for frontend in result["spec"]["components"]:
             assert frontend["podTemplate"]["spec"]["containers"][0]["env"] == [
                 {"name": "DYN_ROUTER_MODE", "value": "kv"}
             ]
@@ -851,14 +908,18 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result == [planner_cm, dgd_config]
+        assert result[0] == planner_cm
         components = {
             component["name"]: component
-            for component in dgd_config["spec"]["components"]
+            for component in result[-1]["spec"]["components"]
         }
         assert components["decode"]["scalingAdapter"] == {"enabled": True}
         assert components["prefill"]["scalingAdapter"] == {"enabled": True}
         assert "scalingAdapter" not in components["Frontend"]
+        assert all(
+            "scalingAdapter" not in component
+            for component in dgd_config["spec"]["components"]
+        )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -1512,7 +1573,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=agg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
             patch(
-                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
                 return_value=False,
             ),
             patch(
@@ -1620,7 +1681,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=disagg_dgd),
             patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
             patch(
-                "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+                "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
                 return_value=False,
             ),
             patch(

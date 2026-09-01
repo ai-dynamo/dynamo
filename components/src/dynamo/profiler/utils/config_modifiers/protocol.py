@@ -164,6 +164,18 @@ class BaseConfigModifier:
     BACKEND: str = ""
 
     @classmethod
+    def apply_runtime_defaults(cls, config: dict) -> dict:
+        """Apply backend defaults required by every generated deployment."""
+        return config
+
+    @classmethod
+    def apply_model_runtime_constraints(
+        cls, config: dict, model_name_or_path: str | None
+    ) -> dict:
+        """Apply runtime constraints derived from the selected model."""
+        return config
+
+    @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
         """Load default DGD config for the given mode. Subclasses must implement."""
         raise NotImplementedError("Subclasses must implement load_default_config")
@@ -586,7 +598,8 @@ class BaseConfigModifier:
                 model_path=effective_model_path,
             )
 
-        return result
+        result = cls.apply_runtime_defaults(result)
+        return cls.apply_model_runtime_constraints(result, effective_model_path)
 
     @classmethod
     def _resolve_component_name(

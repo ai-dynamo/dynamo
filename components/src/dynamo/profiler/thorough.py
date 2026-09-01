@@ -15,6 +15,7 @@
 
 """THOROUGH search strategy: enumerate candidates, deploy, benchmark, pick."""
 
+import copy
 import logging
 import os
 from itertools import chain
@@ -38,11 +39,8 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
-from dynamo.profiler.utils.dgd_materialization import (
-    DGDMaterializationPurpose,
-    materialize_dgd,
-)
+from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
+from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
@@ -53,6 +51,7 @@ from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
     get_profiling_job_tolerations,
+    inject_tolerations_into_dgd,
     pick_decode_component,
     resolve_model_path,
 )
@@ -60,14 +59,6 @@ from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
-
-
-def _enable_chunked_prefill_for_trtllm_candidates(
-    prefill_candidates, decode_candidates
-) -> None:
-    """Enable chunked prefill on every TRT-LLM profiling candidate."""
-    for candidate in [*prefill_candidates, *decode_candidates]:
-        candidate.dgd_config = enable_trtllm_chunked_prefill(candidate.dgd_config)
 
 
 def _normalize_candidate_model_identity(
@@ -434,18 +425,15 @@ async def run_thorough(
     dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
     job_tolerations = get_profiling_job_tolerations(dgdr)
     for candidate in chain(prefill_candidates, decode_candidates):
-        candidate.dgd_config = materialize_dgd(
-            candidate.dgd_config,
-            purpose=DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
-            override=dgd_override,
-            tolerations=job_tolerations,
-            runtime_backend=backend,
-            model_name_or_path=local_or_hf_model,
-        )
-
-    if backend == "trtllm":
-        _enable_chunked_prefill_for_trtllm_candidates(
-            prefill_candidates, decode_candidates
+        dgd_config = copy.deepcopy(candidate.dgd_config)
+        if dgd_override:
+            dgd_config = apply_dgd_overrides(dgd_config, dgd_override)
+        if job_tolerations:
+            dgd_config = inject_tolerations_into_dgd(dgd_config, job_tolerations)
+        candidate.dgd_config = apply_remote_code_policy(
+            dgd_config,
+            backend,
+            local_or_hf_model,
         )
 
     # Overrides may carry stale model arguments, so reassert the DGDR model
