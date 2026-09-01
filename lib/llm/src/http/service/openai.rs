@@ -154,7 +154,9 @@ impl Drop for StreamingLifecycleTerminal {
 }
 
 fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
-    if response.0.is_client_error() {
+    if response.0.as_u16() == 499 {
+        TerminalOutcome::Cancelled
+    } else if response.0.is_client_error() {
         TerminalOutcome::Rejected
     } else {
         TerminalOutcome::Failed
@@ -3605,7 +3607,7 @@ async fn chat_completions(
                     ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
                     _ => TerminalOutcome::Failed,
                 });
-            } else if ctx.is_killed() {
+            } else if ctx.is_stopped() || ctx.is_killed() {
                 terminal.finish(TerminalOutcome::Cancelled);
             } else {
                 terminal.finish(TerminalOutcome::Success);

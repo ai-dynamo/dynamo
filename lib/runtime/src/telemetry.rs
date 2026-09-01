@@ -123,6 +123,7 @@ pub enum LifecycleStage {
     RequestDispatch,
     KvTransfer,
     EngineQueue,
+    WorkerOperation,
     WorkerOperationPrefill,
     WorkerOperationDecode,
     ResponseStreaming,
@@ -143,6 +144,7 @@ impl LifecycleStage {
             Self::RequestDispatch => "request.dispatch",
             Self::KvTransfer => "kv.transfer",
             Self::EngineQueue => "engine.queue",
+            Self::WorkerOperation => "worker.operation",
             Self::WorkerOperationPrefill => "worker.operation.prefill",
             Self::WorkerOperationDecode => "worker.operation.decode",
             Self::ResponseStreaming => "response.streaming",
@@ -160,6 +162,7 @@ impl LifecycleStage {
             Self::RouterQueue | Self::RouterSelection => "router",
             Self::WorkerAdmission
             | Self::RequestDispatch
+            | Self::WorkerOperation
             | Self::WorkerOperationPrefill
             | Self::WorkerOperationDecode
             | Self::ResponseStreamingPrefill
@@ -334,7 +337,7 @@ impl LifecycleTrace {
         match worker_disaggregation_mode().as_deref() {
             Some("prefill") => self.start(LifecycleStage::WorkerOperationPrefill),
             Some("decode") => self.start(LifecycleStage::WorkerOperationDecode),
-            _ => Span::none(),
+            _ => self.start(LifecycleStage::WorkerOperation),
         }
     }
 }

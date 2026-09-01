@@ -22,7 +22,6 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use opentelemetry::trace::{SpanContext, SpanId, Status, TraceFlags, TraceId, TraceState};
 use tokio::sync::watch;
@@ -215,15 +214,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
-
-        let lifecycle = LifecycleTrace::from_request_id(ctx.id().to_string());
-        let worker_operation = if self.mode.is_prefill() {
-            lifecycle.start(LifecycleStage::WorkerOperationPrefill)
-        } else if self.mode.is_decode() {
-            lifecycle.start(LifecycleStage::WorkerOperationDecode)
-        } else {
-            tracing::Span::none()
-        };
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -511,7 +501,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // we just dropped — `Span` is a cheap handle, clones share storage.
 
         let mapped = async_stream::stream! {
-            let _worker_operation = worker_operation;
             let mut inner = Box::pin(mapped);
             while let Some(item) = inner.next().await {
                 yield item;
