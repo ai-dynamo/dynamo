@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
+use crate::kv_router::{
+    FindBestMatchAdmission,
+    minimal_cache_loss::{CacheHistoryRequest, RouteObservation},
+    routing_host::{kv_selection::SelectionOutcome, request_guard::CacheLossTracking},
+};
 
 impl<Sel> RoutingHost<Sel>
 where
@@ -292,10 +296,44 @@ where
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
+        let cache_history_request = CacheHistoryRequest::new(
+            routing_parts.token_ids.to_vec(),
+            routing_parts.block_mm_infos.map(ToOwned::to_owned),
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.clone()),
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.clone()),
+            chooser.block_size(),
+            chooser.is_eagle(),
+        );
+        let cache_history = self
+            .cache_history
+            .as_ref()
+            .expect("KV routing must initialize cache-loss history");
+        let cache_loss = RouteObservation {
+            prompt_tokens: routing_parts.token_ids.len() as u64,
+            previously_computed_tokens: cache_history_request
+                .previously_computed_tokens(&cache_history.lock()),
+            best_router_tokens: selection.max_cached_tokens as u64,
+            selected_router_tokens: selection.cached_tokens as u64,
+        }
+        .bounded();
         let mut guard = match cleanup {
-            Some(cleanup) => {
-                RequestGuard::new_kv_with_cleanup(self.request_metrics.clone(), cleanup, request)
-            }
+            Some(cleanup) => RequestGuard::new_kv_with_cleanup(
+                self.request_metrics.clone(),
+                cleanup,
+                request,
+                true,
+                CacheLossTracking::new(
+                    cache_loss,
+                    Arc::clone(cache_history),
+                    cache_history_request,
+                ),
+            ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
                 self.request_metrics.clone(),
@@ -303,6 +341,12 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
+                !is_query_only,
+                CacheLossTracking::new(
+                    cache_loss,
+                    Arc::clone(cache_history),
+                    cache_history_request,
+                ),
             ),
         };
 

@@ -1076,6 +1076,9 @@ pub struct WorkerSelectionResult {
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
 
+    /// Greatest router-visible cached-token count among eligible workers.
+    pub max_cached_tokens: usize,
+
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,

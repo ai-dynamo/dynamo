@@ -134,6 +134,8 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Greatest router-visible cached-token count among eligible workers.
+    pub max_cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
@@ -452,6 +454,18 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         Self {
             request,
             eligibility: request.eligibility(),
+            workers,
+        }
+    }
+
+    pub fn with_eligibility(
+        request: &'a SchedulingRequest,
+        workers: &'a HashMap<WorkerId, C>,
+        eligibility: RoutingEligibility<'a>,
+    ) -> Self {
+        Self {
+            request,
+            eligibility,
             workers,
         }
     }

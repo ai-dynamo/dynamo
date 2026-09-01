@@ -1466,6 +1466,7 @@ impl<
                 best_worker: selected.selection.worker,
                 effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                 cached_tokens: selected.selection.cached_tokens,
+                max_cached_tokens: selected.selection.max_cached_tokens,
                 selected_worker_tiers: selected.selected_worker_tiers,
                 target_cached_prefix_blocks,
                 router_hint_candidates: request.router_hint_candidates.take(),
@@ -1498,6 +1499,7 @@ impl<
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
+            max_cached_tokens: selected.selection.max_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
             router_hint_candidates: request.router_hint_candidates.take(),
@@ -1873,11 +1875,15 @@ mod tests {
                 return Err(KvSchedulerError::NoEndpoints);
             };
 
+            let max_cached_tokens =
+                SchedulingContext::with_eligibility(request, workers, eligibility)
+                    .best_cached_tokens();
             Ok(WorkerSelectionResult {
                 worker,
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                max_cached_tokens,
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })
