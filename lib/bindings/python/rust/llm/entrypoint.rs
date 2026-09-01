@@ -338,6 +338,8 @@ impl KvRouterConfig {
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
+            // prefill-continue knobs are env-only for now; take their fail-closed defaults.
+            ..Default::default()
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
