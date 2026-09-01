@@ -306,8 +306,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "v1beta1 introducing case-insensitive component names is rejected by CEL on update",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
-				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
+				dgd.Spec.Components[0].ComponentName = dgdAdmissionUpperWorkerName
 			})),
 			wantCELErr: "spec.components: Invalid value: component names must be unique case-insensitively",
 		},
