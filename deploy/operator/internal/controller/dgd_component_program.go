@@ -147,14 +147,14 @@ func (p *componentProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (currentWorkerHashStatusChanged bool, err error) {
-	currentWorkerHashStatusChanged, err = p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, status)
+) (bool, error) {
+	currentWorkerHashStatusChanged, err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, status)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return false, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
 	if currentWorkerHashStatusChanged {
-		return currentWorkerHashStatusChanged, nil
+		return true, nil
 	}
 
 	if supportsManagedRollingUpdate(dgd) {
