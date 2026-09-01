@@ -339,10 +339,10 @@ pub(crate) fn build_downloader() -> Result<LoRADownloader, DynamoError> {
         Arc::new(LocalLoRASource::new()),
         Arc::new(HuggingFaceLoRASource::from_env()),
     ];
-    match S3LoRASource::from_env() {
-        Ok(source) => sources.push(Arc::new(source)),
-        Err(error) => tracing::debug!(%error, "S3 LoRA source is not configured"),
-    }
+    // `S3LoRASource::from_env` became infallible in #13844: it defers endpoint and
+    // credential resolution to a `OnceCell` so a missing S3 configuration surfaces
+    // when an `s3://` source is actually resolved, not at construction.
+    sources.push(Arc::new(S3LoRASource::from_env()));
     let cache = LoRACache::from_env()
         .map_err(|error| client::invalid_argument(format!("invalid LoRA cache: {error}")))?;
     Ok(LoRADownloader::new(sources, cache))
