@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::time::Instant;
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -31,6 +32,38 @@ impl QueueSnapshot {
             cached_tokens,
             uncached_tokens: raw_isl_tokens.saturating_sub(cached_tokens),
             scheduling_cost_tokens: raw_isl_tokens.saturating_sub(cached_tokens).max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `uncached_tokens` is derived, so omit it from every queued entry to make room
+// for exact deadline ordering without growing the entry.
+struct QueueEntrySnapshot {
+    raw_isl_tokens: usize,
+    cached_tokens: usize,
+    scheduling_cost_tokens: usize,
+}
+
+impl From<QueueSnapshot> for QueueEntrySnapshot {
+    fn from(snapshot: QueueSnapshot) -> Self {
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
+        }
+    }
+}
+
+impl From<QueueEntrySnapshot> for QueueSnapshot {
+    fn from(snapshot: QueueEntrySnapshot) -> Self {
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            uncached_tokens: snapshot
+                .raw_isl_tokens
+                .saturating_sub(snapshot.cached_tokens),
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
         }
     }
 }
@@ -75,8 +108,11 @@ pub struct PolicyQueueStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueuePriority {
     strict_priority: u32,
+    due_time_key: u64,
     policy_score: OrderedFloat<f64>,
 }
+
+const NO_DUE_TIME: u64 = u64::MAX;
 
 #[inline]
 fn cmp_queue_order(
@@ -88,6 +124,7 @@ fn cmp_queue_order(
     lhs_priority
         .strict_priority
         .cmp(&rhs_priority.strict_priority)
+        .then_with(|| rhs_priority.due_time_key.cmp(&lhs_priority.due_time_key))
         .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
         .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
 }
@@ -96,7 +133,7 @@ pub struct PolicyQueueEntry<T> {
     class_index: usize,
     priority: QueuePriority,
     enqueue_seq: u64,
-    snapshot: QueueSnapshot,
+    snapshot: QueueEntrySnapshot,
     payload: T,
 }
 
@@ -106,7 +143,11 @@ impl<T> PolicyQueueEntry<T> {
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
-        self.snapshot
+        self.snapshot.into()
+    }
+
+    fn due_time_key(&self) -> Option<u64> {
+        (self.priority.due_time_key != NO_DUE_TIME).then_some(self.priority.due_time_key)
     }
 
     pub fn payload(&self) -> &T {
@@ -132,11 +173,12 @@ impl<T> PartialEq for PolicyQueueEntry<T> {
 
 impl<T> Ord for PolicyQueueEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .strict_priority
-            .cmp(&other.priority.strict_priority)
-            .then_with(|| self.priority.policy_score.cmp(&other.priority.policy_score))
-            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
+        cmp_queue_order(
+            self.priority,
+            self.enqueue_seq,
+            other.priority,
+            other.enqueue_seq,
+        )
     }
 }
 
@@ -153,18 +195,38 @@ struct DispatchCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Keep the BTree key compact by pairing fields that otherwise pad
+// QueuePriority and WorkerWithDpRank independently.
 struct WorkerLaneHead {
-    worker: WorkerWithDpRank,
-    priority: QueuePriority,
+    worker_id: u64,
+    due_time_key: u64,
+    policy_score: OrderedFloat<f64>,
     enqueue_seq: u64,
+    strict_priority: u32,
+    dp_rank: u32,
 }
 
 impl WorkerLaneHead {
     fn new<T>(worker: WorkerWithDpRank, entry: &PolicyQueueEntry<T>) -> Self {
         Self {
-            worker,
-            priority: entry.priority,
+            worker_id: worker.worker_id,
+            due_time_key: entry.priority.due_time_key,
+            policy_score: entry.priority.policy_score,
             enqueue_seq: entry.enqueue_seq,
+            strict_priority: entry.priority.strict_priority,
+            dp_rank: worker.dp_rank,
+        }
+    }
+
+    fn worker(self) -> WorkerWithDpRank {
+        WorkerWithDpRank::new(self.worker_id, self.dp_rank)
+    }
+
+    fn priority(self) -> QueuePriority {
+        QueuePriority {
+            strict_priority: self.strict_priority,
+            due_time_key: self.due_time_key,
+            policy_score: self.policy_score,
         }
     }
 }
@@ -172,12 +234,12 @@ impl WorkerLaneHead {
 impl Ord for WorkerLaneHead {
     fn cmp(&self, other: &Self) -> Ordering {
         cmp_queue_order(
-            self.priority,
+            self.priority(),
             self.enqueue_seq,
-            other.priority,
+            other.priority(),
             other.enqueue_seq,
         )
-        .then_with(|| self.worker.cmp(&other.worker))
+        .then_with(|| self.worker().cmp(&other.worker()))
     }
 }
 
@@ -312,7 +374,7 @@ impl<T> PolicyClassQueue<T> {
             let dispatchable = {
                 let ready = self
                     .ready_by_worker
-                    .get(&head.worker)
+                    .get(&head.worker())
                     .expect("indexed worker lane vanished");
                 is_dispatchable(
                     class_index,
@@ -326,19 +388,23 @@ impl<T> PolicyClassQueue<T> {
             if !dispatchable {
                 let removed = self.candidate_worker_heads.pop_last();
                 debug_assert_eq!(removed, Some(head));
-                self.blocked_workers.insert(head.worker);
+                self.blocked_workers.insert(head.worker());
                 continue;
             }
 
-            let exact_cost = self.ready_by_worker[&head.worker]
+            let exact_cost = self.ready_by_worker[&head.worker()]
                 .peek()
                 .expect("indexed worker lane is empty")
                 .snapshot
                 .scheduling_cost_tokens;
             return match shared {
                 Some((priority, enqueue_seq, cost))
-                    if cmp_queue_order(priority, enqueue_seq, head.priority, head.enqueue_seq)
-                        == Ordering::Greater =>
+                    if cmp_queue_order(
+                        priority,
+                        enqueue_seq,
+                        head.priority(),
+                        head.enqueue_seq,
+                    ) == Ordering::Greater =>
                 {
                     Some(DispatchCandidate {
                         placement: WorkerPlacement::Any,
@@ -346,7 +412,7 @@ impl<T> PolicyClassQueue<T> {
                     })
                 }
                 _ => Some(DispatchCandidate {
-                    placement: WorkerPlacement::Exact(head.worker),
+                    placement: WorkerPlacement::Exact(head.worker()),
                     cost: exact_cost,
                 }),
             };
@@ -418,6 +484,8 @@ pub struct PolicyQueue<T> {
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
+    due_entries: BTreeSet<(u64, u64)>,
+    deadline_origin: Instant,
     candidates: Vec<Option<DispatchCandidate>>,
 }
 
@@ -444,6 +512,8 @@ impl<T> PolicyQueue<T> {
             carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
+            due_entries: BTreeSet::new(),
+            deadline_origin: Instant::now(),
             candidates: vec![None; class_count],
         }
     }
@@ -471,6 +541,12 @@ impl<T> PolicyQueue<T> {
                         .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
                 })
         })
+    }
+
+    pub(crate) fn next_due_at(&self) -> Option<Instant> {
+        let &(due_time_key, _) = self.due_entries.first()?;
+        self.deadline_origin
+            .checked_add(std::time::Duration::from_nanos(due_time_key))
     }
 
     pub fn class_count(&self) -> usize {
@@ -527,6 +603,41 @@ impl<T> PolicyQueue<T> {
         placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_due_at(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            None,
+            placement,
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_with_due_at(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        due_at: Option<Instant>,
+        placement: WorkerPlacement,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        if due_at.is_some() && self.due_entries.is_empty() {
+            self.deadline_origin = Instant::now();
+        }
+        let due_time_key = due_at.map_or(NO_DUE_TIME, |due_at| {
+            due_at
+                .saturating_duration_since(self.deadline_origin)
+                .as_nanos()
+                .min((NO_DUE_TIME - 1) as u128) as u64
+        });
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -538,10 +649,15 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
+            due_time_key,
             class.config.queue_policy,
             self.next_enqueue_seq,
             payload,
         );
+        if due_time_key != NO_DUE_TIME {
+            self.due_entries
+                .insert((due_time_key, self.next_enqueue_seq));
+        }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
         class.push_ready(placement, entry);
@@ -554,10 +670,43 @@ impl<T> PolicyQueue<T> {
         class_index: usize,
         mut predicate: impl FnMut(&T) -> bool,
     ) -> (Vec<PolicyQueueEntry<T>>, bool) {
+        self.take_if_entry_in_class(class_index, |entry| predicate(entry.payload()))
+    }
+
+    pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
+        if self.due_entries.is_empty() {
+            return Vec::new();
+        }
+        let now_key = now
+            .saturating_duration_since(self.deadline_origin)
+            .as_nanos()
+            .min((NO_DUE_TIME - 1) as u128) as u64;
+        let expired_sequences: FxHashSet<u64> = self
+            .due_entries
+            .range(..=(now_key, u64::MAX))
+            .map(|(_, enqueue_seq)| *enqueue_seq)
+            .collect();
+        let mut expired = Vec::new();
+        for class_index in 0..self.classes.len() {
+            expired.extend(
+                self.take_if_entry_in_class(class_index, |entry| {
+                    expired_sequences.contains(&entry.enqueue_seq)
+                })
+                .0,
+            );
+        }
+        expired
+    }
+
+    fn take_if_entry_in_class(
+        &mut self,
+        class_index: usize,
+        mut predicate: impl FnMut(&PolicyQueueEntry<T>) -> bool,
+    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
         let class = &mut self.classes[class_index];
         let remove_sequences: FxHashSet<u64> = class
             .entries()
-            .filter(|entry| predicate(entry.payload()))
+            .filter(|entry| predicate(entry))
             .map(|entry| entry.enqueue_seq)
             .collect();
         if remove_sequences.is_empty() {
@@ -600,8 +749,9 @@ impl<T> PolicyQueue<T> {
         class.rebuild_worker_heads();
 
         for entry in &removed {
-            subtract_stats(&mut class.stats, entry.snapshot);
+            subtract_stats(&mut class.stats, entry.snapshot());
             self.pending_count -= 1;
+            remove_due_time(&mut self.due_entries, entry);
         }
         if class.ready_is_empty() {
             class.deficit = 0;
@@ -729,14 +879,22 @@ impl<T> PolicyQueue<T> {
         class.deficit = class
             .deficit
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
-        subtract_stats(&mut class.stats, entry.snapshot);
+        subtract_stats(&mut class.stats, entry.snapshot());
         self.pending_count -= 1;
+        remove_due_time(&mut self.due_entries, &entry);
         if class.ready_is_empty() {
             class.deficit = 0;
         } else {
             self.carry_class = (class.deficit > 0).then_some(class_index);
         }
         entry
+    }
+}
+
+fn remove_due_time<T>(due_entries: &mut BTreeSet<(u64, u64)>, entry: &PolicyQueueEntry<T>) {
+    if let Some(due_time_key) = entry.due_time_key() {
+        let removed = due_entries.remove(&(due_time_key, entry.enqueue_seq));
+        debug_assert!(removed);
     }
 }
 
@@ -747,6 +905,7 @@ fn make_entry<T>(
     arrival_offset_secs: f64,
     priority_jump: f64,
     strict_priority: u32,
+    due_time_key: u64,
     queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
@@ -757,10 +916,11 @@ fn make_entry<T>(
         class_index,
         priority: QueuePriority {
             strict_priority,
+            due_time_key,
             policy_score: OrderedFloat(policy_score),
         },
         enqueue_seq,
-        snapshot,
+        snapshot: snapshot.into(),
         payload,
     }
 }
@@ -855,6 +1015,12 @@ policy_classes:
     }
 
     #[test]
+    fn queue_entry_stays_compact() {
+        assert_eq!(std::mem::size_of::<PolicyQueueEntry<()>>(), 64);
+        assert_eq!(std::mem::size_of::<WorkerLaneHead>(), 40);
+    }
+
+    #[test]
     fn per_worker_caps_scale_and_remain_pre_add() {
         let mut queue = PolicyQueue::new(profile(
             r#"
@@ -914,6 +1080,243 @@ policy_classes:
         assert_eq!(rejection.limit, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    #[test]
+    fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(20)),
+                WorkerPlacement::Any,
+                "later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(10)),
+                WorkerPlacement::Any,
+                "earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.next_due_at(),
+            Some(now + std::time::Duration::from_secs(10))
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "earlier-due"
+        );
+        assert_eq!(queue.due_entries.len(), 1);
+        assert_eq!(
+            queue.next_due_at(),
+            Some(now + std::time::Duration::from_secs(20))
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "later-due"
+        );
+        assert!(queue.due_entries.is_empty());
+        assert_eq!(queue.next_due_at(), None);
+    }
+
+    #[test]
+    fn due_time_order_preserves_sub_millisecond_precision() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let due_at = Instant::now() + std::time::Duration::from_secs(10);
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                Some(due_at + std::time::Duration::from_nanos(1)),
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "later-due-better-fcfs",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(due_at),
+                WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
+                "earlier-due-worse-fcfs",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "earlier-due-worse-fcfs"
+        );
+    }
+
+    #[test]
+    fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let due_at = Instant::now() + std::time::Duration::from_secs(10);
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "no-deadline",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(due_at),
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "deadline",
+            )
+            .unwrap();
+
+        assert_eq!(queue.next_due_at(), Some(due_at));
+        queue.retain(|payload| *payload != "deadline");
+        assert!(queue.due_entries.is_empty());
+        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn deadline_timer_removes_an_expired_blocked_worker_lane() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let worker = WorkerWithDpRank::new(7, 0);
+        let due_at = Instant::now() + std::time::Duration::from_secs(1);
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                Some(due_at),
+                WorkerPlacement::Exact(worker),
+                "blocked",
+            )
+            .unwrap();
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        assert!(queue.classes[0].blocked_workers.contains(&worker));
+        assert_eq!(queue.next_due_at(), Some(due_at));
+
+        let expired = queue.take_expired(due_at);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            expired.into_iter().next().unwrap().into_payload(),
+            "blocked"
+        );
+        assert_eq!(queue.next_due_at(), None);
+        assert!(
+            queue
+                .pop_next(|_, _, _| panic!("expired lane revisited"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn strict_priority_precedes_earlier_due_request_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                10,
+                Some(now + std::time::Duration::from_secs(20)),
+                WorkerPlacement::Any,
+                "high-priority-later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some(now + std::time::Duration::from_secs(10)),
+                WorkerPlacement::Any,
+                "low-priority-earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "high-priority-later-due"
+        );
+    }
+
+    #[test]
+    fn drr_charges_cost_when_the_queue_was_empty() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let mut snapshot = QueueSnapshot::new(100, 0);
+        snapshot.scheduling_cost_tokens = 7;
+        queue
+            .enqueue(
+                0,
+                1,
+                snapshot,
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "idle-arrival",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "following-arrival",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "idle-arrival"
+        );
+        assert_eq!(queue.classes[0].deficit, 3);
     }
 
     #[test]

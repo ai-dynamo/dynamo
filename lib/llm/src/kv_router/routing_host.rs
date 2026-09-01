@@ -10,6 +10,7 @@ use std::{
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{ClassifierError, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -38,6 +39,7 @@ use crate::{
     protocols::common::{
         FinishReason,
         llm_backend::LLMEngineOutput,
+        preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
@@ -65,6 +67,37 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+fn classification_failure(error: &Error) -> Option<&KvSchedulerError> {
+    error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<KvSchedulerError>()?;
+        matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(_)
+                | KvSchedulerError::RequestClassifierFailed(_)
+                | KvSchedulerError::RequestClassifierReplacedRequest
+                | KvSchedulerError::DuplicateClassificationRequestId(_)
+                | KvSchedulerError::InvalidClassificationMetadata(_)
+        )
+        .then_some(error)
+    })
+}
+
+fn classifier_abort_error(error: &KvSchedulerError) -> Arc<ClassifierError> {
+    match error {
+        KvSchedulerError::RequestClassifierFailed(source) => Arc::clone(source),
+        _ => owned_abort_error(error),
+    }
+}
+
+fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
+    if is_cancelled(error) {
+        return;
+    }
+    if let Some(operation) = operation.take() {
+        operation.invalidate();
+    }
 }
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {

@@ -24,9 +24,10 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
-        AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
-        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        AdmissionAttempt, AdmissionCounterSnapshot, AttemptId, CacheHitEstimates, OverlapAnalysis,
+        OverloadedWorkerProvider, RequestClassifier, ScheduleMode, ScheduleRequest,
+        TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
 };
@@ -459,6 +460,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::DueTimeExpired => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -882,6 +884,28 @@ where
         registration: dynamo_runtime::discovery::EndpointRegistrationLease,
     ) {
         self.endpoint_registration = Some(registration);
+    }
+
+    /// Attach a request classifier before placing this router into service.
+    pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        if !self
+            .scheduler
+            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+        {
+            anyhow::bail!("request classifier is already configured");
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.scheduler.begin_request_lifecycle(request_id)
+    }
+
+    pub fn admission_counters(&self) -> AdmissionCounterSnapshot {
+        self.scheduler.admission_counters()
     }
 
     pub(crate) fn set_teardown_task_guard(
@@ -1375,7 +1399,10 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
+                None,
                 block_mm_infos,
                 router_config_override,
                 update_states,
@@ -1427,7 +1454,10 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
+                Instant::now(),
                 tokens,
+                tokens.len(),
+                None,
                 block_mm_infos,
                 router_config_override,
                 false,
@@ -1458,7 +1488,10 @@ where
     async fn find_best_match_details_with_policy_class_inner(
         &self,
         context_id: Option<&str>,
+        ingress_at: Instant,
         tokens: &[u32],
+        input_tokens: usize,
+        caller_deadline: Option<Instant>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
@@ -1619,7 +1652,12 @@ where
         let (response, attempt, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request_admitted(schedule_request)
+                .schedule_request_admitted_with_context(
+                    schedule_request,
+                    input_tokens,
+                    ingress_at,
+                    caller_deadline,
+                )
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {

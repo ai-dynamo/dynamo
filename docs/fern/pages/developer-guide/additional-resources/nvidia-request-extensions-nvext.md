@@ -138,7 +138,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
-| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values; a classifier-provided `due_at` breaks ties within a tier. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -166,8 +166,8 @@ For layer-by-layer behavior and backend requirements, see
 
 `strict_priority` is an unsigned router-only tier for requests waiting in a
 router scheduler queue. The queue orders requests by
-`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
-requests within the same tier.
+`(strict_priority, due_at, configured_policy_key)`, so a classifier-provided due time breaks ties
+within the strict tier before FCFS, LCFS, or WSPT orders requests.
 
 This field does not change backend engine priority, preempt running work, or
 provide ordering across router replicas. It also does not prevent an eligible

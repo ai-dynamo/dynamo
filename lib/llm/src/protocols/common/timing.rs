@@ -339,6 +339,10 @@ impl RequestTracker {
         self.request_received_epoch_ms
     }
 
+    pub(crate) fn request_received(&self) -> Instant {
+        self.request_received
+    }
+
     /// KV cache hit rate as a ratio (0.0 to 1.0).
     pub fn kv_hit_rate(&self) -> Option<f64> {
         let overlap = *self.kv_overlap_blocks.get()?;

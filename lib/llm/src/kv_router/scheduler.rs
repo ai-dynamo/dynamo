@@ -9,11 +9,12 @@ pub use dynamo_kv_router::scheduling::queue::{
     SchedulerBookingCleanup, SchedulerBookingDescriptor,
 };
 pub use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    LocalScheduler, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdmissionCounterSnapshot, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
+    KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
+use dynamo_kv_router::scheduling::{RequestClassifier, RequestLifecycle};
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
@@ -38,7 +39,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
@@ -281,13 +282,43 @@ where
         response
     }
 
-    pub(crate) async fn schedule_request_admitted(
+    pub(crate) async fn schedule_request_admitted_with_context(
         &self,
         request: ScheduleRequest,
+        input_tokens: usize,
+        ingress_at: Instant,
+        caller_deadline: Option<Instant>,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let response = self.inner.schedule_request_admitted(request).await;
+        let response = self
+            .inner
+            .schedule_request_admitted_with_context(
+                request,
+                input_tokens,
+                ingress_at,
+                caller_deadline,
+            )
+            .await;
         self.observe_schedule_result(&response);
         response
+    }
+
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.inner.install_request_classifier(classifier, shutdown)
+    }
+
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.inner.begin_request_lifecycle(request_id)
+    }
+
+    pub fn admission_counters(&self) -> AdmissionCounterSnapshot {
+        self.inner.admission_counters()
     }
 
     #[expect(clippy::too_many_arguments)]

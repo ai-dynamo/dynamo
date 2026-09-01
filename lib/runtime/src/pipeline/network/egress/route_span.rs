@@ -195,6 +195,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::ConnectionTimeout => "connection_timeout",
         ErrorType::ResponseTimeout => "response_timeout",
         ErrorType::Cancelled => "cancelled",
+        ErrorType::DeadlineExceeded => "deadline_exceeded",
         ErrorType::ResourceExhausted => "resource_exhausted",
         ErrorType::Unavailable => "unavailable",
         ErrorType::WorkerOverloaded => "worker_overloaded",
@@ -233,7 +234,9 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => "rejected",
+        ErrorType::DeadlineExceeded
+        | ErrorType::ResourceExhausted
+        | ErrorType::WorkerOverloaded => "rejected",
         ErrorType::Unavailable => "unavailable",
         ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
         ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown) => "error",
@@ -509,6 +512,15 @@ mod tests {
 
     fn field(captured: &Captured, name: &str) -> Option<String> {
         captured.fields.lock().unwrap().get(name).cloned()
+    }
+
+    #[test]
+    fn deadline_exceeded_is_a_rejected_route_outcome() {
+        assert_eq!(
+            error_type_name(ErrorType::DeadlineExceeded),
+            "deadline_exceeded"
+        );
+        assert_eq!(error_outcome(ErrorType::DeadlineExceeded), "rejected");
     }
 
     #[tokio::test]

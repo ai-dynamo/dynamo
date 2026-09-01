@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant as StdInstant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
@@ -16,8 +16,10 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
-    ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
+    AdmissionCounterSnapshot, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+    SchedulerQueue,
 };
+use super::request_classifier::{RequestClassifier, RequestClassifierRuntime, RequestLifecycle};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
@@ -51,6 +53,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -308,6 +311,7 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier: OnceLock::new(),
             track_prefill_tokens_default,
             worker_type,
         })
@@ -328,6 +332,24 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let input_tokens = request.isl_tokens;
+        self.schedule_request_admitted_with_context(request, input_tokens, StdInstant::now(), None)
+            .await
+    }
+
+    /// Schedule with the router's original ingress timing and caller deadline.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted_with_context(
+        &self,
+        request: ScheduleRequest,
+        input_tokens: usize,
+        ingress_at: StdInstant,
+        caller_deadline: Option<StdInstant>,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        self.queue.record_received();
+        let classified_request = self
+            .classify_request(&request, input_tokens, ingress_at, caller_deadline)
+            .await?;
         let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
@@ -343,6 +365,8 @@ where
                 block_hashes,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
+                classified_request,
+                ingress_at,
             )
             .await;
 
@@ -362,6 +386,69 @@ where
             lease.disarm();
         }
         Ok(AdmittedSchedulingResponse { response, attempt })
+    }
+
+    async fn classify_request(
+        &self,
+        request: &ScheduleRequest,
+        input_tokens: usize,
+        ingress_at: StdInstant,
+        caller_deadline: Option<StdInstant>,
+    ) -> Result<Option<super::request_classifier::ClassifyRequest>, KvSchedulerError> {
+        if matches!(request.mode, ScheduleMode::QueryOnly { .. }) {
+            return Ok(None);
+        }
+        let Some(classifier) = self.request_classifier.get() else {
+            return Ok(None);
+        };
+        let request_id = request.mode.tracked_request_id().ok_or_else(|| {
+            KvSchedulerError::BookingFailed(
+                "classifier admission requires a tracked request".to_string(),
+            )
+        })?;
+        if !classifier.has_request(request_id) {
+            return Err(KvSchedulerError::InvalidClassificationMetadata(
+                "tracked classifier admission requires a request lifecycle".to_string(),
+            ));
+        }
+        classifier
+            .classify_with(|| {
+                self.queue
+                    .classify_request(request, input_tokens, ingress_at, caller_deadline)
+            })
+            .await
+            .map(Some)
+            .inspect_err(|error| {
+                if matches!(error, KvSchedulerError::DueTimeExpired) {
+                    self.queue.record_due_time_passed();
+                }
+            })
+    }
+
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.request_classifier
+            .set(RequestClassifierRuntime::new(classifier, shutdown))
+            .is_ok()
+    }
+
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .get()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
+    }
+
+    pub fn admission_counters(&self) -> AdmissionCounterSnapshot {
+        self.queue.admission_counters()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.

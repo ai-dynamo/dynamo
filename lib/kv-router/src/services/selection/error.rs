@@ -67,10 +67,16 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
         KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
+        | KvSchedulerError::PinnedWorkerOverloaded { .. }
+        | KvSchedulerError::DueTimeExpired => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
+        KvSchedulerError::RequestClassifierPanicked(_)
+        | KvSchedulerError::RequestClassifierFailed(_)
+        | KvSchedulerError::RequestClassifierReplacedRequest
+        | KvSchedulerError::DuplicateClassificationRequestId(_)
+        | KvSchedulerError::InvalidClassificationMetadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -86,6 +92,19 @@ fn sequence_error_status(error: &SequenceError) -> StatusCode {
 
 impl IntoResponse for SelectionError {
     fn into_response(self) -> Response {
+        if matches!(
+            &self,
+            Self::Scheduler(
+                KvSchedulerError::RequestClassifierPanicked(_)
+                    | KvSchedulerError::RequestClassifierFailed(_)
+            )
+        ) {
+            return (
+                self.status(),
+                Json(serde_json::json!({"error": "request classifier failed"})),
+            )
+                .into_response();
+        }
         if let Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &self {
             return (
                 self.status(),
@@ -109,6 +128,10 @@ impl IntoResponse for SelectionError {
 mod tests {
     use super::*;
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("private plugin detail")]
+    struct PrivateClassifierError;
+
     #[test]
     fn filtered_workers_are_unavailable_not_overloaded() {
         assert_eq!(
@@ -119,5 +142,23 @@ mod tests {
             SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
+        assert_eq!(
+            SelectionError::Scheduler(KvSchedulerError::DueTimeExpired).status_code(),
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+    }
+
+    #[tokio::test]
+    async fn classifier_error_response_is_sanitized() {
+        let response = SelectionError::Scheduler(KvSchedulerError::RequestClassifierFailed(
+            Box::new(PrivateClassifierError),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
     }
 }

@@ -116,6 +116,24 @@ pub enum KvSchedulerError {
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier failed: {0}")]
+    RequestClassifierFailed(std::sync::Arc<super::ClassifierError>),
+
+    #[error("request classifier replaced the logical request")]
+    RequestClassifierReplacedRequest,
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidClassificationMetadata(String),
+
+    #[error("request due time expired")]
+    DueTimeExpired,
+
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
@@ -465,22 +483,32 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_cached_tokens(&self) -> usize {
-        match self.eligibility.pinned_worker() {
-            Some(worker) => self.request.effective_cached_tokens_for(worker),
-            None => self
-                .request
-                .overlap
-                .effective_cached_tokens
-                .iter()
-                .filter(|(worker, _)| {
-                    self.workers.get(&worker.worker_id).is_some_and(|config| {
-                        self.eligibility.allows_worker(worker.worker_id, config)
-                    })
-                })
-                .map(|(_, cached_tokens)| *cached_tokens)
-                .max()
-                .unwrap_or(0),
-        }
+        best_cached_tokens(
+            &self.request.overlap.effective_cached_tokens,
+            self.eligibility,
+            self.workers,
+        )
+    }
+}
+
+/// Highest effective cached-token count over the workers this request may use.
+pub(crate) fn best_cached_tokens<C: WorkerConfigLike>(
+    effective_cached_tokens: &HashMap<WorkerWithDpRank, usize>,
+    eligibility: RoutingEligibility<'_>,
+    workers: &HashMap<WorkerId, C>,
+) -> usize {
+    match eligibility.pinned_worker() {
+        Some(worker) => effective_cached_tokens.get(&worker).copied().unwrap_or(0),
+        None => effective_cached_tokens
+            .iter()
+            .filter(|(worker, _)| {
+                workers
+                    .get(&worker.worker_id)
+                    .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
+            })
+            .map(|(_, cached_tokens)| *cached_tokens)
+            .max()
+            .unwrap_or(0),
     }
 }
 

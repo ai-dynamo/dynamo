@@ -106,6 +106,11 @@ fn error_response(code: StatusCode, message: String) -> Response {
 fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     let (error_type, message) = if super::metrics::request_was_rejected(error) {
         (ErrorType::Overload, SanitizedError::Overloaded.to_string())
+    } else if super::metrics::request_deadline_exceeded(error) {
+        (
+            ErrorType::Cancelled,
+            "request deadline exceeded".to_string(),
+        )
     } else if super::metrics::request_was_unavailable(error) {
         (
             ErrorType::Unavailable,
