@@ -1225,12 +1225,14 @@ func TestSyncResourceOwnership(t *testing.T) {
 	}
 }
 
-func TestSyncResourceDeleteUsesObservedUIDPrecondition(t *testing.T) {
+func TestSyncResourceDeleteUsesObservedPreconditions(t *testing.T) {
 	parent := syncResourceTestParent("parent-uid")
 	existing := syncResourceTestConfigMap("before", syncResourceTestControllerRef(parent))
 	existing.UID = "resource-uid"
 
 	var deleteUID *types.UID
+	var deleteResourceVersion *string
+	var observedResourceVersion string
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 to scheme: %v", err)
@@ -1241,10 +1243,12 @@ func TestSyncResourceDeleteUsesObservedUIDPrecondition(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 				options := (&client.DeleteOptions{}).ApplyOptions(opts)
-				if options.Preconditions == nil || options.Preconditions.UID == nil {
-					t.Fatal("SyncResource() delete has no UID precondition")
+				observedResourceVersion = object.GetResourceVersion()
+				if options.Preconditions == nil || options.Preconditions.UID == nil || options.Preconditions.ResourceVersion == nil {
+					t.Fatal("SyncResource() delete does not have both UID and ResourceVersion preconditions")
 				}
 				deleteUID = options.Preconditions.UID
+				deleteResourceVersion = options.Preconditions.ResourceVersion
 				return delegate.Delete(ctx, object, opts...)
 			},
 		}).
@@ -1270,5 +1274,8 @@ func TestSyncResourceDeleteUsesObservedUIDPrecondition(t *testing.T) {
 	}
 	if deleteUID == nil || *deleteUID != existing.UID {
 		t.Fatalf("delete UID precondition = %v, want %q", deleteUID, existing.UID)
+	}
+	if deleteResourceVersion == nil || *deleteResourceVersion != observedResourceVersion {
+		t.Fatalf("delete ResourceVersion precondition = %v, want %q", deleteResourceVersion, observedResourceVersion)
 	}
 }
