@@ -91,7 +91,10 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -104,7 +107,7 @@ mod tests {
         engine::{AsyncEngine, AsyncEngineContext},
         pipeline::{
             AddressedRequest, Context, Error, ManyIn, ManyOut, PushRouter, ResponseStream,
-            RouterMode, SingleIn, StreamingDispatch, context::Controller,
+            RouterMode, ServerStreamingEngine, SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
         traits::DistributedRuntimeProvider,
@@ -119,12 +122,15 @@ mod tests {
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
     };
+    use dynamo_runtime::pipeline::Operator;
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
 
     struct RecordingDispatch {
         worker_ids: Mutex<Vec<u64>>,
         pending_responses: bool,
+        /// `stop_conditions.max_tokens` as it reached the worker, per dispatch.
+        dispatched_max_tokens: Mutex<Vec<Option<u32>>>,
     }
 
     impl RecordingDispatch {
@@ -132,6 +138,7 @@ mod tests {
             Self {
                 worker_ids: Mutex::new(Vec::new()),
                 pending_responses: false,
+                dispatched_max_tokens: Mutex::new(Vec::new()),
             }
         }
 
@@ -139,6 +146,7 @@ mod tests {
             Self {
                 worker_ids: Mutex::new(Vec::new()),
                 pending_responses: true,
+                dispatched_max_tokens: Mutex::new(Vec::new()),
             }
         }
 
@@ -166,7 +174,11 @@ mod tests {
             request: SingleIn<AddressedRequest<PreprocessedRequest>>,
         ) -> Result<ManyOut<LlmResponse>, Error> {
             let (addressed, _) = request.transfer(());
-            let (_, _, instance) = addressed.into_parts();
+            let (payload, _, instance) = addressed.into_parts();
+            self.dispatched_max_tokens
+                .lock()
+                .unwrap()
+                .push(payload.stop_conditions.max_tokens);
             self.worker_ids
                 .lock()
                 .unwrap()
@@ -192,6 +204,25 @@ mod tests {
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
             event_transport_kind: EventTransportKind::Zmq,
+        }
+    }
+
+    struct CountingDecodeHost {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
+        for CountingDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<LlmResponse>, Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+            let _ = request;
+            Ok(ResponseStream::new(Box::pin(futures::stream::empty()), ctx))
         }
     }
 
@@ -235,6 +266,7 @@ mod tests {
         namespace: &str,
         mode: RouterMode,
         dispatch: Arc<RecordingDispatch>,
+        prefill_continue: Option<&dynamo_kv_router::config::KvRouterConfig>,
     ) -> (
         Arc<RoutingHost>,
         Arc<PrefillRouter>,
@@ -306,7 +338,14 @@ mod tests {
         let shared = Arc::new(
             RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
         );
-        let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
+        let prefill = match prefill_continue {
+            Some(config) => PrefillRouter::disabled_with_prefill_continue(
+                Arc::new(ModelManager::new()),
+                mode,
+                config,
+            ),
+            None => PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None),
+        };
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
@@ -327,6 +366,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_continuation_is_forwarded_whole_and_dispatches_no_decode_leg() {
+        // The whole of T5 in one test: a marked request is served by the prefill
+        // worker, its stream reaches the client untouched, no decode worker is
+        // asked for anything, and the request keeps its own token budget.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation",
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+            Some(&dynamo_kv_router::config::KvRouterConfig {
+                prefill_continue_enabled: true,
+                prefill_continue_force: true,
+                prefill_continue_prefill_busy_threshold: Some(0.4),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        let decode_calls = Arc::new(AtomicUsize::new(0));
+        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
+            Arc::new(CountingDecodeHost {
+                calls: decode_calls.clone(),
+            });
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+        request
+            .annotations
+            .push(crate::kv_router::prefill_router::PREFILL_CONTINUE_ANNOTATION.to_string());
+
+        let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
+            .await
+            .expect("a continuation should be served by the prefill worker");
+        let mut chunks = 0;
+        while response.next().await.is_some() {
+            chunks += 1;
+        }
+
+        // the prefill worker's stream reached the client
+        assert_eq!(
+            chunks, 1,
+            "the prefill stream must be forwarded, not drained"
+        );
+        // no decode leg was dispatched
+        assert_eq!(
+            decode_calls.load(Ordering::Relaxed),
+            0,
+            "a continuation must not dispatch a decode leg"
+        );
+        // and the worker was asked for the whole response, not one token
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(256)],
+            "a continuation keeps the request's own budget"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn rr_prefill_queries_do_not_advance_shared_dispatch_cursor() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
@@ -338,6 +442,7 @@ mod tests {
             namespace,
             RouterMode::RoundRobin,
             dispatch.clone(),
+            None,
         )
         .await;
 
@@ -383,6 +488,7 @@ mod tests {
                 &format!("prefill-query-occupancy-{index}"),
                 mode,
                 dispatch,
+                None,
             )
             .await;
 

@@ -11,6 +11,7 @@ use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
+    prefill_continue::PrefillContinuePolicy,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -112,6 +113,21 @@ impl PrefillRouter<DefaultWorkerSelector> {
         Self::disabled_with_selector(model_manager, decode_router_mode, session_affinity_ttl_secs)
     }
 
+    /// A disabled router whose prefill-continue policy is configured. Test-only:
+    /// production builds the policy from the frontend's router config.
+    #[cfg(test)]
+    pub(crate) fn disabled_with_prefill_continue(
+        model_manager: Arc<ModelManager>,
+        decode_router_mode: RouterMode,
+        config: &dynamo_kv_router::config::KvRouterConfig,
+    ) -> Arc<Self> {
+        let router = Self::disabled_with_selector(model_manager, decode_router_mode, None);
+        // Safe: the Arc is unique here, before the router is shared.
+        let mut owned = Arc::try_unwrap(router).ok().expect("uniquely owned");
+        owned.prefill_continue_policy = PrefillContinuePolicy::from_config(config);
+        Arc::new(owned)
+    }
+
     /// `decode_router_mode` is the owning decode worker set's mode. It governs
     /// decode-side decisions and is the fallback for the prefill hop; a prefill
     /// worker that advertises its own `router_config` overrides the latter.
@@ -172,6 +188,7 @@ where
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy: make_conditional_disagg_policy(None),
+            prefill_continue_policy: PrefillContinuePolicy::disabled(),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
             prefill_load_estimator: None,
@@ -203,6 +220,10 @@ where
         let cancel_token = parent_token.child_token();
         let (target_tx, target_rx) = watch::channel(None);
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let prefill_continue_policy = kv_router_config
+            .as_ref()
+            .map(PrefillContinuePolicy::from_config)
+            .unwrap_or_else(PrefillContinuePolicy::disabled);
         let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
             c.conditional_disagg_prefill_busy_threshold
                 .or(c.router_queue_threshold)
@@ -222,6 +243,7 @@ where
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy,
+            prefill_continue_policy,
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
             prefill_load_estimator,

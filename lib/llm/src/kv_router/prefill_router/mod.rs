@@ -15,6 +15,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
+    prefill_continue::PrefillContinuePolicy,
     protocols::RoutingConstraints,
     scheduling::QueueRejection,
     selector::{DefaultWorkerSelector, WorkerSelector},
@@ -104,6 +105,11 @@ enum PrefillOutcome {
     },
     Terminal {
         output: Box<Annotated<LLMEngineOutput>>,
+    },
+    /// The prefill worker is serving the whole request, so its stream is the
+    /// response. Nothing is consumed and no decode leg is dispatched.
+    Continuation {
+        stream: ManyOut<Annotated<LLMEngineOutput>>,
     },
 }
 
@@ -227,6 +233,7 @@ where
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
+    prefill_continue_policy: PrefillContinuePolicy,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
     conditional_disagg_prefill_busy_threshold: Option<f64>,
@@ -408,9 +415,21 @@ where
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set).
+        // A continuation is the whole response, so it keeps the request's own
+        // budget; clamping it here would silently reduce the feature to a no-op.
         let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
+        // T5 wires only the bring-up path: force continues every request. The
+        // load-driven predicate lands with the decision wiring; until then this
+        // is the only way in.
+        let prefill_continues = self.prefill_continue_policy.force_enabled();
+        if prefill_continues {
+            prefill_req
+                .annotations
+                .push(PREFILL_CONTINUE_ANNOTATION.to_string());
+        } else {
+            prefill_req.stop_conditions.max_tokens = Some(1);
+        }
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -423,6 +442,19 @@ where
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         propagate_first_response_guard(&context, &mut prefill_context)?;
+        if prefill_continues {
+            // The prefill context has its own controller, so a cancel would not
+            // reach the worker on a stream we hand back to the client. Link it,
+            // as Migration does for its retry children.
+            engine_ctx.link_child(prefill_context.context());
+            // link_child does not replay state already set, so a cancel that
+            // arrived before the link would be lost and the worker would generate
+            // a whole response for a client that is gone. Migration guards the
+            // same race the same way.
+            if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+                prefill_context.context().stop_generating();
+            }
+        }
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -451,7 +483,16 @@ where
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
-            let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
+            let outcome = if prefill_continues {
+                // Outranks bootstrap: that path backgrounds the prefill stream and
+                // dispatches a decode leg, which would discard the response. Drop
+                // the phase permit as the ordinary path does, so a migration retry
+                // can set Prefill again.
+                drop(prefill_phase_barrier);
+                PrefillOutcome::Continuation {
+                    stream: prefill_stream,
+                }
+            } else if let Some(bootstrap_info) = prepared.bootstrap_info {
                 self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
@@ -521,6 +562,7 @@ where
                     engine_ctx,
                 ));
             }
+            PrefillOutcome::Continuation { stream } => return Ok(stream),
             outcome => outcome,
         };
 
@@ -563,6 +605,9 @@ where
                 decode_req.prefill_result = Some(result);
                 decode_req.migration_link = worker_link;
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
+            }
+            PrefillOutcome::Continuation { .. } => {
+                unreachable!("a continuation returns its stream before decode routing")
             }
             PrefillOutcome::Terminal { .. } => {
                 unreachable!("terminal prefill outcomes return before decode routing")

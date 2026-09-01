@@ -176,6 +176,12 @@ impl PrefillContinuePolicy {
         self.enabled
     }
 
+    /// Whether the bring-up override is on: continue every eligible request,
+    /// whatever the decode load. Requires the feature to be enabled.
+    pub fn force_enabled(&self) -> bool {
+        self.enabled && self.force
+    }
+
     /// Whether the caller needs to probe prefill load for this policy.
     ///
     /// False when no busy threshold is configured, because there is then nothing
