@@ -1,10 +1,7 @@
 # SGLang sidecar
 
 > [!WARNING]
-> **Experimental.** These deployment examples and the sidecar image
-> are experimental and not yet packaged for distribution (the launcher module
-> ships inside `ai-dynamo-runtime`). The manifests, flags, and behavior may change
-> without notice.
+> **Experimental.** These deployment examples and the sidecar image are experimental and not yet packaged for distribution. The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel pair. The manifests, flags, and behavior may change without notice.
 
 `dynamo-sglang-sidecar` connects Dynamo's unified worker lifecycle to an
 out-of-process SGLang engine through SGLang's native gRPC service. It is a
@@ -21,10 +18,7 @@ cargo build --release -p dynamo-sglang-sidecar
     --grpc-endpoint http://127.0.0.1:30001
 ```
 
-There is no published image yet; see
-[Build the image](../README.md#build-the-image), which produces one image
-containing all three sidecar executables. Official packaging is deferred to a
-follow-up.
+There is no published image yet; see [Build the image](../README.md#build-the-image), which produces one image containing all three sidecar executables.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
@@ -54,10 +48,7 @@ python3 -m sglang.launch_server \
     --sidecar dynamo.sglang.sidecar
 ```
 
-The entry point configures Dynamo logging when `main()` runs, then calls the
-private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
-prepends the executable name expected by clap, releases the GIL, and runs the
-same unified worker lifecycle as the standalone executable.
+`dynamo.sglang.sidecar` configures Dynamo logging and starts the same native worker lifecycle as the standalone executable.
 
 ## Deploy on Kubernetes (quick start)
 
@@ -74,10 +65,7 @@ executables; these manifests run `dynamo-sglang-sidecar` as the container
 command.
 
 > [!NOTE]
-> The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there. The KV-routing examples require
-> **v0.5.18+** because the sidecar discovers their structured KV-event
-> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.18`.
+> All examples use stock SGLang `0.5.18`. This release provides native gRPC and the structured KV-event discovery required by the KV-routing examples.
 
 ### Prerequisites
 
@@ -97,7 +85,7 @@ Build and push the image to a registry your cluster can pull from:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -t <your-registry>/dynamo-sidecar:dev --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture

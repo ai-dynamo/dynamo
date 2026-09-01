@@ -30,18 +30,18 @@ spec:
         containers:
         # Dynamo frontend; operator adds the command.
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2
   - name: SGLangWorker
     type: worker
     replicas: 1
     podTemplate:
       spec:
         # sglang-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after. Native gRPC `--grpc-port` needs SGLang
-        # v0.5.16+; keep this example aligned with Dynamo main's SGLang pin.
+        # starts before `main`, stops after. Keep this example on the latest
+        # released SGLang image.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.17
+          image: lmsysorg/sglang:v0.5.18
           restartPolicy: Always
           # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
           # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
@@ -92,7 +92,7 @@ spec:
         # imagePullSecrets if private. Must be named "main" (operator injects
         # discovery env + probes by name).
         - name: main
-          image: <your-registry>/dynamo-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:dev
           command:
           - dynamo-sglang-sidecar
           args:

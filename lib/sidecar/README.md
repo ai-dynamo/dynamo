@@ -20,15 +20,13 @@ Engine protocols and request conversion remain in each engine's crate.
 There is no published sidecar image yet. `Dockerfile` builds one CPU-only image
 carrying all three engine-specific executables — `dynamo-vllm-sidecar`,
 `dynamo-sglang-sidecar`, and `dynamo-trtllm-sidecar` — in `/usr/local/bin`.
-Official packaging is deferred to a follow-up change.
 
-Build a multi-arch image from the repository root so it runs on any node —
-`amd64` (x86) or `arm64` (GB200/Grace):
+Build a multi-architecture image for `linux/amd64` and `linux/arm64` from the repository root:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -t <your-registry>/dynamo-sidecar:dev --push .
 ```
 
 To build faster for one architecture, pass just that platform (for example
@@ -53,9 +51,9 @@ ad-hoc `docker run` needs only the engine name. Deployments override it with
 `command`, so the two paths never interact:
 
 ```bash
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 vllm --help
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 sglang --help
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 trtllm --help
+docker run --rm <your-registry>/dynamo-sidecar:dev vllm --help
+docker run --rm <your-registry>/dynamo-sidecar:dev sglang --help
+docker run --rm <your-registry>/dynamo-sidecar:dev trtllm --help
 ```
 
 Plain `docker run` with no arguments uses the image `CMD` of `--help`, prints
