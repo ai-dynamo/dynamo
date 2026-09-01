@@ -1074,6 +1074,38 @@ class TestDeferredAbort:
         engine_client.abort.assert_awaited_once_with("req-3")
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_abort_timeout_fires_without_first_token(self, monkeypatch):
+        """Optional timeout bounds stale pre-first-token decode aborts."""
+        monkeypatch.setenv("DYN_VLLM_DEFERRED_ABORT_TIMEOUT_S", "0.01")
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-timeout")
+
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        assert guard._abort_task is not None
+        await asyncio.wait_for(guard._abort_task, timeout=1.0)
+
+        engine_client.abort.assert_awaited_once_with("req-timeout")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_abort_timeout_close_awaits_cleanup(self, monkeypatch):
+        """close() does not cancel the timeout-backed cleanup task."""
+        monkeypatch.setenv("DYN_VLLM_DEFERRED_ABORT_TIMEOUT_S", "0.01")
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-timeout-close")
+
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        await guard.close()
+
+        engine_client.abort.assert_awaited_once_with("req-timeout-close")
+        assert guard._abort_task is not None
+        assert guard._abort_task.done()
+        assert not guard._abort_task.cancelled()
+
+    @pytest.mark.asyncio
     async def test_signal_first_token_is_idempotent(self):
         """Calling signal_first_token multiple times is safe."""
         engine_client = MagicMock()

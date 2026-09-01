@@ -123,6 +123,7 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+_DEFERRED_ABORT_TIMEOUT_ENV = "DYN_VLLM_DEFERRED_ABORT_TIMEOUT_S"
 # Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
@@ -173,6 +174,22 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
+def _deferred_abort_timeout_s() -> Optional[float]:
+    value = os.environ.get(_DEFERRED_ABORT_TIMEOUT_ENV)
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except ValueError:
+        logger.warning(
+            "%s=%r is invalid; deferred abort timeout is disabled",
+            _DEFERRED_ABORT_TIMEOUT_ENV,
+            value,
+        )
+        return None
+    return timeout if timeout > 0 else None
+
+
 class _DeferredAbort:
     """Defers engine_client.abort(request_id) until the first engine output.
 
@@ -209,6 +226,7 @@ class _DeferredAbort:
         # Exception the real engine abort raised (if it has run), so the admin
         # abort_request route can report failure instead of a false "ok".
         self._abort_exc: Optional[BaseException] = None
+        self._timeout_s = _deferred_abort_timeout_s()
 
     def signal_first_token(self) -> None:
         """Called when the first engine output for the request is received."""
@@ -274,7 +292,19 @@ class _DeferredAbort:
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
         try:
-            await self._first_token_event.wait()
+            if self._timeout_s is None:
+                await self._first_token_event.wait()
+            else:
+                await asyncio.wait_for(
+                    self._first_token_event.wait(), timeout=self._timeout_s
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Deferred abort: first token not received for request %s "
+                "within %.3fs; aborting anyway",
+                self._request_id,
+                self._timeout_s,
+            )
         except Exception:
             pass
         await self._run_abort()
@@ -296,7 +326,7 @@ class _DeferredAbort:
         if self._abort_task is None:
             return
 
-        if not self._first_token_received:
+        if not self._first_token_received and self._timeout_s is None:
             # Case 1b: cancel the local waiter without firing the real abort.
             self._abort_task.cancel()
 
