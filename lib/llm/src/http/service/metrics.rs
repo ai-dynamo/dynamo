@@ -4083,9 +4083,11 @@ mod tests {
     }
 
     /// #11349 regression: non-streaming chat must preserve per-chunk metrics
-    /// through folding, including a zero-token payload-usage tail.
+    /// through folding and the backend-error preflight, including a zero-token
+    /// payload-usage tail.
     #[tokio::test]
     async fn test_non_streaming_fold_preserves_chunk_metrics() {
+        use crate::http::service::openai::check_for_backend_error;
         use crate::preprocessor::LLMMetricAnnotation;
         use crate::protocols::openai::ParsingOptions;
         use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
@@ -4184,17 +4186,23 @@ mod tests {
         let mut collector = metrics.clone().create_response_collector("test-model");
         let mut http_queue_guard = None;
 
-        // Match the non-streaming chat path: fold, observe metrics, then aggregate.
+        // Match the production non-streaming chat path exactly:
+        // fold -> observe metrics -> backend-error preflight -> aggregate.
+        // The preflight buffers leading annotation frames, so the observer must
+        // sit ahead of it for TTFT/ITL to reflect arrival time.
         let (folded, payload_future) = fold_aggregate_with_future(futures::stream::iter(chunks));
-        let stream = folded.inspect(move |response| {
+        let observed = folded.inspect(move |response| {
             process_chat_response_and_observe_metrics(
                 response,
                 &mut collector,
                 &mut http_queue_guard,
             );
         });
+        let checked = check_for_backend_error(observed, None)
+            .await
+            .expect("production-shaped stream must pass the backend-error preflight");
         let response = NvCreateChatCompletionResponse::from_annotated_stream(
-            stream,
+            checked,
             ParsingOptions::default(),
         )
         .await
