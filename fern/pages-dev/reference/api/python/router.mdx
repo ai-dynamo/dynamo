@@ -60,9 +60,39 @@ Router search-space preparation and replay-spec materialization.
 from dynamo.router.simulation import DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L116`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L116)
+[`components/src/dynamo/router/simulation/provider.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L132)
 
 **Public methods**
+
+<h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-compile-prediction">compile_prediction</h4>
+
+```python
+compile_prediction(config: Mapping[str, JSONValue], context: PredictionAdapterContext) -> AdapterReplaySpec
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L141)
+
+<h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-compile-recommendation">compile_recommendation</h4>
+
+```python
+compile_recommendation(config: Mapping[str, JSONValue], context: RecommendationAdapterContext) -> AdapterSearchPlan
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L181)
+
+<h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-materialize-candidate">materialize_candidate</h4>
+
+```python
+materialize_candidate(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], context: CandidateContext) -> AdapterReplaySpec
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L300)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-generate-search-space">generate_search_space</h4>
 
@@ -72,7 +102,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L123)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L308)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -82,7 +112,7 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L149)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L339)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-build-aic-perf-config" title="build_aic_perf_config (function)">
@@ -124,7 +154,7 @@ from dynamo.router.simulation import create_provider
 create_provider() -> DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L190)
+[`components/src/dynamo/router/simulation/provider.py#L417`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L417)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-parse-args" title="parse_args (function)">

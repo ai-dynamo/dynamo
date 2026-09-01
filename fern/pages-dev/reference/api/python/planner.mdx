@@ -225,9 +225,39 @@ Planner search-space preparation and replay-spec materialization.
 from dynamo.planner.simulation import DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L372`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L372)
+[`components/src/dynamo/planner/simulation/provider.py#L664`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L664)
 
 **Public methods**
+
+<h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-compile-prediction">compile_prediction</h4>
+
+```python
+compile_prediction(config: Mapping[str, JSONValue], context: PredictionAdapterContext) -> AdapterReplaySpec
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L674)
+
+<h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-compile-recommendation">compile_recommendation</h4>
+
+```python
+compile_recommendation(config: Mapping[str, JSONValue], context: RecommendationAdapterContext) -> AdapterSearchPlan
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L762)
+
+<h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-candidate">materialize_candidate</h4>
+
+```python
+materialize_candidate(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], context: CandidateContext) -> AdapterReplaySpec
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L839)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-generate-search-space">generate_search_space</h4>
 
@@ -237,7 +267,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L380)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L873)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -247,7 +277,7 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L461)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L987)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-emptytargetreplicaserror" title="EmptyTargetReplicasError (class)">
@@ -1782,5 +1812,5 @@ from dynamo.planner.simulation import create_provider
 create_provider() -> DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L588`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L588)
+[`components/src/dynamo/planner/simulation/provider.py#L1199`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1199)
 </Accordion>
