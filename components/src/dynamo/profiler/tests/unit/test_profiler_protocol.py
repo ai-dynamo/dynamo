@@ -1554,6 +1554,62 @@ def test_remote_code_policy_shell_form_preserves_syntax() -> None:
     assert result_args[0] == original_cmd + " --trust-remote-code"
 
 
+@pytest.mark.parametrize(
+    ("runtime_backend", "worker_name", "backend_module"),
+    [
+        ("vllm", "VllmDecodeWorker", "dynamo.vllm"),
+        ("sglang", "SglangDecodeWorker", "dynamo.sglang"),
+    ],
+)
+def test_remote_code_policy_shell_form_targets_backend_command_segment(
+    runtime_backend: str,
+    worker_name: str,
+    backend_module: str,
+) -> None:
+    """A trust flag in a later shell command does not satisfy the backend."""
+    from dynamo.profiler.utils.dgd_remote_code import apply_remote_code_policy
+
+    backend_command = f"python3 -m {backend_module} --model some/model"
+    trailing_command = "echo --trust-remote-code"
+    cfg = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "test"},
+        "spec": {
+            "components": [
+                _make_component(
+                    worker_name,
+                    "decode",
+                    command=["sh", "-c"],
+                    args=[f"{backend_command} && {trailing_command}"],
+                )
+            ]
+        },
+    }
+    with (
+        patch(
+            "dynamo.profiler.utils.dgd_remote_code.model_has_auto_map",
+            return_value=True,
+        ),
+        patch(
+            "dynamo.profiler.utils.dgd_remote_code.model_ref_allows_implicit_trust_remote_code",
+            return_value=True,
+        ),
+    ):
+        result = apply_remote_code_policy(
+            cfg,
+            runtime_backend=runtime_backend,
+            model_name_or_path="some/model",
+        )
+
+    result_command = _main_container(_components_by_name(result)[worker_name])["args"][
+        0
+    ]
+    assert result_command == (
+        f"{backend_command} --trust-remote-code && {trailing_command}"
+    )
+
+
 def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
     """Unexpected errors (network, auth) must return True (conservative default)
     rather than silently returning False and risking a missed injection."""

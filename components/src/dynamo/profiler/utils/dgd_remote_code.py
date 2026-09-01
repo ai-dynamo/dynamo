@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 from dynamo.profiler.utils.config import get_main_container_dict
@@ -15,7 +16,14 @@ from dynamo.profiler.utils.model_info import (
 
 _TRUST_REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
 _TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
+_TRUST_REMOTE_CODE_PATTERN = re.compile(
+    rf"(?<!\S){re.escape(_TRUST_REMOTE_CODE_FLAG)}(?=\s|$)"
+)
 _WORKER_COMPONENT_TYPES = frozenset({"worker", "prefill", "decode"})
+_BACKEND_SHELL_MARKERS = {
+    "vllm": ("dynamo.vllm", "vllm.entrypoints"),
+    "sglang": ("dynamo.sglang", "sglang.launch_server"),
+}
 
 
 def apply_remote_code_policy(
@@ -31,7 +39,7 @@ def apply_remote_code_policy(
     ):
         return config
 
-    if _all_workers_already_have_trust_flag(config):
+    if _all_workers_already_have_trust_flag(config, runtime_backend):
         return config
     if not model_ref_allows_implicit_trust_remote_code(model_name_or_path):
         raise RuntimeError(
@@ -40,11 +48,11 @@ def apply_remote_code_policy(
             "explicitly via overrides if this ref is intended."
         )
 
-    _inject_trust_remote_code_flag(config)
+    _inject_trust_remote_code_flag(config, runtime_backend)
     return config
 
 
-def _all_workers_already_have_trust_flag(config: dict) -> bool:
+def _all_workers_already_have_trust_flag(config: dict, runtime_backend: str) -> bool:
     """Return True when every real worker carries --trust-remote-code."""
     workers_seen = False
     for main_container in _worker_main_containers(config):
@@ -54,14 +62,14 @@ def _all_workers_already_have_trust_flag(config: dict) -> bool:
         if _is_mocker_container(command, args):
             continue
         if _is_shell_command(command, args):
-            if _TRUST_REMOTE_CODE_FLAG not in args[0]:
+            if not _shell_backend_has_trust_flag(args[0], runtime_backend):
                 return False
         elif _TRUST_REMOTE_CODE_FLAG not in args:
             return False
     return workers_seen
 
 
-def _inject_trust_remote_code_flag(config: dict) -> None:
+def _inject_trust_remote_code_flag(config: dict, runtime_backend: str) -> None:
     """Append --trust-remote-code to real workers without changing CLI form."""
     for main_container in _worker_main_containers(config):
         args = main_container.get("args") or []
@@ -69,10 +77,67 @@ def _inject_trust_remote_code_flag(config: dict) -> None:
         if _is_mocker_container(command, args):
             continue
         if _is_shell_command(command, args):
-            if _TRUST_REMOTE_CODE_FLAG not in args[0]:
-                main_container["args"] = [f"{args[0]} {_TRUST_REMOTE_CODE_FLAG}"]
+            if not _shell_backend_has_trust_flag(args[0], runtime_backend):
+                main_container["args"] = [
+                    _insert_shell_backend_trust_flag(args[0], runtime_backend)
+                ]
         elif _TRUST_REMOTE_CODE_FLAG not in args:
             main_container["args"] = [*args, _TRUST_REMOTE_CODE_FLAG]
+
+
+def _shell_backend_segment(command: str, runtime_backend: str) -> tuple[int, int]:
+    """Return the backend command's offsets within a shell script."""
+    marker_indexes = [
+        command.find(marker)
+        for marker in _BACKEND_SHELL_MARKERS[runtime_backend]
+        if marker in command
+    ]
+    if not marker_indexes:
+        return 0, len(command.rstrip())
+
+    start = min(marker_indexes)
+    index = start
+    quote: str | None = None
+    while index < len(command):
+        char = command[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+                index += 1
+            elif quote == '"' and char == "\\" and index + 1 < len(command):
+                index += 2
+            else:
+                index += 1
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+        elif char == "\\" and index + 1 < len(command):
+            index += 2
+        elif char == "&" and index > 0 and command[index - 1] in "<>":
+            index += 1
+        elif char in ";|&\n":
+            return start, index
+        else:
+            index += 1
+
+    return start, len(command.rstrip())
+
+
+def _shell_backend_has_trust_flag(command: str, runtime_backend: str) -> bool:
+    """Report whether the backend command segment carries the trust flag."""
+    start, end = _shell_backend_segment(command, runtime_backend)
+    return _TRUST_REMOTE_CODE_PATTERN.search(command[start:end]) is not None
+
+
+def _insert_shell_backend_trust_flag(command: str, runtime_backend: str) -> str:
+    """Insert the trust flag before the backend command's shell operator."""
+    _, end = _shell_backend_segment(command, runtime_backend)
+    prefix = command[:end].rstrip()
+    suffix = command[end:]
+    trailing_space = " " if suffix and not suffix[0].isspace() else ""
+    return f"{prefix} {_TRUST_REMOTE_CODE_FLAG}{trailing_space}{suffix}"
 
 
 def _worker_main_containers(config: dict) -> Iterator[dict]:
