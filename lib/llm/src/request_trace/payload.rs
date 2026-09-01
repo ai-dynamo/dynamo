@@ -95,8 +95,6 @@ impl RequestPayloadHandle {
         drop_reason: Option<String>,
     ) {
         let payload_complete = response.is_some() && drop_reason.is_none();
-        // A record with no response and no stated reason must not look complete;
-        // label it `unspecified` rather than leave it indistinguishable from a good one.
         let drop_reason = match (payload_complete, drop_reason) {
             (true, reason) => reason,
             (false, Some(reason)) => Some(reason),
@@ -365,8 +363,6 @@ mod tests {
         assert_eq!(first_payload.request_id, "payload-test-req-ok");
         assert!(first_payload.request.is_some());
         assert!(first_payload.response.is_some());
-        // Negative control: a faithful record still reports itself complete with
-        // no reason, so the flag stays meaningful in both directions.
         assert!(first_payload.payload_complete);
         assert!(first_payload.payload_drop_reason.is_none());
 

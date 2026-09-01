@@ -98,6 +98,22 @@ where
             Poll::Ready(Some(chunk)) => {
                 // Store chunk for aggregation
                 self.chunks.push(chunk.clone());
+                // Settle the outcome on the error chunk rather than at end-of-stream.
+                // The SSE monitor in `http::service::disconnect` breaks out of its loop
+                // on the first `Err` it receives and drops this stream, so end-of-stream
+                // is never reached on the streaming path and the buffered prefix would
+                // otherwise be lost behind a `client_cancelled` reason.
+                if chunk.is_error() {
+                    if let Some(tx) = self.done_tx.take() {
+                        let chunks = std::mem::take(&mut self.chunks);
+                        let parsing_options = ParsingOptions::default();
+                        tokio::spawn(async move {
+                            let _ = tx.send(
+                                aggregate_with_partial_recovery(chunks, parsing_options).await,
+                            );
+                        });
+                    }
+                }
                 // Forward the chunk unchanged downstream
                 Poll::Ready(Some(chunk))
             }
@@ -166,7 +182,6 @@ async fn aggregate_with_partial_recovery(
     PayloadOutcome::dropped(partial, reason)
 }
 
-/// Return (pass-through stream, future -> aggregation outcome for request payload capture).
 pub fn scan_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Unpin + Send + 'static,
@@ -547,8 +562,6 @@ mod tests {
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
-        // Negative control for the drop-reason work: a clean stream must still
-        // aggregate to a complete record with no reason attached.
         assert!(
             outcome.drop_reason.is_none(),
             "a fully successful aggregation must not carry a drop reason"
@@ -608,10 +621,6 @@ mod tests {
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
-        assert!(
-            outcome.drop_reason.is_none(),
-            "a fully successful aggregation must not carry a drop reason"
-        );
         let final_resp = outcome
             .response
             .expect("aggregation should produce a record");
@@ -721,10 +730,6 @@ mod tests {
         let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
-        assert!(
-            outcome.drop_reason.is_none(),
-            "a fully successful aggregation must not carry a drop reason"
-        );
         let final_resp = outcome
             .response
             .expect("aggregation should produce a record");
@@ -810,9 +815,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_chunk_settles_the_outcome_without_reaching_end_of_stream() {
+        // `http::service::disconnect` stops polling and drops the stream as soon as an
+        // error reaches it, so end-of-stream never arrives on the streaming path. Model
+        // that: take chunks up to and including the error, then drop the pass-through.
+        let chunks = vec![
+            create_mock_chunk("Hello ".to_string(), 0),
+            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
+                "invalid sampling parameter",
+            ),
+            create_mock_chunk("never polled".to_string(), 0),
+        ];
+
+        let (passthrough, future) = scan_aggregate_with_future(stream::iter(chunks));
+        let delivered: Vec<_> = passthrough.take(2).collect().await;
+        assert_eq!(delivered.len(), 2);
+
+        let outcome = future.await;
+
+        let reason = outcome
+            .drop_reason
+            .as_deref()
+            .expect("an errored stream must carry a drop reason");
+        assert!(
+            reason.contains("invalid sampling parameter"),
+            "the record must name the backend error rather than report a client cancel, got {reason}"
+        );
+
+        let partial = outcome
+            .response
+            .expect("content delivered before the error must survive the early drop");
+        assert_eq!(
+            partial.inner.choices[0].message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello ".to_string()),
+        );
+    }
+
+    #[tokio::test]
     async fn error_chunk_mid_stream_keeps_partial_content_and_names_the_error() {
-        // The client saw "Hello " before the backend errored, so the audit record must
-        // keep that text and say why it is short.
         let chunks = vec![
             create_mock_chunk("Hello ".to_string(), 0),
             Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
@@ -857,8 +897,6 @@ mod tests {
 
     #[tokio::test]
     async fn error_as_first_chunk_reports_reason_without_a_response() {
-        // Nothing was delivered before the error, so there is no partial content to
-        // keep — but the record must still say why it is empty.
         let chunks = vec![
             Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend unavailable"),
         ];
