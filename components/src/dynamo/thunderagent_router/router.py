@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
@@ -36,10 +36,25 @@ class PauseDecision:
     waited_seconds: float = 0.0
     was_paused: bool = False
     was_soft_demoted: bool = False
-    assigned_worker_hint: Optional[int] = None
-    # Only meaningful together with assigned_worker_hint. None means the pin
-    # cannot be expressed this turn; the request must go out without a pin.
-    assigned_dp_rank_hint: Optional[int] = None
+    # Replica this program is accounted against, and therefore the pin to send. None
+    # means the program is not placed yet, so the request goes out unpinned.
+    assigned_replica_hint: Optional[ReplicaKey] = None
+    # Identifies the admission this decision belongs to, so a late first-chunk back-fill
+    # cannot write into a placement a subsequent turn already made.
+    admission_epoch: int = 0
+
+
+@dataclass
+class _ReplicaUsage:
+    """One replica's occupancy, from a single pass over the program table.
+
+    Kept live for a whole tick: pause and resume adjust it as they mutate the table. No
+    ``used_decayed`` field -- it moves with the clock, so it is derived on demand.
+    """
+
+    capacity: int
+    used: int = 0
+    programs: list[Program] = field(default_factory=list)
 
 
 @dataclass
@@ -160,9 +175,10 @@ class ThunderAgentScheduler:
                             program is not None
                             and program.lifecycle == ProgramLifecycle.PAUSED
                         ):
-                            replica = self._least_loaded_replica_locked(
+                            usage = self._replica_usage_locked(
                                 self._capacity.snapshot()
                             )
+                            replica = self._least_loaded_replica_locked(usage)
                             self._resume_program(program, replica)
                             self._stat_forced_resumes += 1
 
@@ -188,8 +204,8 @@ class ThunderAgentScheduler:
                     waited_seconds=waited,
                     was_paused=was_paused,
                     was_soft_demoted=soft_demoted,
-                    assigned_worker_hint=program.assigned_worker_id,
-                    assigned_dp_rank_hint=program.assigned_dp_rank,
+                    assigned_replica_hint=program.assigned_replica,
+                    admission_epoch=program.admission_epoch,
                 )
         except asyncio.CancelledError:
             # Admission mutates shared state before the first cancellable wait.
@@ -265,16 +281,17 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
-        needs_assignment = was_new and program.assigned_worker_id is None
+        # Any unplaced program, not just a new one: the back-fill records only a complete
+        # replica, so admission is what repairs a program whose response named no rank.
+        needs_assignment = program.assigned_replica is None
         stale_replacement = False
         live_worker_ids: set[int] = set()
-        if program.assigned_worker_id is not None:
+        if program.assigned_replica is not None:
             live_worker_ids = self._capacity.live_worker_ids()
-            if not live_worker_ids or program.assigned_worker_id in live_worker_ids:
+            if not live_worker_ids or program.assigned_replica[0] in live_worker_ids:
                 return None, False
-            stale_worker_id = program.assigned_worker_id
-            program.assigned_worker_id = None
-            program.assigned_dp_rank = None
+            stale_worker_id = program.assigned_replica[0]
+            program.assigned_replica = None
             needs_assignment = True
             stale_replacement = True
             logger.info(
@@ -301,15 +318,20 @@ class ThunderAgentScheduler:
             # through unassigned; the first response chunk back-fills the pair.
             return None, False
         replica = self._select_replica_for_admission_locked(
-            capacities,
+            self._replica_usage_locked(capacities),
             program.token_total,
-            queue_behind_paused=not stale_replacement,
+            queue_behind_paused=was_new and not stale_replacement,
         )
         if replica is not None:
-            # A program's KV lives on one replica, so admission names it: the
-            # accounting keys on it, and the first turn can go out pinned.
-            program.assigned_worker_id, program.assigned_dp_rank = replica
+            # Placing here is pre-existing (worker-keyed did the same argmin), and not
+            # binding: _greedy_resume_locked re-picks the replica on every resume.
+            program.assigned_replica = replica
             self._stat_worker_assignments += 1
+            return None, False
+
+        if not was_new:
+            # Already running and unplaceable: let the turn through unpinned rather than
+            # parking a live session. The next turn retries.
             return None, False
 
         # Every replica is full: queue until the scheduler tick resumes us.
@@ -355,14 +377,33 @@ class ThunderAgentScheduler:
             await self._pause_acting(program_id)
 
     async def assign_worker(
-        self, program_id: str, worker_id: int, dp_rank: Optional[int] = None
-    ) -> None:
+        self,
+        program_id: str,
+        replica: Optional[ReplicaKey],
+        *,
+        admission_epoch: int,
+    ) -> bool:
+        """Back-fill the replica the engine chose. Cold start only.
+
+        Refuses a rank-less answer, a stale epoch (a later turn owns this Program) and an
+        already-placed program. Returns whether it recorded anything.
+        """
+        if replica is None:
+            return False
         async with self._lock:
             program = self._table.programs.get(program_id)
-            if program is not None:
-                program.assigned_worker_id = worker_id
-                program.assigned_dp_rank = dp_rank
-                self._stat_worker_assignments += 1
+            # Released, superseded by a later turn, not running, or already placed by
+            # admission -- which is authoritative. A response only fills a gap it left.
+            if (
+                program is None
+                or program.admission_epoch != admission_epoch
+                or program.lifecycle != ProgramLifecycle.ACTIVE
+                or program.assigned_replica is not None
+            ):
+                return False
+            program.assigned_replica = replica
+            self._stat_worker_assignments += 1
+            return True
 
     async def _scheduler_loop(self) -> None:
         consecutive_failures = 0
@@ -388,11 +429,15 @@ class ThunderAgentScheduler:
         capacities = self._capacity.snapshot()
         if not capacities:
             return
-        # Upstream TA ordering: resume first, then pause -- a program paused
-        # this tick can't resume until the next.
-        self._apply_soft_demotes(capacities)
-        await self._greedy_resume(capacities)
-        await self._pause_until_safe(capacities)
+        # One lock acquisition and one table pass for the whole tick: per-phase rescans
+        # cost O(replicas x programs), and replicas went from W to W x dp_size.
+        async with self._lock:
+            usage = self._replica_usage_locked(capacities)
+            # Upstream TA ordering: resume first, then pause -- a program paused
+            # this tick can't resume until the next.
+            self._apply_soft_demotes(usage)
+            self._greedy_resume_locked(usage)
+            self._pause_until_safe_locked(usage)
 
     def _program_tokens(self, program: Program, *, decayed: bool = False) -> int:
         if program.status != ProgramStatus.ACTING:
@@ -407,34 +452,48 @@ class ThunderAgentScheduler:
         )
         return int(program.token_total * (2.0 ** (-(idle / tau))))
 
-    def _active_programs_for_replica(self, key: ReplicaKey) -> list[Program]:
-        worker_id, dp_rank = key
-        return [
-            p
-            for p in self._table.programs.values()
-            if p.lifecycle == ProgramLifecycle.ACTIVE
-            and p.assigned_worker_id == worker_id
-            and p.assigned_dp_rank == dp_rank
-        ]
+    def _replica_usage_locked(
+        self, capacities: dict[ReplicaKey, int]
+    ) -> dict[ReplicaKey, _ReplicaUsage]:
+        """Bucket ACTIVE programs by replica in one O(programs + replicas) pass.
 
-    def _replica_used(self, key: ReplicaKey, *, decayed: bool = False) -> int:
-        programs = self._active_programs_for_replica(key)
-        tokens = sum(self._program_tokens(p, decayed=decayed) for p in programs)
-        return tokens + len(programs) * self._cfg.buffer_per_program
+        Caller holds ``self._lock``. Unplaced programs, and ones naming a replica no longer
+        in ``capacities``, are counted against nothing -- as before.
+        """
+        usage = {
+            key: _ReplicaUsage(capacity=capacity)
+            for key, capacity in capacities.items()
+        }
+        buffer = self._cfg.buffer_per_program
+        for program in self._table.programs.values():
+            if program.lifecycle != ProgramLifecycle.ACTIVE:
+                continue
+            entry = usage.get(program.assigned_replica)
+            if entry is None:
+                continue
+            entry.programs.append(program)
+            entry.used += self._program_tokens(program) + buffer
+        return usage
+
+    def _decayed_used(self, entry: _ReplicaUsage) -> int:
+        """``entry.used`` with the ACTING decay applied; derived on demand because it moves
+        with the clock."""
+        tokens = sum(self._program_tokens(p, decayed=True) for p in entry.programs)
+        return tokens + len(entry.programs) * self._cfg.buffer_per_program
 
     def _least_loaded_replica_locked(
-        self, capacities: dict[ReplicaKey, int]
+        self, usage: dict[ReplicaKey, _ReplicaUsage]
     ) -> Optional[ReplicaKey]:
-        if not capacities:
+        if not usage:
             return None
         return max(
-            capacities,
-            key=lambda key: capacities[key] - self._replica_used(key, decayed=True),
+            usage,
+            key=lambda key: usage[key].capacity - self._decayed_used(usage[key]),
         )
 
     def _select_replica_for_admission_locked(
         self,
-        capacities: dict[ReplicaKey, int],
+        usage: dict[ReplicaKey, _ReplicaUsage],
         estimated_tokens: int,
         *,
         queue_behind_paused: bool,
@@ -442,71 +501,81 @@ class ThunderAgentScheduler:
         # Fairness: new programs queue behind any existing paused program.
         if queue_behind_paused and self._table.paused:
             return None
-        buffer = self._cfg.buffer_per_program
-        required = estimated_tokens + buffer
-        candidates = [
-            (key, self._replica_used(key))
-            for key, capacity in capacities.items()
-            if capacity - self._replica_used(key) >= required
-        ]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda item: item[1])[0]
+        required = estimated_tokens + self._cfg.buffer_per_program
+        best_key: Optional[ReplicaKey] = None
+        best_used: Optional[int] = None
+        for key, entry in usage.items():
+            if entry.capacity - entry.used < required:
+                continue
+            if best_used is None or entry.used < best_used:
+                best_key, best_used = key, entry.used
+        return best_key
 
-    def _apply_soft_demotes(self, capacities: dict[ReplicaKey, int]) -> None:
+    def _apply_soft_demotes(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
         soft_until = time.monotonic() + self._cfg.scheduler_interval_seconds * 1.5
-        for key, capacity in capacities.items():
-            util = self._replica_used(key) / capacity
+        for entry in usage.values():
+            util = entry.used / entry.capacity
             if not (
                 self._cfg.soft_demote_threshold <= util < self._cfg.pause_threshold
             ):
                 continue
-            for program in self._active_programs_for_replica(key):
+            for program in entry.programs:
                 if (
                     not program.marked_for_pause
                     and program.soft_demoted_until < soft_until
                 ):
                     program.soft_demoted_until = soft_until
 
-    async def _pause_until_safe(self, capacities: dict[ReplicaKey, int]) -> None:
+    def _pause_until_safe_locked(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
+        """Shed load from every over-threshold replica. Caller holds ``self._lock``.
+
+        Smallest-ACTING-first then mark REASONING, as upstream. Candidate order is taken
+        once per replica instead of rescanning the table on every pause.
+        """
         threshold = self._cfg.pause_threshold
         pause_target = min(self._cfg.pause_target, threshold)
+        buffer = self._cfg.buffer_per_program
 
-        for key, capacity in capacities.items():
-            # Hold the lock for the entire per-replica decision so the snapshot
-            # of program state used by _smallest_candidates / _replica_used
-            # cannot race with concurrent before_request admissions.
-            async with self._lock:
-                base_used = self._replica_used(key)
-                if base_used <= capacity * threshold:
-                    continue
+        for key, entry in usage.items():
+            base_used = entry.used
+            if base_used <= entry.capacity * threshold:
+                continue
 
-                target_limit = capacity * pause_target
-                paused_this_tick = 0
-                marked_this_tick = 0
-                # Bound the inner loop by total program count so a candidate
-                # transitioning out from under us can't spin the tick.
-                for _ in range(len(self._table.programs) + 1):
-                    if self._replica_used(key) <= target_limit:
-                        break
-                    acting, reasoning = self._smallest_candidates(key)
-                    if acting is not None:
-                        if self._pause_acting_locked(acting.program_id):
-                            paused_this_tick += 1
-                        continue
-                    if reasoning is not None:
-                        if (
-                            not reasoning.marked_for_pause
-                            and reasoning.lifecycle == ProgramLifecycle.ACTIVE
-                            and reasoning.status == ProgramStatus.REASONING
-                        ):
-                            reasoning.marked_for_pause = True
-                            self._stat_marked_for_pause += 1
-                            marked_this_tick += 1
-                        continue
+            target_limit = entry.capacity * pause_target
+            paused_this_tick = 0
+            marked_this_tick = 0
+
+            acting = sorted(
+                (p for p in entry.programs if p.status == ProgramStatus.ACTING),
+                key=lambda p: p.token_total,
+            )
+            for program in acting:
+                if entry.used <= target_limit:
                     break
+                if program.marked_for_pause:
+                    continue
+                freed = self._program_tokens(program) + buffer
+                if not self._pause_acting_locked(program.program_id):
+                    continue
+                entry.programs.remove(program)
+                entry.used -= freed
+                paused_this_tick += 1
 
-                final_used = self._replica_used(key)
+            if entry.used > target_limit:
+                # Marking does not free anything now; it defers the pause to
+                # after_request. Upstream keeps marking until the candidates run out.
+                reasoning = sorted(
+                    (p for p in entry.programs if p.status == ProgramStatus.REASONING),
+                    key=lambda p: p.token_total,
+                )
+                for program in reasoning:
+                    if program.marked_for_pause:
+                        continue
+                    if program.lifecycle != ProgramLifecycle.ACTIVE:
+                        continue
+                    program.marked_for_pause = True
+                    self._stat_marked_for_pause += 1
+                    marked_this_tick += 1
 
             if paused_this_tick or marked_this_tick:
                 logger.info(
@@ -516,37 +585,9 @@ class ThunderAgentScheduler:
                     key[1],
                     paused_this_tick,
                     marked_this_tick,
-                    base_used / capacity,
-                    final_used / capacity,
+                    base_used / entry.capacity,
+                    entry.used / entry.capacity,
                 )
-
-    def _smallest_candidates(
-        self, key: ReplicaKey
-    ) -> tuple[Optional[Program], Optional[Program]]:
-        worker_id, dp_rank = key
-        smallest_acting: Optional[Program] = None
-        smallest_reasoning: Optional[Program] = None
-        for program in self._table.programs.values():
-            if program.assigned_worker_id != worker_id:
-                continue
-            if program.assigned_dp_rank != dp_rank:
-                continue
-            if program.lifecycle != ProgramLifecycle.ACTIVE:
-                continue
-            if program.marked_for_pause:
-                continue
-            if program.status == ProgramStatus.ACTING:
-                if (
-                    smallest_acting is None
-                    or program.token_total < smallest_acting.token_total
-                ):
-                    smallest_acting = program
-            elif program.status == ProgramStatus.REASONING and (
-                smallest_reasoning is None
-                or program.token_total < smallest_reasoning.token_total
-            ):
-                smallest_reasoning = program
-        return smallest_acting, smallest_reasoning
 
     async def _pause_acting(self, program_id: str) -> bool:
         async with self._lock:
@@ -562,8 +603,7 @@ class ThunderAgentScheduler:
         if program.status != ProgramStatus.ACTING:
             return False
         program.lifecycle = ProgramLifecycle.PAUSED
-        program.assigned_worker_id = None
-        program.assigned_dp_rank = None
+        program.assigned_replica = None
         if program.waiting is None:
             program.waiting = asyncio.Event()
         else:
@@ -603,86 +643,89 @@ class ThunderAgentScheduler:
             )
             return True
 
-    async def _greedy_resume(self, capacities: dict[ReplicaKey, int]) -> None:
+    def _greedy_resume_locked(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
+        """Best-fit-decreasing restore of paused programs. Caller holds ``self._lock``.
+
+        Keeps ``usage`` in step as it resumes -- invariant maintenance, since a replica only
+        accepts a resume while it stays under the resume ceiling.
+        """
         if not self._table.paused:
             return
 
-        async with self._lock:
-            paused_programs = [
-                self._table.programs[pid]
-                for pid in self._table.paused
-                if pid in self._table.programs
-            ]
-            if not paused_programs:
-                return
+        paused_programs = [
+            self._table.programs[pid]
+            for pid in self._table.paused
+            if pid in self._table.programs
+        ]
+        if not paused_programs:
+            return
 
-            def group_key(program: Program) -> int:
-                if program.step_count <= 1:
-                    return 1
-                if program.status == ProgramStatus.REASONING:
-                    return 0
-                return 2
+        def group_key(program: Program) -> int:
+            if program.step_count <= 1:
+                return 1
+            if program.status == ProgramStatus.REASONING:
+                return 0
+            return 2
 
-            paused_programs.sort(key=lambda p: (group_key(p), p.token_total))
+        paused_programs.sort(key=lambda p: (group_key(p), p.token_total))
 
-            resume_ceiling = max(
-                0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
-            )
-            backend_caps = [
-                (key, int(c * resume_ceiling) - self._replica_used(key, decayed=False))
-                for key, c in capacities.items()
-            ]
-            backend_caps = [
-                (key, r) for key, r in backend_caps if r > self._cfg.buffer_per_program
-            ]
+        resume_ceiling = max(
+            0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
+        )
+        buffer = self._cfg.buffer_per_program
+        backend_caps = [
+            (key, int(entry.capacity * resume_ceiling) - entry.used)
+            for key, entry in usage.items()
+        ]
+        backend_caps = [(key, r) for key, r in backend_caps if r > buffer]
+        if not backend_caps:
+            return
+
+        backend_caps.sort(key=lambda x: -x[1])
+
+        total_capacity = sum(r for _, r in backend_caps)
+        resumable_programs: list[Program] = []
+        cumulative = 0
+        for program in paused_programs:
+            required = program.token_total + buffer
+            if cumulative + required <= total_capacity:
+                resumable_programs.append(program)
+                cumulative += required
+
+        if not resumable_programs:
+            return
+
+        resumable_programs.sort(key=lambda p: -p.token_total)
+        min_required = min(p.token_total for p in resumable_programs) + buffer
+
+        resumed_this_tick = 0
+        for program in resumable_programs:
             if not backend_caps:
-                return
+                break
+            replica, remaining = backend_caps[0]
+            if min_required > remaining:
+                break
+            required = program.token_total + buffer
+            if required > remaining:
+                continue
+            self._resume_program(program, replica)
+            entry = usage[replica]
+            entry.programs.append(program)
+            entry.used += self._program_tokens(program) + buffer
+            resumed_this_tick += 1
+            updated_remaining = remaining - required
+            if updated_remaining > buffer:
+                backend_caps[0] = (replica, updated_remaining)
+                backend_caps.sort(key=lambda x: -x[1])
+            else:
+                backend_caps.pop(0)
 
-            backend_caps.sort(key=lambda x: -x[1])
-
-            total_capacity = sum(r for _, r in backend_caps)
-            resumable_programs: list[Program] = []
-            cumulative = 0
-            for program in paused_programs:
-                required = program.token_total + self._cfg.buffer_per_program
-                if cumulative + required <= total_capacity:
-                    resumable_programs.append(program)
-                    cumulative += required
-
-            if not resumable_programs:
-                return
-
-            resumable_programs.sort(key=lambda p: -p.token_total)
-            min_required = (
-                min(p.token_total for p in resumable_programs)
-                + self._cfg.buffer_per_program
+        if resumed_this_tick:
+            logger.info(
+                "scheduler.tick resumed=%d still_paused=%d",
+                resumed_this_tick,
+                len(self._table.paused),
             )
-
-            resumed_this_tick = 0
-            for program in resumable_programs:
-                if not backend_caps:
-                    break
-                replica, remaining = backend_caps[0]
-                if min_required > remaining:
-                    break
-                required = program.token_total + self._cfg.buffer_per_program
-                if required > remaining:
-                    continue
-                self._resume_program(program, replica)
-                resumed_this_tick += 1
-                updated_remaining = remaining - required
-                if updated_remaining > self._cfg.buffer_per_program:
-                    backend_caps[0] = (replica, updated_remaining)
-                    backend_caps.sort(key=lambda x: -x[1])
-                else:
-                    backend_caps.pop(0)
-
-            if resumed_this_tick:
-                logger.info(
-                    "scheduler.tick resumed=%d still_paused=%d",
-                    resumed_this_tick,
-                    len(self._table.paused),
-                )
 
     def _resume_program(
         self, program: Program, target_replica: Optional[ReplicaKey]
@@ -691,13 +734,8 @@ class ThunderAgentScheduler:
         if program.lifecycle != ProgramLifecycle.PAUSED:
             return
         program.lifecycle = ProgramLifecycle.ACTIVE
-        # The caller picked a replica, so record the rank too; leaving it None would
-        # make the program unaccounted again.
-        if target_replica is None:
-            program.assigned_worker_id = None
-            program.assigned_dp_rank = None
-        else:
-            program.assigned_worker_id, program.assigned_dp_rank = target_replica
+        program.assigned_replica = target_replica
+        if target_replica is not None:
             self._stat_worker_assignments += 1
         notify = program.waiting
         program.waiting = None
@@ -716,53 +754,32 @@ class ThunderAgentScheduler:
         )
 
     def _worker_snapshot_locked(
-        self, capacities: dict[ReplicaKey, int]
+        self, usage: dict[ReplicaKey, _ReplicaUsage]
     ) -> dict[str, dict[str, Any]]:
-        """Per-replica metrics, keyed ``"<worker_id>:<dp_rank>"``.
+        """Per-replica metrics, keyed ``"<worker_id>:<dp_rank>"``, both parts also as fields.
 
-        Both components are also exposed as fields so consumers need not parse the key.
+        Reads the same usage map a tick does, so the two cannot disagree.
         """
-        used = dict.fromkeys(capacities, 0)
-        used_decayed = dict.fromkeys(capacities, 0)
-        active_programs = dict.fromkeys(capacities, 0)
-
-        for program in self._table.programs.values():
-            worker_id = program.assigned_worker_id
-            dp_rank = program.assigned_dp_rank
-            if worker_id is None or dp_rank is None:
-                continue
-            replica: ReplicaKey = (worker_id, dp_rank)
-            if (
-                program.lifecycle != ProgramLifecycle.ACTIVE
-                or replica not in capacities
-            ):
-                continue
-            active_programs[replica] += 1
-            used[replica] += self._program_tokens(program)
-            used_decayed[replica] += self._program_tokens(program, decayed=True)
-
         workers = {}
-        for replica, capacity in capacities.items():
-            buffer_tokens = active_programs[replica] * self._cfg.buffer_per_program
-            replica_used = used[replica] + buffer_tokens
-            replica_used_decayed = used_decayed[replica] + buffer_tokens
+        for replica, entry in usage.items():
+            used_decayed = self._decayed_used(entry)
             workers[f"{replica[0]}:{replica[1]}"] = {
                 "worker_id": replica[0],
                 "dp_rank": replica[1],
-                "capacity": capacity,
-                "used": replica_used,
-                "used_decayed": replica_used_decayed,
-                "utilization": replica_used / capacity if capacity else None,
-                "utilization_decayed": replica_used_decayed / capacity
-                if capacity
-                else None,
-                "active_programs": active_programs[replica],
+                "capacity": entry.capacity,
+                "used": entry.used,
+                "used_decayed": used_decayed,
+                "utilization": entry.used / entry.capacity if entry.capacity else None,
+                "utilization_decayed": (
+                    used_decayed / entry.capacity if entry.capacity else None
+                ),
+                "active_programs": len(entry.programs),
             }
         return workers
 
     async def status_snapshot(self) -> dict:
         async with self._lock:
-            capacities = self._capacity.snapshot()
+            usage = self._replica_usage_locked(self._capacity.snapshot())
             lifecycle_counts = {lifecycle.value: 0 for lifecycle in ProgramLifecycle}
             status_counts = {status.value: 0 for status in ProgramStatus}
             programs = []
@@ -770,12 +787,14 @@ class ThunderAgentScheduler:
             for program in self._table.programs.values():
                 lifecycle_counts[program.lifecycle.value] += 1
                 status_counts[program.status.value] += 1
+                worker_id, dp_rank = program.assigned_replica or (None, None)
                 programs.append(
                     {
                         "program_id": program.program_id,
                         "lifecycle": program.lifecycle.value,
                         "status": program.status.value,
-                        "assigned_worker_id": program.assigned_worker_id,
+                        "assigned_worker_id": worker_id,
+                        "assigned_dp_rank": dp_rank,
                         "token_total": program.token_total,
                         "step_count": program.step_count,
                         "marked_for_pause": program.marked_for_pause,
@@ -783,7 +802,7 @@ class ThunderAgentScheduler:
                     }
                 )
 
-            workers = self._worker_snapshot_locked(capacities)
+            workers = self._worker_snapshot_locked(usage)
 
             return {
                 "programs_total": len(self._table.programs),
@@ -796,7 +815,9 @@ class ThunderAgentScheduler:
 
     async def metrics_snapshot(self) -> dict:
         async with self._lock:
-            workers = self._worker_snapshot_locked(self._capacity.snapshot())
+            workers = self._worker_snapshot_locked(
+                self._replica_usage_locked(self._capacity.snapshot())
+            )
             return {
                 "counters": {
                     "programs_created_total": self._stat_programs_created,

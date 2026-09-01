@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 import uvloop
@@ -38,6 +39,7 @@ from dynamo.thunderagent_router.args import (
     parse_args,
 )
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.program_state import ReplicaKey
 from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
@@ -133,10 +135,12 @@ class ThunderAgentRouterHandler:
         self._capacity: Optional[WorkerCapacityProvider] = None
         self._scheduler: Optional[ThunderAgentScheduler] = None
         self._worker_id_extract_warned = False
+        self._unpinned_warned_at = 0.0
         self._stat_requests_total = 0
         self._stat_program_requests = 0
         self._stat_passthrough_requests = 0
         self._stat_session_final_requests = 0
+        self._stat_unpinned_turns = 0
 
     async def initialize(self) -> None:
         # Endpoint shape was validated by ThunderAgentRouterConfig.validate()
@@ -217,9 +221,10 @@ class ThunderAgentRouterHandler:
                 if proof is not None:
                     if first_chunk:
                         first_chunk = False
-                        selected_worker = self._extract_worker_id(chunk)
-                        if selected_worker is not None:
-                            proof["selected_worker_id"] = selected_worker
+                        selected_replica = self._extract_replica(chunk)
+                        if selected_replica is not None:
+                            proof["selected_worker_id"] = selected_replica[0]
+                            proof["selected_dp_rank"] = selected_replica[1]
                     _inject_thunderagent_route_proof(chunk, proof)
                 yield chunk
             return
@@ -233,16 +238,14 @@ class ThunderAgentRouterHandler:
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
         )
-        worker_pin = decision.assigned_worker_hint
-        worker_dp_rank = decision.assigned_dp_rank_hint
+        replica_pin = decision.assigned_replica_hint
         logger.debug(
             "thunderagent.route path=program program=%s prompt_tokens=%d "
-            "worker_hint=%s dp_rank_hint=%s waited_seconds=%.4f was_paused=%s "
+            "replica_hint=%s waited_seconds=%.4f was_paused=%s "
             "soft_demoted=%s priority_jump=%.3f",
             program_id,
             estimated_prompt_tokens,
-            worker_pin,
-            worker_dp_rank,
+            replica_pin,
             decision.waited_seconds,
             decision.was_paused,
             decision.was_soft_demoted,
@@ -256,17 +259,18 @@ class ThunderAgentRouterHandler:
             routing["priority_jump"] = float(existing) + decision.priority_jump
             preprocessed["routing"] = routing
 
-        if worker_pin is not None and (
-            worker_dp_rank is not None or self._pin_needs_no_rank(worker_pin)
-        ):
+        if replica_pin is not None:
             routing = preprocessed.get("routing") or {}
-            routing["backend_instance_id"] = worker_pin
-            # RoutingHints reads (backend_instance_id, dp_rank) together.
-            # Include rank when known; omit only for single-rank workers where
-            # the router can resolve it via unique_dp_rank_for_worker.
-            if worker_dp_rank is not None:
-                routing["dp_rank"] = worker_dp_rank
+            # RoutingHints reads (backend_instance_id, dp_rank) together, and the pin is
+            # only ever a complete replica, so both go out or neither does.
+            routing["backend_instance_id"] = replica_pin[0]
+            routing["dp_rank"] = replica_pin[1]
             preprocessed["routing"] = routing
+        else:
+            # Not placed yet. Counted and warned: a session that quietly lost sticky KV
+            # affinity is otherwise indistinguishable from one still pinned.
+            self._stat_unpinned_turns += 1
+            self._warn_unpinned_turn(program_id)
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
@@ -283,8 +287,10 @@ class ThunderAgentRouterHandler:
                 "was_soft_demoted": decision.was_soft_demoted,
                 "waited_seconds": decision.waited_seconds,
                 "priority_jump": decision.priority_jump,
-                "assigned_worker_hint": worker_pin,
-                "assigned_dp_rank_hint": worker_dp_rank,
+                "assigned_worker_hint": None if replica_pin is None else replica_pin[0],
+                "assigned_dp_rank_hint": (
+                    None if replica_pin is None else replica_pin[1]
+                ),
             }
             if want_route_proof
             else None
@@ -293,26 +299,28 @@ class ThunderAgentRouterHandler:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                # Cold-start fallback: admission had no MDC to pick a replica from, so
-                # take the pair the engine actually used. Carries the rank as well --
-                # a worker without one is neither accounted for nor pinnable.
-                if first_chunk and worker_pin is None:
+                # Cold start: admission had no MDC, so take the replica the engine used.
+                # Only a complete one is usable -- see assign_worker.
+                if first_chunk and replica_pin is None:
                     first_chunk = False
-                    selected_worker = self._extract_worker_id(chunk)
-                    selected_dp_rank = self._extract_worker_dp_rank(chunk)
-                    if selected_worker is not None:
-                        await self._scheduler.assign_worker(
-                            program_id, selected_worker, selected_dp_rank
-                        )
-                        selected_worker_id = selected_worker
+                    selected_replica = self._extract_replica(chunk)
+                    recorded = await self._scheduler.assign_worker(
+                        program_id,
+                        selected_replica,
+                        admission_epoch=decision.admission_epoch,
+                    )
+                    # ``recorded`` already implies a complete replica; the explicit check
+                    # is what lets the unpack below be typed.
+                    if recorded and selected_replica is not None:
+                        selected_worker_id, selected_dp_rank = selected_replica
                         if proof is not None:
-                            proof["selected_worker_id"] = selected_worker
+                            proof["selected_worker_id"] = selected_worker_id
                             proof["selected_dp_rank"] = selected_dp_rank
                         logger.debug(
-                            "thunderagent.route_selected program=%s worker=%s "
+                            "thunderagent.route_selected program=%s replica=%s "
                             "source=first_chunk",
                             program_id,
-                            selected_worker,
+                            selected_replica,
                         )
 
                 usage = (
@@ -350,11 +358,11 @@ class ThunderAgentRouterHandler:
             )
             logger.debug(
                 "thunderagent.request_complete program=%s prompt_tokens=%d "
-                "completion_tokens=%d worker_hint=%s selected_worker=%s",
+                "completion_tokens=%d replica_hint=%s selected_worker=%s",
                 program_id,
                 prompt_tokens_seen,
                 completion_tokens_seen,
-                worker_pin,
+                replica_pin,
                 selected_worker_id,
             )
 
@@ -375,6 +383,7 @@ class ThunderAgentRouterHandler:
                 "program": self._stat_program_requests,
                 "passthrough": self._stat_passthrough_requests,
                 "session_final": self._stat_session_final_requests,
+                "unpinned_turns": self._stat_unpinned_turns,
             },
         }
 
@@ -390,6 +399,7 @@ class ThunderAgentRouterHandler:
             "program_requests_total": self._stat_program_requests,
             "passthrough_requests_total": self._stat_passthrough_requests,
             "session_final_requests_total": self._stat_session_final_requests,
+            "unpinned_turns_total": self._stat_unpinned_turns,
         }
         yield {
             "component": "thunderagent_router",
@@ -399,11 +409,12 @@ class ThunderAgentRouterHandler:
             "workers": scheduler_metrics["workers"],
         }
 
-    def _extract_worker_id(self, chunk: Any) -> Optional[int]:
-        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
-        # bindings: worker attribution rides ``routing_data.worker_id``. Log once if the
-        # shape no longer matches; silent extraction failure here means we lose
-        # worker-affinity on pin.
+    def _extract_replica(self, chunk: Any) -> Optional[ReplicaKey]:
+        """``(worker_id, dp_rank)`` of the replica that served this chunk.
+
+        Both halves from the *same* phase, decode preferred: ``decode_dp_rank`` is written
+        only when a rank was supplied, so per-field fallback can fabricate a replica.
+        """
         if not isinstance(chunk, dict):
             self._warn_unexpected_chunk_shape("not a dict")
             return None
@@ -412,53 +423,36 @@ class ThunderAgentRouterHandler:
             self._warn_unexpected_chunk_shape("no routing_data dict")
             return None
         info = routing_data.get("worker_id")
-        if isinstance(info, dict):
-            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
-            # nested ``worker_id`` key. The sticky pin is applied as
-            # ``backend_instance_id``, which the frontend resolves to the decode/backend
-            # worker, so prefer ``decode_worker_id`` and fall back to
-            # ``prefill_worker_id`` (identical in aggregated mode).
-            worker_id = info.get("decode_worker_id")
-            if not isinstance(worker_id, int):
-                worker_id = info.get("prefill_worker_id")
-            if isinstance(worker_id, int):
-                return worker_id
-        self._warn_unexpected_chunk_shape("worker_id payload shape changed")
+        if not isinstance(info, dict):
+            self._warn_unexpected_chunk_shape("worker_id payload shape changed")
+            return None
+        for id_key, rank_key in (
+            ("decode_worker_id", "decode_dp_rank"),
+            ("prefill_worker_id", "prefill_dp_rank"),
+        ):
+            worker_id = info.get(id_key)
+            dp_rank = info.get(rank_key)
+            if isinstance(worker_id, int) and isinstance(dp_rank, int):
+                return (worker_id, dp_rank)
         return None
 
-    def _extract_worker_dp_rank(self, chunk: Any) -> Optional[int]:
-        """DP rank of the replica that served this chunk, if the payload names one.
+    def _warn_unpinned_turn(self, program_id: str) -> None:
+        """Warn that a turn went out without a pin, at most once a minute.
 
-        Same ``routing_data.worker_id`` payload as ``_extract_worker_id``; prefers the
-        decode rank and falls back to prefill (identical in aggregated mode). Silent on
-        a missing rank -- ``_extract_worker_id`` already warns on malformed payloads.
+        Rate-limited, not once-only: this comes and goes, so a single start-up warning would
+        not say it is happening now. Exact count is ``unpinned_turns_total``.
         """
-        if not isinstance(chunk, dict):
-            return None
-        routing_data = chunk.get("routing_data")
-        if not isinstance(routing_data, dict):
-            return None
-        info = routing_data.get("worker_id")
-        if not isinstance(info, dict):
-            return None
-        dp_rank = info.get("decode_dp_rank")
-        if not isinstance(dp_rank, int):
-            dp_rank = info.get("prefill_dp_rank")
-        return dp_rank if isinstance(dp_rank, int) else None
-
-    def _pin_needs_no_rank(self, worker_id: int) -> bool:
-        """Return True if *worker_id* can be pinned by id alone (no explicit rank).
-
-        Only single-rank workers qualify: the router's
-        ``unique_dp_rank_for_worker`` fills in the rank when
-        ``data_parallel_size == 1``, and raises otherwise. Unknown cases
-        (subscriber not yet up, card missing, older engine without the field)
-        return False so an unexpressible pin degrades to KV-overlap routing
-        rather than an error.
-        """
-        if self._capacity is None:
-            return False
-        return self._capacity.dp_size_for_worker(worker_id) == 1
+        now = time.monotonic()
+        if now - self._unpinned_warned_at < 60.0:
+            return
+        self._unpinned_warned_at = now
+        logger.warning(
+            "ThunderAgent turn sent without a sticky pin (program=%s, %d so far): the "
+            "program has no replica yet, so this turn routes by KV overlap and its "
+            "tokens are not charged to any replica.",
+            program_id,
+            self._stat_unpinned_turns,
+        )
 
     def _warn_unexpected_chunk_shape(self, reason: str) -> None:
         if self._worker_id_extract_warned:

@@ -148,8 +148,8 @@ scheduler.tick resumed=<N> still_paused=<M>
 
 ThunderAgent serves two Dynamo runtime endpoints alongside `generate`:
 
-- `<namespace>.thunderagent_router.status` returns scheduler state, active/paused program counts, per-program lifecycle state, per-worker utilization, and request counters.
-- `<namespace>.thunderagent_router.metrics` returns counters and gauges shaped for quick operational checks, including created/ended programs, admitted/paused requests, pause/resume totals, forced resumes, and per-worker utilization.
+- `<namespace>.thunderagent_router.status` returns scheduler state, active/paused program counts, per-program lifecycle state, per-replica utilization keyed `<worker_id>:<dp_rank>`, and request counters (including `unpinned_turns`).
+- `<namespace>.thunderagent_router.metrics` returns counters and gauges shaped for quick operational checks, including created/ended programs, admitted/paused requests, pause/resume totals, forced resumes, `unpinned_turns_total`, and per-replica utilization.
 
 These are Dynamo runtime endpoints, not public OpenAI HTTP routes. Use them from another Dynamo component or a small runtime client connected to the same namespace.
 
