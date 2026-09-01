@@ -907,7 +907,6 @@ impl MetricsRegistry {
 
         let mut merger = FamilyMerger::from_gathered(&registries)?;
 
-        // Typed callbacks hand over families directly -- no text, no parsing.
         for registry in &registries {
             for family in registry.execute_typed_callbacks() {
                 let name = family.name().to_string();
@@ -2048,8 +2047,6 @@ mod test_metric_families_combined {
         fs.iter().map(|f| f.name()).collect()
     }
 
-    /// Engine families arrive typed and land in the same collection as
-    /// Dynamo's own.
     #[test]
     fn typed_and_native_families_share_one_collection() {
         let families = registry().metric_families_combined().expect("combined");

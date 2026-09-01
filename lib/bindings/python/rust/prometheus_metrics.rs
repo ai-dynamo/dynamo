@@ -158,7 +158,6 @@ impl EngineMetrics {
         Ok(())
     }
 
-    /// Mirrors `RuntimeMetrics.register_prometheus_typed_callback`.
     fn register_prometheus_typed_callback(&self, callback: PyObject) -> PyResult<()> {
         self.hierarchy
             .get_metrics_registry()

@@ -205,7 +205,6 @@ class FailoverMetrics:
             return get_prometheus_typed(self._registry)
 
     def register(self, endpoint) -> None:
-        # /metrics keeps the exposition text; OTLP needs the typed structure.
         endpoint.metrics.register_prometheus_expfmt_callback(self._collect)
         endpoint.metrics.register_prometheus_typed_callback(self._collect_typed)
         logger.info(

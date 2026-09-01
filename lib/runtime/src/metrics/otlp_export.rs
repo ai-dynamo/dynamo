@@ -223,30 +223,45 @@ impl ExportConfig {
             return Ok(None);
         }
 
-        let metrics_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL).ok();
-        let protocol = crate::logging::resolve_signal_otlp_protocol(
-            crate::logging::otlp_protocol_from_env(),
-            metrics_protocol.as_deref(),
-            env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
-        );
         // Only gRPC is implemented; failing loudly beats exporting over the
-        // wrong transport. Name whichever variable actually supplied the value,
-        // so an operator who set only the generic one is not sent to the
+        // wrong transport. Validate the value as configured rather than as
+        // resolved: the shared resolver falls back to grpc for anything it does
+        // not recognise, so a typo would otherwise be exported over gRPC --
+        // exactly the silent mis-send this check exists to prevent.
+        //
+        // The signal-specific variable wins; name whichever one supplied the
+        // value, so an operator who set only the generic one is not sent to the
         // specific one.
-        if protocol != crate::logging::OtlpProtocol::Grpc {
-            let source = match metrics_protocol.as_deref() {
-                Some(value) if !value.trim().is_empty() => {
-                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
-                }
-                _ => env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
-            };
+        let metrics_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL).ok();
+        let generic_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL).ok();
+        let configured = [
+            (
+                metrics_protocol.as_deref(),
+                env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
+            ),
+            (
+                generic_protocol.as_deref(),
+                env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(value, source)| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| (value, source))
+        });
+
+        if let Some((value, source)) = configured
+            && !value.eq_ignore_ascii_case("grpc")
+        {
             anyhow::bail!(
-                "{source}={} is not supported for metrics; only grpc is implemented. \
+                "{source}={value} is not supported for metrics; only grpc is implemented. \
                  Set {}=grpc to override.",
-                protocol.as_str(),
                 env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
             );
         }
+        let protocol = crate::logging::OtlpProtocol::Grpc;
 
         Ok(Some(Self {
             endpoint: crate::logging::resolve_otlp_endpoint(
@@ -469,6 +484,30 @@ mod tests {
                     env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
                     Some("http/protobuf"),
                 ),
+            ],
+            || assert!(ExportConfig::from_env().is_err()),
+        );
+
+        // A typo must fail too. The shared resolver silently falls back to
+        // grpc for anything it does not recognise, so validating the resolved
+        // protocol would export over gRPC and call it success.
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
+                    Some("htp/protbuf"),
+                ),
+            ],
+            || assert!(ExportConfig::from_env().is_err()),
+        );
+
+        // The generic variable is the fallback and must be validated too.
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL, None),
+                (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, Some("http/protobuf")),
             ],
             || assert!(ExportConfig::from_env().is_err()),
         );
