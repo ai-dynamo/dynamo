@@ -579,6 +579,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
+        embedding_worker=False,
+        embedding_worker_processes=1,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -1835,6 +1837,7 @@ class TestEmbeddingWorkerFlag:
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
         config = parse_args()
         assert config.embedding_worker is False
+        assert config.embedding_worker_processes == 1
 
     def test_flag_sets_true(self, mock_vllm_cli):
         """--embedding-worker on its own with default agg mode parses cleanly."""
@@ -1847,6 +1850,53 @@ class TestEmbeddingWorkerFlag:
         )
         config = parse_args()
         assert config.embedding_worker is True
+
+    def test_embedding_worker_processes_parse(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "8",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker_processes == 8
+
+    def test_embedding_worker_processes_require_embedding_worker(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--embedding-worker-processes", "4")
+        with pytest.raises(ValueError, match="requires --embedding-worker"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_data_parallel(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--data-parallel-size",
+            "2",
+        )
+        with pytest.raises(ValueError, match="data-parallel-size=1"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_lora(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--enable-lora",
+        )
+        with pytest.raises(ValueError, match="--enable-lora"):
+            parse_args()
 
     def test_rejects_prefill_disagg(self, mock_vllm_cli):
         """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
