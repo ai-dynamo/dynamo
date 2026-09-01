@@ -3,6 +3,65 @@
 
 use super::*;
 use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
+use crate::protocols::common::timing::{RoutingDecisionCandidate, RoutingDecisionTrace};
+
+fn request_trace_routing_decision(
+    trace: dynamo_kv_router::protocols::RoutingDecisionTrace,
+) -> RoutingDecisionTrace {
+    RoutingDecisionTrace {
+        schema: trace.schema,
+        worker_type: trace.worker_type,
+        policy: trace.policy,
+        selection_reason: trace.selection_reason,
+        candidate_scope: trace.candidate_scope,
+        block_size: trace.block_size,
+        request_blocks: trace.request_blocks,
+        track_prefill_tokens: trace.track_prefill_tokens,
+        selected_worker_id: trace.selected_worker_id,
+        selected_dp_rank: trace.selected_dp_rank,
+        max_overlap_worker_id: trace.max_overlap_worker_id,
+        max_overlap_dp_rank: trace.max_overlap_dp_rank,
+        avoidable_prefill_token_equivalents: trace.avoidable_prefill_token_equivalents,
+        overlap_score_credit: trace.overlap_score_credit,
+        overlap_score_credit_decay: trace.overlap_score_credit_decay,
+        prefill_load_scale: trace.prefill_load_scale,
+        host_cache_hit_weight: trace.host_cache_hit_weight,
+        disk_cache_hit_weight: trace.disk_cache_hit_weight,
+        shared_cache_multiplier: trace.shared_cache_multiplier,
+        decode_active_request_weight: trace.decode_active_request_weight,
+        router_temperature: trace.router_temperature,
+        candidates: trace
+            .candidates
+            .into_iter()
+            .map(|candidate| RoutingDecisionCandidate {
+                worker_id: candidate.worker_id,
+                dp_rank: candidate.dp_rank,
+                eligible: candidate.eligible,
+                selected: candidate.selected,
+                max_overlap: candidate.max_overlap,
+                total_cost_blocks: candidate.total_cost_blocks,
+                effective_overlap_blocks: candidate.effective_overlap_blocks,
+                device_overlap_blocks: candidate.device_overlap_blocks,
+                host_overlap_blocks: candidate.host_overlap_blocks,
+                disk_overlap_blocks: candidate.disk_overlap_blocks,
+                shared_beyond_device_blocks: candidate.shared_beyond_device_blocks,
+                raw_prefill_blocks: candidate.raw_prefill_blocks,
+                active_prefill_tokens: candidate.active_prefill_tokens,
+                prefill_cost_blocks: candidate.prefill_cost_blocks,
+                decode_cost_blocks: candidate.decode_cost_blocks,
+                active_requests: candidate.active_requests,
+                active_request_cost_blocks: candidate.active_request_cost_blocks,
+                overlap_credit_blocks: candidate.overlap_credit_blocks,
+                overlap_credit_decay: candidate.overlap_credit_decay,
+                effective_overlap_score_credit: candidate.effective_overlap_score_credit,
+                adjusted_prefill_blocks: candidate.adjusted_prefill_blocks,
+                base_score_blocks: candidate.base_score_blocks,
+                preferred_taint_multiplier: candidate.preferred_taint_multiplier,
+                decode_overlap_formula: candidate.decode_overlap_formula,
+            })
+            .collect(),
+    }
+}
 
 impl<Sel> RoutingHost<Sel>
 where
@@ -360,6 +419,9 @@ where
             }
 
             if let Some(ref tracker) = request.tracker {
+                if let Some(trace) = selection.decision_trace.take() {
+                    tracker.record_routing_decision_trace(request_trace_routing_decision(trace));
+                }
                 let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));

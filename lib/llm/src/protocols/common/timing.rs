@@ -29,6 +29,64 @@ pub const WORKER_TYPE_PREFILL: &str = "prefill";
 pub const WORKER_TYPE_DECODE: &str = "decode";
 const UNSET_DP_RANK_LABEL: &str = "none";
 
+/// One diagnostic-only router choice, retained only when the KV router's
+/// opt-in decision-trace flag is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingDecisionTrace {
+    pub schema: String,
+    pub worker_type: String,
+    pub policy: String,
+    pub selection_reason: String,
+    pub candidate_scope: String,
+    pub block_size: u32,
+    pub request_blocks: u64,
+    pub track_prefill_tokens: bool,
+    pub selected_worker_id: u64,
+    pub selected_dp_rank: u32,
+    pub max_overlap_worker_id: u64,
+    pub max_overlap_dp_rank: u32,
+    pub avoidable_prefill_token_equivalents: f64,
+    pub overlap_score_credit: f64,
+    pub overlap_score_credit_decay: f64,
+    pub prefill_load_scale: f64,
+    pub host_cache_hit_weight: f64,
+    pub disk_cache_hit_weight: f64,
+    pub shared_cache_multiplier: f64,
+    pub decode_active_request_weight: f64,
+    pub router_temperature: f64,
+    pub candidates: Vec<RoutingDecisionCandidate>,
+}
+
+/// Numerical score inputs for one eligible worker. No user payload or cache
+/// key material is retained here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingDecisionCandidate {
+    pub worker_id: u64,
+    pub dp_rank: u32,
+    pub eligible: bool,
+    pub selected: bool,
+    pub max_overlap: bool,
+    pub total_cost_blocks: f64,
+    pub effective_overlap_blocks: f64,
+    pub device_overlap_blocks: f64,
+    pub host_overlap_blocks: f64,
+    pub disk_overlap_blocks: f64,
+    pub shared_beyond_device_blocks: u32,
+    pub raw_prefill_blocks: f64,
+    pub active_prefill_tokens: usize,
+    pub prefill_cost_blocks: f64,
+    pub decode_cost_blocks: f64,
+    pub active_requests: usize,
+    pub active_request_cost_blocks: f64,
+    pub overlap_credit_blocks: f64,
+    pub overlap_credit_decay: f64,
+    pub effective_overlap_score_credit: f64,
+    pub adjusted_prefill_blocks: f64,
+    pub base_score_blocks: f64,
+    pub preferred_taint_multiplier: Option<f64>,
+    pub decode_overlap_formula: bool,
+}
+
 /// Phase of the request in disaggregated serving.
 ///
 /// Used to determine which worker ID field to record when routing.
@@ -184,6 +242,9 @@ pub struct RequestTracker {
     /// `nvext.extra_fields=["prompt_token_ids"]` response request.
     /// First-write-wins because one response generator owns one prompt.
     prompt_token_ids: OnceLock<Vec<u32>>,
+
+    /// Candidate scores selected by the frontend's KV router.
+    routing_decision_trace: OnceLock<RoutingDecisionTrace>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -244,6 +305,7 @@ impl RequestTracker {
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
+            routing_decision_trace: OnceLock::new(),
         }
     }
 
@@ -509,6 +571,17 @@ impl RequestTracker {
     /// Record router scheduler queue depth at routing time.
     pub fn record_router_queue_depth(&self, depth: usize) {
         let _ = self.router_queue_depth.set(depth);
+    }
+
+    /// Record the one prefill routing decision associated with this request.
+    /// First-write-wins keeps the trace bounded for disaggregated requests that
+    /// make more than one router hop.
+    pub fn record_routing_decision_trace(&self, trace: RoutingDecisionTrace) {
+        let _ = self.routing_decision_trace.set(trace);
+    }
+
+    pub fn routing_decision_trace(&self) -> Option<RoutingDecisionTrace> {
+        self.routing_decision_trace.get().cloned()
     }
 
     /// Get the router scheduler queue depth recorded at routing time.

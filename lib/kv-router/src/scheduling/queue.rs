@@ -1470,6 +1470,7 @@ impl<
                 target_cached_prefix_blocks,
                 router_hint_candidates: request.router_hint_candidates.take(),
                 potential_decode_blocks: selected.selection.potential_decode_blocks,
+                decision_trace: selected.selection.decision_trace,
             },
         })
     }
@@ -1502,6 +1503,7 @@ impl<
             target_cached_prefix_blocks,
             router_hint_candidates: request.router_hint_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            decision_trace: selected.selection.decision_trace,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -1880,6 +1882,7 @@ mod tests {
                 cached_tokens: request.effective_cached_tokens_for(worker),
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
+                decision_trace: None,
             })
         }
     }

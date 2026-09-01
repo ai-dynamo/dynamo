@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::common::extensions::AgentContext;
+use crate::protocols::common::timing::RoutingDecisionTrace;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
@@ -116,6 +117,10 @@ pub struct RequestTraceMetrics {
     pub replay: Option<RequestReplayMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason_metadata: Option<FinishReasonMetadata>,
+    /// Opt-in full KV-router candidate table. Present only on diagnostic
+    /// deployments with `DYN_ROUTER_DECISION_TRACE_ENABLED=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_decision: Option<RoutingDecisionTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,6 +345,7 @@ mod tests {
                     input_sequence_hashes: vec![11, 22],
                 }),
                 finish_reason_metadata: None,
+                routing_decision: None,
             }),
             tool: None,
             payload: None,
@@ -354,6 +360,102 @@ mod tests {
         assert!(value.get("payload").is_none());
         assert!(value["request"].get("model").is_none());
         assert!(value["request"].get("finish_reason_metadata").is_none());
+    }
+
+    #[test]
+    fn request_trace_serializes_opt_in_routing_decision() {
+        let record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestEnd,
+            event_time_unix_ms: 1_100,
+            event_source: None,
+            agent_context: None,
+            request: Some(RequestTraceMetrics {
+                request_id: "req-1".to_string(),
+                x_request_id: None,
+                model: None,
+                input_tokens: Some(256),
+                output_tokens: None,
+                cached_tokens: None,
+                request_received_ms: None,
+                prefill_wait_time_ms: None,
+                prefill_time_ms: None,
+                ttft_ms: None,
+                total_time_ms: None,
+                avg_itl_ms: None,
+                kv_hit_rate: None,
+                kv_transfer_estimated_latency_ms: None,
+                queue_depth: None,
+                worker: None,
+                replay: None,
+                finish_reason_metadata: None,
+                routing_decision: Some(RoutingDecisionTrace {
+                    schema: "dynamo.router.decision.v1".to_string(),
+                    worker_type: "aggregated".to_string(),
+                    policy: "default".to_string(),
+                    selection_reason: "minimum_cost".to_string(),
+                    candidate_scope: "eligible_workers_only".to_string(),
+                    block_size: 256,
+                    request_blocks: 1,
+                    track_prefill_tokens: true,
+                    selected_worker_id: 42,
+                    selected_dp_rank: 0,
+                    max_overlap_worker_id: 42,
+                    max_overlap_dp_rank: 0,
+                    avoidable_prefill_token_equivalents: 0.0,
+                    overlap_score_credit: 1.0,
+                    overlap_score_credit_decay: 1.0,
+                    prefill_load_scale: 3.0,
+                    host_cache_hit_weight: 0.5,
+                    disk_cache_hit_weight: 0.0,
+                    shared_cache_multiplier: 0.0,
+                    decode_active_request_weight: 0.0,
+                    router_temperature: 0.0,
+                    candidates: vec![crate::protocols::common::timing::RoutingDecisionCandidate {
+                        worker_id: 42,
+                        dp_rank: 0,
+                        eligible: true,
+                        selected: true,
+                        max_overlap: true,
+                        total_cost_blocks: 1.25,
+                        effective_overlap_blocks: 8.0,
+                        device_overlap_blocks: 4.0,
+                        host_overlap_blocks: 4.0,
+                        disk_overlap_blocks: 0.0,
+                        shared_beyond_device_blocks: 4,
+                        raw_prefill_blocks: 10.0,
+                        active_prefill_tokens: 512,
+                        prefill_cost_blocks: 30.0,
+                        decode_cost_blocks: 2.0,
+                        active_requests: 1,
+                        active_request_cost_blocks: 1.0,
+                        overlap_credit_blocks: 8.0,
+                        overlap_credit_decay: 1.0,
+                        effective_overlap_score_credit: 1.0,
+                        adjusted_prefill_blocks: 2.0,
+                        base_score_blocks: 3.0,
+                        preferred_taint_multiplier: None,
+                        decode_overlap_formula: false,
+                    }],
+                }),
+            }),
+            tool: None,
+            payload: None,
+        };
+
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(
+            value["request"]["routing_decision"]["selected_worker_id"],
+            42
+        );
+        assert_eq!(
+            value["request"]["routing_decision"]["candidates"][0]["effective_overlap_blocks"],
+            8.0
+        );
+        assert_eq!(
+            value["request"]["routing_decision"]["avoidable_prefill_token_equivalents"],
+            0.0
+        );
     }
 
     #[test]
