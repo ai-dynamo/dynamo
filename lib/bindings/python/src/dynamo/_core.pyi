@@ -1181,6 +1181,7 @@ class KvEventPublisher:
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
+        video_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1201,7 +1202,9 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
             batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
                 flushes at each submitted source-list boundary.
+            image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
+            video_token_id: Optional model video-placeholder token for exact MM routing.
         """
 
     def publish_stored(
@@ -1713,6 +1716,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a RouterConfig.
@@ -1725,6 +1729,7 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
         """
         ...
 
@@ -2880,6 +2885,7 @@ class KvRouter:
         session_affinity_ttl_secs: Optional[int] = None,
         *,
         load_threshold_config: Optional[LoadThresholdConfig] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2891,6 +2897,7 @@ class KvRouter:
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
         """
         ...
 

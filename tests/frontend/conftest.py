@@ -230,7 +230,7 @@ def start_services_with_grpc(
 class MockerWorkerProcess(ManagedProcess):
     """Shared mocker worker process for frontend tests.
 
-    Uses dynamo.mocker with configurable model and speedup ratio.
+    Uses the internal Mocker worker launcher with configurable model and speedup ratio.
     Can be used by any frontend test that needs a fast mock backend.
     """
 
@@ -252,7 +252,7 @@ class MockerWorkerProcess(ManagedProcess):
         command = [
             "python3",
             "-m",
-            "dynamo.mocker",
+            "dynamo.mocker._worker",
             "--model-path",
             model,
             "--speedup-ratio",
@@ -286,7 +286,7 @@ class MockerWorkerProcess(ManagedProcess):
             display_output=True,
             terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
-            straggler_commands=["-m dynamo.mocker"],
+            straggler_commands=["-m dynamo.mocker._worker"],
             log_dir=log_dir,
         )
 

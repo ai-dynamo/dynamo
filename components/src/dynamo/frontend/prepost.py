@@ -32,6 +32,7 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -267,6 +268,10 @@ def build_tool_call_guided_decoding(
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
+            if _is_named_tool_choice(tool_choice) and admits_only_empty_object(
+                json_schema
+            ):
+                return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
                 and json_schema.get("type") == "array"
@@ -747,7 +752,7 @@ async def preprocess_chat_request(
         and parser_guided_decoding is None
         and guided_decoding is tool_guided_decoding
         and isinstance(tool_guided_decoding, dict)
-        and "json" in tool_guided_decoding
+        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -853,6 +858,17 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
+        # Every ORIGINAL generated token id for this choice, in order (NVBug
+        # 6678449b). The count is delegated to the pinned vLLM parser's own
+        # `count_reasoning_tokens`, so it is never re-derived from parser output.
+        # Deriving it was wrong three ways: the response projections drop or
+        # defer it (`_suppress_reasoning_output`, and the non-streaming tool
+        # path's terminal-delta buffering); a per-chunk classifier over-counts a
+        # chunk carrying both kinds; and re-encoding decoded text drifts from the
+        # original ids, because detokenisation is not injective -- one generated
+        # id can re-encode to several.
+        self._reasoning_token_ids: list[int] = []
+
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
@@ -894,6 +910,13 @@ class StreamingPostProcessor:
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    @property
+    def reasoning_token_total(self) -> int:
+        """Reasoning tokens for this choice, per the parser's own counter."""
+        if self.reasoning_parser is None:
+            return 0
+        return self.reasoning_parser.count_reasoning_tokens(self._reasoning_token_ids)
 
     def _decode_dynamo_json_fallback_tool_calls(
         self, text: str
@@ -1290,6 +1313,10 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        # BEFORE any branch below: every path must feed the ledger, including
+        # the ones that emit nothing for this chunk.
+        if self.reasoning_parser is not None:
+            self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback:
             return self._process_dynamo_json_fallback_tool_calls(output)
         if self._should_buffer_for_non_streaming_tool_parse():

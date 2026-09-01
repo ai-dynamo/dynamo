@@ -70,6 +70,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -184,8 +185,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+	// eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
 	// components. Only meaningful when `type` is `epp`.
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of
+	// `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+	// mount) so existing DGDs keep running across operator upgrades until
+	// migration is started by clearing this field.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 

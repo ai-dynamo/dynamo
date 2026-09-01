@@ -101,6 +101,71 @@ class _PendingRelease:
         self._tensor_ids.clear()
 
 
+def _attach_received_embedding_transfers(
+    multimodal_groups: list[MultiModalGroup],
+    transfer_group_indices: list[int],
+    loaded: list[tuple[int, torch.Tensor]],
+    pending: _PendingRelease | None,
+) -> None:
+    """Attach legacy per-image or coalesced tensors to image groups.
+
+    Each group with transfer metadata starts a transfer run. A run containing
+    multiple groups is a Qwen-VL tensor coalesced along its visual-token axis;
+    the existing per-group ``embeddings_shape`` values define its boundaries.
+    """
+    if multimodal_groups and (
+        not transfer_group_indices or transfer_group_indices[0] != 0
+    ):
+        raise RuntimeError("The first multimodal group has no embedding transfer")
+    if len(transfer_group_indices) != len(loaded):
+        raise RuntimeError(
+            "Embedding transfer result count mismatch: "
+            f"transfers={len(transfer_group_indices)}, results={len(loaded)}"
+        )
+
+    for transfer_pos, (group_idx, (_tensor_id, embedding)) in enumerate(
+        zip(transfer_group_indices, loaded, strict=True)
+    ):
+        next_group_idx = (
+            transfer_group_indices[transfer_pos + 1]
+            if transfer_pos + 1 < len(transfer_group_indices)
+            else len(multimodal_groups)
+        )
+        groups = multimodal_groups[group_idx:next_group_idx]
+        if len(groups) == 1:
+            groups[0].loaded_embedding = embedding
+            continue
+
+        shapes = [group.embeddings_shape for group in groups]
+        if any(shape is None or len(shape) != 3 for shape in shapes):
+            raise RuntimeError("Coalesced embedding groups are missing 3-D shapes")
+        valid_shapes = [shape for shape in shapes if shape is not None]
+        expected_shape = (
+            1,
+            sum(shape[1] for shape in valid_shapes),
+            valid_shapes[0][2],
+        )
+        if tuple(embedding.shape) != expected_shape or any(
+            shape[0] != 1 or shape[2] != expected_shape[2] for shape in valid_shapes
+        ):
+            raise RuntimeError(
+                "Coalesced embedding token count or hidden size does not match "
+                f"group shapes: expected={expected_shape}, "
+                f"actual={tuple(embedding.shape)}"
+            )
+
+        for group, part in zip(
+            groups,
+            embedding.split([shape[1] for shape in valid_shapes], dim=1),
+            strict=True,
+        ):
+            group.loaded_embedding = part
+
+    if pending is not None:
+        for tensor_id, _ in loaded:
+            pending.track(tensor_id)
+
+
 def _accumulate_embeddings(
     multi_modal_data: Dict[str, Any],
     model: str,
@@ -243,19 +308,36 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(
         f"[PREFILL] request: {request_id} receive embeddings"
     ):
-        tasks = [
-            asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
-            for group in multimodal_groups
+        transfer_group_indices = [
+            idx
+            for idx, group in enumerate(multimodal_groups)
             if group.serialized_request is not None
+        ]
+        tasks = [
+            asyncio.create_task(
+                receiver.receive_embeddings(
+                    multimodal_groups[idx].serialized_request  # type: ignore[arg-type]
+                )
+            )
+            for idx in transfer_group_indices
         ]
         loaded = await asyncio.gather(*tasks)
 
     is_local = isinstance(receiver, LocalEmbeddingReceiver)
     pending: _PendingRelease | None = None if is_local else _PendingRelease(receiver)
-    for group, (tensor_id, embedding) in zip(multimodal_groups, loaded, strict=True):
-        group.loaded_embedding = embedding
+    try:
+        _attach_received_embedding_transfers(
+            multimodal_groups,
+            transfer_group_indices,
+            loaded,
+            pending,
+        )
+    except RuntimeError:
         if pending is not None:
-            pending.track(tensor_id)
+            for tensor_id, _ in loaded:
+                pending.track(tensor_id)
+            pending.release_all()
+        raise
 
     return multimodal_groups, pending
 

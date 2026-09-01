@@ -107,8 +107,8 @@ impl VllmMockerService {
                 data_parallel_size: engine_args.dp_size,
                 data_parallel_rank: DP_RANK,
                 decode_context_parallel_size: 1,
-                // Mocker runs a single rank per data-parallel replica.
-                world_size: u64::from(engine_args.dp_size),
+                // Mocker runs a single rank per data-parallel replica (TP * PP * PCP).
+                world_size: 1,
             }),
             max_model_len: engine_args
                 .max_model_len

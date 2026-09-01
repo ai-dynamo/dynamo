@@ -26,10 +26,16 @@ dynamo:
     # rather than building it in wheel_builder, so it moves independently of
     # the framework-level ref the runtime target's nixl-sys links against.
     nixl_ref: v1.3.2
-  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
+  # Dynamo's native Rust EPP (deploy/inference-gateway/ext-proc). This is the
+  # default value of the frontend's EPP_IMAGE build arg; the frontend copies
+  # /epp out of it. CI overrides EPP_IMAGE with the per-commit image it just
+  # built, so this default is what a plain `docker build` of the rendered
+  # Dockerfile resolves to.
+  epp_image: nvcr.io/nvidia/ai-dynamo/dynamo-epp:1.5.0
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   # Self-baseline of the ubuntu frontend base; the licenses stage subtracts it so
-  # frontend NOTICES attribute only what dynamo (+ EPP's Go modules) add on top.
+  # frontend NOTICES attribute only what dynamo (+ the Rust EPP, via the SBOM
+  # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
@@ -46,7 +52,7 @@ dynamo:
   nats_version: v2.12.14
   etcd_version: v3.5.33
 
-  nixl_ref: v1.0.1
+  nixl_ref: v1.3.2
   nixl_ucx_ref: v1.21.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
@@ -71,7 +77,7 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.27.1-ubuntu2404
+    runtime_image_tag: v0.28.0-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -90,12 +96,14 @@ vllm:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.27.1
+    runtime_image_tag: v0.28.0
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
-  vllm_omni_ref: "v0.27.0rc1"
-  # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
-  # support that landed upstream after the release. Remove this pin when the
-  # vLLM base images include https://github.com/vllm-project/vllm/pull/49797.
+  vllm_omni_ref: "v0.28.0rc1"
+  # vLLM-Omni 0.28.0rc1 requires transformers>=5.10.1,<5.15, while vLLM's own
+  # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.
+  # Omni is layered against the installed Transformers version, so without
+  # this pin its dependency solve is unsatisfiable. Remove the pin once
+  # vLLM-Omni lifts its <5.15 upper bound.
   transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
@@ -152,9 +160,9 @@ trtllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc24
+    runtime_image_tag: 1.3.0rc25
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@16a103b8
+    baseline_sbom: release@2366e4b4
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
