@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -40,6 +40,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "embedding_frontend_tokenization": False,
         # Pin to the real Config default: an auto-created Mock attribute is
         # truthy, which enables the GMS shadow-mode path and imports the
         # optional gpu_memory_service package (absent in some test images).
@@ -166,6 +167,74 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
 
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+    calls = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+
+    async def fail_after_setup(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise RuntimeError("startup failed")
+
+    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await factory._create_decode_worker(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert calls == ["state-agent", "handler", "engine"]
+
+
+@pytest.mark.asyncio
+async def test_prefill_startup_failure_withdraws_state_agent_owner():
+    lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=lifecycle)
+    factory._run_prefill_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("prefill startup failed")
+    )
+
+    with pytest.raises(RuntimeError, match="prefill startup failed"):
+        await factory._create_prefill_worker(Mock(), Mock(), asyncio.Event(), [])
+
+    lifecycle.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
+    from dynamo.vllm import worker_factory
+
+    monkeypatch.setattr(
+        worker_factory, "state_agent_settings", lambda _config: object()
+    )
+    setup_legacy = Mock(return_value=["legacy"])
+    setup_owner = AsyncMock(side_effect=RuntimeError("host is unavailable"))
+    factory = _make_factory(
+        setup_kv_event_publisher_fn=setup_legacy,
+        setup_kv_state_attachment_owner_fn=setup_owner,
+    )
+
+    result = await factory._setup_kv_routing(
+        Mock(),
+        Mock(),
+        Mock(),
+        consolidator_enabled=False,
+        consolidator_port=0,
+    )
+
+    assert result is None
+    setup_owner.assert_awaited_once()
+    setup_legacy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1090,3 +1159,72 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedding_frontend_tokenization", "expected_model_input"),
+    [(False, ModelInput.Text), (True, ModelInput.Tokens)],
+)
+async def test_embedding_worker_registration_and_cleanup(
+    embedding_frontend_tokenization: bool,
+    expected_model_input: ModelInput,
+) -> None:
+    cleanup_order: list[str] = []
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "embedding-worker-id"
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda: cleanup_order.append("client")
+    engine_cleanup_resource = Mock()
+    engine_cleanup_resource.cleanup.side_effect = lambda: cleanup_order.append(
+        "resource"
+    )
+    setup_vllm_engine = Mock(
+        return_value=(
+            engine_client,
+            Mock(),
+            Mock(),
+            engine_cleanup_resource,
+            Mock(),
+        )
+    )
+    register_vllm_model = AsyncMock(return_value=None)
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: cleanup_order.append("handler")
+    config = _make_config(
+        embedding_worker=True,
+        embedding_frontend_tokenization=embedding_frontend_tokenization,
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        model="test-model",
+    )
+    shutdown_event = asyncio.Event()
+    shutdown_endpoints: list = []
+
+    with patch(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+        return_value=handler,
+    ):
+        await factory._create_embedding_worker(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+        )
+
+    register_vllm_model.assert_awaited_once()
+    assert register_vllm_model.await_args.args[0] == expected_model_input
+    assert cleanup_order == ["handler", "client", "resource"]
+    assert shutdown_endpoints == [endpoint]

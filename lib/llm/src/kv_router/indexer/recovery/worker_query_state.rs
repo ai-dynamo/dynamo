@@ -229,6 +229,24 @@ impl RankState {
         self.recovery_inflight = false;
     }
 
+    /// Buffer a live event behind an in-flight source snapshot.
+    pub(super) fn buffer_recovery_tail(&mut self, event: RouterEvent) {
+        self.recovery_inflight = true;
+        self.observe_and_buffer(event);
+    }
+
+    /// Drain the buffered suffix after an advisory source snapshot.
+    ///
+    /// Unlike worker gap recovery, this preserves the state-agent stream's
+    /// accepted warn-and-continue behavior across missing event IDs.
+    pub(super) fn drain_advisory_tail_after(&mut self, recovered_through: u64) -> Vec<RouterEvent> {
+        self.cursor = CursorState::Initial.advance_to(recovered_through);
+        let events = self.take_failed_recovery_degraded();
+        let last_event_id = events.last().map(|event| event.event.event_id);
+        self.commit_failed_recovery_degraded(last_event_id);
+        events
+    }
+
     pub(super) fn take_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
         let last_admitted_id = self.last_admitted_id().unwrap_or(0);
         let mut events: Vec<_> = self.pending_live_events.drain(..).collect();
@@ -367,6 +385,25 @@ mod tests {
         assert_eq!(state.last_admitted_id(), Some(2));
         state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
         assert_eq!(state.last_admitted_id(), Some(4));
+        assert!(!state.recovery_inflight);
+    }
+
+    #[test]
+    fn advisory_recovery_tail_applies_snapshot_before_ordered_suffix() {
+        let mut state = RankState::default();
+        state.buffer_recovery_tail(store(5));
+        state.buffer_recovery_tail(store(3));
+        state.buffer_recovery_tail(store(4));
+        state.buffer_recovery_tail(store(4));
+
+        let tail = state.drain_advisory_tail_after(3);
+        assert_eq!(
+            tail.iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(state.last_admitted_id(), Some(5));
         assert!(!state.recovery_inflight);
     }
 

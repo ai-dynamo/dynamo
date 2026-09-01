@@ -10,8 +10,10 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -147,6 +149,17 @@ func (r *DynamoGraphDeploymentReconciler) mapResourceClaimTemplateToDGDRequests(
 	return r.mapDRAClaimToDGDRequests(ctx, obj, true)
 }
 
+func (r *DynamoGraphDeploymentReconciler) shouldMapDRAEventToDGD(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) bool {
+	// DGD-level DRA events serve Grove; unselected legacy DGDs remain eligible until adoption.
+	if !r.RuntimeConfig.Gate.Enabled(features.Grove) {
+		return false
+	}
+	provider, selected := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+	return !selected || provider == consts.WorkloadProviderGrove
+}
+
 func (r *DynamoGraphDeploymentReconciler) mapDRAClaimToDGDRequests(
 	ctx context.Context,
 	obj client.Object,
@@ -161,7 +174,7 @@ func (r *DynamoGraphDeploymentReconciler) mapDRAClaimToDGDRequests(
 	requests := make([]ctrl.Request, 0)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if !r.isGrovePathway(deployment) {
+		if !r.shouldMapDRAEventToDGD(deployment) {
 			continue
 		}
 		for componentIndex := range deployment.Spec.Components {
@@ -191,7 +204,7 @@ func (r *DynamoGraphDeploymentReconciler) mapDeviceClassToDGDRequests(
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
 		if !commonController.NamespaceAllowed(r.Config, r.RuntimeConfig, deployment, deployment.Namespace) ||
-			!r.isGrovePathway(deployment) {
+			!r.shouldMapDRAEventToDGD(deployment) {
 			continue
 		}
 		for componentIndex := range deployment.Spec.Components {

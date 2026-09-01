@@ -256,7 +256,6 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
-  - podsnapshotcontents
   verbs:
   - create
   - delete
@@ -273,7 +272,6 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
-  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -285,8 +283,6 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
-  - podsnapshotcontents/status
-  - podsnapshots/status
   verbs:
   - get
   - patch
