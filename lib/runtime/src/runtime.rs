@@ -398,6 +398,8 @@ impl Runtime {
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let complete = self.shutdown_state.complete.clone();
+        let teardown_main_token = main_token.clone();
+        let teardown_complete = complete.clone();
 
         let owns_executor = matches!(self.primary, RuntimeType::Shared(_))
             || matches!(self.secondary, RuntimeType::Shared(_));
@@ -444,7 +446,7 @@ impl Runtime {
         });
 
         if let Some(coordinator_done) = coordinator_done {
-            self.spawn_owned_teardown(coordinator_done);
+            self.spawn_owned_teardown(coordinator_done, teardown_main_token, teardown_complete);
         }
     }
 
@@ -454,7 +456,12 @@ impl Runtime {
     /// Only [`Runtime::shutdown`] may call this. An owned runtime that is dropped without
     /// a `shutdown` call — `transports::etcd` and `storage::kv::etcd` both build one,
     /// `block_on` it and drop it — must keep the plain drop behaviour.
-    fn spawn_owned_teardown(&self, coordinator_done: std::sync::mpsc::Receiver<()>) {
+    fn spawn_owned_teardown(
+        &self,
+        coordinator_done: std::sync::mpsc::Receiver<()>,
+        main_token: CancellationToken,
+        complete: CancellationToken,
+    ) {
         // These clones keep `Arc::get_mut` in `Drop for RuntimeType` from succeeding on the
         // caller's thread, so an async-context drop cannot call `shutdown_background`.
         let primary = self.primary.clone();
@@ -473,6 +480,8 @@ impl Runtime {
                         wait_secs = wait_bound.as_secs(),
                         "Shutdown coordinator did not finish in time; tearing down the owned runtime anyway"
                     );
+                    main_token.cancel();
+                    complete.cancel();
                 }
 
                 if coordinator_timed_out {
