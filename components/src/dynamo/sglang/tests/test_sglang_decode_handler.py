@@ -786,6 +786,19 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     )
 
 
+def test_build_sampling_params_maps_guided_decoding_to_regex():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": {"regex": r"\{\}"}},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["regex"] == r"\{\}"
+
+
 def test_build_sampling_params_maps_min_tokens_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 

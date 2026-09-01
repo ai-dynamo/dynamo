@@ -18,6 +18,9 @@ use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, RouterMode, SingleIn, async_trait,
+        network::egress::route_span::{
+            get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+        },
     },
     protocols::annotated::Annotated,
 };

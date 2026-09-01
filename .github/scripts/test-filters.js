@@ -137,8 +137,18 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/README.md',
-    expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'sidecar README avoids Rust, Fern, and E2E checks'
+    expect: { sidecar: false, ignore: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README is classification-only and triggers no build'
+  },
+  {
+    file: '.github/workflows/shared-build-sidecar.yml',
+    expect: { sidecar: true },
+    desc: 'sidecar workflow triggers its own job'
+  },
+  {
+    file: 'container/compliance/policy/licenses.toml',
+    expect: { sidecar: true },
+    desc: 'compliance policy changes validate the sidecar image gate'
   },
 
   // Doc files should be excluded from core (negation patterns)

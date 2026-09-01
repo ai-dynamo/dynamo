@@ -2707,6 +2707,10 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{
+				GPUsPerEngine:  2,
+				GPUsPerReplica: 2,
+			}
 
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
@@ -3018,6 +3022,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 
 			// Assert the ComponentReconcileResult
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{}
 
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -3114,6 +3119,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 			ReadyReplicas:     ptr.To(int32(0)),
 			AvailableReplicas: ptr.To(int32(0)),
 		},
+		gpuShape: &dynamo.GPUShape{},
 	}))
 
 }
@@ -3349,6 +3355,63 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
+}
+
+func TestSetStatusConditionAndServiceReplicaStatusPublishesGPUShape(t *testing.T) {
+	t.Log("Build a component and a provider-resolved GPU shape")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "dra-worker",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(dcd).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{Client: kubeClient}
+	componentStatus := &v1beta1.ComponentReplicaStatus{
+		ComponentKind: v1beta1.ComponentKindDeployment,
+	}
+	reconcileResult := ComponentReconcileResult{
+		status:               metav1.ConditionTrue,
+		reason:               "DeploymentReady",
+		message:              "Deployment is ready",
+		serviceReplicaStatus: componentStatus,
+		gpuShape: &dynamo.GPUShape{
+			GPUsPerEngine:  2,
+			GPUsPerReplica: 3,
+		},
+	}
+
+	t.Log("Publish the renderer-provided shape in DCD status")
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	updated := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUsPerEngine)
+	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
+	assert.Equal(t, int64(2), *updated.Status.Component.GPUsPerEngine)
+	assert.Equal(t, int64(3), *updated.Status.Component.GPUsPerReplica)
+
+	t.Log("Publish an explicit zero after a successful non-GPU observation")
+	reconcileResult.gpuShape = &dynamo.GPUShape{}
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUsPerEngine)
+	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerEngine)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerReplica)
+
+	t.Log("Clear both fields before reporting a later provider failure")
+	require.NoError(t, reconciler.clearDCDGPUShape(t.Context(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	}))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	assert.Nil(t, updated.Status.Component.GPUsPerEngine)
+	assert.Nil(t, updated.Status.Component.GPUsPerReplica)
 }
 
 func Test_generateDeployment_Strategy(t *testing.T) {
