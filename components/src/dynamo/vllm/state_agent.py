@@ -141,6 +141,7 @@ async def start_attachment_owner(
     generate_endpoint: Endpoint,
     vllm_config: "VllmConfig",
     image_token_id: int | None,
+    video_token_id: int | None = None,
 ) -> KvStateAttachmentOwner | None:
     settings = state_agent_settings(config)
     if settings is None:
@@ -188,6 +189,7 @@ async def start_attachment_owner(
                 ),
                 "raw_topic": "",
                 "image_token_id": image_token_id,
+                "video_token_id": video_token_id,
                 "router_hint_source": (
                     {
                         "source_control_endpoint": router_hint_source.source_control_endpoint,
