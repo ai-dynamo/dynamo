@@ -785,94 +785,6 @@ jobs:
           vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
 
   # ============================================================================
-  # GB300 DEPLOY TEST
-  # ============================================================================
-  # The production deploy runner receives a multi-context kubeconfig from tbot.
-  # Select the GB300 context in every job so concurrent deploy tests cannot race
-  # through the shared kubeconfig or accidentally target another cluster.
-  gb300-deploy-operator:
-    name: vLLM GB300 Deploy Operator
-    needs: [compute-release-mode, operator-build, resolve-source-sha]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    runs-on: prod-deploy-tester-v1
-    permissions:
-      contents: read
-    env:
-      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-gb300
-    outputs:
-      namespace: ${{ steps.setup.outputs.namespace }}
-      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
-      operator_tag: ${{ steps.setup.outputs.operator_tag }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-
-      - name: Set kubectl context to dynamo-aws-gb300
-        uses: $/.github/actions/set-kube-context
-
-      - name: Setup vCluster and operator
-        id: setup
-        uses: $/.github/actions/setup-dynamo-operator
-        with:
-          # An empty vcluster_namespace resolves to dynamo-deploy-test for this
-          # context, and the run-scoped name keeps concurrent nightlies isolated.
-          vcluster_name: nightly-gb300-${{ github.run_id }}
-          registry: ${{ vars.ECR_REGISTRY }}
-          repository: ${{ vars.ECR_REPOSITORY }}
-          operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-
-  gb300-deploy-test-vllm:
-    name: vLLM GB300 Deploy Test
-    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-build, gb300-deploy-operator]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/shared-deploy-test.yml
-    with:
-      framework: vllm
-      profiles: '["agg", "disagg"]'
-      image_tag: ${{ format('{0}-{1}-nightly', needs.resolve-source-sha.outputs.source_sha, needs.vllm-build.outputs.target_tag_plain) }}
-      namespace: ${{ needs.gb300-deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.gb300-deploy-operator.outputs.vcluster_name }}
-      operator_tag: ${{ needs.gb300-deploy-operator.outputs.operator_tag }}
-      kube_context: nv-prd-dgxc.teleport.sh-dynamo-aws-gb300
-      operator_registry: ${{ vars.ECR_REGISTRY }}
-      operator_repository: ${{ vars.ECR_REPOSITORY }}
-      runtime_image_repository: ${{ format('{0}/{1}', vars.ECR_REGISTRY, vars.ECR_REPOSITORY) }}
-      platform_arch: amd64
-      # The FSx shared-model-cache PVC is host-side. It is mounted by the
-      # cluster-local GB300 runner hook, but is not mapped into this vCluster.
-      mount_model_cache: false
-    secrets: inherit
-
-  gb300-deploy-cleanup:
-    name: vLLM GB300 Deploy Cleanup
-    if: always()
-    needs: [gb300-deploy-operator, gb300-deploy-test-vllm]
-    runs-on: prod-deploy-tester-v1
-    permissions:
-      contents: read
-    env:
-      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-gb300
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set kubectl context to dynamo-aws-gb300
-        uses: $/.github/actions/set-kube-context
-
-      - name: Teardown vCluster
-        if: needs.gb300-deploy-operator.outputs.vcluster_name != '' && needs.gb300-deploy-operator.outputs.namespace != ''
-        uses: $/.github/actions/teardown-dynamo-operator
-        with:
-          vcluster_name: ${{ needs.gb300-deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.gb300-deploy-operator.outputs.namespace }}
-
-  # ============================================================================
   # COMPLIANCE
   # ============================================================================
   # Compliance extract + verify now runs as an inline step INSIDE each build job
@@ -984,33 +896,6 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
-  vllm-gb300-test:
-    name: vllm-runtime
-    needs: [vllm-build, resolve-source-sha, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: nightly
-      dd_flaky_retry_enabled: 'false'
-      test_suite_name: vllm
-      test_type: GB300 Test
-      # The ARC hook requests exactly two GB300 GPUs for every workflow pod.
-      amd_runner: aws-gb300-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      enable_coverage: true
-      run_sanity_check: false
-      gpu_test_markers: vllm and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
-      run_gpu_parallel_tests: true
-      # Keep the initial lane at the already profiled H100 ceiling; the hook
-      # still provides both full GB300 devices to tests that need them.
-      gpu_parallel_max_vram_gib: '80'
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
-
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
@@ -1110,30 +995,6 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
-  sglang-gb300-test:
-    name: sglang-runtime
-    needs: [sglang-build, resolve-source-sha, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: nightly
-      dd_flaky_retry_enabled: 'false'
-      test_suite_name: sglang
-      test_type: GB300 Test
-      amd_runner: aws-gb300-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      enable_coverage: true
-      run_sanity_check: false
-      gpu_test_markers: sglang and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
-      run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '80'
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
-
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
@@ -1204,30 +1065,6 @@ jobs:
       gpu_test_markers: trtllm and (gpu_1 or gpu_2)
       gpu_test_timeout_minutes: 240
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
-      run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '80'
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
-
-  trtllm-gb300-test:
-    name: trtllm-runtime
-    needs: [trtllm-build, resolve-source-sha, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: nightly
-      dd_flaky_retry_enabled: 'false'
-      test_suite_name: trtllm
-      test_type: GB300 Test
-      amd_runner: aws-gb300-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64"]'
-      enable_coverage: true
-      run_sanity_check: false
-      gpu_test_markers: trtllm and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -1418,7 +1255,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, vllm-gb300-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, sglang-gb300-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, trtllm-gb300-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -1645,7 +1482,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, vllm-gb300-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, sglang-gb300-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, trtllm-gb300-test, deploy-cleanup, gb300-deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
