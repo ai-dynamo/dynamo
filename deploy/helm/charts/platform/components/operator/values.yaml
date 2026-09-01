@@ -173,6 +173,19 @@ etcdAddr: ""
 
 modelExpressURL: ""
 
+# TLS configuration for inter-component encryption.
+# Paths are injected into all DGD pods via InfrastructureConfiguration.
+natsTLSCAPath: ""
+natsTLSClientCertPath: ""
+natsTLSClientKeyPath: ""
+tcpTLSCertPath: ""
+tcpTLSKeyPath: ""
+tcpTLSCAPath: ""
+tcpTLSClientCertPath: ""
+tcpTLSClientKeyPath: ""
+tcpTLSClientCAPath: ""
+tcpTLSServerName: ""
+
 # Checkpoint configuration for fast pod restore.
 # In legacy agentMount mode, install the snapshot chart in each workload
 # namespace. In podMount mode, install one shared snapshot-agent DaemonSet and

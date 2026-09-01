@@ -365,6 +365,22 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec: Invalid value: minAvailable is immutable after creation",
 		},
 		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDCDForAdmission(nil),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec: Invalid value: type is immutable after it is set",
+		},
+		{
 			name: "v1alpha1 inter-pod GMS client containers are rejected by CEL",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{

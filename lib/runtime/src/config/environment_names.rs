@@ -386,11 +386,32 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
-    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
-    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
-    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
+    /// BOTH the batch and the streaming path. Off by default.
+    ///
+    /// Which v2 shape a request gets is decided by the configured parsers, not by a
+    /// second flag:
+    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
+    ///   incremental tool-call emission and drops values truncated at EOF.
+    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
+    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
+    ///   in one ordered stream, so reasoning that followed a tool call stays after it
+    ///   instead of being hoisted to the front and fused with the first thought.
+    ///
+    /// One switch, because both are the same decision: stop using v1.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
+
+    /// Rollback lever for incremental guided-tool-call streaming.
+    ///
+    /// A forced `tool_choice` (`required` or a named tool) installs a JSON grammar,
+    /// so by default the jail releases tool-call chunks as they arrive instead of
+    /// buffering the whole response. The grammar-constrained decoding itself lives
+    /// in the published `dynamo-parsers` dependency, not in this repo, so if a
+    /// backend in production doesn't correctly honor the grammar the only other
+    /// rollback is a dependency repin and a new release. On by default; set this
+    /// to a falsy value (`0`/`false`) to fall back to the old buffer-to-completion
+    /// behavior at runtime, no redeploy required.
+    pub const DYN_ENABLE_GUIDED_TOOL_STREAMING: &str = "DYN_ENABLE_GUIDED_TOOL_STREAMING";
 
     /// Backend stream inactivity timeout in seconds.
     ///
@@ -689,6 +710,10 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
+    /// Request-plane transport selection: `"tcp"` (default) or `"nats"`. Read by the
+    /// runtime in `distributed.rs` and by the Python launch layer.
+    pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
+
     /// Preferred payload codec advertised by every request-plane endpoint in this process.
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
@@ -941,6 +966,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+            llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -999,6 +1025,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
