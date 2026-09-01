@@ -140,7 +140,7 @@ docker push "$XPU_IMAGE"
 
 ```bash
 sed \
-  -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag|nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}|g" \
+  -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0|nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}|g" \
   -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag|${XPU_IMAGE}|g" \
   examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml \
   | kubectl apply --namespace "$NAMESPACE" -f -

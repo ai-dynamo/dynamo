@@ -145,7 +145,7 @@ func TestDGDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 							Containers: []corev1.Container{
 								{
 									Name:  "main",
-									Image: "my-registry/sglang-runtime:my-tag",
+									Image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
 									Resources: corev1.ResourceRequirements{
 										Limits: corev1.ResourceList{
 											"nvidia.com/gpu": resource.MustParse("1"),
@@ -407,7 +407,7 @@ func TestMarshal_RoundTrip(t *testing.T) {
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
 								Name:  "main",
-								Image: "my-registry/sglang-runtime:my-tag",
+								Image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
 								Env:   []corev1.EnvVar{{Name: "X", Value: "1"}},
 								Resources: corev1.ResourceRequirements{
 									Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
@@ -613,7 +613,7 @@ func newDGDWithEmptyPodTemplateMetadata(name string) DynamoGraphDeployment {
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  "main",
-							Image: "my-registry/sglang-runtime:my-tag",
+							Image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
 							Resources: corev1.ResourceRequirements{
 								Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
 							},

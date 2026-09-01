@@ -120,7 +120,7 @@ kubectl -n dynamo-lmcache get lmcacheengine lmcache-mp
 <Step title="Deploy the Dynamo worker" id="deploy-the-dynamo-worker">
 
 Edit [`examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml): replace
-`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` (on both `Frontend` and
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0` (on both `Frontend` and
 `VllmDecodeWorker`) with your Dynamo vllm-runtime image.
 
 ```bash

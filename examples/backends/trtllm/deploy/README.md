@@ -115,7 +115,7 @@ podTemplate:
   spec:
     containers:
     - name: main
-      image: my-registry/tensorrtllm-runtime:my-tag
+      image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
       workingDir: /workspace/examples/backends/trtllm
       command:
       - python3
@@ -135,7 +135,7 @@ Before using these templates, ensure you have:
 
 ### Container Images
 
-The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
 python container/render.py --framework=trtllm --output-short-filename --cuda-version=13.1
@@ -162,7 +162,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: my-registry/tensorrtllm-runtime:my-tag
+image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
 
 # Configure your model and deployment settings
 args:
