@@ -29,6 +29,16 @@
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
 
+# GOVERNANCE.md lands in this same PR; the blob/main URL 404s only until merge.
+# TODO(remove after the governance PR merges)
+^https://github\.com/ai-dynamo/dynamo/blob/main/GOVERNANCE\.md$
+^https://github\.com/ai-dynamo/dynamo/blob/main/MAINTAINERS\.md$
+^https://github\.com/ai-dynamo/dynamo/blob/main/SIGS\.md$
+
+# The governance and enhancement-proposal pages land in this same PR, so they
+# 404 on the docs site until it merges and the site redeploys.
+# TODO(remove after the governance PR merges)
+^https://docs\.nvidia\.com/dynamo/dev/contributing/enhancement-proposals$
 # The v1.3.0 GitHub release tag is only published when v1.3.0 GA is cut; the
 # canonical release/support-matrix links added by the version bump 404 from CI
 # until then. Remove this entry once the v1.3.0 release is published.

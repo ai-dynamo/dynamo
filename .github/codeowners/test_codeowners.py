@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     is_policy_change,
+    sigs_gaps,
+    sigs_mapped_teams,
     split_coverage,
 )
 from codeowners_match import (  # noqa: E402
@@ -934,26 +936,47 @@ class TestTeamExternalsMap:
         return {"router": "@ai-dynamo/router", "docs": "@ai-dynamo/docs"}
 
     def test_maps_area_label_to_team_handles(self) -> None:
-        contributors = [{"name": "Jane", "github": "jane", "areas": ["router"]}]
+        contributors = [
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "maintainer",
+                "areas": ["router"],
+            }
+        ]
         mapping = team_externals_map(contributors, self._label_to_team())
         assert mapping == {"@ai-dynamo/router": ["@jane"]}
 
     def test_multiple_contributors_same_area(self) -> None:
         contributors = [
-            {"name": "Jane", "github": "jane", "areas": ["router"]},
-            {"name": "Jo", "github": "jo", "areas": ["router"]},
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "maintainer",
+                "areas": ["router"],
+            },
+            {"name": "Jo", "github": "jo", "level": "maintainer", "areas": ["router"]},
         ]
         mapping = team_externals_map(contributors, self._label_to_team())
         assert mapping["@ai-dynamo/router"] == ["@jane", "@jo"]
 
     def test_contributor_multiple_areas(self) -> None:
-        contributors = [{"name": "Jane", "github": "jane", "areas": ["router", "docs"]}]
+        contributors = [
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "maintainer",
+                "areas": ["router", "docs"],
+            }
+        ]
         mapping = team_externals_map(contributors, self._label_to_team())
         assert mapping["@ai-dynamo/router"] == ["@jane"]
         assert mapping["@ai-dynamo/docs"] == ["@jane"]
 
     def test_unknown_area_label_is_fatal(self) -> None:
-        contributors = [{"name": "Jane", "github": "jane", "areas": ["nope"]}]
+        contributors = [
+            {"name": "Jane", "github": "jane", "level": "maintainer", "areas": ["nope"]}
+        ]
         with pytest.raises(SystemExit):
             team_externals_map(contributors, self._label_to_team())
 
@@ -1013,6 +1036,7 @@ class TestRenderContributorsMd:
         md = render_contributors_md([])
         assert "# Contributors" in md
         assert "_No external contributors yet._" in md
+        assert "External contributors who hold area-scoped **codeownership**" in md
         assert "codeownership" in md
 
     def test_renders_row_with_link_level_and_area(self) -> None:
@@ -1026,6 +1050,7 @@ class TestRenderContributorsMd:
             }
         ]
         md = render_contributors_md(contributors)
+        assert "External contributors holding a recognized standing" in md
         assert "Jane Doe" in md
         assert "Maintainer" in md
         assert "Example Org" in md
@@ -1084,14 +1109,28 @@ class TestRenderCodeownersWithExternals:
 
     def test_base_line_gets_handle(self) -> None:
         model = self._model()
-        external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
+        external = [
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "maintainer",
+                "areas": ["runtime"],
+            }
+        ]
         lines, _ = _render_codeowners(model, group=True, external=external)
         body = "\n".join(lines)
         assert "@runtime @jane" in body
 
     def test_shared_line_gets_handle(self) -> None:
         model = self._model()
-        external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
+        external = [
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "maintainer",
+                "areas": ["runtime"],
+            }
+        ]
         lines, _ = _render_codeowners(model, group=True, external=external)
         shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
         assert "@runtime" in shared_line
@@ -1102,3 +1141,65 @@ class TestRenderCodeownersWithExternals:
         model = self._model()
         plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
+
+    def test_trusted_contributor_is_not_a_code_owner(self) -> None:
+        """Level gates code-ownership: a TC may review but cannot merge, so
+        their handle must never reach CODEOWNERS (GOVERNANCE.md)."""
+        model = self._model()
+        external = [
+            {
+                "name": "Tess",
+                "github": "tess",
+                "level": "trusted_contributor",
+                "areas": ["runtime"],
+            }
+        ]
+        lines, _ = _render_codeowners(model, group=True, external=external)
+        assert not any("@tess" in ln for ln in lines)
+
+    def test_only_maintainer_levels_reach_codeowners(self) -> None:
+        model = self._model()
+        external = [
+            {"name": "M", "github": "mm", "level": "maintainer", "areas": ["runtime"]},
+            {"name": "C", "github": "cc", "level": "contributor", "areas": ["runtime"]},
+        ]
+        body = "\n".join(_render_codeowners(model, group=True, external=external)[0])
+        assert "@mm" in body
+        assert "@cc" not in body
+
+
+class TestSigsGaps:
+    """SIG roster drift gate: every non-program area appears in SIGS.md."""
+
+    def test_all_mapped(self) -> None:
+        text = "| sig-x | stuff | `dynamo-runtime-codeowners`, `dynamo-router-codeowners` |"
+        assert sigs_gaps(["runtime", "router"], text) == []
+
+    def test_missing_area_flagged(self) -> None:
+        text = "| sig-x | stuff | `dynamo-runtime-codeowners` |"
+        assert sigs_gaps(["runtime", "router"], text) == ["router"]
+
+    def test_program_areas_exempt(self) -> None:
+        assert sigs_gaps(["docs", "ops", "process"], "") == []
+
+    def test_label_is_not_substring_matched_bare(self) -> None:
+        # The bare label appearing in prose does not satisfy the check; the
+        # full team name must be present.
+        assert sigs_gaps(["router"], "the router is great") == ["router"]
+
+    def test_prose_mention_does_not_count_as_mapped(self) -> None:
+        # A team named in a retirement note (or any prose) is not a mapping;
+        # only the roster table's CODEOWNERS Groups column counts.
+        text = "RETIRED 2026: sig-x dissolved; `dynamo-router-codeowners` has no SIG."
+        assert sigs_gaps(["router"], text) == ["router"]
+
+    def test_commented_out_row_does_not_count(self) -> None:
+        text = "<!-- | sig-x | scope | `dynamo-router-codeowners` | -->"
+        assert sigs_gaps(["router"], text) == ["router"]
+
+    def test_mapped_teams_parses_multi_team_cells(self) -> None:
+        text = "| sig-x | scope | `dynamo-a-codeowners`, `dynamo-b-codeowners` |"
+        assert sigs_mapped_teams(text) == {
+            "dynamo-a-codeowners",
+            "dynamo-b-codeowners",
+        }

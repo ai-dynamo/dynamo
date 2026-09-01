@@ -19,19 +19,40 @@ limitations under the License.
 
 Thank you for your interest in contributing to Dynamo!
 
-For the full contribution guide — including how to get started, build from source, submit PRs, and what to expect during review — see:
+For the full walkthrough - setting up a fork, building from source, and what to expect during review - see the [Contribution Guide](https://docs.nvidia.com/dynamo/dev/contributing/contribution-guide) on the docs site.
 
-**[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** (docs site)
+How the project is governed is defined in [GOVERNANCE.md](GOVERNANCE.md): the contributor ladder, decision-making, SIGs, and conflict resolution. The rules below are the ones that decide whether your pull request can be reviewed and merged.
 
-Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md)
+## Before You Open a Pull Request
+
+Small changes go straight to a pull request. Typo fixes, documentation corrections, small bug fixes, and narrow configuration changes need no issue.
+
+Open a [Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) first, and wait for the `approved-for-pr` label, when a change is over 100 core lines, spans multiple areas, changes a public API, or adds a dependency. **Core lines** means changed lines of code, excluding tests, documentation, and generated files. Trusted Contributors are exempt from the size trigger, but a Contribution Request is still required for the other three.
+
+Changes to a public API, to communication plane architecture, to backend integration contracts, or spanning multiple areas need a [Dynamo Enhancement Proposal](https://github.com/ai-dynamo/enhancements) instead of a Contribution Request. Do not open both: a DEP settles whether the work is wanted and how it should be built, which is the Contribution Request's question and more. A DEP is sponsored by the Special Interest Group covering the affected areas, acting through a Co-Lead or an area Maintainer, reviewed by the Maintainers of every area it touches, and approved by a two-thirds vote of the Core Maintainers. Take the idea to the SIG before writing the proposal. A DEP is not limited to architectural changes: anything worth agreeing before it is built can have one, including changes to process and convention. Once it is approved, the pull requests implementing it link the DEP and skip the Contribution Request, though they still need their code owners and two approvals.
+
+## Review and CI
+
+Every commit must carry a signature that GitHub reports as verified. Unsigned commits block CI approval.
+
+External contributors need a Maintainer to approve CI for the pull request's current head, either by commenting `/ok to test COMMIT-ID` or by updating the branch. Each new push creates a new head and needs approval again. Trusted Contributors receive automatic CI approval on every head.
+
+Every pull request needs approval from at least two Maintainers other than the author. These are human reviews: AI-assisted review is a supplemental signal and does not count toward the threshold. GitHub auto-requests the [CODEOWNERS](CODEOWNERS) team that owns each file you touched.
+
+## AI-Assisted Contributions
+
+Use AI tooling if it helps, and understand every line you submit. You are the author of record, whatever produced the code, and being unable to explain a change is grounds for rejection.
+
+Disclose substantial AI assistance in the pull request description. Fully automated submissions, opened without a human reviewing the content, are not accepted. See "AI-Assisted Contributions" in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Quick Links
 
+- [Project Governance](GOVERNANCE.md)
 - [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)
 - [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted)
 - [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
-- [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
+- [Enhancement Proposals](https://github.com/ai-dynamo/enhancements)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [Slack](https://ai-dynamo.org/slack)
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)

@@ -1,74 +1,84 @@
-name: Dynamo Enhancement Proposal (DEP)
-description: Propose a new feature, architecture change, or process improvement
+name: Dynamo Enhancement Proposal (DEP) tracking issue
+description: Track a DEP whose design lives in ai-dynamo/enhancements
 title: "DEP: "
 labels: ["dep:draft"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue **tracks** a DEP; it is not the proposal itself.
+
+        The design goes in [ai-dynamo/enhancements](https://github.com/ai-dynamo/enhancements)
+        as a markdown file under `deps/`, reviewed as a pull request, so reviewers can comment
+        on the specific paragraph they disagree with. Start from
+        `NNNN-limited-template.md` and pull in sections from `NNNN-complete-template.md`
+        as the design demands them.
+
+        Keep this issue short: it carries the `dep:` state label, records the area that
+        determines who is assigned, and links the proposal. See
+        [Enhancement Proposals](https://docs.nvidia.com/dynamo/dev/contributing/enhancement-proposals).
   - type: dropdown
     id: area
     attributes:
       label: Area
       description: Primary area this DEP affects (determines PIC assignment)
       options:
-        - external-api
         - frontend
+        - agents
         - router
         - backend-vllm
         - backend-trtllm
         - backend-sglang
         - kv-memory
         - multimodal
+        - diffusion
         - planner
-        - core-platform
+        - runtime
         - observability
         - fault-tolerance
-        - gateway
-        - devops
+        - ops
         - docs
         - process
-        - k8s
-        - dgdr
+        - operator
+        - gms
+        - epp
+        - tokenspeed
+        - rl
+        - performance
         - xpu
+        - efa
+        - cross-area (multiple)
     validations:
       required: true
   - type: textarea
     id: summary
     attributes:
       label: Summary
-      description: One-paragraph summary of the proposal
+      description: One paragraph on what this changes and why. The full case belongs in the proposal.
     validations:
       required: true
-  - type: textarea
-    id: motivation
-    attributes:
-      label: Motivation
-      description: Why is this change needed? What problem does it solve?
-    validations:
-      required: true
-  - type: textarea
-    id: proposal
+  - type: input
+    id: proposal_pr
     attributes:
       label: Proposal
-      description: Detailed description of the proposed change
-    validations:
-      required: true
-  - type: textarea
-    id: alternates
-    attributes:
-      label: Alternate Solutions
-      description: What other approaches were considered and why were they not chosen?
+      description: >-
+        Pull request in ai-dynamo/enhancements carrying the design. Leave blank while drafting
+        and fill it in when you open the pull request.
+      placeholder: https://github.com/ai-dynamo/enhancements/pull/NNN
     validations:
       required: false
-  - type: textarea
-    id: requirements
+  - type: input
+    id: sponsor
     attributes:
-      label: Requirements
-      description: Specific requirements (use MUST/SHOULD per RFC-2119)
+      label: Sponsor
+      description: Maintainer or code owner carrying this through review. Blank if you are still looking.
+      placeholder: "@handle"
     validations:
       required: false
   - type: textarea
     id: references
     attributes:
       label: References
-      description: Links to related documents, prior art, external resources
+      description: Related issues, prior art, external resources
     validations:
       required: false
