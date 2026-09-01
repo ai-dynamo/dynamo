@@ -127,6 +127,19 @@ mod tests {
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
 
+    /// A decode host and its call counter. Tests that only need *a* next engine
+    /// bind the counter as `_`.
+    fn counting_decode_host() -> (
+        Arc<AtomicUsize>,
+        ServerStreamingEngine<PreprocessedRequest, LlmResponse>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let next = Arc::new(CountingDecodeHost {
+            calls: calls.clone(),
+        });
+        (calls, next)
+    }
+
     #[derive(Default)]
     struct RecordingDispatch {
         worker_ids: Mutex<Vec<u64>>,
@@ -312,15 +325,13 @@ mod tests {
             DistributedRuntime::new(runtime.clone(), distributed_config(discovery_root))
                 .await
                 .unwrap();
-        let client = router_runtime
+        let router_endpoint = router_runtime
             .namespace(namespace.to_string())
             .unwrap()
             .component(component.to_string())
             .unwrap()
-            .endpoint(endpoint_name)
-            .client()
-            .await
-            .unwrap();
+            .endpoint(endpoint_name);
+        let client = router_endpoint.client().await.unwrap();
         let instances = tokio::time::timeout(Duration::from_secs(5), async {
             let mut source = client.instance_source.as_ref().clone();
             loop {
@@ -338,29 +349,6 @@ mod tests {
         .expect("all four workers must be discovered");
         let mut workers = instances.iter().map(Instance::id).collect::<Vec<_>>();
         workers.sort_unstable();
-        let load_context = RoutingLoadContext::start(
-            client.clone(),
-            RouterLoadSource::Prefill,
-            crate::discovery::LoadThresholdHandle::new(Default::default()),
-            &client.endpoint.drt().child_token(),
-            None,
-        )
-        .await
-        .unwrap();
-        let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
-            .await
-            .unwrap();
-        let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
-        );
-        let prefill = match prefill_continue {
-            Some(config) => PrefillRouter::disabled_with_prefill_continue(
-                Arc::new(ModelManager::new()),
-                mode,
-                config,
-            ),
-            None => PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None),
-        };
         // Derived from the pool that was actually discovered, so a change to
         // the harness's worker count cannot quietly turn a unanimous pool into
         // a mixed one.
@@ -385,6 +373,72 @@ mod tests {
         // The sender is dropped immediately: a watch receiver keeps reading the
         // last published value, and no test republishes.
         let (_, prefill_runtime_configs) = tokio::sync::watch::channel(runtime_configs);
+
+        let push_router = PushRouter::from_client_with_dispatch(client.clone(), mode, dispatch)
+            .await
+            .unwrap();
+        // The two planes reach `prepare_prefill_dispatch` by different routes,
+        // so the continuation path is exercised on both rather than assumed to
+        // be plane-agnostic.
+        let shared = if mode.is_kv_routing() {
+            let kv_config = dynamo_kv_router::config::KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                ..Default::default()
+            };
+            let chooser = crate::kv_router::KvRouter::new(
+                router_endpoint,
+                client,
+                prefill_runtime_configs.clone(),
+                None,
+                16,
+                dynamo_kv_router::selector::DefaultWorkerSelector::new(
+                    Some(kv_config.clone()),
+                    "prefill",
+                ),
+                Some(kv_config),
+                None,
+                "prefill",
+                None,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            Arc::new(RoutingHost::new(push_router, Arc::new(chooser), None).unwrap())
+        } else {
+            // Only this arm needs a load context, and starting one spawns a
+            // worker monitor.
+            let load_context = RoutingLoadContext::start(
+                client.clone(),
+                RouterLoadSource::Prefill,
+                crate::discovery::LoadThresholdHandle::new(Default::default()),
+                &client.endpoint.drt().child_token(),
+                None,
+            )
+            .await
+            .unwrap();
+            Arc::new(
+                RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+            )
+        };
+        // The harness must build the plane the test asked for. A silent fall
+        // back would make a KV test re-cover what the round-robin tests prove.
+        assert_eq!(
+            shared.kv_router_if_enabled().is_some(),
+            mode.is_kv_routing(),
+            "harness built the wrong routing plane for {mode:?}"
+        );
+        let prefill = match prefill_continue {
+            Some(config) => PrefillRouter::disabled_with_prefill_continue(
+                Arc::new(ModelManager::new()),
+                mode,
+                config,
+            ),
+            None => PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None),
+        };
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
@@ -419,28 +473,15 @@ mod tests {
             "prefill-continuation",
             RouterMode::RoundRobin,
             dispatch.clone(),
-            Some(&dynamo_kv_router::config::KvRouterConfig {
-                prefill_continue_enabled: true,
-                prefill_continue_force: true,
-                prefill_continue_prefill_busy_threshold: Some(0.4),
-                prefill_continue_max_concurrent: Some(2),
-                ..Default::default()
-            }),
+            Some(&continue_config(Some(2))),
             PoolSupport::Unanimous,
         )
         .await;
 
-        let decode_calls = Arc::new(AtomicUsize::new(0));
-        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
-            Arc::new(CountingDecodeHost {
-                calls: decode_calls.clone(),
-            });
+        let (decode_calls, next) = counting_decode_host();
 
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
-        request
-            .annotations
-            .push(crate::kv_router::prefill_router::PREFILL_CONTINUE_ANNOTATION.to_string());
 
         let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
             .await
@@ -488,6 +529,168 @@ mod tests {
         runtime.shutdown();
     }
 
+    /// The continuation config every continuation test shares: force-on, so
+    /// the decode-load condition cannot mask what is actually under test, plus
+    /// a per-test cap. `None` means the cap is deliberately absent.
+    ///
+    /// Nothing validates this config. It reaches `PrefillContinuePolicy` via
+    /// `disabled_with_prefill_continue`, not `KvRouter::new`, which the KV arm
+    /// of the harness builds its own config for.
+    fn continue_config(max_concurrent: Option<usize>) -> dynamo_kv_router::config::KvRouterConfig {
+        dynamo_kv_router::config::KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_force: true,
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            prefill_continue_max_concurrent: max_concurrent,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_continuation_is_forwarded_whole_on_the_kv_plane() {
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-kv",
+            RouterMode::KV,
+            dispatch.clone(),
+            Some(&continue_config(Some(2))),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        assert!(
+            shared.kv_router_if_enabled().is_some(),
+            "this test must run on the KV plane; a silent fall back to the built-in \
+             plane would just re-cover what the round-robin tests already prove"
+        );
+
+        let (decode_calls, next) = counting_decode_host();
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
+            .await
+            .expect("a continuation should be served by the prefill worker");
+
+        let worker_id = dispatch.worker_ids.lock().unwrap()[0];
+        assert_eq!(
+            prefill_router.continuations.in_flight(worker_id),
+            1,
+            "the census must count a KV-routed continuation the same way"
+        );
+
+        while response.next().await.is_some() {}
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(256)],
+            "a KV-routed continuation keeps the request's own budget"
+        );
+        assert_eq!(
+            decode_calls.load(Ordering::Relaxed),
+            0,
+            "a continuation must not dispatch a decode leg on either plane"
+        );
+        assert_eq!(
+            prefill_router.continuations.in_flight(worker_id),
+            0,
+            "and gives its place back at the end of the stream"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_capped_worker_is_demoted_on_the_kv_plane() {
+        // Same demotion, selected through the KV scheduler rather than a
+        // round-robin cursor.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-kv-capped",
+            RouterMode::KV,
+            dispatch.clone(),
+            Some(&continue_config(Some(0))),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        assert!(
+            shared.kv_router_if_enabled().is_some(),
+            "this test must run on the KV plane; a silent fall back to the built-in \
+             plane would just re-cover what the round-robin tests already prove"
+        );
+
+        let (_, next) = counting_decode_host();
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "a demoted KV-routed request must carry the one-token clamp again"
+        );
+        assert_eq!(
+            *dispatch.dispatched_annotations.lock().unwrap(),
+            vec![Vec::<String>::new()],
+            "and the marker must not reach the worker"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_mixed_pool_refuses_to_continue_on_the_kv_plane() {
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-kv-mixed",
+            RouterMode::KV,
+            dispatch.clone(),
+            Some(&continue_config(Some(2))),
+            PoolSupport::AllButOne,
+        )
+        .await;
+
+        assert!(
+            shared.kv_router_if_enabled().is_some(),
+            "this test must run on the KV plane; a silent fall back to the built-in \
+             plane would just re-cover what the round-robin tests already prove"
+        );
+
+        let (_, next) = counting_decode_host();
+
+        let mut request = request();
+        request.stop_conditions.max_tokens = Some(256);
+
+        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1)],
+            "a pool that did not unanimously declare support hands off on the KV plane too"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn without_a_configured_cap_nothing_continues() {
         // Startup validation asks for a cap, but it only runs when the decode
@@ -503,23 +706,13 @@ mod tests {
             "prefill-continuation-uncapped",
             RouterMode::RoundRobin,
             dispatch.clone(),
-            Some(&dynamo_kv_router::config::KvRouterConfig {
-                prefill_continue_enabled: true,
-                prefill_continue_force: true,
-                prefill_continue_prefill_busy_threshold: Some(0.4),
-                // Deliberately absent.
-                prefill_continue_max_concurrent: None,
-                ..Default::default()
-            }),
+            // The cap is deliberately absent.
+            Some(&continue_config(None)),
             PoolSupport::Unanimous,
         )
         .await;
 
-        let decode_calls = Arc::new(AtomicUsize::new(0));
-        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
-            Arc::new(CountingDecodeHost {
-                calls: decode_calls.clone(),
-            });
+        let (_, next) = counting_decode_host();
 
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
@@ -556,23 +749,13 @@ mod tests {
             "prefill-continuation-capped",
             RouterMode::RoundRobin,
             dispatch.clone(),
-            Some(&dynamo_kv_router::config::KvRouterConfig {
-                prefill_continue_enabled: true,
-                prefill_continue_force: true,
-                prefill_continue_prefill_busy_threshold: Some(0.4),
-                // No place for any continuation at all.
-                prefill_continue_max_concurrent: Some(0),
-                ..Default::default()
-            }),
+            // No place for any continuation at all.
+            Some(&continue_config(Some(0))),
             PoolSupport::Unanimous,
         )
         .await;
 
-        let decode_calls = Arc::new(AtomicUsize::new(0));
-        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
-            Arc::new(CountingDecodeHost {
-                calls: decode_calls.clone(),
-            });
+        let (_, next) = counting_decode_host();
 
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
@@ -615,22 +798,12 @@ mod tests {
             "prefill-continuation-mixed",
             RouterMode::RoundRobin,
             dispatch.clone(),
-            Some(&dynamo_kv_router::config::KvRouterConfig {
-                prefill_continue_enabled: true,
-                prefill_continue_force: true,
-                prefill_continue_prefill_busy_threshold: Some(0.4),
-                prefill_continue_max_concurrent: Some(2),
-                ..Default::default()
-            }),
+            Some(&continue_config(Some(2))),
             PoolSupport::AllButOne,
         )
         .await;
 
-        let decode_calls = Arc::new(AtomicUsize::new(0));
-        let next: ServerStreamingEngine<PreprocessedRequest, LlmResponse> =
-            Arc::new(CountingDecodeHost {
-                calls: decode_calls.clone(),
-            });
+        let (_, next) = counting_decode_host();
 
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
