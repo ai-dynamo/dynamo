@@ -169,11 +169,14 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	userInfo *authenticationv1.UserInfo,
 	operatorPrincipal string,
 ) (admission.Warnings, error) {
+	// runtimeVersionSource is inert here: the metadata-only path never consults
+	// it, and the Disabled variant went away when runtime-version validation
+	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                  ctx,
 			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceDisabled,
+			runtimeVersionSource: runtimeVersionSourceV1Beta1,
 		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
