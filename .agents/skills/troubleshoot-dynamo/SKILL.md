@@ -63,6 +63,10 @@ Do not request Kubernetes Secret resources. Treat the bundle as sensitive:
 descriptions and logs receive best-effort redaction, but inspect the output
 before sharing it.
 
+Pass a new or empty directory to `--outdir` or `--output-dir`. The collector
+rejects nonempty directories so stale artifacts from another scope cannot be
+mistaken for current evidence.
+
 ### 2. Classify The Failure
 
 Use `references/failure-decision-tree.md` and classify into one primary bucket:
@@ -159,6 +163,8 @@ Return:
   need user-side inspection.
 - `--deployment-name` scopes pod details and logs, but namespace summaries
   remain namespace-wide.
+- User-provided output directories must be empty; the collector never deletes
+  or silently mixes existing artifacts.
 - Any failed top-level read, pod discovery, pod description, or current-log
   read makes the script return nonzero and records its name in `summary.json`;
   the successfully collected evidence is still preserved. Missing
@@ -173,7 +179,7 @@ Return:
 | `kubectl` returns Forbidden on events/pods | Service account lacks read RBAC | Ask operator for read-only role binding on the namespace |
 | Bundle reports `complete: false` | One or more required collection commands failed | Inspect `failed_commands` in `summary.json` and the matching result files |
 | Bundle missing `DynamoGraphDeployment` status | Operator not installed or different namespace | Verify `dynamo-platform` operator is installed and watching the namespace |
-| Model-download job in `Pending` | PVC unbound or HF secret missing | Fix PVC binding or create the named HF secret, then rerun the job |
+| Model-download job in `Pending` | PVC unbound or configured model-access Secret missing | Fix PVC binding or create the Secret referenced by the model-download job, then rerun the job |
 | Worker pods `CrashLoopBackOff` | Image/runtime mismatch or GPU not available | Inspect container logs; check `nvidia.com/gpu` allocatable on nodes |
 
 

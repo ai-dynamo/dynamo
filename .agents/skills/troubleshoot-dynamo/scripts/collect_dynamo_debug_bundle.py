@@ -28,11 +28,12 @@ RETURNCODE_TIMED_OUT = 124  # subprocess timeout
 # bearer tokens, passwords). Scrub them before anything is written to disk so
 # common credentials are not persisted verbatim in the bundle.
 _PLAIN_KV_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*)(\s*[:=]\s*)(\S+)")
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]+)")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(\S+)")
 _HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{8,}\b")
 
 
 def is_secret_key(key: str) -> bool:
+    """Return whether a field name conventionally identifies a credential."""
     camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
     parts = tuple(
         part for part in re.split(r"[^A-Za-z0-9]+", camel_split.lower()) if part
@@ -127,22 +128,25 @@ def redact_json_string_values(text: str) -> str:
 
 
 def redact(text: str) -> str:
+    """Redact common credentials while preserving non-secret diagnostics."""
     if not text:
         return text
 
     def redact_plain_value(match: re.Match[str]) -> str:
+        """Redact a matched plain key/value when its key is sensitive."""
         if not is_secret_key(match.group(1)):
             return match.group(0)
         return f"{match.group(1)}{match.group(2)}<redacted>"
 
     text = redact_json_string_values(text)
-    text = _PLAIN_KV_RE.sub(redact_plain_value, text)
     text = _BEARER_RE.sub(lambda m: f"{m.group(1)}<redacted>", text)
+    text = _PLAIN_KV_RE.sub(redact_plain_value, text)
     text = _HF_TOKEN_RE.sub("<redacted-hf-token>", text)
     return text
 
 
 def run(cmd: list[str], timeout: int) -> dict[str, Any]:
+    """Run one command and normalize subprocess wrapper failures."""
     try:
         proc = subprocess.run(
             cmd, text=True, capture_output=True, timeout=timeout, check=False
@@ -170,6 +174,7 @@ def run(cmd: list[str], timeout: int) -> dict[str, Any]:
 
 
 def write_result(outdir: Path, name: str, result: dict[str, Any]) -> None:
+    """Write one redacted command result into the bundle."""
     safe = name.replace("/", "_").replace(" ", "_")
     (outdir / f"{safe}.txt").write_text(
         "$ "
@@ -196,6 +201,7 @@ def write_pod_discovery_result(outdir: Path, name: str, result: dict[str, Any]) 
 
 
 def kubectl_json(args: list[str], timeout: int) -> tuple[Any | None, dict[str, Any]]:
+    """Run a kubectl JSON query and retain its normalized command result."""
     result = run(["kubectl", *args, "-o", "json"], timeout)
     if result["returncode"] != 0:
         return None, result
@@ -213,6 +219,7 @@ def kubectl_json(args: list[str], timeout: int) -> tuple[Any | None, dict[str, A
 def pod_names(
     namespace: str, selector: str | None, timeout: int
 ) -> tuple[list[str], dict[str, Any]]:
+    """Discover selected pod names and return the inventory command result."""
     args = ["get", "pods", "-n", namespace]
     if selector:
         args.extend(["-l", selector])
@@ -232,6 +239,7 @@ def pod_names(
 def container_names(
     namespace: str, pod: str, timeout: int
 ) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+    """Discover a pod's init and application container names."""
     body, result = kubectl_json(["get", "pod", pod, "-n", namespace], timeout)
     if not body:
         return [], result
@@ -260,6 +268,7 @@ def deployment_pod_selector(
 
 
 def main() -> int:
+    """Collect a debug bundle and return zero only when required reads succeed."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--namespace", "-n", required=True)
     parser.add_argument(
@@ -284,6 +293,8 @@ def main() -> int:
     if args.outdir:
         outdir = Path(args.outdir).expanduser().resolve()
         outdir.mkdir(parents=True, exist_ok=True)
+        if any(outdir.iterdir()):
+            parser.error(f"--outdir must be empty: {outdir}")
     else:
         # mkdtemp gives an unpredictable name with 0700 perms, unlike a
         # guessable /tmp/dynamo-debug-<timestamp> path on a shared host.

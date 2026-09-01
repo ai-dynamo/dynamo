@@ -22,6 +22,7 @@ SPEC.loader.exec_module(bundle)
 
 class DebugBundleTest(unittest.TestCase):
     def test_redact_distinguishes_credentials_from_token_telemetry(self) -> None:
+        """Redact credential fields without hiding token-count telemetry."""
         source = (
             '{"api_key":"json-secret","access_token":"access-secret",'
             '"author":"alice","tokenizer":"Qwen","prompt_tokens":128,'
@@ -41,6 +42,7 @@ class DebugBundleTest(unittest.TestCase):
         self.assertEqual(output.count("<redacted>"), 3)
 
     def test_redact_decodes_json_keys_and_preserves_escaped_values(self) -> None:
+        """Decode escaped JSON keys while preserving non-secret escaped values."""
         source = r'{"api\u005fkey":"secr\"et","author":"ali\"ce"}'
 
         output = bundle.redact(source)
@@ -51,11 +53,30 @@ class DebugBundleTest(unittest.TestCase):
         )
 
     def test_redact_handles_long_unterminated_json_string(self) -> None:
+        """Handle adversarial unterminated JSON strings without backtracking."""
         source = '{"api_key":"' + (r"\!" * 50_000)
 
         self.assertEqual(bundle.redact(source), source)
 
+    def test_write_result_redacts_complete_bearer_credential(self) -> None:
+        """Remove a full opaque bearer credential from persisted command output."""
+        credential = "opaque+/token=="
+        result = {
+            "cmd": ["kubectl", "logs", "worker-0"],
+            "returncode": 0,
+            "stdout": f"Authorization: Bearer {credential}\n",
+            "stderr": "",
+        }
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            bundle.write_result(Path(tempdir), "logs", result)
+            output = (Path(tempdir) / "logs.txt").read_text()
+
+        self.assertNotIn(credential, output)
+        self.assertIn("<redacted>", output)
+
     def test_pod_discovery_files_do_not_persist_pod_specs(self) -> None:
+        """Omit full pod specifications from pod-discovery result files."""
         result = {
             "cmd": ["kubectl", "get", "pod", "worker-0", "-o", "json"],
             "returncode": 0,
@@ -70,15 +91,18 @@ class DebugBundleTest(unittest.TestCase):
         self.assertIn("pod JSON used only for local discovery", output)
 
     def test_deployment_and_explicit_selectors_are_combined(self) -> None:
+        """Combine deployment and caller selectors for pod discovery."""
         self.assertEqual(
             bundle.deployment_pod_selector("qwen", "app=worker"),
             "nvidia.com/dynamo-graph-deployment-name=qwen,app=worker",
         )
 
     def test_named_deployment_scopes_pods_and_failed_reads_return_nonzero(self) -> None:
+        """Scope pod reads and fail the bundle when a required read fails."""
         calls: list[list[str]] = []
 
         def fake_run(cmd: list[str], timeout: int) -> dict[str, object]:
+            """Record calls and fail only the required events query."""
             del timeout
             calls.append(cmd)
             failed = cmd[1:3] == ["get", "events"]
@@ -123,7 +147,10 @@ class DebugBundleTest(unittest.TestCase):
         )
 
     def test_complete_top_level_collection_returns_zero(self) -> None:
+        """Return zero when every required top-level collection succeeds."""
+
         def fake_run(cmd: list[str], timeout: int) -> dict[str, object]:
+            """Return successful empty inventory responses."""
             del timeout
             return {
                 "cmd": cmd,
@@ -148,7 +175,10 @@ class DebugBundleTest(unittest.TestCase):
         self.assertEqual(summary["failed_commands"], [])
 
     def test_current_log_rbac_failure_makes_bundle_incomplete(self) -> None:
+        """Treat denied current logs as required and previous logs as optional."""
+
         def fake_run(cmd: list[str], timeout: int) -> dict[str, object]:
+            """Expose one pod and deny both current and previous logs."""
             del timeout
             if cmd[1:3] == ["get", "pods"] and cmd[-2:] == ["-o", "json"]:
                 stdout = '{"items": [{"metadata": {"name": "worker-0"}}]}'
@@ -185,7 +215,10 @@ class DebugBundleTest(unittest.TestCase):
         )
 
     def test_documented_output_dir_alias_is_accepted(self) -> None:
+        """Accept the documented output-directory alias."""
+
         def fake_run(cmd: list[str], timeout: int) -> dict[str, object]:
+            """Return successful empty inventory responses."""
             del timeout
             return {
                 "cmd": cmd,
@@ -205,6 +238,24 @@ class DebugBundleTest(unittest.TestCase):
                 result = bundle.main()
 
         self.assertEqual(result, 0)
+
+    def test_nonempty_output_directory_is_rejected(self) -> None:
+        """Reject stale artifacts before running any collection command."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            stale_file = Path(tempdir) / "logs_from_another_scope.txt"
+            stale_file.write_text("stale")
+            argv = [str(SCRIPT), "--namespace", "demo", "--outdir", tempdir]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(bundle, "run") as fake_run,
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                bundle.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        fake_run.assert_not_called()
 
 
 if __name__ == "__main__":
