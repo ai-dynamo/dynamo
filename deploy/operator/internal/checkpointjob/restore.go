@@ -115,17 +115,17 @@ func PrepareRestorePodSpec(
 					Value: "1",
 				})
 			}
-			ensureRestoreStartupProbe(container)
+			EnsureRestoreStartupProbe(container)
 		}
 	}
 	return nil
 }
 
-// ensureRestoreStartupProbe installs a StartupProbe that gates Ready until
+// EnsureRestoreStartupProbe installs a StartupProbe that gates Ready until
 // CRIU restore completes. It prefers the workload's existing Startup/Liveness/
 // Readiness probe (deep-copied with tightened cadence and infinite retries),
 // and falls back to a sentinel-file exec probe when none is defined.
-func ensureRestoreStartupProbe(container *corev1.Container) {
+func EnsureRestoreStartupProbe(container *corev1.Container) {
 	startup := container.StartupProbe
 	if startup == nil {
 		startup = container.LivenessProbe

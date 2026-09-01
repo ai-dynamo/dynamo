@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -205,6 +206,40 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 			require.NotNil(t, container.StartupProbe.Exec)
 			assert.Equal(t, []string{"cat", "/snapshot-control/restore-complete"}, container.StartupProbe.Exec.Command)
 		}
+	})
+
+	t.Run("preserves workload health semantics in the restore startup gate", func(t *testing.T) {
+		t.Log("Given a native restore candidate whose liveness probe defines engine startup")
+		pod := nativeRestoreCandidatePod(snapshot)
+		pod.Spec.Containers[0].LivenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")},
+			},
+			PeriodSeconds:    5,
+			TimeoutSeconds:   4,
+			FailureThreshold: 1,
+		}
+		original := mustMarshalPod(t, pod)
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: pod.Namespace,
+			Object:    runtime.RawExtension{Raw: original},
+		}}
+
+		t.Log("When the Dynamo admission webhook shapes the Pod")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then startup waits for the engine health endpoint before enabling liveness")
+		require.True(t, resp.Allowed)
+		shaped := applyAdmissionPatches(t, original, resp)
+		startup := shaped.Spec.Containers[0].StartupProbe
+		require.NotNil(t, startup)
+		require.NotNil(t, startup.HTTPGet)
+		assert.Equal(t, "/live", startup.HTTPGet.Path)
+		assert.Equal(t, int32(1), startup.PeriodSeconds)
+		assert.Equal(t, int32(1800), startup.FailureThreshold)
+		assert.Equal(t, int32(1), startup.SuccessThreshold)
+		assert.Equal(t, pod.Spec.Containers[0].LivenessProbe, shaped.Spec.Containers[0].LivenessProbe)
 	})
 
 	t.Run("denies stale or unsafe native candidates", func(t *testing.T) {
