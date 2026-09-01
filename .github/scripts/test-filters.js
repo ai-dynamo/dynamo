@@ -231,7 +231,7 @@ const testCases = [
     desc: 'helm file triggers deploy'
   },
 
-  // Framework snapshot lifecycle: backend filter + that framework's DynamoCheckpoint filter
+  // Framework snapshot lifecycle: backend filter + that framework's checkpoint filter
   {
     file: 'components/src/dynamo/vllm/snapshot.py',
     expect: {
@@ -241,7 +241,7 @@ const testCases = [
       snapshot_sglang: false,
       snapshot_trtllm: false,
     },
-    desc: 'vllm snapshot.py gates only vllm DynamoCheckpoint'
+    desc: 'vllm snapshot.py gates only vllm checkpoint tests'
   },
   {
     file: 'components/src/dynamo/sglang/snapshot.py',
@@ -252,7 +252,7 @@ const testCases = [
       snapshot_sglang: true,
       snapshot_trtllm: false,
     },
-    desc: 'sglang snapshot.py gates only sglang DynamoCheckpoint'
+    desc: 'sglang snapshot.py gates only sglang checkpoint tests'
   },
   {
     file: 'components/src/dynamo/trtllm/snapshot.py',
@@ -263,12 +263,12 @@ const testCases = [
       snapshot_sglang: false,
       snapshot_trtllm: true,
     },
-    desc: 'trtllm snapshot.py gates only trtllm DynamoCheckpoint'
+    desc: 'trtllm snapshot.py gates only trtllm checkpoint tests'
   },
   {
     file: 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py',
     expect: { trtllm: true, snapshot_trtllm: true, snapshot: false },
-    desc: 'trtllm snapshot unit test gates only trtllm DynamoCheckpoint'
+    desc: 'trtllm snapshot unit test gates only trtllm checkpoint tests'
   },
   {
     file: 'components/src/dynamo/common/snapshot/lifecycle.py',
@@ -278,7 +278,7 @@ const testCases = [
   {
     file: 'tests/deploy/test_dynamocheckpoint.py',
     expect: { snapshot: true, deploy: true },
-    desc: 'DynamoCheckpoint deploy test triggers shared snapshot'
+    desc: 'Checkpoint deploy test triggers shared snapshot integration'
   },
 ];
 

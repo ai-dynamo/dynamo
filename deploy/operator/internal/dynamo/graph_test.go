@@ -30,18 +30,17 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1241,83 +1240,6 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	}, topologyItems)
 	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
-}
-
-func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(&corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "checkpoint-storage",
-				Namespace: "default",
-			},
-		}).
-		Build()
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-				ComponentName: "worker",
-				ComponentType: v1beta1.ComponentTypeWorker,
-				Replicas:      ptr.To(int32(1)),
-			}},
-		},
-	}
-	operatorConfig := &configv1alpha1.OperatorConfiguration{
-		Checkpoint: configv1alpha1.CheckpointConfiguration{
-			Enabled: true,
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				Type: snapshotprotocol.StorageTypePVC,
-				PVC: configv1alpha1.CheckpointPVCConfig{
-					PVCName:  "checkpoint-storage",
-					BasePath: "/checkpoints",
-				},
-			},
-		},
-	}
-	runtimeConfig := &controller_common.RuntimeConfig{
-		Gate: features.Gates{Checkpoint: true},
-	}
-	checkpointInfos := map[string]*checkpoint.CheckpointInfo{
-		"worker": {
-			Enabled:       true,
-			Ready:         true,
-			Hash:          "ready-checkpoint",
-			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		},
-	}
-
-	got, err := GenerateGrovePodCliqueSet(
-		context.Background(),
-		dgd,
-		operatorConfig,
-		runtimeConfig,
-		kubeClient,
-		nil,
-		nil,
-		nil,
-		checkpointInfos,
-	)
-	require.NoError(t, err)
-	require.Len(t, got.Spec.Template.Cliques, 1)
-
-	podSpec := got.Spec.Template.Cliques[0].Spec.PodSpec
-	var checkpointVolume *corev1.Volume
-	for i := range podSpec.Volumes {
-		if podSpec.Volumes[i].Name == snapshotprotocol.CheckpointVolumeName {
-			checkpointVolume = &podSpec.Volumes[i]
-			break
-		}
-	}
-	require.NotNil(t, checkpointVolume)
-	require.NotNil(t, checkpointVolume.PersistentVolumeClaim)
-	assert.Equal(t, "checkpoint-storage", checkpointVolume.PersistentVolumeClaim.ClaimName)
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
@@ -8588,73 +8510,6 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 	}
 }
 
-func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testing.T) {
-	labels, err := generateLabels(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:   commonconsts.ComponentTypeWorker,
-			DynamoNamespace: ptr.To("default-test-dgd"),
-			Labels: map[string]string{
-				"user-label":                       "keep",
-				snapshotprotocol.CheckpointIDLabel: "stale-hash",
-			},
-			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
-				Labels: map[string]string{
-					"extra-label":                      "keep-too",
-					snapshotprotocol.CheckpointIDLabel: "stale-hash",
-				},
-			},
-		}),
-		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-		}),
-		"Worker",
-		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-	)
-	require.NoError(t, err)
-	annotations := map[string]string{}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
-		Enabled: true,
-		Ready:   false,
-		Hash:    "resolved-hash",
-	})
-	assert.Equal(t, "keep", labels["user-label"])
-	assert.Equal(t, "keep-too", labels["extra-label"])
-	_, hasCheckpointHash := labels[snapshotprotocol.CheckpointIDLabel]
-	assert.False(t, hasCheckpointHash, "checkpoint-id label must be cleared when checkpoint is not Ready")
-	_, hasTargetAnnotation := annotations[snapshotprotocol.TargetContainersAnnotation]
-	assert.False(t, hasTargetAnnotation, "target-containers annotation must be cleared when checkpoint is not Ready")
-}
-
-func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
-	labels, err := generateLabels(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:   commonconsts.ComponentTypeWorker,
-			DynamoNamespace: ptr.To("default-test-dgd"),
-			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
-				Labels: map[string]string{
-					snapshotprotocol.CheckpointIDLabel: "stale-hash",
-				},
-			},
-		}),
-		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-		}),
-		"Worker",
-		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-	)
-	require.NoError(t, err)
-	annotations := map[string]string{}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, &checkpoint.CheckpointInfo{
-		Enabled: true,
-		Ready:   true,
-		Hash:    "resolved-hash",
-	})
-	assert.Equal(t, "resolved-hash", labels[snapshotprotocol.CheckpointIDLabel],
-		"ready checkpoint must overwrite stale checkpoint-id with the resolved hash")
-	assert.Equal(t, commonconsts.MainContainerName, annotations[snapshotprotocol.TargetContainersAnnotation],
-		"ready checkpoint must stamp the default target-containers annotation")
-}
-
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
 	labels, err := generateLabels(
 		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -8808,71 +8663,40 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
 	}
 
-	// snapshot-agent DaemonSet fixture so InjectCheckpointIntoPodSpec can
-	// discover the checkpoint PVC storage in the target namespace.
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "test-ns",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: snapshotprotocol.SnapshotAgentVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
-						},
-					}},
-				},
-			},
-		},
-	}).Build()
-
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
 			Enabled:        true,
 			Exists:         true,
 			Ready:          true,
-			Hash:           "abc123def4567890",
 			CheckpointName: "decode-checkpoint",
+			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
+				UID:                  "snapshot-uid",
+				BoundContentName:     "snapshot-content",
+				CompatibilityVersion: commonconsts.SnapshotCompatibilityVersion,
+				GMSMode:              commonconsts.SnapshotGMSModeDisabled,
+			},
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
 	var sawGMS, sawEngine bool
 	for _, clique := range got.Spec.Template.Cliques {
-		targetAnnotation := clique.Annotations[snapshotprotocol.TargetContainersAnnotation]
-		checkpointID := clique.Labels[snapshotprotocol.CheckpointIDLabel]
+		targetAnnotation := clique.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation]
 		mainContainer := findContainerInClique(t, clique, commonconsts.MainContainerName)
 
 		if strings.Contains(clique.Name, "gms") {
 			sawGMS = true
-			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry snapshot-target-containers annotation", clique.Name)
-			assert.Empty(t, checkpointID, "GMS clique %q must not carry checkpoint-id label (would make it look like a restore target)", clique.Name)
+			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry restore target metadata", clique.Name)
+			assert.Empty(t, clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
 		} else {
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
-				"engine clique %q must carry snapshot-target-containers=main annotation", clique.Name)
-			assert.Empty(t, checkpointID,
-				"engine clique %q must not carry checkpoint-id label until the pod-create mutating webhook restore-shapes a Pod", clique.Name)
+				"engine clique %q must carry the main restore destination", clique.Name)
 			assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
 				"engine clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
 			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
@@ -8936,49 +8760,23 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
 	}
 
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "test-ns",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: snapshotprotocol.SnapshotAgentVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
-						},
-					}},
-				},
-			},
-		},
-	}).Build()
-
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
 			Enabled:                 true,
 			Exists:                  true,
 			Ready:                   true,
-			Hash:                    "abc123def4567890",
 			CheckpointName:          "decode-checkpoint",
 			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
+				UID:                  "snapshot-uid",
+				BoundContentName:     "snapshot-content",
+				CompatibilityVersion: commonconsts.SnapshotCompatibilityVersion,
+				GMSMode:              commonconsts.SnapshotGMSModeDisabled,
+			},
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8988,8 +8786,8 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			t.Fatalf("intra-pod failover must not produce a GMS clique: %q", clique.Name)
 		}
 		sawDecode = true
-		assert.Equal(t, "engine-0,engine-1", clique.Annotations[snapshotprotocol.TargetContainersAnnotation],
-			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
+		assert.Equal(t, "engine-0,engine-1", clique.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation],
+			"clique %q must carry both engine restore destinations", clique.Name)
 		assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
 			"clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
 		for _, engineName := range IntraPodFailoverEngineContainerNames() {
@@ -8997,7 +8795,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			assert.NotEqual(t, []string{"sleep", "infinity"}, c.Command,
 				"%s in clique %q must stay cold-start-shaped in Immediate startup", engineName, clique.Name)
 			for _, m := range c.VolumeMounts {
-				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
+				if m.Name == podcontract.SnapshotControlVolumeName {
 					t.Fatalf("%s in clique %q must not mount the snapshot-control volume before the pod-create webhook runs", engineName, clique.Name)
 				}
 			}
@@ -9042,10 +8840,9 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 		nil,
 		map[string]*checkpoint.CheckpointInfo{
 			"decode": {
-				Enabled:        true,
-				Exists:         true,
-				StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-				CheckpointName: "decode-checkpoint",
+				Enabled:          true,
+				AutomaticCapture: true,
+				StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 		},
 	)

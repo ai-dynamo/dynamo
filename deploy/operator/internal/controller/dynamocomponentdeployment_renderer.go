@@ -219,24 +219,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
-	isNativeRestore := checkpointInfo != nil && checkpointInfo.UsesPodSnapshot()
-	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if !isNativeRestore && (checkpointInfo == nil ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint)) {
-			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-				ctx,
-				r.reader,
-				dcd.Namespace,
-				podSpec,
-				checkpointInfo,
-				r.config.Checkpoint.Storage,
-				r.config.Checkpoint.EffectiveSeccompProfile(),
-			); err != nil {
-				return nil, errors.Wrap(err, "failed to inject checkpoint config")
-			}
-		}
-	}
-
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
@@ -248,19 +230,10 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
-	if checkpointInfo != nil &&
-		(isNativeRestore || checkpointInfo.StartupPolicy == "" ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
-		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
+	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podAnnotations, checkpointInfo); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
 		}
-	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(
-		podLabels,
-		podAnnotations,
-		checkpointInfo,
-		r.config.Checkpoint.Storage,
-	); err != nil {
-		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -298,29 +271,20 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	}
 
 	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
-	hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
-	sourceKind := dcd.Annotations[commonconsts.CheckpointSourceKindAnnotation]
-
-	// A DGD-generated native DCD may temporarily have no reference while its
-	// SnapshotJob is pending; legacy routing remains until the cleanup MR.
-	var (
-		info *checkpoint.CheckpointInfo
-		err  error
-	)
-	switch {
-	case sourceKind == commonconsts.CheckpointSourceKindSnapshot && !hasCheckpointRef:
+	var info *checkpoint.CheckpointInfo
+	if checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "" {
+		// A DGD-generated DCD temporarily has no reference while its automatic
+		// SnapshotJob is pending.
 		startupPolicy := alphaCheckpointConfig.StartupPolicy
 		if startupPolicy == "" {
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 		info = &checkpoint.CheckpointInfo{
 			Enabled:       true,
-			SourceKind:    checkpoint.SourceKindPodSnapshot,
 			StartupPolicy: startupPolicy,
 		}
-	case !hasCheckpointRef || sourceKind == commonconsts.CheckpointSourceKindLegacy:
-		info, err = checkpoint.ResolveLegacyCheckpointForService(ctx, r.reader, dcd.Namespace, alphaCheckpointConfig)
-	case sourceKind == "" || sourceKind == commonconsts.CheckpointSourceKindSnapshot:
+	} else {
+		var err error
 		info, err = checkpoint.ResolvePodSnapshotForService(
 			ctx,
 			r.reader,
@@ -328,17 +292,16 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			alphaCheckpointConfig,
 			dynamo.GetDCDEffectiveWorkerHash(dcd),
 		)
-	default:
-		return nil, errors.Errorf("unsupported checkpoint source kind %q", sourceKind)
-	}
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
 	}
 	if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 	}
 
 	serviceGMS := dynamo.GetGPUMemoryService(component)
+	var err error
 	if info.NativeSnapshot != nil {
 		err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
 	} else {

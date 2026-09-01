@@ -41,12 +41,9 @@ func TestPodSnapshotDependencyIndexes(t *testing.T) {
 		assert.Equal(t, []string{"snapshot-a"}, refs)
 	})
 
-	t.Run("excludes generated legacy component references", func(t *testing.T) {
-		t.Log("Given a DCD carrying the staged automatic-capture source marker")
+	t.Run("indexes component references", func(t *testing.T) {
+		t.Log("Given a DCD that references a PodSnapshot")
 		dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-				consts.CheckpointSourceKindAnnotation: consts.CheckpointSourceKindLegacy,
-			}},
 			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 					Experimental: nativeCheckpointExperimental("checkpoint-a"),
@@ -54,11 +51,11 @@ func TestPodSnapshotDependencyIndexes(t *testing.T) {
 			},
 		}
 
-		t.Log("When the native dependency index is evaluated")
+		t.Log("When the dependency index is evaluated")
 		refs := dcdPodSnapshotRefIndexValues(dcd)
 
-		t.Log("Then the legacy reference cannot be mistaken for a same-named PodSnapshot")
-		assert.Empty(t, refs)
+		t.Log("Then the referenced PodSnapshot is indexed")
+		assert.Equal(t, []string{"checkpoint-a"}, refs)
 	})
 }
 

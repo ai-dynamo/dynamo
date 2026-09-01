@@ -12,7 +12,6 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
@@ -31,128 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, nvidiacomv1alpha1.AddToScheme(scheme))
-
-	readyCheckpoint := &nvidiacomv1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-checkpoint",
-			Namespace: "default",
-			Labels: map[string]string{
-				snapshotprotocol.CheckpointIDLabel: "checkpoint-123",
-			},
-			Annotations: map[string]string{
-				snapshotprotocol.CheckpointArtifactVersionAnnotation: "2",
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-			Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
-		},
-	}
-	notReadyCheckpoint := readyCheckpoint.DeepCopy()
-	notReadyCheckpoint.Name = "pending-checkpoint"
-	notReadyCheckpoint.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: "checkpoint-456"}
-	notReadyCheckpoint.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
-
-	webhookClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(readyCheckpoint, notReadyCheckpoint).
-		Build()
-	mutator := NewPodCheckpointRestoreMutator(
-		webhookClient,
-		webhookClient,
-		&configv1alpha1.OperatorConfiguration{
-			Checkpoint: configv1alpha1.CheckpointConfiguration{
-				Enabled: true,
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: snapshotprotocol.StorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName:  "snapshot-pvc",
-						BasePath: "/checkpoints",
-					},
-				},
-			},
-		},
-	)
-	mutator.scheme = scheme
-	ctx := features.WithGate(context.Background(), features.Gates{Checkpoint: true})
-
-	t.Run("ready checkpoint restore-shapes pod create", func(t *testing.T) {
-		pod := checkpointCandidatePod("worker-checkpoint")
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: admissionv1.Create,
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
-		}}
-
-		resp := mutator.Handle(ctx, req)
-		require.True(t, resp.Allowed)
-		require.NotEmpty(t, resp.Patches)
-
-		patchesByPath := map[string]any{}
-		for _, patch := range resp.Patches {
-			patchesByPath[patch.Path] = patch.Value
-		}
-		assert.Equal(t, "checkpoint-123", patchesByPath["/metadata/labels/nvidia.com~1snapshot-checkpoint-id"])
-		assert.Equal(t, "true", patchesByPath["/metadata/labels/nvidia.com~1snapshot-is-restore-target"])
-		assert.Equal(t, "2", patchesByPath["/metadata/annotations/nvidia.com~1snapshot-artifact-version"])
-		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-target-containers")
-		assert.Contains(t, patchesByPath, "/spec/volumes")
-		for _, patch := range resp.Patches {
-			assert.NotContains(t, patch.Path, "/command")
-			assert.NotContains(t, patch.Path, "/args")
-		}
-		envPatch, ok := patchesByPath["/spec/containers/0/env"].([]any)
-		require.True(t, ok, "expected env patch, got %#v", patchesByPath)
-		assert.Contains(t, envPatch, map[string]any{
-			"name":  podcontract.RestoreStandbyModeEnv,
-			"value": "1",
-		})
-	})
-
-	t.Run("not ready checkpoint leaves pod unchanged", func(t *testing.T) {
-		pod := checkpointCandidatePod("pending-checkpoint")
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: admissionv1.Create,
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
-		}}
-
-		resp := mutator.Handle(ctx, req)
-		require.True(t, resp.Allowed)
-		assert.Empty(t, resp.Patches)
-	})
-
-	t.Run("update leaves pod unchanged", func(t *testing.T) {
-		pod := checkpointCandidatePod("worker-checkpoint")
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: admissionv1.Update,
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
-		}}
-
-		resp := mutator.Handle(ctx, req)
-		require.True(t, resp.Allowed)
-		assert.Empty(t, resp.Patches)
-	})
-
-	t.Run("arbitrary annotated pod without operator stamp is ignored", func(t *testing.T) {
-		pod := checkpointCandidatePod("worker-checkpoint")
-		delete(pod.Labels, consts.KubeLabelDynamoComponent)
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: admissionv1.Create,
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
-		}}
-
-		resp := mutator.Handle(ctx, req)
-		require.True(t, resp.Allowed)
-		assert.Empty(t, resp.Patches)
-	})
-}
-
 func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -160,13 +37,8 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	require.NoError(t, snapshotv1alpha1.AddToScheme(scheme))
 
 	snapshot := nativeRestoreTestSnapshot()
-	staleSnapshot := snapshot.DeepCopy()
-	staleSnapshot.UID = types.UID("stale-snapshot-uid")
-	staleSnapshot.Status.BoundPodSnapshotContentName = ptr.To("stale-content")
-	webhookClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(staleSnapshot).Build()
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
 	mutator := NewPodCheckpointRestoreMutator(
-		webhookClient,
 		apiReader,
 		&configv1alpha1.OperatorConfiguration{
 			Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
@@ -195,7 +67,6 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		assert.Equal(t, "main=engine-0,main=engine-1", shaped.Annotations[podcontract.RestoreContainerMapAnnotation])
 		assert.NotContains(t, shaped.Annotations, consts.CheckpointRestoreCandidateAnnotation)
 		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
-		assert.NotContains(t, shaped.Annotations, snapshotprotocol.TargetContainersAnnotation)
 		require.Len(t, shaped.Spec.Volumes, 1)
 		assert.Equal(t, podcontract.SnapshotControlVolumeName, shaped.Spec.Volumes[0].Name)
 		for _, container := range shaped.Spec.Containers {
@@ -278,17 +149,9 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				wantErr: "must directly invoke python -m",
 			},
 			{
-				name: "legacy restore metadata conflict",
-				mutate: func(pod *corev1.Pod) {
-					pod.Labels[snapshotprotocol.CheckpointIDLabel] = "legacy-checkpoint"
-				},
-				wantErr: "conflicts with legacy checkpoint metadata",
-			},
-			{
-				name: "retired Snapshot target annotation without Dynamo target metadata",
+				name: "missing restore target metadata",
 				mutate: func(pod *corev1.Pod) {
 					delete(pod.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
-					pod.Annotations[snapshotprotocol.TargetContainersAnnotation] = "engine-0,engine-1"
 				},
 				wantErr: "missing required nvidia.com/dynamo-restore-target-containers annotation",
 			},
@@ -372,32 +235,6 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 	}
 }
 
-func checkpointCandidatePod(checkpointName string) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: "worker",
-				consts.KubeLabelDynamoNamespace: "default-worker",
-				consts.KubeLabelDynamoSelector:  "worker",
-			},
-			Annotations: map[string]string{
-				consts.CheckpointRestoreCandidateAnnotation: consts.KubeLabelValueTrue,
-				consts.CheckpointNameAnnotation:             checkpointName,
-				snapshotprotocol.TargetContainersAnnotation: consts.MainContainerName,
-			},
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:    consts.MainContainerName,
-				Image:   "worker:latest",
-				Command: []string{"python3", "-m", "dynamo.vllm"},
-			}},
-		},
-	}
-}
-
 func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
 	return &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
@@ -442,7 +279,6 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 			Annotations: map[string]string{
 				consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,
 				consts.CheckpointNameAnnotation:                   snapshot.Name,
-				consts.CheckpointSourceKindAnnotation:             consts.CheckpointSourceKindSnapshot,
 				consts.SnapshotCandidateUIDAnnotation:             string(snapshot.UID),
 				consts.SnapshotCandidateContentAnnotation:         "content-a",
 				consts.SnapshotCandidateGMSModeAnnotation:         consts.SnapshotGMSModeDisabled,

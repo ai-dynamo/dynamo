@@ -236,9 +236,8 @@ type GPUMemoryServiceSpec struct {
 
 	// ExtraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in pods rendered from the enclosing spec.
-	// DGD/DCD services apply this to service pods. Auto-created checkpoints
-	// apply checkpoint job clients before creating the SnapshotJob; manual
-	// DynamoCheckpoint users must provide an already-prepared pod template.
+	// DGD/DCD services apply this to service pods. Automatic captures apply
+	// SnapshotJob capture Pod clients before creating the SnapshotJob.
 	// Every name must match a user-declared container in the enclosing pod spec.
 	// +optional
 	// +listType=set
@@ -331,8 +330,8 @@ const (
 type CheckpointStartupPolicy string
 
 const (
-	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
-	// job runs in the background, and only pods created after the checkpoint is
+	// CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob
+	// capture runs in the background, and only pods created after the checkpoint is
 	// Ready are restore-shaped by the pod-create mutating webhook.
 	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
 	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
@@ -394,7 +393,7 @@ type ServiceCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
+	// Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
 	// Use CheckpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
@@ -407,14 +406,14 @@ type ServiceCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// Job customizes the DGD-managed checkpoint Job.
+	// Job customizes the DGD-managed SnapshotJob capture Pod.
 	// +optional
 	Job *ServiceCheckpointJobConfig `json:"job,omitempty"`
 }
 
-// ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+// ServiceCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD service.
 type ServiceCheckpointJobConfig struct {
-	// GMSClientContainers lists checkpoint Job containers that should receive
+	// GMSClientContainers lists SnapshotJob capture Pod containers that should receive
 	// GMS client wiring. Requires gpuMemoryService on the service.
 	// +optional
 	// +listType=set
@@ -423,7 +422,7 @@ type ServiceCheckpointJobConfig struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
 
-	// PodTemplate customizes the checkpoint Job pod. The operator starts from the
+	// PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.
 	// +optional
@@ -431,4 +430,54 @@ type ServiceCheckpointJobConfig struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// Deprecated: omit in DGD service checkpoint configs. Automatic capture
+// needs no replacement; use CheckpointRef to restore a PodSnapshot.
+type DynamoCheckpointIdentity struct {
+	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B").
+	// Deprecated: legacy identity only.
+	// +kubebuilder:validation:Required
+	Model string `json:"model"`
+
+	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
+	// Deprecated: legacy identity only.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	BackendFramework string `json:"backendFramework"`
+
+	// DynamoVersion is the Dynamo platform version.
+	// Deprecated: legacy identity only.
+	// +optional
+	DynamoVersion string `json:"dynamoVersion,omitempty"`
+
+	// TensorParallelSize is the tensor parallel configuration.
+	// Deprecated: automatic capture derives compatibility from the worker.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
+
+	// PipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated: automatic capture derives compatibility from the worker.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
+
+	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// Deprecated: legacy identity only.
+	// +optional
+	Dtype string `json:"dtype,omitempty"`
+
+	// MaxModelLen is the maximum sequence length.
+	// Deprecated: legacy identity only.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxModelLen int32 `json:"maxModelLen,omitempty"`
+
+	// ExtraParameters contains additional legacy identity parameters.
+	// Deprecated: legacy identity only.
+	// +optional
+	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }

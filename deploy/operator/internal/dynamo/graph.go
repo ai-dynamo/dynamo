@@ -1562,7 +1562,7 @@ func IsWorkerComponent(componentType string) bool {
 }
 
 // AddStandardEnvVars adds the standard environment variables that are common to
-// both checkpoint jobs and generated worker pods.
+// both SnapshotJob capture Pods and generated worker Pods.
 func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if operatorConfig.Infrastructure.NATSAddress != "" {
@@ -2428,7 +2428,6 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 	containerGPUs               ContainerGPUCount
 }
@@ -2445,30 +2444,6 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
-	}
-
-	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	checkpointEnabled := p.runtimeConfig.Gate.Enabled(features.Checkpoint)
-	shouldUseAdmissionRestore := checkpointEnabled &&
-		p.r.Role != RoleGMS &&
-		p.checkpointInfo != nil &&
-		(p.checkpointInfo.UsesPodSnapshot() ||
-			p.checkpointInfo.StartupPolicy == "" ||
-			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
-	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
-		if p.checkpointInfo != nil &&
-			p.checkpointInfo.Enabled &&
-			p.checkpointInfo.Ready &&
-			p.checkpointRestore == nil {
-			return nil, fmt.Errorf("resolved checkpoint restore is required for role %s", p.r.Name)
-		}
-		if err := checkpoint.InjectResolvedCheckpointIntoPodSpec(
-			podSpec,
-			p.checkpointRestore,
-			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
-		); err != nil {
-			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
-		}
 	}
 
 	// MinAvailable serves two purposes for Grove PCLQ:
@@ -2546,13 +2521,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		applyKvTransferPolicyTopologyAnnotations(annotations, p.dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 	}
 	if p.r.Role != RoleGMS {
-		if shouldUseAdmissionRestore {
-			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, p.checkpointInfo); err != nil {
+		if p.runtimeConfig.Gate.Enabled(features.Checkpoint) {
+			if err := checkpoint.ApplyRestoreCandidateMetadata(annotations, p.checkpointInfo); err != nil {
 				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
-			}
-		} else {
-			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
 			}
 		}
 	}
@@ -2748,24 +2719,6 @@ func GenerateGrovePodCliqueSet(
 		if checkpointInfoByComponent != nil {
 			checkpointInfo = checkpointInfoByComponent[componentName]
 		}
-		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
-		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
-			checkpointInfo != nil &&
-			!checkpointInfo.UsesPodSnapshot() &&
-			checkpointInfo.StartupPolicy != "" &&
-			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
-			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
-				ctx,
-				reader,
-				dynamoDeployment.Namespace,
-				checkpointInfo,
-				operatorConfig.Checkpoint.Storage,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)
-			}
-		}
-
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
 		containerGPUs := sync.OnceValues(func() (int64, error) {
@@ -2798,7 +2751,6 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 				containerGPUs:               containerGPUs,
 			})

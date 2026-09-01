@@ -443,7 +443,6 @@ areas:
   - components/src/dynamo/common/tests/test_snapshot*
   - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
-  - deploy/operator/internal/checkpointjob/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
@@ -948,14 +947,6 @@ shared:
   owners:
   - operator
   - observability
-- glob: deploy/operator/api/v1alpha1/dynamocheckpoint*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/config/**/*dynamocheckpoint*
-  owners:
-  - operator
-  - gms
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator

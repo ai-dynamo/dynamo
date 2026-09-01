@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -77,16 +76,12 @@ func isRestorePodReplacementEligible(pod *corev1.Pod) bool {
 		return false
 	}
 
-	// Native restore Pods require replacement after a terminal restore outcome or GMS restart.
-	if pod.Annotations[podcontract.RestoreFromAnnotation] != "" {
-		outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
-		return outcome == podcontract.RestoreOutcomeFailed ||
-			outcome == podcontract.RestoreOutcomePartiallySucceeded ||
-			hasRestartedNativeGMSServer(pod)
+	if pod.Annotations[podcontract.RestoreFromAnnotation] == "" {
+		return false
 	}
-
-	// Legacy restore Pods retain their narrower GMS-restart replacement policy.
-	return pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue &&
+	outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
+	return outcome == podcontract.RestoreOutcomeFailed ||
+		outcome == podcontract.RestoreOutcomePartiallySucceeded ||
 		hasRestartedNativeGMSServer(pod)
 }
 

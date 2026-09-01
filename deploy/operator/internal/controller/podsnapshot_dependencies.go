@@ -55,9 +55,6 @@ func dcdPodSnapshotRefIndexValues(raw client.Object) []string {
 	if !ok {
 		return nil
 	}
-	if dcd.Annotations[consts.CheckpointSourceKindAnnotation] == consts.CheckpointSourceKindLegacy {
-		return nil
-	}
 	config := dynamo.GetCheckpoint(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if config == nil || config.CheckpointRef == nil {
 		return nil
