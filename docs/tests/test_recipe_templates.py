@@ -686,9 +686,7 @@ def test_disaggregate_placement_selector_targets_prefill_and_decode_workers() ->
         required_affinity = operation["value"][
             "requiredDuringSchedulingIgnoredDuringExecution"
         ]
-        values = required_affinity[0]["labelSelector"]["matchExpressions"][0][
-            "values"
-        ]
+        values = required_affinity[0]["labelSelector"]["matchExpressions"][0]["values"]
         assert values == ["prefill", "decode"]
 
 
