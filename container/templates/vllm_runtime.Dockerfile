@@ -406,6 +406,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # and the import check fails the build if the package arrives by another route
 # -- a filter that silently stopped matching would otherwise look like success.
 #
+# mooncake goes the same way, for two reasons. The floor names the CUDA 13
+# distribution, and the XPU and CPU bases carry no mooncake at all, so under
+# --no-deps it would arrive here without msgpack, which vLLM does not pull in.
+# The check asserts the distribution is absent rather than the `mooncake` module,
+# so it tests the filter without assuming what a future base may ship. It is
+# written as a positive test with no `!` and no stderr redirect: a broken
+# interpreter then fails the build instead of passing it vacuously.
+#
 # Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
 # middle of a `\`-continued command emits a blank line that ends the command
 # early, and a `#` comment there is joined onto the previous line, commenting
@@ -413,10 +421,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    grep -v '^PyNvVideoCodec' /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+        /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
-    ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null
+    ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null && \
+    /opt/venv/bin/python -c "import importlib.metadata as m; names={(d.metadata['Name'] or '').replace('_','-').lower() for d in m.distributions()}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest

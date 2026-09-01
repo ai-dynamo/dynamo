@@ -18,8 +18,13 @@ cryptography>=50.0.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
-# the updated etcd client stack.
-mooncake-transfer-engine>=0.3.13.post1
+# the updated etcd client stack. vllm-openai is built with
+# INSTALL_KV_CONNECTORS=true on CUDA 13, and its Dockerfile uninstalls the
+# generic project and installs mooncake-transfer-engine-cuda13 in its place.
+# Both ship the same `mooncake` package and the generic one links
+# libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
+# only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
+mooncake-transfer-engine-cuda13>=0.3.13.post1
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
