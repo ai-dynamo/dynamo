@@ -58,6 +58,17 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
+def validate_disaggregated_n(n: Any) -> None:
+    """Reject parallel sampling unsupported by disaggregated serving."""
+    if n is None or (isinstance(n, int) and not isinstance(n, bool) and n == 1):
+        return
+    raise HttpError(
+        400,
+        "SGLang disaggregated serving requires n=1; parallel sampling is not "
+        f"supported, got n={n!r}.",
+    )
+
+
 class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     """Minimal base class for all generative handlers (LLM, diffusion, etc.).
 

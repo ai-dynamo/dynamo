@@ -42,6 +42,7 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    expected_status_code: int = field(default=200, kw_only=True)
     # Number of times to send this exact request in sequence. Each call must
     # pass validation independently. Use >1 for cache/repeatability tests
     # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
@@ -127,6 +128,16 @@ class BasePayload:
         content = self.response_handler(response)
         self.validate(response, content)
         return content
+
+
+@dataclass
+class HttpErrorPayload(BasePayload):
+    """Payload that validates an expected HTTP error response."""
+
+    expected_status_code: int = field(default=400, kw_only=True)
+
+    def response_handler(self, response: Any) -> str:
+        return response.text
 
 
 @dataclass

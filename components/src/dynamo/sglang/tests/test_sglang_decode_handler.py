@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
@@ -37,6 +38,8 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
+    MultimodalPrefillWorkerHandler,
+    MultimodalWorkerHandler,
     SglangUtils,
     StreamProcessor,
 )
@@ -273,10 +276,16 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
+def _new_decode_handler(
+    *,
+    use_sglang_tokenizer: bool = False,
+    enable_rl: bool = False,
+    serving_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
+    handler.serving_mode = serving_mode
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(served_model_name="test-model"),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
@@ -412,6 +421,32 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
             priority=None,
             sampling_overrides={"max_new_tokens": 1},
         )
+
+
+def test_native_generate_rejects_parallel_disaggregated_decode():
+    handler = _new_decode_handler(serving_mode=DisaggregationMode.DECODE)
+    handler.enable_trace = False
+    handler.engine = SimpleNamespace()
+    handler._priority_kwargs = lambda _priority: {}
+    handler._resolve_lora = lambda _request: None
+    context = SimpleNamespace(trace_id="trace-id", id=lambda: "request-id")
+
+    with pytest.raises(HttpError, match="requires n=1") as error:
+        handler._native_generate_stream(
+            request={
+                "bootstrap_info": {
+                    "bootstrap_host": "prefill",
+                    "bootstrap_port": 1234,
+                    "bootstrap_room": 5678,
+                }
+            },
+            native_payload={"sampling_params": {"n": 2}},
+            input_param={"input_ids": [1, 2, 3]},
+            context=context,
+            priority=None,
+        )
+
+    assert error.value.code == 400
 
 
 def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
@@ -716,6 +751,39 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["max_new_tokens"] == 8
 
 
+def test_build_sampling_params_rejects_parallel_disaggregated_decode():
+    handler = _new_decode_handler(
+        serving_mode=DisaggregationMode.DECODE,
+    )
+
+    with pytest.raises(HttpError, match="requires n=1") as error:
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"n": 2},
+                "stop_conditions": {"max_tokens": 8},
+            }
+        )
+
+    assert error.value.code == 400
+
+
+@pytest.mark.asyncio
+async def test_prefill_rejects_parallel_sampling():
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"n": 2},
+        "stop_conditions": {"max_tokens": 8},
+    }
+
+    with pytest.raises(HttpError, match="requires n=1") as error:
+        async for _ in handler.generate(request, context):
+            pass
+
+    assert error.value.code == 400
+
+
 def test_build_sampling_params_omits_string_stop_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
@@ -865,6 +933,51 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["min_new_tokens"] == 64
     assert sampling_params["max_new_tokens"] == 64
     assert sampling_params["ignore_eos"] is True
+
+
+@pytest.mark.asyncio
+async def test_multimodal_rejects_parallel_disaggregated_decode():
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler.enable_trace = False
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=8),
+            sampling_options=SamplingOptions(n=2),
+        )
+    )
+    context = SimpleNamespace(trace_id="trace-id")
+
+    with pytest.raises(HttpError, match="requires n=1") as error:
+        async for _ in handler.generate(request, context):
+            pass
+
+    assert error.value.code == 400
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_parallel_sampling_before_room_allocation():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler._validate_and_parse_disagg_request = lambda request: request
+    room_allocated = False
+
+    def generate_bootstrap_room():
+        nonlocal room_allocated
+        room_allocated = True
+        return 1
+
+    handler._generate_bootstrap_room = generate_bootstrap_room
+    request = SimpleNamespace(sampling_params={"n": 2})
+    context = SimpleNamespace(trace_id="trace-id", id=lambda: "request-id")
+
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert len(chunks) == 1
+    response = json.loads(chunks[0])
+    assert response["finish_reason"] == "error"
+    assert "requires n=1" in response["error"]
+    assert not room_allocated
 
 
 @pytest.mark.parametrize(
