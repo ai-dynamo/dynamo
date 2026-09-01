@@ -183,10 +183,8 @@ where
             match rx.await {
                 Ok(outcome) => outcome,
                 Err(_) => {
-                    // tx dropped without sending: the SSE consumer dropped the
-                    // passthrough stream before end-of-stream (client cancel), or the
-                    // spawned aggregation task was cancelled before it reported.
-                    // Aggregation failures report themselves and no longer land here.
+                    // tx dropped without sending: the SSE consumer dropped the passthrough
+                    // stream before end-of-stream (client cancel), or the task was cancelled.
                     tracing::debug!(
                         "request payload: response aggregation produced no outcome (client cancel)"
                     );
@@ -216,11 +214,8 @@ where
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
-                // Report the failure instead of dropping tx silently, so the record
-                // carries why it has no response. The client still receives a
-                // (best-effort) empty fallback chunk so the HTTP response shape stays
-                // valid; the combined request payload record is emitted with
-                // `response = None` and this drop reason.
+                // The client still receives a (best-effort) empty fallback chunk so the
+                // HTTP response shape stays valid; the record carries this reason instead.
                 let _ = tx.send(PayloadOutcome::dropped(None, aggregation_failed_reason(&e)));
                 let fallback = NvCreateChatCompletionResponse {
                     inner: dynamo_protocols::types::CreateChatCompletionResponse {
@@ -700,10 +695,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_stream_handling() {
-        // Empty stream: the aggregator has nothing to apply, so the outcome carries
-        // no response. It names itself rather than looking like a client cancel, so
-        // the caller (preprocessor) emits the combined request payload record with
-        // `response = None` and this specific drop reason.
+        // Empty stream: the aggregator has nothing to apply, so the outcome carries no
+        // response, and names itself rather than looking like a client cancel.
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);
@@ -822,9 +815,8 @@ mod tests {
 
     #[tokio::test]
     async fn error_chunk_mid_stream_keeps_partial_content_and_names_the_error() {
-        // The regression this change exists for: the client saw "Hello " before the
-        // backend errored, so the audit record must keep that text and say why it is
-        // short, instead of silently claiming a complete empty record.
+        // The client saw "Hello " before the backend errored, so the audit record must
+        // keep that text and say why it is short.
         let chunks = vec![
             create_mock_chunk("Hello ".to_string(), 0),
             Annotated::<NvCreateChatCompletionStreamResponse>::from_error(

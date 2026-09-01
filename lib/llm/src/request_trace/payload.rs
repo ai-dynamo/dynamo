@@ -95,9 +95,8 @@ impl RequestPayloadHandle {
         drop_reason: Option<String>,
     ) {
         let payload_complete = response.is_some() && drop_reason.is_none();
-        // Defensive: a record with neither a response nor a reason would assert
-        // nothing about why it is empty, which is exactly the state this signature
-        // exists to prevent. Never silently mark it complete.
+        // A record with no response and no stated reason must not look complete;
+        // label it `unspecified` rather than leave it indistinguishable from a good one.
         let drop_reason = match (payload_complete, drop_reason) {
             (true, reason) => reason,
             (false, Some(reason)) => Some(reason),
@@ -392,9 +391,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn emit_without_response_or_reason_still_marks_the_record_incomplete() {
-        // Defensive invariant: even if a future call site drops the response
-        // without saying why, the record must not claim completeness. It is
-        // labelled rather than left silently indistinguishable from a good one.
+        // Guards a future call site that drops the response without saying why:
+        // the record must be labelled, not left indistinguishable from a good one.
         crate::request_trace::init_bus_for_test(8);
         let mut rx = crate::request_trace::subscribe();
 

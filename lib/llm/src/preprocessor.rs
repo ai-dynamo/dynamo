@@ -6474,12 +6474,8 @@ impl
                 crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn the payload emit off the request path. `agg_fut` resolves to an
-            // outcome that carries a drop reason on client cancel / gateway timeout /
-            // aggregation failure, plus any partial response recovered before the
-            // failure; we emit the payload record either way so those cases remain
-            // inspectable and self-describing. The record carries the request
-            // snapshot and arrival time captured at handle creation.
+            // Spawn the payload emit off the request path. The outcome carries a drop
+            // reason and any recovered partial response, so emit the record either way.
             tokio::spawn(async move {
                 let outcome = agg_fut.await;
                 if let Some(reason) = outcome.drop_reason.as_deref() {
