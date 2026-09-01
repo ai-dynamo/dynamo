@@ -2098,6 +2098,7 @@ _LONG_ARGUMENT_CHUNK_TEXTS = (
     '"]}}\n</tool_call>',
 )
 
+
 def _long_string_argument_outputs():
     return [
         CompletionOutput(
@@ -2113,12 +2114,6 @@ def _long_string_argument_outputs():
         for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
     ]
 
-
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-@pytest.mark.vllm
-@pytest.mark.core
 def test_streaming_tool_call_arguments_are_not_withheld(
     tokenizer, request_for_sampling, sampling_params
 ):
