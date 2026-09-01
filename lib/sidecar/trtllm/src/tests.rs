@@ -257,7 +257,7 @@ fn transport(connections: usize) -> GrpcTransportConfig {
 
 fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {
     TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(endpoint, "--trtllm-endpoint").expect("valid test endpoint"),
+        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
         transport(connections),
         ConfiguredModel {
             source: "model-source".to_string(),
@@ -723,7 +723,7 @@ async fn unsupported_features_fail_before_rpc_submission() {
 async fn pool_uses_each_configured_connection() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let endpoint =
-        GrpcEndpoint::parse(&server.endpoint, "--trtllm-endpoint").expect("valid endpoint");
+        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid endpoint");
     let client = TrtllmClient::connect(&endpoint, transport(2))
         .await
         .expect("connect pool");

@@ -20,6 +20,8 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
 
+Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |
@@ -236,7 +238,7 @@ The example EPP links the example catalog and registers it before the standard r
 ```rust
 let mut registry = WorkerSelectionPolicyRegistry::default();
 dynamo_custom_policy_example_catalog::register(&mut registry)?;
-run_with_worker_selection_policy_registry(registry).await
+run(Some(registry)).await
 ```
 
 Run the binary in standalone mode:
@@ -264,6 +266,11 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.
 
 ## Try the Policies End to End With Mocker
+
+> [!WARNING]
+> Online simulation with Mocker is temporarily unavailable. The `python -m dynamo.mocker` commands
+> in this section do not run in this release. This workflow will return through the unified
+> AISimulate surface in a future release.
 
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 

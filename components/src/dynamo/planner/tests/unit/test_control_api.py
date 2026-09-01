@@ -26,6 +26,8 @@ class _Environment:
         *,
         prefill_gpus: int = 2,
         decode_gpus: int = 1,
+        prefill_gpu_cost: int | None = None,
+        decode_gpu_cost: int | None = None,
         prefill_watts: int | None = None,
         decode_watts: int | None = None,
     ) -> None:
@@ -33,6 +35,8 @@ class _Environment:
         self.state = DeploymentState()
         self.state.prefill.num_gpus = prefill_gpus
         self.state.decode.num_gpus = decode_gpus
+        self.state.prefill.gpus_per_replica = prefill_gpu_cost
+        self.state.decode.gpus_per_replica = decode_gpu_cost
         self.state.prefill.power_watts_per_replica = prefill_watts
         self.state.decode.power_watts_per_replica = decode_watts
 
@@ -51,6 +55,8 @@ def _planner(
     *,
     prefill_watts: int | None = None,
     decode_watts: int | None = None,
+    prefill_gpu_cost: int | None = None,
+    decode_gpu_cost: int | None = None,
     **overrides,
 ) -> NativePlannerBase:
     values = {
@@ -71,6 +77,8 @@ def _planner(
             _Environment(
                 prefill_watts=prefill_watts,
                 decode_watts=decode_watts,
+                prefill_gpu_cost=prefill_gpu_cost,
+                decode_gpu_cost=decode_gpu_cost,
             ),
         )
 
@@ -179,6 +187,18 @@ def test_startup_validation_rejects_minimum_gpu_footprint():
         planner._validate_min_endpoint_budgets_at_startup()
 
 
+def test_startup_validation_charges_sidecar_gpu_cost():
+    planner = _planner(
+        "disagg",
+        max_gpu_budget=7,
+        prefill_gpu_cost=3,
+        decode_gpu_cost=5,
+    )
+
+    with pytest.raises(DeploymentValidationError, match="requires 8 GPUs"):
+        planner._validate_min_endpoint_budgets_at_startup()
+
+
 @pytest.mark.asyncio
 async def test_runtime_patch_rejects_minimum_power_footprint():
     planner = _planner(
@@ -217,9 +237,10 @@ async def test_runtime_api_returns_503_when_decision_lock_times_out():
     client = TestClient(TestServer(_build_app(planner)))
     await client.start_server()
     try:
-        with patch(
-            "dynamo.planner.core.base._CONFIG_LOCK_TIMEOUT_SECONDS", 0
-        ), pytest.raises(_MinimumEndpointUnavailableError):
+        with (
+            patch("dynamo.planner.core.base._CONFIG_LOCK_TIMEOUT_SECONDS", 0),
+            pytest.raises(_MinimumEndpointUnavailableError),
+        ):
             async with planner._config_lock:
                 await planner.get_min_endpoints()
 

@@ -8,6 +8,12 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+    # Documentation changes are validated before merge and do not affect images or GPU tests.
+    paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
+      - '**.md'
+      - '**.rst'
   workflow_dispatch:
     inputs:
       framework:
@@ -165,6 +171,24 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+  # ============================================================================
+  # SIDECAR BUILD
+  # ============================================================================
+  sidecar-build:
+    name: dynamo-sidecar
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-dynamo-sidecar' || '' }}
+        ${{ github.ref_name == 'main' && format('main-dynamo-sidecar-{0}', github.sha) || '' }}
 
   # ============================================================================
   # BUILD JOBS
@@ -912,7 +936,7 @@ jobs:
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg", "agg_router"]'
+      profiles: '["agg", "agg_logging", "agg_router"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
@@ -1044,7 +1068,7 @@ jobs:
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-vllm.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1077,7 +1101,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1089,7 +1114,7 @@ jobs:
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1122,7 +1147,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1134,7 +1160,7 @@ jobs:
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1167,7 +1193,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1507,11 +1534,11 @@ jobs:
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
       - deploy-cleanup-checkpoint-trtllm
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: "Check all deploy test jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # CLEANUP JOBS
@@ -1521,7 +1548,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, sidecar-build, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

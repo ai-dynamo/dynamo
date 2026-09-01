@@ -4,9 +4,7 @@
 title: Multinode Orchestration
 ---
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for details on orchestrator selection and configuration.
-
-
+Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes.
 
 ## Option 1: Grove + KAI Scheduler
 
@@ -76,4 +74,4 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
   --wait --timeout 300s
 ```
 
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for orchestrator selection.
+See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options.
