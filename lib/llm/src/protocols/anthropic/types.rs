@@ -584,37 +584,44 @@ pub(super) fn tool_use_input(
     arguments: &str,
     truncated: bool,
 ) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(arguments) {
+    // One warning per call, logged where the outcome is known. Logging before the
+    // `truncated` check would announce a recovery that the branch below may refuse.
+    let error = match serde_json::from_str::<serde_json::Value>(arguments) {
         Ok(value) => return value,
-        Err(error) => {
-            tracing::warn!(
-                tool_name = %tool_name,
-                argument_bytes = arguments.len(),
-                error = %error,
-                "tool call arguments are not valid JSON; recovering the members that \
-                 completed. Check `stop_reason` — `max_tokens` means the call was truncated"
-            );
-        }
-    }
+        Err(error) => error,
+    };
 
     if !truncated {
         tracing::warn!(
             tool_name = %tool_name,
             argument_bytes = arguments.len(),
-            "tool call arguments are malformed but generation was not cut off; emitting an \
-             empty tool_use input rather than a partial one, because the response claims \
+            error = %error,
+            "tool call arguments are not valid JSON and generation was not cut off; emitting \
+             an empty tool_use input rather than a partial one, because the response claims \
              this call completed"
         );
         return serde_json::json!({});
     }
 
     match recover_completed_members(arguments) {
-        Some(map) => serde_json::Value::Object(map),
+        Some(map) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                recovered_members = map.len(),
+                error = %error,
+                "tool call arguments were cut off at the token limit; keeping the members \
+                 that completed. `stop_reason` is `max_tokens`"
+            );
+            serde_json::Value::Object(map)
+        }
         None => {
             tracing::warn!(
                 tool_name = %tool_name,
                 argument_bytes = arguments.len(),
-                "no complete argument member survived; emitting an empty tool_use input"
+                error = %error,
+                "tool call arguments were cut off at the token limit and no complete member \
+                 survived; emitting an empty tool_use input"
             );
             serde_json::json!({})
         }
@@ -680,9 +687,16 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
 /// Appending `}` to a truncated object can turn an unfinished value into a plausible
 /// finished one. `{"n": 25` cut to `{"n": 2` closes into `{"n": 2}`, reporting an
 /// argument the model never emitted — the exact fabrication this module refuses to do.
-/// A closing quote, brace or bracket is different: those characters only appear once the
-/// value is over, so a payload ending in one has no half-written tail. Bare numbers and
-/// bare literals are ambiguous by construction and fall through to the comma scan.
+///
+/// Four tails prove the value is over:
+/// - trailing whitespace. JSON allows it only between tokens, so the value before it
+///   ended. This also covers a complete number.
+/// - an unescaped closing quote. It appears only once the string is over.
+/// - `}` or `]`. They appear only once the object or array is over.
+/// - `true`, `false` or `null`. No longer JSON token starts with one of them.
+///
+/// Only a bare number with nothing after it stays ambiguous, because its own digits may
+/// be cut short. It falls through to the comma scan.
 fn ends_on_a_finished_value(trimmed: &str) -> bool {
     let tail = trimmed.trim_end();
     // Whitespace cannot occur inside a JSON number or literal. Let the normal
