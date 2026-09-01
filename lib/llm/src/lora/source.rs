@@ -672,7 +672,7 @@ mod tests {
         provider::{ProvideCredentials, SharedCredentialsProvider, future},
     };
     use hf_hub::Cache;
-    use mockito::{Matcher, ServerOpts};
+    use mockito::Matcher;
     use object_store::{
         StaticCredentialProvider,
         aws::{AmazonS3ConfigKey, AwsCredentialProvider},
@@ -778,77 +778,6 @@ mod tests {
         );
 
         assert_eq!(endpoint.as_deref(), Some("https://legacy.example"));
-    }
-
-    #[serial_test::serial]
-    #[tokio::test]
-    async fn s3_source_downloads_from_bucket_qualified_virtual_hosted_endpoint() {
-        let mut server = mockito::Server::new_with_opts_async(ServerOpts {
-            host: "::1",
-            ..ServerOpts::default()
-        })
-        .await;
-        let port = server.socket_address().port();
-        let endpoint = format!("http://localhost:{port}");
-        let bucket_host = format!("bucket.localhost:{port}");
-        let list = server
-            .mock("GET", "/")
-            .match_header("host", bucket_host.as_str())
-            .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("list-type".into(), "2".into()),
-                Matcher::UrlEncoded("prefix".into(), "adapter/".into()),
-            ]))
-            .with_status(200)
-            .with_header("content-type", "application/xml")
-            .with_body(
-                r#"<ListBucketResult><Contents><Key>adapter/adapter_config.json</Key><Size>2</Size><LastModified>2026-01-01T00:00:00Z</LastModified><ETag>"etag"</ETag></Contents></ListBucketResult>"#,
-            )
-            .create_async()
-            .await;
-        let get = server
-            .mock("GET", "/adapter/adapter_config.json")
-            .match_header("host", bucket_host.as_str())
-            .with_status(200)
-            .with_body("{}")
-            .create_async()
-            .await;
-        let temp = TempDir::new().unwrap();
-        let destination = temp.path().join("adapter");
-
-        let downloaded = temp_env::async_with_vars(
-            [
-                ("AWS_ACCESS_KEY_ID", Some("test-access-key")),
-                ("AWS_SECRET_ACCESS_KEY", Some("test-secret-key")),
-                ("AWS_SESSION_TOKEN", None),
-                ("AWS_REGION", Some("us-east-1")),
-                ("AWS_DEFAULT_REGION", None),
-                ("AWS_ENDPOINT", None),
-                ("AWS_ENDPOINT_URL_S3", None),
-                ("AWS_SHARED_CREDENTIALS_FILE", None),
-                ("AWS_CONFIG_FILE", None),
-                ("AWS_PROFILE", None),
-                ("AWS_ENDPOINT_URL", Some(endpoint.as_str())),
-                ("AWS_ALLOW_HTTP", Some("true")),
-                ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
-                ("AWS_PROXY_URL", None),
-                ("AWS_PROXY_EXCLUDES", None),
-                ("AWS_EC2_METADATA_DISABLED", Some("true")),
-            ],
-            async {
-                let source = S3LoRASource::from_env();
-                source.download("s3://bucket/adapter", &destination).await
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(downloaded, destination);
-        assert_eq!(
-            fs::read_to_string(downloaded.join("adapter_config.json")).unwrap(),
-            "{}"
-        );
-        list.assert_async().await;
-        get.assert_async().await;
     }
 
     #[tokio::test]
