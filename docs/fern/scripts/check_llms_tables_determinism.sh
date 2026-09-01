@@ -3,8 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Prove gen_llms_tables.py is reproducible: two runs under deliberately hostile
-# environments must produce byte-identical output, that output must match the
-# committed bytes, and it must be LF-only.
+# environments must produce byte-identical, LF-only output.
+#
+# Freshness is NOT checked here. The gen-llms-tables-check hook runs
+# `gen_llms_tables.py --check` over the same trigger set and owns that half; a
+# committed-bytes comparison here would only duplicate it. If that hook is ever
+# removed or its `files:` pattern narrowed, staleness stops being caught at all.
 #
 # Usage: docs/fern/scripts/check_llms_tables_determinism.sh
 set -euo pipefail
@@ -62,13 +66,6 @@ for output in "${outputs[@]}"; do
   if ! cmp -s "$tmp_dir/first/$output" "$tmp_dir/second/$output"; then
     echo "::error file=$output::Generator output is not byte-identical across runs"
     diff -u "$tmp_dir/first/$output" "$tmp_dir/second/$output" || true
-    failed=1
-  fi
-  # Committed-bytes comparison only where the output is committed (the two
-  # assets stop being tracked once publish-time generation lands; temp-vs-temp
-  # and the CR scan still cover them).
-  if [ -f "$output" ] && ! cmp -s "$tmp_dir/first/$output" "$output"; then
-    echo "::error file=$output::Regenerated output does not match the committed bytes"
     failed=1
   fi
   if LC_ALL=C grep -q $'\r' "$tmp_dir/first/$output"; then
