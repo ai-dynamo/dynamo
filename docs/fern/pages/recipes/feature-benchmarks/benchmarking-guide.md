@@ -427,9 +427,12 @@ For development and testing purposes, Dynamo provides DynoSim and the [mocker ba
 - **CI/CD pipelines** that need to validate infrastructure without model execution
 - **Benchmarking framework validation** to ensure your setup works before using real backends
 
-Mocker is the live simulated engine in DynoSim: it mimics the API and behavior of real backends (SGLang, TensorRT-LLM, vLLM) but generates mock responses instead of running actual inference. Use [DynoSim Runs](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for one simulated workload/config trial and [DynoSim Sweeps](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) when you want to search across many candidate configurations.
-
-See [Live Simulation with Mocker](../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) for usage examples and configuration options.
+The Mocker engine models backend behavior without running inference. Use
+[DynoSim Runs](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for one offline
+workload/configuration trial and
+[DynoSim Sweeps](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) to search candidate
+configurations. The direct online Mocker CLI is temporarily unavailable and will return in a future
+release.
 
 ---
 

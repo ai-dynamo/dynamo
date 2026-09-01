@@ -152,6 +152,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: pages/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: MatrixHub
+                path: pages/kubernetes/model-deployment/model-loading/matrixhub.md
 
       - section: KV-Aware Routing
         icon: route
@@ -749,6 +751,9 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: GLM-5.3-Flash
+            path: pages/recipes/model-recipes/glm-5-3-flash.mdx
+            slug: glm-5-3-flash
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3

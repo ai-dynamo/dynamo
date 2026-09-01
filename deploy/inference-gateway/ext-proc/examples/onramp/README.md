@@ -17,7 +17,7 @@ For the user-facing walkthrough, start with
 
 This on-ramp is available for aggregated serving only at this time.
 
-The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.27.1` image. Replace it with the vLLM
+The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.28.0` image. Replace it with the vLLM
 image your platform standardizes on if you need another pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
 [selection service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md),
@@ -33,7 +33,7 @@ release containing standalone mode has not been published yet, build the EPP fro
 revision and push it to a registry that every cluster node can pull from:
 
 ```bash
-export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+export EPP_IMAGE=registry.example.com/your-project/dynamo-epp:standalone
 
 make -C ../.. IMAGE_TAG="$EPP_IMAGE" image-push
 ```

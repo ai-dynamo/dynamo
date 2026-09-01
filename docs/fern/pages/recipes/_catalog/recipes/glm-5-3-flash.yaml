@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: glm-5-3-flash
+title: GLM-5.3-Flash
+page: pages/recipes/model-recipes/glm-5-3-flash.mdx
+provider: zai
+model:
+  name: GLM-5.3-Flash
+  hf_id: zai-org/GLM-5.3-Flash
+  precision: FP8-quantized checkpoint
+status: experimental
+targets:
+- id: vllm-agg-gb200
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: aggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - prefix-caching
+  - kv-aware-routing
+  - mnnvl
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl-ucx
+  - fp8
+  - bf16-kv-cache
+  - mnnvl
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: aggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - mtp-speculative-decode
+  - prefix-caching
+  - deepgemm
+  - flashmla-sparse
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl-ucx
+  - fp8
+  - bf16-kv-cache
+  - mtp-speculative-decode
+  - prefix-caching
+  - deepgemm
+  - flashmla-sparse
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- Performance numbers are not published.
