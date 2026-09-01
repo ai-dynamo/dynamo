@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL. Disaggregated vLLM sidecars behind Dynamo's KV-aware router.
+#
+# This deploys two prefill and two decode worker pods. Each pod colocates the
+# Rust sidecar with a stock vLLM engine. Prefill engines publish KV-cache events
+# over ZMQ so the frontend can route requests to cached prefixes before handing
+# the resulting KV cache to a decode engine over NIXL/RDMA.
+#
+# kv_role is kv_producer on prefill and kv_consumer on decode (kv_both is
+# deprecated for NixlConnector). Decode engines use the same KV block size but
+# do not publish events, matching the local disaggregated KV-router launcher.
+#
+# PREREQUISITES / CAVEATS:
+#   - Needs a sidecar built from lib/sidecar/Dockerfile that carries the
+#     disaggregation fixes (component-by-role + NIXL port encoding).
+#   - RDMA/NIXL: the engine needs rdma/ib devices, IPC_LOCK/SYS_RESOURCE, pinned
+#     memory (ulimit -l unlimited), and UCX tuning; adjust for your fabric.
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST must be a routable pod IP (set via downward API).
+#   - No published sidecar image yet; set <your-registry> below.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-disagg-kv-router
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+
+  - name: VLLMPrefillWorker
+    type: worker
+    replicas: 2
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai:v0.28.0
+          restartPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          # The sidecar resolves the wildcard KV-event host to this pod's IP.
+          command: ["/bin/sh", "-c"]
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 127.0.0.1 --grpc-port 50051 -- \
+              --block-size 64 \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-sidecar:1.3.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - prefill
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+
+  - name: VLLMDecodeWorker
+    type: worker
+    replicas: 2
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai:v0.28.0
+          restartPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          command: ["/bin/sh", "-c"]
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 127.0.0.1 --grpc-port 50051 -- \
+              --block-size 64 \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-sidecar:1.3.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - decode
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

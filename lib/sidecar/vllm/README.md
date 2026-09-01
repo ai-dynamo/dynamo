@@ -141,8 +141,11 @@ and fidelity limits.
 ## Deploy on Kubernetes (quick start)
 
 `deploy/agg.yaml` runs an aggregated deployment (a frontend plus one worker pod
-that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
-disaggregated prefill/decode with NIXL KV transfer.
+that colocates the sidecar with a vLLM engine). `deploy/agg_kv_router.yaml`
+runs two aggregated workers behind Dynamo's KV-aware router.
+`deploy/disagg.yaml` runs disaggregated prefill/decode with NIXL KV transfer;
+`deploy/disagg_kv_router.yaml` expands it to two workers per role and publishes
+prefill KV-cache events for exact routing.
 
 There is no published sidecar image yet, so build and push the image from
 `lib/sidecar/Dockerfile`. It contains the vLLM, SGLang, and TensorRT-LLM
@@ -154,9 +157,10 @@ The sidecar waits for both the Control and Inference services through the standa
 ### Prerequisites
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
-  gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
-  `restartPolicy: Always`), which requires that version.
+  gate) with the Dynamo operator and a GPU node (two GPUs for
+  `agg_kv_router.yaml`; two or four GPUs plus an RDMA fabric for `disagg.yaml` or
+  `disagg_kv_router.yaml`, respectively). The engine runs as a native sidecar
+  (`initContainers` with `restartPolicy: Always`), which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
@@ -177,8 +181,8 @@ build. These manifests set the container `command` to
 
 ### 2. Point the manifest at your image
 
-In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the `main` worker image to
-the one you pushed. Add `imagePullSecrets` if your registry is private.
+In the selected manifest under `deploy/`, set the `main` worker image to the one
+you pushed. Add `imagePullSecrets` if your registry is private.
 
 ### 3. Create the Hugging Face token secret
 
@@ -211,11 +215,27 @@ curl -s localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}' | jq .
 ```
 
+### KV routing
+
+The KV-routing manifests run multiple workers and configure each relevant vLLM
+engine to publish ZMQ KV-cache events. The sidecars advertise those event
+sources to the frontend for exact KV-aware routing.
+
+```bash
+# Aggregated: two workers, two GPUs.
+kubectl apply -f lib/sidecar/vllm/deploy/agg_kv_router.yaml -n <namespace>
+
+# Disaggregated: two prefill + two decode workers, four GPUs and RDMA.
+kubectl apply -f lib/sidecar/vllm/deploy/disagg_kv_router.yaml -n <namespace>
+```
+
 ### Disaggregated
 
 `deploy/disagg.yaml` runs prefill and decode as separate worker pods with NIXL
 KV transfer. It needs multiple GPUs and an RDMA fabric, and both worker pods
-must reach `2/2 Running`. Apply it the same way and call the frontend as above.
+must reach `2/2 Running`. `deploy/disagg_kv_router.yaml` uses two replicas per
+role and enables exact KV routing from the prefill event streams. Apply either
+manifest the same way and call its frontend as above.
 
 ## Packaging
 
