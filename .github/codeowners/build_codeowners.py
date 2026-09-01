@@ -289,12 +289,14 @@ def _transfer_entries(spec: dict) -> list[dict]:
                 f"areas.yaml: ownership_transfers entry {entry!r} needs a glob"
             )
         removing = entry.get("removing")
-        if not isinstance(removing, list) or not all(
-            isinstance(label, str) and label for label in removing
+        if (
+            not isinstance(removing, list)
+            or not removing
+            or not all(isinstance(label, str) and label for label in removing)
         ):
             raise SystemExit(
                 f"areas.yaml: ownership_transfers entry {entry!r} needs a "
-                "'removing' list of owner labels"
+                "non-empty 'removing' list of owner labels"
             )
     return entries
 
@@ -707,6 +709,31 @@ def _print_warnings(gate: CoverageGate, base: str) -> None:
     print("   ", gate.warnings[:15])
 
 
+def split_transfers(
+    removals: list[WeakenedDeclaration],
+    head_spec: dict,
+    base_spec: dict | None,
+    label_to_team: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """Split unmatched acknowledgements into blocking and inherited.
+
+    An entry the base already carried is not this change's problem. Blocking
+    on it would red-X every unrelated policy PR the moment a hand-off lands,
+    and would fail the push-to-main run outright, where HEAD is its own
+    merge-base and no removal can be observed. Same split the stale-glob gate
+    makes between what a branch orphaned and what it inherited.
+    """
+    unmatched = unmatched_transfers(removals, head_spec, label_to_team)
+    inherited = (
+        unmatched_transfers(removals, base_spec, label_to_team)
+        if base_spec is not None
+        else unmatched
+    )
+    return describe_transfers(unmatched - inherited), describe_transfers(
+        unmatched & inherited
+    )
+
+
 def _removal_label_map(base_spec: dict | None, model: ResolvedModel) -> dict[str, str]:
     """Label-to-team map spanning both revisions.
 
@@ -772,19 +799,7 @@ def main() -> int:
     removals = weakened_declarations(base_spec, spec, tree)
     label_map = _removal_label_map(base_spec, model)
     weakened = unacknowledged(removals, _acknowledged_removals(spec, label_map))
-    unmatched_acks = unmatched_transfers(removals, spec, label_map)
-    # An entry the base already carried is not this change's problem. Blocking
-    # on it would red-X every unrelated policy PR the moment a hand-off lands,
-    # and would fail the push-to-main run outright, where HEAD is its own
-    # merge-base and no removal can be observed. Same split the stale-glob
-    # gate makes between what a branch orphaned and what it inherited.
-    inherited = (
-        unmatched_transfers(removals, base_spec, label_map)
-        if base_spec
-        else unmatched_acks
-    )
-    inert = describe_transfers(unmatched_acks - inherited)
-    stale_inherited = describe_transfers(unmatched_acks & inherited)
+    inert, stale_inherited = split_transfers(removals, spec, base_spec, label_map)
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
     print_shared_additivity_violations(additivity)
     print_weakened_declarations(weakened)

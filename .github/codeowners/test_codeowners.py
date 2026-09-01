@@ -35,6 +35,7 @@ from build_codeowners import (  # noqa: E402
     ownership_contract_violations,
     shared_additivity_violations,
     split_coverage,
+    split_transfers,
     strict_failure,
     unacknowledged,
     unmatched_transfers,
@@ -1022,6 +1023,7 @@ class TestWeakenedDeclarations:
             ["bad-entry"],
             [{"glob": "lib/"}],
             [{"glob": "lib/", "removing": "docs"}],
+            [{"glob": "lib/", "removing": []}],
         ],
     )
     def test_malformed_transfer_entries_fail_closed(self, entries) -> None:
@@ -1085,7 +1087,6 @@ class TestWeakenedDeclarations:
         assert unmatched_transfers(removals, head, teams) == set()
 
     def test_each_acknowledged_team_is_judged_separately(self) -> None:
-        # One real removal must not carry a misspelled one through with it.
         base = self._spec()
         head = self._spec()
         head["shared"] = []
@@ -1107,8 +1108,7 @@ class TestWeakenedDeclarations:
         assert weakened[0].lost == ("@docs",)
 
     def test_inert_hand_off_entry_is_reported(self) -> None:
-        # Nothing is being removed, so the entry is dead weight. Held to the
-        # same standard as a glob that matches no file.
+        # Held to the same standard as a glob that matches no file.
         head = self._spec()
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
         teams = compute_resolution(head).label_to_team()
@@ -1118,19 +1118,39 @@ class TestWeakenedDeclarations:
 
     def test_landed_hand_off_does_not_block_its_own_base(self) -> None:
         # After the hand-off merges, the push-to-main run has HEAD as its own
-        # merge-base, so no removal is observable and the entry reads as
-        # inert. It must warn rather than block, or every hand-off would
-        # guarantee a red main the moment it lands.
+        # merge-base, so no removal is observable and the entry reads as inert.
+        # It must warn rather than block, or every hand-off would guarantee a
+        # red main the moment it lands.
         head = self._spec()
         head["shared"] = []
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
         removals = weakened_declarations(head, head, ["lib/a.rs"])
         teams = compute_resolution(head).label_to_team()
-        unmatched = unmatched_transfers(removals, head, teams)
-        inherited = unmatched_transfers(removals, head, teams)
-        assert removals == []
-        assert unmatched - inherited == set()
-        assert unmatched & inherited != set()
+        inert, warned = split_transfers(removals, head, head, teams)
+        assert inert == []
+        assert warned == ["lib/ (@docs)"]
+        assert (
+            strict_failure(
+                True, CoverageGate([], []), None, [], [], None, [], [], inert
+            )
+            is None
+        )
+
+    def test_new_inert_hand_off_blocks(self) -> None:
+        # The same entry, absent from the base, is this change's to justify.
+        base = self._spec()
+        head = self._spec()
+        head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = compute_resolution(head).label_to_team()
+        inert, warned = split_transfers(removals, head, base, teams)
+        assert inert == ["lib/ (@docs)"]
+        assert warned == []
+        failure = strict_failure(
+            True, CoverageGate([], []), None, [], [], None, [], [], inert
+        )
+        assert failure is not None
+        assert "acknowledge a removal that is not happening" in failure
 
     def test_strict_gate_blocks_on_a_weakened_declaration(self) -> None:
         base = self._spec()
