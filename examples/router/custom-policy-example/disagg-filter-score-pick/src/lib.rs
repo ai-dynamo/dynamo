@@ -162,6 +162,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             overlap: OverlapSignals::default(),
             router_hint_candidates: None,
             retain_router_hint_chain: false,
