@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ pytestmark = [
 ]
 
 
+@pytest.mark.timeout(60)
 def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
     result = subprocess.run(
         [
@@ -37,6 +39,7 @@ def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
         ],
         capture_output=True,
         text=True,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stderr
@@ -214,6 +217,10 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
                 "metadata": {"name": "direct"},
                 "spec": {"components": [{"name": "Worker"}]},
             }
+            self.experimental = {
+                "concurrency": 64,
+                "hardware_sku": "h200_sxm",
+            }
 
     def fake_materialize(config, *, image, num_gpus_per_node):
         captured.update(
@@ -244,7 +251,15 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
         "num_gpus_per_node": 8,
     }
     dgd = yaml.safe_load(rendered)
-    assert dgd["metadata"] == {
+    metadata = dgd["metadata"]
+    evaluation_context = metadata.pop("annotations")[
+        "nvidia.com/sweeper-evaluation-context"
+    ]
+    assert json.loads(evaluation_context) == {
+        "concurrency": 64,
+        "hardware_sku": "h200_sxm",
+    }
+    assert metadata == {
         "name": "sweeper-dgd",
         "namespace": "demo",
     }

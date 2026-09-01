@@ -101,7 +101,6 @@ def _materialize_worker(
     candidate_config: dict[str, Any],
     keys: dict[str, str],
     *,
-    backend: str,
     component_type: SubComponentType,
     num_gpus_per_node: int,
 ) -> dict:
@@ -115,11 +114,7 @@ def _materialize_worker(
     setter_name = _STRATEGY_SETTERS.get(strategy)
     if setter_name is None:
         raise MaterializationError(f"unknown parallelism strategy {strategy!r}")
-    setter = getattr(modifier, setter_name, None)
-    if setter is None:
-        raise MaterializationError(
-            f"{backend} modifier has no {setter_name} implementation"
-        )
+    setter = getattr(modifier, setter_name)
 
     if strategy == "tp":
         config = setter(config, candidate_config[keys["tp"]], component_type)
@@ -221,7 +216,6 @@ def materialize_dgd_from_candidate(
                 modifier,
                 candidate_config,
                 _AGG_KEYS,
-                backend=backend,
                 component_type=component_type,
                 num_gpus_per_node=num_gpus_per_node,
             )
@@ -235,7 +229,6 @@ def materialize_dgd_from_candidate(
                     modifier,
                     candidate_config,
                     _role_keys(role),
-                    backend=backend,
                     component_type=role_component_type,
                     num_gpus_per_node=num_gpus_per_node,
                 )
@@ -250,6 +243,12 @@ def materialize_dgd_from_candidate(
     except KeyError as exc:
         raise MaterializationError(
             f"candidate_config missing required field: {exc}"
+        ) from exc
+    except ValueError as exc:
+        # Pydantic's ValidationError is a ValueError subclass, so this also
+        # normalizes rejected Config.model_validate calls.
+        raise MaterializationError(
+            f"{backend}/{mode} materialization failed: {exc}"
         ) from exc
 
     experimental = {

@@ -25,12 +25,14 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.sweeper.renderers.direct.materializer import (
-        MaterializationError,
-        materialize_dgd_from_candidate,
+    from dynamo.profiler.sweeper.renderers.direct import (
+        materializer as materializer_module,
     )
 except ImportError as exc:
     pytest.skip(f"Skip (missing dependency): {exc}", allow_module_level=True)
+
+MaterializationError = materializer_module.MaterializationError
+materialize_dgd_from_candidate = materializer_module.materialize_dgd_from_candidate
 
 
 # Verbatim from a real Sweeper.run() scalar search (see phase1-item2 fixture).
@@ -228,6 +230,21 @@ def test_missing_required_field_raises_materialization_error() -> None:
     candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, strategy="tp")
     del candidate["agg_block_size"]
     with pytest.raises(MaterializationError, match="missing required field"):
+        materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+
+def test_modifier_value_error_is_reported_as_materialization_error(monkeypatch) -> None:
+    def fail_materialization(*_args, **_kwargs):
+        raise ValueError("invalid modifier input")
+
+    monkeypatch.setattr(
+        materializer_module,
+        "_materialize_worker",
+        fail_materialization,
+    )
+    candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, strategy="tp")
+
+    with pytest.raises(MaterializationError, match="materialization failed"):
         materialize_dgd_from_candidate(candidate, image=_IMAGE)
 
 

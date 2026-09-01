@@ -234,6 +234,65 @@ def test_pareto_writes_prefixed_kustomize_sources(monkeypatch, tmp_path) -> None
         }
 
 
+def test_pareto_keeps_renderable_candidates(monkeypatch, tmp_path, capsys) -> None:
+    output_dir = tmp_path / "output"
+    config = _config(pareto=True)
+    candidates = [_Candidate(1.5), _Candidate(1.0), _Candidate(0.5)]
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module,
+        "run_sweep",
+        lambda *_args, **_kwargs: SweepResult(config=config, candidates=candidates),
+    )
+
+    def fake_render(candidate, _workload, _options, *, dgd_name, renderer):
+        if candidate is candidates[1]:
+            raise main_module.CandidateMaterializationError("unsupported strategy")
+        return _rendered_dgd(dgd_name, candidate.score)
+
+    monkeypatch.setattr(main_module, "render_dgd", fake_render)
+
+    result = main_module.main(_args(output_dir, "--dgd-name-prefix", "qwen-pareto"))
+
+    assert result == 0
+    assert sorted(path.name for path in output_dir.glob("*.yaml")) == [
+        "qwen-pareto-000.yaml",
+        "qwen-pareto-002.yaml",
+    ]
+    assert "skipping Pareto candidate qwen-pareto-001" in capsys.readouterr().err
+
+
+def test_pareto_fails_when_no_candidate_can_be_rendered(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    config = _config(pareto=True)
+    candidates = [_Candidate(1.5), _Candidate(1.0)]
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module,
+        "run_sweep",
+        lambda *_args, **_kwargs: SweepResult(config=config, candidates=candidates),
+    )
+
+    def fail_render(*_args, **_kwargs):
+        raise main_module.CandidateMaterializationError("unsupported strategy")
+
+    monkeypatch.setattr(
+        main_module,
+        "render_dgd",
+        fail_render,
+    )
+
+    result = main_module.main(
+        _args(tmp_path / "output", "--dgd-name-prefix", "qwen-pareto")
+    )
+
+    assert result == 2
+    assert "no Pareto candidate could be rendered" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     ("pareto", "invalid_flag", "valid_flag"),
     [
