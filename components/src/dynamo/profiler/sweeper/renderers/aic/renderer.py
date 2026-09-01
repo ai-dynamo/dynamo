@@ -77,6 +77,7 @@ def render(
         )
     return patch_dgd_manifest(
         rendered,
+        candidate,
         options,
         dgd_name=dgd_name,
     )
