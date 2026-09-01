@@ -2114,7 +2114,11 @@ def _long_string_argument_outputs():
     ]
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
 @pytest.mark.vllm
+@pytest.mark.core
 def test_streaming_tool_call_arguments_are_not_withheld(
     tokenizer, request_for_sampling, sampling_params
 ):
