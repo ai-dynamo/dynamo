@@ -163,6 +163,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             overlap: OverlapSignals::default(),
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
