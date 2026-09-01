@@ -6,6 +6,7 @@ import logging
 import pytest
 
 from dynamo.frontend.utils import (
+    backend_invalid_argument_to_http_error,
     handle_engine_error,
     make_backend_error,
     make_internal_error,
@@ -85,3 +86,73 @@ class TestHandleEngineError:  # FRONTEND.8 — engine error → HTTP-friendly ma
     def test_missing_token_ids(self):
         err = handle_engine_error({"other": "data"}, "req-1", logging.getLogger("test"))
         assert err["error"]["type"] == "internal_error"
+
+
+class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must not surface as 500
+    def test_parses_code_and_message(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError(
+                'BackendInvalidArgument: {"message":"The min_p and logit_bias '
+                "sampling parameters are not yet supported with speculative "
+                'decoding.","code":400}'
+            )
+        )
+        assert err is not None
+        assert err.code == 400
+        assert "min_p" in err.message
+        # The serialized envelope must not leak into the client-visible text.
+        assert "BackendInvalidArgument" not in err.message
+
+    def test_honours_a_non_400_status(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError('BackendInvalidArgument: {"message":"bad media","code":415}')
+        )
+        assert err is not None and err.code == 415
+
+    def test_prefix_after_an_outer_wrapper(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError('Unknown: BackendInvalidArgument: {"message":"nope","code":400}')
+        )
+        assert err is not None and err.message == "nope"
+
+    def test_unstructured_payload_still_becomes_400(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError("BackendInvalidArgument: grammar is not valid")
+        )
+        assert err is not None
+        assert err.code == 400 and err.message == "grammar is not valid"
+
+    def test_missing_code_defaults_to_400(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError('BackendInvalidArgument: {"message":"nope"}')
+        )
+        assert err is not None and err.code == 400
+
+    @pytest.mark.parametrize("code", [0, 99, 600, 1000, -1])
+    def test_out_of_range_code_defers_to_the_caller(self, code):
+        # Rust degrades these to a 500, which is what the generic handler
+        # already produces -- returning None is how we defer to it.
+        assert (
+            backend_invalid_argument_to_http_error(
+                ValueError(f'BackendInvalidArgument: {{"message":"x","code":{code}}}')
+            )
+            is None
+        )
+
+    def test_boolean_code_is_not_a_status(self):
+        err = backend_invalid_argument_to_http_error(
+            ValueError('BackendInvalidArgument: {"message":"x","code":true}')
+        )
+        assert err is not None and err.code == 400
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "CUDA out of memory",
+            "BackendUnknown: something broke",
+            '{"message":"no prefix","code":400}',
+            "",
+        ],
+    )
+    def test_unrelated_errors_are_left_alone(self, text):
+        assert backend_invalid_argument_to_http_error(ValueError(text)) is None
