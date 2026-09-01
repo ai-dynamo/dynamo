@@ -29,6 +29,10 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::scheduling::AdmissionAttempt;
+#[cfg(feature = "thunderagent-e2e")]
+use dynamo_kv_router::scheduling::{
+    ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -63,7 +67,8 @@ use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 #[cfg(feature = "thunderagent-e2e")]
 use thunderagent_dynamo_policy::{
-    ThunderAgentComponents, ThunderAgentConfig, WorkerCapacityProvider, WorkerCapacitySnapshot,
+    ThunderAgentClassifier, ThunderAgentComponents, ThunderAgentConfig, WorkerCapacityProvider,
+    WorkerCapacitySnapshot,
 };
 
 use super::aic_callback::create_aic_prefill_load_estimator;
@@ -72,6 +77,75 @@ use super::entrypoint::AicPerfConfig;
 mod demand_driven;
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+#[cfg(feature = "thunderagent-e2e")]
+struct ThunderAgentE2eProbe {
+    inner: ThunderAgentClassifier,
+}
+
+#[cfg(feature = "thunderagent-e2e")]
+#[async_trait::async_trait]
+impl RequestClassifier for ThunderAgentE2eProbe {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        let request_id = request.request_id().unwrap_or("<missing>").to_owned();
+        let session_id = request
+            .session_context()
+            .map(|session| session.session_id().to_owned());
+        tracing::info!(
+            %request_id,
+            session_id,
+            "ThunderAgent E2E classification started"
+        );
+        let classification = self.inner.classify(request);
+        Box::pin(async move {
+            let result = classification.await;
+            tracing::info!(
+                %request_id,
+                success = result.is_ok(),
+                "ThunderAgent E2E classification finished"
+            );
+            result
+        })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent<'_>) {
+        match &event {
+            ClassifyEvent::Sent { request_id, worker } => tracing::info!(
+                request_id = %request_id,
+                worker = ?worker,
+                event = "sent",
+                "ThunderAgent E2E lifecycle event"
+            ),
+            ClassifyEvent::Responding { request_id, worker } => tracing::info!(
+                request_id = %request_id,
+                worker = ?worker,
+                event = "responding",
+                "ThunderAgent E2E lifecycle event"
+            ),
+            ClassifyEvent::Completed {
+                request_id,
+                worker,
+                context_tokens,
+            } => tracing::info!(
+                request_id = %request_id,
+                worker = ?worker,
+                context_tokens,
+                event = "completed",
+                "ThunderAgent E2E lifecycle event"
+            ),
+            ClassifyEvent::Aborted {
+                request_id, worker, ..
+            } => tracing::info!(
+                request_id = %request_id,
+                worker = ?worker,
+                event = "aborted",
+                "ThunderAgent E2E lifecycle event"
+            ),
+            _ => tracing::info!(event = "unknown", "ThunderAgent E2E lifecycle event"),
+        }
+        self.inner.on_event(event).await;
+    }
+}
 
 #[pyclass(frozen)]
 #[derive(Clone, Debug)]
@@ -2046,7 +2120,12 @@ async fn create_kv_router_from_endpoint(
                 ThunderAgentConfig::default(),
                 capacity_provider,
             )?;
-            (components.worker_selection_policy, components.classifier)
+            (
+                components.worker_selection_policy,
+                ThunderAgentE2eProbe {
+                    inner: components.classifier,
+                },
+            )
         };
         #[cfg(not(feature = "thunderagent-e2e"))]
         let selector = worker_selection_policy_factory.map_or_else(
